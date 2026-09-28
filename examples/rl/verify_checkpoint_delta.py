@@ -40,8 +40,9 @@ Cauchy-Schwarz over the two EMAs::
 and after bias correction the per-step displacement is at most ``lr * c(t)``
 with ``c(t) = (1-b1)/sqrt(1-b2) * sqrt(sum_{k<t} (b1^2/b2)^k) *
 sqrt(1-b2^t) / (1-b1^t)``. At the default betas (0.9, 0.999) ``c(1) = 1`` --
-the first step moves every element by exactly ``lr`` whatever the gradient,
-which is the normalisation Adam exists for -- and ``c`` grows slowly towards
+the first step moves no element by more than ``lr``, and any element whose
+gradient is well above ``eps`` by very nearly ``lr`` whatever its size, which
+is the normalisation Adam exists for -- and ``c`` grows slowly towards
 its limit of about 7.3. The displacement over ``N`` steps is at most
 ``lr * sum_{t<=N} c(t)``, and ``adam_bound.adam_step_ceiling`` computes that sum:
 it stays under ``4 * N`` for every ``N`` up to 862 at the default betas. So
@@ -100,9 +101,7 @@ Usage
 from __future__ import annotations
 
 import argparse
-import json
 import math
-import struct
 import sys
 from pathlib import Path
 from typing import Any
@@ -112,6 +111,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from adam_bound import SLACK, optimiser_bound  # noqa: E402
+from safetensors_tree import read_header, tensor_map  # noqa: E402
 
 FROZEN = "model.embed_tokens.weight"
 EXIT_FAILED = 1
@@ -127,15 +127,6 @@ DTYPES = {"F32": np.float32, "F64": np.float64, "BF16": np.uint16, "F16": np.flo
 #: 2^-p for a p-bit significand (implicit bit included): F32 24, F64 53, BF16 8,
 #: F16 11.
 HALF_ULP = {"F32": 2.0**-24, "F64": 2.0**-53, "BF16": 2.0**-8, "F16": 2.0**-11}
-
-
-def read_header(path: Path) -> tuple[dict[str, Any], int]:
-    """(metadata, offset of the data buffer) from a safetensors file."""
-    with open(path, "rb") as handle:
-        length = struct.unpack("<Q", handle.read(8))[0]
-        meta = json.loads(handle.read(length))
-    meta.pop("__metadata__", None)
-    return meta, 8 + length
 
 
 def read_tensor(path: Path, info: dict[str, Any], base: int) -> Any:
@@ -207,25 +198,6 @@ def element_ceilings(a: Any, b: Any, diff: Any, bound: float, steps: int, half_u
         if room > 0:
             best["where"].extend(int(start + i) for i in over[:room])
     return best
-
-
-def tensor_map(root: Path) -> dict[str, Path]:
-    """Every tensor name in a checkpoint directory, mapped to the file holding it.
-
-    Reads ``model.safetensors.index.json`` when the tree is sharded, else the
-    single ``model.safetensors`` a small model is saved as. Each tree is read
-    through its *own* index, so a PRE and POST sharded differently still pair
-    tensor by tensor.
-    """
-    index = root / "model.safetensors.index.json"
-    if index.is_file():
-        weight_map = json.loads(index.read_text())["weight_map"]
-        return {name: root / shard for name, shard in weight_map.items()}
-    single = root / "model.safetensors"
-    if single.is_file():
-        meta, _ = read_header(single)
-        return dict.fromkeys(meta, single)
-    raise FileNotFoundError(f"{root}: no model.safetensors.index.json or model.safetensors")
 
 
 class _Reader:

@@ -33,8 +33,9 @@ What an iteration does
    when ``--kl-beta`` is set, where ``N`` is the number of samples.
 4. **Adam**, with moments built once outside the loop so they accumulate. The
    tempting shortcut -- Adam's first step from zeroed moments, every iteration
-   -- is signSGD: it moves every element by the full ``lr`` whatever the
-   gradient, which is a far larger step than the learning rate suggests.
+   -- is signSGD: it moves every element whose gradient is well above ``eps``
+   by very nearly the full ``lr``, whatever the gradient's size, which is a far
+   larger step than the learning rate suggests.
 5. **The checks** (below), and only then a checkpoint.
 
 The KL term
@@ -107,8 +108,9 @@ rewrite ``checkpoint-pre``; ``--iteration-offset`` numbers the iterations so a
 chained run's ``wire.jsonl`` concatenates into one series. Each link writes to
 its own ``--out``: a directory already holding a run's artifacts is refused. ⚠ The Adam moments
 are **not** carried across a chain -- they are two more copies of the model and
-are not written to disk -- so each link restarts with a first step of exactly
-``lr`` per element. That is a real discontinuity and belongs beside any chained
+are not written to disk -- so each link restarts with a first step of up to
+``lr`` per element, very nearly ``lr`` wherever the gradient is well above
+``eps``. That is a real discontinuity and belongs beside any chained
 curve.
 
 Usage
@@ -322,7 +324,7 @@ def generate(model: Any, tok: Any, prompts: list[str], args: Any,
         # Printed, never swallowed: a repaired row is partly the guard's text
         # rather than the policy's, so the count travels with any number
         # computed from these completions.
-        print(f"  [logits-guard] repaired {guard.nan_rows} NaN row(s) across "
+        print(f"  [logits-guard] repaired {guard.nan_rows} non-finite (NaN or +inf) row(s) across "
               f"{guard.nan_steps} decode step(s); {guard.dead_rows} row(s) had no "
               f"finite logit and were ended at EOS", flush=True)
     return out_texts

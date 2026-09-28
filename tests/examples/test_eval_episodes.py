@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 import sys
 import zlib
 from pathlib import Path
@@ -21,6 +22,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "examples" / "rl"))
 
 import eval_episodes  # noqa: E402
+
+#: The real identity, for the end-to-end tests that ``_stub_evaluate`` would
+#: otherwise stub it out of.
+CHECKPOINT_IDENTITY = eval_episodes.checkpoint_identity
 
 
 def group(scenario_id: str, *, n: int = 8, step1_hits: int | None = 2,
@@ -134,9 +139,24 @@ def test_the_after_column_is_checked_for_completeness_too():
         eval_episodes.compare(run([group("a")]), run([group("a")], scenarios=["a", "b"]))
 
 
-def test_a_column_that_covers_what_it_asked_for_is_not_refused():
-    whole = run([group("a"), group("b")], scenarios=["a"])
+def test_a_column_that_holds_exactly_what_it_asked_for_is_not_refused():
+    whole = run([group("a"), group("b")], scenarios=["a", "b"])
     assert eval_episodes.compare(whole, whole)
+
+
+def test_a_group_the_column_did_not_ask_for_is_refused_not_pooled():
+    """Both columns carrying the same stray group pass every other check, and the
+    pooled rate would then count a scenario neither asked for."""
+    stray = run([group("a"), group("b")], scenarios=["a"])
+    with pytest.raises(ValueError, match=r"did not ask for \(\['b'\]\)"):
+        eval_episodes.compare(stray, stray)
+
+
+def test_a_scenario_held_twice_is_refused():
+    """The scenario-keyed lookup would keep one of the two and drop the other."""
+    twice = run([group("a"), group("a", step1_hits=8)], scenarios=["a"])
+    with pytest.raises(ValueError, match=r"more than once \(\['a'\]\)"):
+        eval_episodes.compare(twice, twice)
 
 
 def test_two_columns_that_saw_different_scenarios_are_refused():
@@ -247,9 +267,11 @@ SCORER = {"sha256": "scorer-a", "files": 3}
 RUNTIME = {"python": "3.x", "transformers": "4.x", "tokenizers": "0.x",
            "safetensors": "0.x", "huggingface_hub": "0.x"}
 WEIGHTS = {"weights": {"sha256": "w-a", "files": 2, "bytes": 8},
+           "tensors": {"sha256": "x-a", "tensors": 1, "bytes": 4},
            "tokenizer": {"sha256": "t-a", "files": 1, "bytes": 4}}
 #: The base model's, for the control column a run without ``--before`` scores.
-BASE_WEIGHTS = {**WEIGHTS, "weights": dict(WEIGHTS["weights"], sha256="w-base")}
+BASE_WEIGHTS = {**WEIGHTS, "weights": dict(WEIGHTS["weights"], sha256="w-base"),
+                "tensors": dict(WEIGHTS["tensors"], sha256="x-base")}
 
 
 def column_file(tmp_path: Path, **config) -> Path:
@@ -270,6 +292,21 @@ def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
     reused = eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
                                            DIGESTS, BACKEND, SCORER, WEIGHTS, RUNTIME)
     assert reused["config"]["init_from"] == "/ckpt/last"
+
+
+@pytest.mark.parametrize("extra, fragment", [
+    (group("b"), r"did not ask for \(\['b'\]\)"),
+    (group("a", step1_hits=8), r"more than once \(\['a'\]\)"),
+])
+def test_a_column_holding_a_stray_or_repeated_group_is_not_reused(tmp_path, extra, fragment):
+    """Refused before a resume spends GPU time carrying it into a new column."""
+    path = column_file(tmp_path)
+    doc = json.loads(path.read_text())
+    doc["groups"].append(extra)
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match=fragment):
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER,
+                                      WEIGHTS, RUNTIME)
 
 
 @pytest.mark.parametrize("field, value", [
@@ -449,7 +486,7 @@ def test_two_copies_of_one_checkpoint_are_refused_before_any_rollout(tmp_path, c
                                "--after", str(tmp_path / "copy-of-ckpt"),
                                "--out", str(tmp_path / "out")])
     assert code == eval_episodes.EXIT_REFUSED
-    assert "the same weights (sha256 w-a)" in capsys.readouterr().err
+    assert "the same tensors (sha256 x-a)" in capsys.readouterr().err
     assert calls == [] and not (tmp_path / "out").exists()
 
 
@@ -473,8 +510,9 @@ def test_two_checkpoints_with_different_weights_reach_the_evaluation(tmp_path, m
     calls = _stub_evaluate(monkeypatch)
     monkeypatch.setattr(
         eval_episodes, "checkpoint_identity",
-        lambda checkpoint, *_a: {**WEIGHTS, "weights": dict(WEIGHTS["weights"],
-                                                            sha256=f"w-{checkpoint.name}")})
+        lambda checkpoint, *_a: {**WEIGHTS,
+                                 "weights": dict(WEIGHTS["weights"], sha256=f"w-{checkpoint.name}"),
+                                 "tensors": dict(WEIGHTS["tensors"], sha256=f"x-{checkpoint.name}")})
     with pytest.raises(ReachedError):
         eval_episodes.main(["--before", str(tmp_path / "one"), "--after", str(tmp_path / "two"),
                             "--out", str(tmp_path / "out")])
@@ -674,6 +712,42 @@ def _tree(root: Path, weights: bytes = b"0123") -> Path:
     return root
 
 
+#: Two tensors, as (dtype, shape, raw bytes).
+TENSORS = {"model.embed.weight": ("U8", [4], b"0123"), "model.head.weight": ("U8", [2], b"45")}
+
+
+def _safetensors(tensors: dict, metadata: dict | None = None) -> bytes:
+    header: dict = {"__metadata__": metadata or {"format": "pt"}}
+    offset, buf = 0, b""
+    for name, (dtype, shape, raw) in tensors.items():
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + len(raw)]}
+        buf += raw
+        offset += len(raw)
+    encoded = json.dumps(header).encode()
+    return struct.pack("<Q", len(encoded)) + encoded + buf
+
+
+def _checkpoint(root: Path, tensors: dict | None = None, *, shards: int = 0,
+                metadata: dict | None = None, extra: dict | None = None) -> Path:
+    """A real safetensors tree: one ``model.safetensors``, or ``shards`` and an index."""
+    tensors = dict(TENSORS if tensors is None else tensors)
+    root.mkdir(parents=True, exist_ok=True)
+    if not shards:
+        (root / "model.safetensors").write_bytes(_safetensors(tensors, metadata))
+    else:
+        weight_map = {}
+        for index in range(shards):
+            part = list(tensors)[index::shards]
+            shard = f"model-{index + 1:05d}-of-{shards:05d}.safetensors"
+            (root / shard).write_bytes(_safetensors({n: tensors[n] for n in part}, metadata))
+            weight_map.update(dict.fromkeys(part, shard))
+        (root / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+    (root / "config.json").write_text("{}")
+    for name, text in (extra or {}).items():
+        (root / name).write_text(text)
+    return root
+
+
 def test_an_overwrite_with_the_same_size_and_mtime_changes_the_identity(tmp_path):
     """The case a (path, size, mtime) cache would miss: `cp -p` of other weights."""
     import os
@@ -731,7 +805,7 @@ def test_same_path_new_weights_is_refused_end_to_end(tmp_path, monkeypatch):
     while the checkpoint is untouched, and refused once the path holds new weights."""
     import episode_env
 
-    ckpt, model = _tree(tmp_path / "ckpt"), _tree(tmp_path / "base", weights=b"base")
+    ckpt, model = _checkpoint(tmp_path / "ckpt"), _tree(tmp_path / "base", weights=b"base")
     args = _Args(model=str(model))
     monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(DIGESTS))
     monkeypatch.setattr(eval_episodes, "blas_backend", lambda: dict(BACKEND))
@@ -742,18 +816,112 @@ def test_same_path_new_weights_is_refused_end_to_end(tmp_path, monkeypatch):
     path = column_file(tmp_path, init_from=str(ckpt), model=str(model),
                        checkpoint=eval_episodes.checkpoint_identity(ckpt, args))
     assert eval_episodes._column(path, ckpt, "after", args)["config"]["init_from"] == str(ckpt)
-    (ckpt / "model.safetensors").write_bytes(b"4567")
+    _checkpoint(ckpt, {"model.embed.weight": ("U8", [4], b"4567")})
     with pytest.raises(ValueError, match="different weights"):
         eval_episodes._column(path, ckpt, "after", args)
 
 
 def test_the_tokenizer_is_part_of_the_identity(tmp_path):
-    ckpt, model = _tree(tmp_path / "ckpt"), _tree(tmp_path / "base")
+    ckpt, model = _checkpoint(tmp_path / "ckpt"), _tree(tmp_path / "base")
     args = _Args(model=str(model))
     before = eval_episodes.checkpoint_identity(ckpt, args)
     (model / "config.json").write_text('{"changed": true}')
     after = eval_episodes.checkpoint_identity(ckpt, args)
     assert after["weights"] == before["weights"] and after["tokenizer"] != before["tokenizer"]
+
+
+@pytest.mark.parametrize("copy", [
+    lambda root: _checkpoint(root, extra={"README.md": "a copy", "tokenizer.json": "{}"}),
+    lambda root: _checkpoint(root, extra={"config.json": '{"edited": true}'}),
+    lambda root: _checkpoint(root, shards=2),
+    lambda root: _checkpoint(root, metadata={"format": "pt", "note": "resaved"}),
+    lambda root: _checkpoint(root, dict(reversed(TENSORS.items()))),
+], ids=["sidecar-files", "config", "resharded", "metadata", "tensor-order"])
+def test_the_same_tensors_have_one_tensor_digest_whatever_sits_beside_them(tmp_path, copy):
+    """What "two copies of one checkpoint" is decided on. The files ``--reuse``
+    keys on still differ, so a copy is never mistaken for the reused column."""
+    original = _checkpoint(tmp_path / "original")
+    other = copy(tmp_path / "copy")
+    assert eval_episodes.tensor_identity(other) == eval_episodes.tensor_identity(original)
+    assert eval_episodes.tree_identity(other) != eval_episodes.tree_identity(original)
+
+
+@pytest.mark.parametrize("tensors", [
+    {**TENSORS, "model.head.weight": ("U8", [2], b"46")},
+    {**TENSORS, "model.head.weight": ("I8", [2], b"45")},
+    {**TENSORS, "model.embed.weight": ("U8", [2, 2], b"0123")},
+    {"model.embed.weight": TENSORS["model.embed.weight"], "model.lm_head.weight": ("U8", [2], b"45")},
+    {"model.embed.weight": TENSORS["model.embed.weight"]},
+], ids=["one-byte", "dtype", "shape", "name", "missing-tensor"])
+def test_any_change_to_a_tensor_changes_the_tensor_digest(tmp_path, tensors):
+    """Narrowness: bytes, dtype, shape and name each count."""
+    original = eval_episodes.tensor_identity(_checkpoint(tmp_path / "original"))
+    assert eval_episodes.tensor_identity(_checkpoint(tmp_path / "changed", tensors)) != original
+
+
+def test_the_tensor_digest_reads_every_chunk(tmp_path):
+    big = {"model.w": ("U8", [100], bytes(100))}
+    before = eval_episodes.tensor_identity(_checkpoint(tmp_path / "a", big), chunk=7)
+    after = eval_episodes.tensor_identity(
+        _checkpoint(tmp_path / "b", {"model.w": ("U8", [100], bytes(99) + b"\x01")}), chunk=7)
+    assert before != after and before["bytes"] == 100 and before["tensors"] == 1
+
+
+def test_a_tensor_that_runs_past_its_file_is_refused(tmp_path):
+    root = _checkpoint(tmp_path / "ckpt")
+    path = root / "model.safetensors"
+    path.write_bytes(path.read_bytes()[:-1])
+    with pytest.raises(ValueError, match="ends past the end of the file"):
+        eval_episodes.tensor_identity(root)
+
+
+def test_a_tree_without_safetensors_is_refused_rather_than_hashed_as_empty(tmp_path):
+    """An empty tensor digest would make any two such trees "the same tensors"."""
+    tree = tmp_path / "bin-only"
+    tree.mkdir()
+    (tree / "pytorch_model.bin").write_bytes(b"0123")
+    (tree / "config.json").write_text("{}")
+    with pytest.raises(FileNotFoundError, match="no model.safetensors"):
+        eval_episodes.checkpoint_identity(tree, _Args(model=str(tree)))
+
+
+def test_the_reuse_identity_still_covers_every_file(tmp_path):
+    """The review's instruction: ``--reuse`` keys on the whole tree, as before."""
+    args = _Args(model=str(_tree(tmp_path / "base", weights=b"base")))
+    ckpt = _checkpoint(tmp_path / "ckpt")
+    identity = eval_episodes.checkpoint_identity(ckpt, args)
+    assert identity["weights"] == eval_episodes.tree_identity(ckpt)
+    assert identity["tokenizer"] == eval_episodes.tree_identity(tmp_path / "base")
+    assert identity["tensors"] == eval_episodes.tensor_identity(ckpt)
+
+
+def test_copies_that_differ_only_beside_the_tensors_are_refused_end_to_end(
+    tmp_path, capsys, monkeypatch
+):
+    """The review's case, through the real identity: same tensors, other sidecar files."""
+    calls = _stub_evaluate(monkeypatch)
+    monkeypatch.setattr(eval_episodes, "checkpoint_identity", CHECKPOINT_IDENTITY)
+    one = _checkpoint(tmp_path / "one")
+    two = _checkpoint(tmp_path / "two", extra={"README.md": "a copy", "tokenizer.json": "{}"})
+    code = eval_episodes.main(["--before", str(one), "--after", str(two),
+                               "--model", str(_tree(tmp_path / "base", weights=b"base")),
+                               "--out", str(tmp_path / "out")])
+    assert code == eval_episodes.EXIT_REFUSED
+    assert "the same tensors" in capsys.readouterr().err
+    assert calls == [] and not (tmp_path / "out").exists()
+
+
+def test_checkpoints_with_different_tensors_reach_the_evaluation_end_to_end(tmp_path, monkeypatch):
+    """Narrowness, through the real identity."""
+    calls = _stub_evaluate(monkeypatch)
+    monkeypatch.setattr(eval_episodes, "checkpoint_identity", CHECKPOINT_IDENTITY)
+    one = _checkpoint(tmp_path / "one")
+    two = _checkpoint(tmp_path / "two", {**TENSORS, "model.head.weight": ("U8", [2], b"99")})
+    with pytest.raises(ReachedError):
+        eval_episodes.main(["--before", str(one), "--after", str(two),
+                            "--model", str(_tree(tmp_path / "base", weights=b"base")),
+                            "--out", str(tmp_path / "out")])
+    assert calls[0][0] == one
 
 
 def test_a_written_column_records_its_checkpoint_identity():
@@ -765,12 +933,13 @@ def test_a_written_column_records_its_checkpoint_identity():
     assert payload["config"]["checkpoint"] == WEIGHTS
 
 
-def test_two_columns_computed_from_the_same_weights_are_not_compared():
-    """What ``--reuse`` of two copies would hand ``compare``: different paths,
-    one digest."""
-    with pytest.raises(ValueError, match="same weights"):
+def test_two_columns_computed_from_the_same_tensors_are_not_compared():
+    """What ``--reuse`` of two copies would hand ``compare``: different paths and
+    different trees, one tensor digest."""
+    copy = {**WEIGHTS, "weights": dict(WEIGHTS["weights"], sha256="w-copy-with-a-readme")}
+    with pytest.raises(ValueError, match=r"same tensors \(sha256 x-a\)"):
         eval_episodes.compare(run([group("a")], init_from="one", checkpoint=dict(WEIGHTS)),
-                              run([group("a")], init_from="two", checkpoint=dict(WEIGHTS)))
+                              run([group("a")], init_from="two", checkpoint=copy))
 
 
 def test_columns_from_different_weights_or_without_a_digest_still_compare():

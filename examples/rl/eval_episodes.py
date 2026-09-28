@@ -56,6 +56,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from safetensors_tree import tensor_identity  # noqa: E402
+
 #: Refused to run: the comparison asked for could not mean what it says.
 EXIT_REFUSED = 3
 
@@ -248,16 +250,23 @@ def checkpoint_identity(checkpoint: Path | None, args: argparse.Namespace) -> di
 
     ``init_from`` is only a path string; new weights written at the same path
     keep it. Both trees are hashed because both are loaded: the weights from
-    the checkpoint, the tokenizer from ``--model``.
+    the checkpoint, the tokenizer from ``--model``. ``weights`` and
+    ``tokenizer`` cover every file, which is what ``--reuse`` keys on.
+    ``tensors`` covers the tensors alone, which is what "two copies of one
+    checkpoint" is decided on: a README or a tokenizer file saved beside them
+    changes the first and not the second.
     """
-    weights = tree_identity(_local_tree(column_source(checkpoint, args)))
-    tokenizer = tree_identity(_local_tree(args.model))
-    return {"weights": weights, "tokenizer": tokenizer}
+    tree = _local_tree(column_source(checkpoint, args))
+    return {
+        "weights": tree_identity(tree),
+        "tensors": tensor_identity(tree),
+        "tokenizer": tree_identity(_local_tree(args.model)),
+    }
 
 
-def weights_digest(column: dict[str, Any]) -> str | None:
-    """The weights sha256 a column records, or ``None`` for one that predates it."""
-    return ((column["config"].get("checkpoint") or {}).get("weights") or {}).get("sha256")
+def tensors_digest(column: dict[str, Any]) -> str | None:
+    """The tensor sha256 a column records, or ``None`` for one that predates it."""
+    return ((column["config"].get("checkpoint") or {}).get("tensors") or {}).get("sha256")
 
 
 def two_proportion_z(hits_a: int, n_a: int, hits_b: int, n_b: int) -> float:
@@ -319,6 +328,23 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _refuse_stray_groups(label: str, column: dict[str, Any]) -> None:
+    """Refuse a column holding a group it did not ask for, or one scenario twice.
+
+    A written column has at most one group per scenario in ``config.scenarios``.
+    A stray one would be pooled into the comparison, and a duplicate would
+    silently replace its twin in the scenario-keyed lookups.
+    """
+    ids = [g["scenario_id"] for g in column["groups"]]
+    stray = sorted(set(ids) - set(column["config"]["scenarios"]))
+    twice = sorted({sid for sid in ids if ids.count(sid) > 1})
+    if stray or twice:
+        raise ValueError(
+            f"the {label} column holds groups it did not ask for ({stray}) or holds a "
+            f"scenario more than once ({twice}); a written column never does"
+        )
+
+
 def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     """Pair two eval columns scenario by scenario, refusing an unpaired one.
 
@@ -331,6 +357,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     a = {g["scenario_id"]: g for g in before["groups"]}
     b = {g["scenario_id"]: g for g in after["groups"]}
     for label, column, got in (("before", before, a), ("after", after, b)):
+        _refuse_stray_groups(label, column)
         missing = sorted(set(column["config"]["scenarios"]) - set(got))
         if missing:
             raise ValueError(
@@ -406,12 +433,12 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             "a paired comparison needs the same scorer on both sides"
         )
 
-    # And *different* weights: copies of one checkpoint at two paths pass every
+    # And *different* tensors: copies of one checkpoint at two paths pass every
     # check above, and the table would report sampling noise as training.
-    weights_a, weights_b = weights_digest(before), weights_digest(after)
-    if weights_a is not None and weights_a == weights_b:
+    tensors_a, tensors_b = tensors_digest(before), tensors_digest(after)
+    if tensors_a is not None and tensors_a == tensors_b:
         raise ValueError(
-            f"the two columns were computed from the same weights (sha256 {weights_a[:12]}): "
+            f"the two columns were computed from the same tensors (sha256 {tensors_a[:12]}): "
             "comparing a checkpoint with a copy of itself measures sampling noise, not training"
         )
 
@@ -602,6 +629,7 @@ def reusable_column(
     new weights written at the same path keep ``init_from`` and change this.
     """
     column = json.loads(path.read_text())
+    _refuse_stray_groups(str(path), column)
     want = _config(args, source)
     differing = [
         f"{field}: on disk {column['config'].get(field)!r}, asked for {want[field]!r}"
@@ -863,6 +891,7 @@ def _identity(checkpoint: Path | None, label: str, args: argparse.Namespace) -> 
     started = time.time()
     weights = checkpoint_identity(checkpoint, args)
     print(f"[hash] {label} weights {weights['weights']['sha256'][:12]} "
+          f"tensors {weights['tensors']['sha256'][:12]} "
           f"({weights['weights']['bytes'] / 2**30:.1f} GiB in {time.time() - started:.0f}s)",
           flush=True)
     return weights
@@ -985,10 +1014,10 @@ def main(argv: list[str] | None = None) -> int:
     # different paths are refused before any GPU time or disk write.
     before_weights = _identity(args.before, "control", args)
     after_weights = _identity(args.after, "trained", args)
-    digest = before_weights["weights"]["sha256"]
-    if digest == after_weights["weights"]["sha256"]:
+    digest = before_weights["tensors"]["sha256"]
+    if digest == after_weights["tensors"]["sha256"]:
         print(f"--before ({column_source(args.before, args)}) and --after ({args.after}) hold "
-              f"the same weights (sha256 {digest[:12]}); comparing a checkpoint with a copy of "
+              f"the same tensors (sha256 {digest[:12]}); comparing a checkpoint with a copy of "
               "itself measures sampling noise, not training.", file=sys.stderr)
         return EXIT_REFUSED
 
