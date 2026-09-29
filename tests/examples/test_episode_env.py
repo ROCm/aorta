@@ -191,6 +191,9 @@ def run_real_loop(tmp_path, monkeypatch, archive: Path, scripted: list[str], **p
         ("unparseable_reply", DELTA, ["not JSON at all"], {}),
         ("refused_category", DELTA, [reply([ALPHA], category="gpu_race")], {}),
         ("partial_drop", DELTA, [reply([ALPHA, "invented"]), reply([DELTA])], {}),
+        # The filter keeps a repeat; validation collapses it and records the
+        # copy, so both logs must carry `redundant_mitigations` (aorta#501).
+        ("repeat_in_one_reply", DELTA, [reply([ALPHA, ALPHA]), reply([DELTA])], {}),
     ],
 )
 def test_the_driver_and_run_agent_loop_write_the_same_log(

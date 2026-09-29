@@ -72,6 +72,11 @@ class AgentPolicy:
                 f"allowed: {sorted(PROBE_CATEGORIES)}"
             )
         cleaned: list[str] = []
+        # Dropping the baseline and repeats is right -- neither adds a cell --
+        # but dropping them unrecorded is how a proposal of only "none" came
+        # to read as the proposer choosing to stop (aorta#501). Every removed
+        # occurrence is kept, so kept plus redundant is what was proposed.
+        redundant: list[str] = list(step.redundant_mitigations)
         for name in step.next_mitigations:
             if not isinstance(name, str) or not name.strip():
                 raise PolicyViolation(f"invalid mitigation name: {name!r}")
@@ -93,9 +98,9 @@ class AgentPolicy:
                 )
             except UnknownMitigationError as exc:
                 raise PolicyViolation(str(exc)) from exc
-            if name == "none":
-                continue
-            if name not in cleaned:
+            if name == "none" or name in cleaned:
+                redundant.append(name)
+            else:
                 cleaned.append(name)
         return AgentStep(
             category=step.category,
@@ -109,6 +114,7 @@ class AgentPolicy:
             # do not resolve -- but the loop needs them to attribute the stop,
             # so validation must not be the thing that loses them.
             unresolved_mitigations=list(step.unresolved_mitigations),
+            redundant_mitigations=redundant,
         )
 
     def needs_approval(self, mitigation: str) -> bool:

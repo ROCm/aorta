@@ -745,6 +745,8 @@ class Episode:
         }
         if step.unresolved_mitigations:
             payload["unresolved_mitigations"] = list(step.unresolved_mitigations)
+        if step.redundant_mitigations:
+            payload["redundant_mitigations"] = list(step.redundant_mitigations)
         self._log("llm_step", payload)
 
         if step.stop or not step.next_mitigations:
@@ -753,6 +755,8 @@ class Episode:
             stopped: dict[str, Any] = {"outcome": outcome, "stop_reason": resolved}
             if step.unresolved_mitigations:
                 stopped["unresolved_mitigations"] = list(step.unresolved_mitigations)
+            if step.redundant_mitigations:
+                stopped["redundant_mitigations"] = list(step.redundant_mitigations)
             self._log("search_stopped", stopped)
             terminal, why = classify_stop(
                 stop_reason=resolved,
