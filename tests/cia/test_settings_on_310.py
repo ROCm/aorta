@@ -51,13 +51,14 @@ def settings_import_broken(monkeypatch):
 
 
 class TestTheEnvironmentIsStillRead:
-    def test_a_configured_vllm_endpoint_survives(
-        self, settings_import_broken, monkeypatch
-    ):
+    def test_a_configured_vllm_endpoint_survives(self, settings_import_broken, monkeypatch):
         monkeypatch.setenv("AORTA_CHAT_VLLM_BASE_URL", "http://configured:4000/v1")
         monkeypatch.setenv("AORTA_CHAT_VLLM_MODEL", "qwen3-35b")
         assert llm_mod.chat_provider() == (
-            "http://configured:4000/v1", "", "qwen3-35b", "vllm",
+            "http://configured:4000/v1",
+            "",
+            "qwen3-35b",
+            "vllm",
         )
 
     def test_a_remote_provider_is_read_from_its_own_fields(
@@ -72,22 +73,20 @@ class TestTheEnvironmentIsStillRead:
         """An empty environment is not a configuration."""
         assert llm_mod.chat_provider() is None
 
-    def test_build_lm_reaches_the_configured_endpoint(
-        self, settings_import_broken, monkeypatch
-    ):
+    def test_build_lm_reaches_the_configured_endpoint(self, settings_import_broken, monkeypatch):
         monkeypatch.setenv("AORTA_CHAT_VLLM_BASE_URL", "http://configured:4000/v1")
         built: dict = {}
         monkeypatch.setattr(llm_mod, "RedactingLM", lambda **kw: built.update(kw) or object())
 
-        llm_mod.build_lm()
+        llm_mod.build_cia_lm()
 
         assert built["api_base"] == "http://configured:4000/v1"
+        assert built["model"] == f"openai/{llm_mod.CIA_MODEL}"
+        assert built["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 class TestItSaysWhatItLost:
-    def test_the_warning_names_the_cause(
-        self, settings_import_broken, monkeypatch, caplog
-    ):
+    def test_the_warning_names_the_cause(self, settings_import_broken, monkeypatch, caplog):
         monkeypatch.setenv("AORTA_CHAT_VLLM_BASE_URL", "http://configured:4000/v1")
         with caplog.at_level(logging.WARNING, logger="aorta.cia.llm"):
             llm_mod.chat_provider()
@@ -97,9 +96,7 @@ class TestItSaysWhatItLost:
         assert "pydantic_settings" in message
         assert "AORTA_CHAT_" in message
 
-    def test_it_says_the_profile_file_is_what_is_missing(
-        self, settings_import_broken, caplog
-    ):
+    def test_it_says_the_profile_file_is_what_is_missing(self, settings_import_broken, caplog):
         with caplog.at_level(logging.WARNING, logger="aorta.cia.llm"):
             llm_mod.chat_provider()
         assert "profile file" in caplog.records[0].getMessage()
@@ -111,9 +108,7 @@ class TestItSaysWhatItLost:
                 llm_mod.chat_provider()
         assert len(caplog.records) == 1
 
-    def test_the_unconfigured_error_names_the_configuration(
-        self, settings_import_broken
-    ):
+    def test_the_unconfigured_error_names_the_configuration(self, settings_import_broken):
         with pytest.raises(llm_mod.ProviderNotConfigured, match="chat config init"):
             llm_mod.build_lm()
 
