@@ -1066,11 +1066,17 @@ def _half_corrupt_archive(triage_reward, root):
     """One scorable run beside one file of each shape the sweep skips."""
     def put(name, filename, body):
         (root / name).mkdir(parents=True)
-        (root / name / filename).write_text(body)
+        path = root / name / filename
+        if isinstance(body, bytes):
+            path.write_bytes(body)
+        else:
+            path.write_text(body)
 
     put("good", "result.json",
         json.dumps(triage_reward._run("ok", "fail", ["tier1:exit_nonzero"], [])))
     put("unparseable", "result.json", "{ not json")
+    put("latin1", "result.json", b'{"verdict": "caf\xe9"}')
+    put("latin1-report", "sanitizer_report.json", b'{"tool": "caf\xe9"}')
     put("listy", "result.json", "[]")
     rotted = triage_reward._run("rotted", "fail", [], [])
     rotted["failure_detectors_fired"] = "tier1:sigsegv"
@@ -1085,7 +1091,7 @@ def test_a_skipped_run_is_in_the_json_not_only_on_stderr(
 
     The skips were loud on stderr, which a consumer reading `--json` never
     sees: the artifact carried `runs` and policy means over one run with
-    nothing to say four more files were in the directory (aorta#506). The exit
+    nothing to say more files were in the directory (aorta#506). The exit
     code is unchanged -- this is a report, not a gate.
     """
     _half_corrupt_archive(triage_reward, tmp_path)
@@ -1095,7 +1101,7 @@ def test_a_skipped_run_is_in_the_json_not_only_on_stderr(
 
     assert [r["source"] for r in out["runs"]] == [str(tmp_path / "good" / "result.json")]
     assert sorted(Path(s["source"]).parent.name for s in out["skipped"]) == [
-        "listy", "report", "rotted", "unparseable",
+        "latin1", "latin1-report", "listy", "report", "rotted", "unparseable",
     ]
     assert all(s["reason"] for s in out["skipped"])
 
@@ -1104,7 +1110,7 @@ def test_a_skipped_run_is_counted_in_the_text_summary(triage_reward, tmp_path, c
     _half_corrupt_archive(triage_reward, tmp_path)
     assert triage_reward.main(["--runs", str(tmp_path)]) == 0
     captured = capsys.readouterr()
-    assert "4 file(s) could not be scored" in captured.out
+    assert "6 file(s) could not be scored" in captured.out
     # The per-file lines are unchanged, so anything reading stderr still works.
     assert f"  skipped {tmp_path / 'unparseable' / 'result.json'}: unreadable (" in captured.err
 

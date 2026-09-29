@@ -101,7 +101,14 @@ def _backends(tmp_path):
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+            env={
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                # What the healthy stub reports, so a runner's own values
+                # cannot turn it into a mismatch.
+                "TS_SAMPLING": "triton",
+                "TS_GRAMMAR": "xgrammar",
+            },
         ).returncode
 
     return (

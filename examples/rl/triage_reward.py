@@ -425,7 +425,7 @@ def load_runs(
     for path in sorted(root.rglob("result.json")):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             _skip(path, f"unreadable ({exc})", skipped)
             continue
         if not isinstance(doc, dict):
@@ -558,7 +558,7 @@ def load_sanitizer_reports(
     for path in sorted(root.rglob("sanitizer_report.json")):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             _skip(path, f"unreadable ({exc})", skipped)
             continue
         if not isinstance(doc, dict):
