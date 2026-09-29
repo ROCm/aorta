@@ -100,6 +100,7 @@ custom_patterns:                   # Tier 5 user-defined patterns
       condition: "exit_code == 137"   # optional; sandboxed at load
     on_match: fail                    # 'fail' | 'warn' | 'info'
     required_for_pass: false          # only valid with on_match: fail
+    category: oom_fragment            # optional; what the detector reports (see classifier.md)
 ```
 
 Collect-until-N stopping rule (issue #232) replaces a fixed trial count

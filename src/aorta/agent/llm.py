@@ -374,7 +374,21 @@ def _symptom_is_a_kernel_race(low: str) -> bool:
     return located and bool(hazard)
 
 
-def _infer_category_from_detectors(detectors: list[str]) -> str:
+def _infer_category_from_detectors(
+    detectors: list[str], declared: Mapping[str, str] | None = None
+) -> str:
+    # `declared` maps a detector ID to the category its recipe declared for it
+    # (`custom_patterns[*].category`). Once a fired detector has declared one,
+    # the declarations decide and no name is read: a `custom:` id is
+    # free-form, and `custom:consan_host_data_race` passes every leg below
+    # that a ConSan race report does while saying the race is on the host.
+    # `unknown` is a detector abstaining, so it does not contradict another
+    # detector's label. Two different labels give `unknown`: both are the
+    # author's, and ranking them would be the guess a declaration replaces.
+    stated = {declared[d] for d in detectors if d in declared} if declared else set()
+    if stated:
+        labels = stated - {"unknown"}
+        return labels.pop() if len(labels) == 1 else "unknown"
     joined = " ".join(detectors).lower()
     # Detector IDs separate words with ":" and "_" (`custom:consan_data_race`,
     # `tier4:python_traceback`), so a substring test for a short word like
@@ -389,10 +403,10 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     # load-bearing rather than cosmetic. A leg keyed on a generic word decides
     # every ID that merely contains it, including IDs a later leg would have
     # identified exactly, so an accidental order silently downgrades the
-    # function's best answers to its vaguest ones. The order here is: exact
-    # multi-word signatures, then the per-ID conjunction, then the broad
-    # single-word legs. Adding a leg means placing it by how much evidence it
-    # demands, not appending it.
+    # function's best answers to its vaguest ones. The order here is: a
+    # declaration, then exact multi-word signatures, then the per-ID
+    # conjunction, then the broad single-word legs. Adding a leg means placing
+    # it by how much evidence it demands, not appending it.
     #
     # `numerics_mismatch` alongside the built-in signature, because a shipping
     # recipe already emits it: `recipes/tokenspeed/tokenspeed-kernel-gemm-smoke.yaml`
@@ -525,7 +539,15 @@ def _infer_category_from_symptom(low: str) -> str:
 
 
 class FakeLLMProposer:
-    """Deterministic proposer: heuristic category + round-robin mitigations."""
+    """Deterministic proposer: heuristic category + round-robin mitigations.
+
+    ``detector_categories`` maps a detector ID to the category its recipe
+    declared for it; the heuristic reads a fired detector's declaration before
+    inferring a category from its ID.
+    """
+
+    def __init__(self, *, detector_categories: Mapping[str, str] | None = None) -> None:
+        self._detector_categories = dict(detector_categories or {})
 
     def propose(
         self,
@@ -537,7 +559,7 @@ class FakeLLMProposer:
     ) -> AgentStep:
         last = cell_summaries[-1] if cell_summaries else {}
         detectors = list(last.get("failure_detectors_fired") or [])
-        category = _infer_category_from_detectors(detectors)
+        category = _infer_category_from_detectors(detectors, self._detector_categories)
         if symptom and category == "unknown":
             category = _infer_category_from_symptom(symptom.lower())
         # The two chains above label *evidence*, and evidence can say
@@ -993,6 +1015,7 @@ def make_proposer(
     *,
     model: str | None = None,
     prompt_profile: str = DEFAULT_PROMPT_PROFILE,
+    detector_categories: Mapping[str, str] | None = None,
 ) -> LLMProposer:
     """Build the proposer for ``--llm-backend``.
 
@@ -1015,6 +1038,10 @@ def make_proposer(
     before the backend, so a misspelt profile fails whichever backend was
     asked for. ``fake`` sends no prompt, so it refuses any profile but
     ``default`` rather than accept one and ignore it.
+
+    ``detector_categories`` -- the categories a recipe's detectors declare --
+    is read by ``fake`` alone. A real backend takes its category from the
+    model, and no profile puts the declarations in a prompt.
     """
     get_prompt_profile(prompt_profile)
     if backend == "fake":
@@ -1023,7 +1050,7 @@ def make_proposer(
                 f"prompt profile {prompt_profile!r} needs a real model: "
                 "--llm-backend=fake builds no prompt, so it would be ignored"
             )
-        return FakeLLMProposer()
+        return FakeLLMProposer(detector_categories=detector_categories)
     if backend == "litellm" and not _chat_layer_available():
         return LiteLLMProposer(model=model or "gpt-4o-mini", prompt_profile=prompt_profile)
     if backend in CHAT_PROVIDER_BACKENDS:
