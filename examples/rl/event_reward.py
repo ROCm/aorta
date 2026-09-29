@@ -349,11 +349,13 @@ class EventScore:
 class CellSignature:
     """Everything about one cell that the *policy* is shown.
 
-    What ``loop._read_cell_summaries`` puts in front of the proposer, field for
-    field: the aggregated verdict, the exit code of the evidence trial, the
+    What the trained prompt shows of a ``loop._read_cell_summaries`` row, field
+    for field: the aggregated verdict, the exit code of the evidence trial, the
     union of failure and warn detector IDs across trials, and the *keys* of the
     capture dict. The policy sees this and nothing else -- no stdout, no
-    stderr, no ``error_detectors_fired``.
+    stderr, no ``error_detectors_fired``. The loop writes that last one on a
+    row where an error detector fired and the ``default`` prompt sends it, but
+    the trained prompt (``episode_env.render_cell_summary``) does not.
 
     Every component is categorical, deliberately: no quantity of bytes can move
     any field, and capture *keys* rather than values because a bigger captured
