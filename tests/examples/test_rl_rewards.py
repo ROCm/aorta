@@ -647,6 +647,30 @@ def test_an_unreadable_recipe_fails_the_novelty_gate_closed(recipe_reward, tmp_p
     }
 
 
+def test_an_undecodable_recipe_fails_the_novelty_gate_closed_too(
+    recipe_reward, tmp_path
+):
+    """Bytes that are not UTF-8 are as unreadable as a file that cannot be opened.
+
+    `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so it escaped the
+    loader as a traceback -- exit 1, the code this CLI uses for "a candidate
+    fell short", so a gate that could not run read as one that ran and failed.
+    Refused through the same message and exit 2 as every other unusable root.
+    """
+    root = tmp_path / "recipes"
+    root.mkdir()
+    (root / "readable.yaml").write_text("schema_version: 1\n")
+    (root / "latin1.yaml").write_bytes(b"ticket: caf\xe9\n")
+    with pytest.raises(recipe_reward.UnreadableCorpus, match="latin1.yaml"):
+        recipe_reward.load_corpus(root)
+
+    candidate = tmp_path / "candidate.yaml"
+    candidate.write_text(recipe_reward._GOOD, encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        recipe_reward.main(["--recipes-root", str(root), str(candidate)])
+    assert excinfo.value.code == 2
+
+
 def test_the_grader_only_injects_a_scratch_key_the_workload_takes(recipe_reward):
     """The grader's own convenience must not become the model's error.
 
@@ -722,11 +746,46 @@ def test_a_genuinely_novel_valid_recipe_keeps_its_full_reward(recipe_reward):
 
 
 def test_without_a_corpus_the_gate_cannot_fire(recipe_reward):
-    """No corpus means no novelty claim, so the tier reward stands unmodified."""
+    """No corpus means no novelty claim, so the tier reward stands unmodified.
+
+    "No claim" includes the record. `novelty_multiplier: 1.0` and
+    `memorised: false` are what a candidate compared and found novel carries,
+    so a gate that never ran must not carry them too (aorta#506).
+    """
     grade = recipe_reward.grade_recipe_text(recipe_reward._GOOD, corpus=None)
     assert grade.reward == grade.tier_reward
-    assert grade.memorised is False
+    assert grade.memorised is None
+    assert grade.novelty_multiplier is None
     assert grade.nearest_committed is None
+    record = grade.as_dict()
+    assert record["novelty_multiplier"] is None and record["memorised"] is None
+
+
+@pytest.mark.parametrize("candidate", ["_GOOD", "_BAD_YAML"])
+def test_an_empty_corpus_is_refused_rather_than_read_as_novel(recipe_reward, candidate):
+    """`{}` asks for the gate and gives it nothing, which is not `None`.
+
+    Treated alike, a verbatim copy compared against nothing scored exactly as a
+    recipe compared against everything and found novel -- the CLI refused an
+    empty `--recipes-root`, but every programmatic caller still got full
+    marks. Raised whatever the candidate's tier, because the fault is the
+    grader's, not the candidate's.
+    """
+    text = getattr(recipe_reward, candidate)
+    with pytest.raises(recipe_reward.EmptyCorpus, match="corpus=None"):
+        recipe_reward.grade_recipe_text(text, corpus={})
+
+
+def test_a_candidate_sharing_nothing_with_the_corpus_was_still_compared(recipe_reward):
+    """Narrowness for the `None` default: compared-and-unlike is novel, not unchecked.
+
+    Both texts fail to parse, so each is compared raw and they share no
+    character: similarity is exactly 0.0.
+    """
+    grade = recipe_reward.grade_recipe_text("[[[", corpus={"recipes/x.yaml": "}}}"})
+    assert grade.nearest_committed == ("recipes/x.yaml", 0.0)
+    assert grade.novelty_multiplier == 1.0
+    assert grade.memorised is False
 
 
 def test_a_malformed_copy_is_not_rescued_by_being_a_copy(recipe_reward):
@@ -1001,6 +1060,75 @@ def test_a_run_with_a_rotted_detector_field_is_skipped_not_fatal(
 
     assert [src for src, _ in runs] == [str(tmp_path / "good" / "result.json")]
     assert triage_reward.label_run(runs[0][1]).verdict == "fail"
+
+
+def _half_corrupt_archive(triage_reward, root):
+    """One scorable run beside one file of each shape the sweep skips."""
+    def put(name, filename, body):
+        (root / name).mkdir(parents=True)
+        (root / name / filename).write_text(body)
+
+    put("good", "result.json",
+        json.dumps(triage_reward._run("ok", "fail", ["tier1:exit_nonzero"], [])))
+    put("unparseable", "result.json", "{ not json")
+    put("listy", "result.json", "[]")
+    rotted = triage_reward._run("rotted", "fail", [], [])
+    rotted["failure_detectors_fired"] = "tier1:sigsegv"
+    put("rotted", "result.json", json.dumps(rotted))
+    put("report", "sanitizer_report.json", "{}")
+
+
+def test_a_skipped_run_is_in_the_json_not_only_on_stderr(
+    triage_reward, tmp_path, capsys
+):
+    """A mean over the runs that loaded reads as complete unless the rest are listed.
+
+    The skips were loud on stderr, which a consumer reading `--json` never
+    sees: the artifact carried `runs` and policy means over one run with
+    nothing to say four more files were in the directory (aorta#506). The exit
+    code is unchanged -- this is a report, not a gate.
+    """
+    _half_corrupt_archive(triage_reward, tmp_path)
+
+    assert triage_reward.main(["--runs", str(tmp_path), "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert [r["source"] for r in out["runs"]] == [str(tmp_path / "good" / "result.json")]
+    assert sorted(Path(s["source"]).parent.name for s in out["skipped"]) == [
+        "listy", "report", "rotted", "unparseable",
+    ]
+    assert all(s["reason"] for s in out["skipped"])
+
+
+def test_a_skipped_run_is_counted_in_the_text_summary(triage_reward, tmp_path, capsys):
+    _half_corrupt_archive(triage_reward, tmp_path)
+    assert triage_reward.main(["--runs", str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert "4 file(s) could not be scored" in captured.out
+    # The per-file lines are unchanged, so anything reading stderr still works.
+    assert f"  skipped {tmp_path / 'unparseable' / 'result.json'}: unreadable (" in captured.err
+
+
+def test_a_clean_archive_skips_nothing(triage_reward, tmp_path, capsys):
+    """Narrowness: the record is of skips, not of runs."""
+    (tmp_path / "good").mkdir()
+    (tmp_path / "good" / "result.json").write_text(
+        json.dumps(triage_reward._run("ok", "fail", ["tier1:exit_nonzero"], []))
+    )
+    triage_reward.main(["--runs", str(tmp_path), "--json"])
+    assert json.loads(capsys.readouterr().out)["skipped"] == []
+    triage_reward.main(["--runs", str(tmp_path)])
+    assert "could not be scored" not in capsys.readouterr().out
+
+
+def test_an_archive_with_nothing_scorable_says_it_found_files(
+    triage_reward, tmp_path, capsys
+):
+    """"None found" and "none readable" need different fixes, so say which."""
+    (tmp_path / "bad").mkdir()
+    (tmp_path / "bad" / "result.json").write_text("{ not json")
+    assert triage_reward.main(["--runs", str(tmp_path)]) == 2
+    assert "(1 skipped)" in capsys.readouterr().err
 
 
 def test_a_correct_answer_earns_the_full_reward(triage_reward):
