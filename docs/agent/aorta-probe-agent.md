@@ -117,9 +117,10 @@ Three distinctions the glosses exist to enforce, because the names alone do not:
 
 `--llm-backend fake` labels a failure without a model. It reads what the
 failure detectors that fired *declare* first — `custom_patterns[*].category` in
-the recipe — and infers a category from detector IDs only when none of them
-declared one. A `warn` or `info` pattern may declare a category too, but it is
-not a failure detector, so this proposer never reads it.
+the recipe. Only when the declarations settle nothing (none was made, or every
+one was `unknown`) does it infer a category from the IDs of the undeclared
+detectors, and then from `--symptom`. A `warn` or `info` pattern may declare a
+category too, but it is not a failure detector, so this proposer never reads it.
 
 Declare a category whenever an ID could mislead: `custom:` IDs are free-form,
 so `custom:consan_host_data_race` names a sanitizer and a race and reads as
