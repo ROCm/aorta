@@ -771,6 +771,7 @@ class Episode:
                 offered=self.scenario.offered,
                 tried=self.tried_mitigations,
                 unresolved=step.unresolved_mitigations,
+                redundant=step.redundant_mitigations,
             )
             self._finish(outcome, recommended, terminal, why)
             return
