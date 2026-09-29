@@ -181,10 +181,10 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
     ),
     EnvironmentKnob(
         name="DISABLE_TF32",
-        library="pytorch",
-        consumer="disables the TF32/xf32 compute path",
+        library="workload",
+        consumer="read by no ROCm or PyTorch library; only a workload that reads it itself (aorta#500)",
         category="gemm_numeric",
-        source_reference=INHERITED_UNAUDITED,
+        source_reference="absent from every ROCm and torch binary (tests/registry/test_mitigation_variable_presence.py)",
         reference_build=NOT_BUILD_SCOPED,
     ),
     EnvironmentKnob(
