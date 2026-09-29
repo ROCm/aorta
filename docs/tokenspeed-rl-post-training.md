@@ -752,8 +752,10 @@ is the machine-checkable contract, and it is a subset of the chatbot's target
 contract rather than the same thing —
 [3.4](#34-the-current-contract-versus-the-target-one) reconciles them.
 
-One `litellm.completion` call per iteration, with
-`response_format={"type": "json_object"}` and two messages. The system message
+One `litellm.completion` call per iteration, with a `response_format` JSON
+schema for the five keys below (`next_mitigations` capped at five names since
+[#510](https://github.com/ROCm/aorta/issues/510); `{"type": "json_object"}`
+before that) and two messages. The system message
 is a fixed string:
 
 ```
@@ -890,8 +892,8 @@ aorta agent --llm-backend litellm --llm-model openai/<served-model-name> ...
 
 Verified against a mock OpenAI-compatible endpoint: the request arrives at
 `POST /v1/chat/completions` on the self-hosted address, with
-`response_format: {"type": "json_object"}` intact, and the reply parses back
-into an `AgentStep` unchanged. Both `openai/<name>` and a bare model name route
+`response_format` intact (then `{"type": "json_object"}`; a JSON schema since
+#510), and the reply parses back into an `AgentStep` unchanged. Both `openai/<name>` and a bare model name route
 there. The `openai/` prefix is stripped on the wire, so **the name after the
 slash must match what the engine advertises**, not what the CLI default says.
 
@@ -906,8 +908,8 @@ Three caveats, none blocking:
 - With the variable set, a `--llm-model gpt-4o-mini` default silently goes to
   the local engine. The flag would say one thing and the traffic do another,
   which the agent report cannot currently distinguish.
-- The serving engine must accept `response_format: {"type": "json_object"}`.
-  TokenSpeed's OpenAI-compatible route is what would serve this, and that
+- The serving engine must accept a `json_schema` `response_format` (it was
+  `{"type": "json_object"}` before #510). TokenSpeed's OpenAI-compatible route is what would serve this, and that
   parameter is a dependency of the integration rather than an optional extra —
   without it the call errors rather than degrading.
 
