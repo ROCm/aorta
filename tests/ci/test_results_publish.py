@@ -186,6 +186,26 @@ def test_dispatches_are_invisible_to_the_gated_series_and_its_retention(tmp_path
     assert all(doc["build"]["upstream_run_id"] for doc in series)
 
 
+def test_the_dispatch_directory_keeps_its_own_180_file_window(tmp_path):
+    existing = {
+        f"results/dispatch/2026-{m:02d}-{d:02d}-{n}.json": _record(f"2026-{m:02d}-{d:02d}T13:00:00Z", "")
+        for n, (m, d) in enumerate(
+            [(m, d) for m in range(1, 9) for d in range(1, 29)][:180])
+    }
+    existing[_scheduled_path()] = _record(f"{_DATE}T11:19:55Z", "34115289502")
+    branch = _Branch(tmp_path, existing)
+
+    proc = branch.publish(_record(f"{_DATE}T13:08:55Z", ""))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    tree = branch.checkout()
+    kept = sorted(p.name for p in (tree / "results" / "dispatch").glob("*.json"))
+    assert len(kept) == 180
+    assert "2026-01-01-0.json" not in kept
+    assert f"{_DATE}-{_RUN_ID}.json" in kept
+    assert (tree / _scheduled_path()).is_file()
+
+
 def test_a_dispatch_onto_a_branch_with_no_scheduled_record_yet_publishes(tmp_path):
     """results/ holds no top-level file after a dispatch-only publish, which
     is the case the retention prune has to tolerate under pipefail."""
