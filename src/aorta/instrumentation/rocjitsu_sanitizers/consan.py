@@ -63,6 +63,10 @@ _SAMPLED_INCOMPLETE_COUNTS = (
     "sampled_static_mapping_malformed",
     "sampled_unsupported_sync",
 )
+_SAMPLED_COUNTS = (*_SAMPLED_SUMMARY_COUNTS, *_SAMPLED_INCOMPLETE_COUNTS)
+# Current-only, and never spelled the legacy way, so it is not a _SAMPLED_COUNTS
+# member: it postdates the flattening rather than being renamed by it.
+_SUPPRESSED_CONFLICTS = "suppressed_uniform_write_conflicts"
 _KV = re.compile(r"(\w+)=(\S+)")
 # glibc's ld.so message when a needed DT_NEEDED library is not on any search
 # path. Written to stderr, and paired with exit 127 there it means the repro
@@ -149,17 +153,47 @@ def _required_int(fields: dict[str, str], key: str) -> int:
     return _int(fields, key)
 
 
-def _required_sampled_int(fields: dict[str, str], legacy_key: str) -> int:
-    """Read one counter from current flattened or legacy Sampled output."""
-    current_key = legacy_key.removeprefix("sampled_")
-    present = [key for key in (legacy_key, current_key) if key in fields]
-    if len(present) != 1:
+def _sampled_schema(fields: dict[str, str]) -> str:
+    """Classify one report as current flattened or legacy Sampled output.
+
+    Current ConSan dropped the ``sampled_`` prefix from every counter at once,
+    so a report spelling some counters one way and the rest the other is
+    truncated or interleaved rather than either grammar. Reading the schema off
+    all of them together rather than off any single counter is what keeps the
+    current-only suppression counter required on every current report: with a
+    per-counter choice, a current report could borrow the legacy spelling for
+    one counter and omit the suppression counter as if it were legacy.
+    """
+    schemas: set[str] = set()
+    for legacy_key in _SAMPLED_COUNTS:
+        present = {
+            schema
+            for schema, key in (
+                ("legacy", legacy_key),
+                ("current", legacy_key.removeprefix("sampled_")),
+            )
+            if key in fields
+        }
+        if len(present) != 1:
+            raise ValueError(
+                f"ConSan field {legacy_key} is "
+                + ("missing" if not present else "ambiguous across current and legacy spellings")
+                + " in a Sampled report summary"
+            )
+        schemas |= present
+    if len(schemas) != 1:
         raise ValueError(
-            f"ConSan field {legacy_key} is "
-            + ("missing" if not present else "ambiguous across current and legacy spellings")
-            + " in a Sampled report summary"
+            "ConSan report summary mixes current and legacy counter spellings: "
+            + ", ".join(sorted(schemas))
         )
-    return _int(fields, present[0])
+    return schemas.pop()
+
+
+def _sampled_int(fields: dict[str, str], legacy_key: str, schema: str) -> int:
+    """Read one counter under the spelling ``schema`` already established."""
+    return _required_int(
+        fields, legacy_key if schema == "legacy" else legacy_key.removeprefix("sampled_")
+    )
 
 
 def _parse_waitcheck(
@@ -253,11 +287,17 @@ def _itemized_by_reader(findings: list[Finding]) -> dict[str, int]:
     return counts
 
 
-def _sampled_totals(summaries: list[dict[str, str]]) -> dict[str, dict[str, int]]:
+def _sampled_totals(
+    summaries: list[dict[str, str]], *, schema: str
+) -> dict[str, dict[str, int]]:
     """Sum each reader's Sampled conflict counters across its report lines.
 
     A reader emits one report per snapshot it publishes, and the counters are
-    per report, so the run's conflict count for a reader is the sum.
+    per report, so the run's conflict count for a reader is the sum. ``schema``
+    is the grammar the coverage records of the same run were written in; a
+    report that disagrees with it is a second grammar spliced into one stream,
+    which is the other way a current report can evade the current-only checks
+    below.
     """
     totals: dict[str, dict[str, int]] = {}
     for summary in summaries:
@@ -265,10 +305,29 @@ def _sampled_totals(summaries: list[dict[str, str]]) -> dict[str, dict[str, int]
         if reader is None:
             raise ValueError("ConSan field reader is missing from a Sampled report summary")
         _required_int(summary, "reader")
-        counts = {key: _required_sampled_int(summary, key) for key in _SAMPLED_SUMMARY_COUNTS}
-        incomplete = {
-            key: _required_sampled_int(summary, key) for key in _SAMPLED_INCOMPLETE_COUNTS
-        }
+        report_schema = _sampled_schema(summary)
+        if report_schema != schema:
+            raise ValueError(
+                f"ConSan report summary for reader {reader} is {report_schema} output "
+                f"while this run's coverage is {schema}"
+            )
+        counts = {key: _sampled_int(summary, key, schema) for key in _SAMPLED_SUMMARY_COUNTS}
+        # Conflicts ConSan detected and then withheld under the expert
+        # same-value opt-in (RJ_CONSAN_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES,
+        # which defaults to 0 and is not enabled by any preset). run_consan
+        # scrubs that opt-in, so a nonzero count means the pinned live contract
+        # was not honored. Required on a current report; legacy reports predate
+        # the counter, but one carrying it anyway still says conflicts were
+        # withheld, and dropping that evidence on the schema branch would pass
+        # the run on a finding it was handed.
+        if schema == "current" or _SUPPRESSED_CONFLICTS in summary:
+            suppressed = _required_int(summary, _SUPPRESSED_CONFLICTS)
+            if suppressed != 0:
+                raise ValueError(
+                    f"ConSan suppressed {suppressed} uniform-write conflict(s) "
+                    f"for reader {reader}"
+                )
+        incomplete = {key: _sampled_int(summary, key, schema) for key in _SAMPLED_INCOMPLETE_COUNTS}
         nonzero_incomplete = [key for key, value in incomplete.items() if value != 0]
         if nonzero_incomplete:
             raise ValueError(
@@ -300,7 +359,9 @@ def _require_sampled_summaries(
     keeps the absence itself fatal rather than silently unaccounted for. Only
     applicable readers are required: a loaded object with no discovered site is
     never instrumented and publishes no report, which is the ordinary shape of
-    the runtime helper objects that accompany a repro.
+    the runtime helper objects that accompany a repro. This presence guarantee
+    is per reader, not per snapshot: RocJITsu emits no snapshot-count field, so
+    deletion of an additional whole report record is not observable here.
     """
     missing = sorted(
         str(record.reader)
@@ -399,9 +460,12 @@ def parse_consan_output(
 ) -> ParsedCombinedOutput:
     """Parse one combined-hook stream without double-counting summaries.
 
-    The current default-detector grammar and the legacy Sampled/Record-Replay
-    grammars are read in one pass. :func:`run_consan` additionally requires the
-    current ``default`` mode; direct callers can still inspect saved old logs.
+    Either the current default-detector grammar or the legacy
+    Sampled/Record-Replay grammars are read, but one stream must be wholly one
+    of them: a stream comes from a single hook build, and a mixed stream is the
+    shape in which a record truncated out of the legacy grammar reads as a
+    current one. :func:`run_consan` additionally requires the current
+    ``default`` mode; direct callers can still inspect saved old logs.
     """
 
     lines = output.splitlines()
@@ -474,7 +538,7 @@ def parse_consan_output(
                     metadata=tuple(sorted(summary.items())),
                 )
             )
-    sampled_totals = _sampled_totals(sampled_summaries)
+    sampled_totals = _sampled_totals(sampled_summaries, schema=decision.schema)
     findings.extend(
         _sampled_summary_findings(sampled_totals, _itemized_by_reader(sampled_details))
     )
