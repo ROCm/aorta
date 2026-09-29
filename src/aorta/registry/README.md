@@ -475,6 +475,36 @@ the built-in axis.
 
 Tracked in issue #195.
 
+### Built-ins that cannot act on some stacks
+
+A mitigation that cannot change anything on the stack under test is a second
+baseline under another name. Its cell records the env it was given, as a
+working mitigation's would, so the matrix cannot tell the two apart. Keep
+these entries out of an axis where the condition holds, or read their cells as
+baselines. The names stay registered, because recipes and archived cells
+refer to them. See aorta#511.
+
+| Entry | Why it cannot act | Where |
+|---|---|---|
+| `tf32_off` | `DISABLE_TF32` is read by no ROCm or PyTorch library | every stack; aorta#500 |
+| `pytorch_alloc_expandable_segments` | PyTorch reads the option and refuses it: *expandable_segments not supported on this platform* | PyTorch builds without expandable-segment support |
+| `fa_prefer_ck` | PyTorch reads it, warns *Cannot set preferred SDPA backend to CK*, and stays on AOTriton | PyTorch builds without CK SDPA |
+| `fa_prefer_aotriton` | `TORCH_ROCM_FA_PREFER_CK=0` reads as unset, and unset already means AOTriton | unless the environment exports `1` |
+| `hsa_enable_cache` | `HSA_DISABLE_CACHE=0` is libhsakmt's default | unless the environment exports `1` |
+| `hsa_no_scratch_reclaim` | the image already exports `HSA_NO_SCRATCH_RECLAIM=1` | `rocm/primus` images |
+| `rccl_gfx942_cheap_fence_off` | RCCL 10.0 turns the cheap fence off by default | RCCL 10.0; it acts on RCCL 7.2 |
+
+`rccl_gfx942_cheap_fence_off` keeps its original name but sets
+`RCCL_GFX9_CHEAP_FENCE_OFF`, the variable RCCL has read since 7.2 renamed
+`RCCL_GFX942_CHEAP_FENCE_OFF`.
+
+`nccl_launch_order_implicit` is a different case: it acts, and has been seen
+to crash every rank (aorta#512).
+
+`tests/registry/test_mitigation_variable_presence.py` checks the first kind —
+a variable no scanned library contains — on the GPU lane. The rest need a
+running workload or the image's environment, and nothing checks them yet.
+
 ## Verifying what's registered
 
 ```bash

@@ -6,10 +6,11 @@ consumes a trial, reports ``fail`` beside the real baseline, and looks exactly
 like a mitigation that was tried and did not help -- a second baseline under a
 different name, which is the failure the probe harness exists to prevent.
 
-Two entries are in that state on the stack probes run on today: ``tf32_off``
-(aorta#500) and ``rccl_gfx942_cheap_fence_off``. Both were found the expensive
-way, by building a scenario around the knob and watching it not invert. This
-check finds them in milliseconds.
+``tf32_off`` (aorta#500) is in that state on the stack probes run on today.
+``rccl_gfx942_cheap_fence_off`` was too, until it was pointed at the name RCCL
+7.2 renamed its variable to (aorta#511). Both were found the expensive way, by
+building a scenario around the knob and watching it not invert. This check
+finds them in milliseconds.
 
 WHAT THIS CAN AND CANNOT DETECT
 ===============================
@@ -59,8 +60,9 @@ Not covered, and not detectable this way:
   0*) are in this state, and both variables are present in the binaries. Only
   running something and reading its warnings finds these.
 * **sets the value that is already the default** -- ``fa_prefer_aotriton``
-  sets ``TORCH_ROCM_FA_PREFER_CK=0``. The variable is present and is honoured;
-  the value is a no-op. Needs the runtime's documented default, not a grep.
+  sets ``TORCH_ROCM_FA_PREFER_CK=0`` and ``hsa_enable_cache`` sets
+  ``HSA_DISABLE_CACHE=0``. The variable is present and is honoured; the value
+  is a no-op. Needs the runtime's documented default, not a grep.
 * **already set in the image** -- ``rocm/primus:v26.3`` bakes
   ``HSA_NO_SCRATCH_RECLAIM=1`` into ``Config.Env``, so
   ``hsa_no_scratch_reclaim`` sets what is set. Needs the cell's intent compared
@@ -150,14 +152,6 @@ KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
             "neither holds."
         ),
     ),
-    ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"): Exemption(
-        claimed_consumer="librccl.so",
-        reason=(
-            "RCCL_GFX942_CHEAP_FENCE_OFF appears in no binary including "
-            "librccl; the name is gfx942-scoped and the supported targets "
-            "have moved on. aorta#511."
-        ),
-    ),
 }
 
 
@@ -165,8 +159,8 @@ def exemption_sonames() -> tuple[str, ...]:
     """Libraries only a :data:`KNOWN_ABSENT` claim puts in the scan set.
 
     Deduplicated and order-stable, and it skips anything
-    :data:`RUNTIME_SONAMES` already carries -- ``librccl`` is already scanned
-    for its own sake, so the RCCL exemption adds nothing.
+    :data:`RUNTIME_SONAMES` already carries -- an exemption claiming
+    ``librccl`` adds nothing, since it is already scanned for its own sake.
     """
     return tuple(
         dict.fromkeys(
@@ -888,7 +882,7 @@ def test_every_known_absent_claim_is_scanned():
 
 
 def test_exemption_sonames_does_not_restate_the_runtime_set():
-    """``librccl`` is scanned for its own sake; the RCCL entry must not re-add it.
+    """A runtime soname is scanned for its own sake; an exemption must not re-add it.
 
     Not cosmetic: :func:`sonames_to_scan` concatenates, so a duplicate would
     resolve the same library twice per directory. The dedup in
@@ -908,13 +902,14 @@ def test_known_absent_covers_only_the_mode_this_test_can_see():
 
     The other three inertness modes are invisible to a grep, so an entry parked
     here for one of them would be silenced by a check that never looked at it.
-    These four are the ones aorta#511 records as inert for reasons this test
+    These are the ones aorta#511 records as inert for reasons this test
     cannot see; none of them belongs in KNOWN_ABSENT.
     """
     not_greppable = {
         "pytorch_alloc_expandable_segments",  # read and refused
         "fa_prefer_ck",                       # read and refused
         "fa_prefer_aotriton",                 # sets the default value
+        "hsa_enable_cache",                   # sets the default value
         "hsa_no_scratch_reclaim",             # already set in the image
     }
     misfiled = sorted(not_greppable & {m for m, _ in KNOWN_ABSENT})
