@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-29T15:06:26.998853+00:00",
+  "build": {
+    "amd_aorta_version": "0.3.1rc20260929",
+    "torch": "2.13.0+rocm7.14.0",
+    "hip": "7.14.60850",
+    "rocm": "7.14.0",
+    "upstream_run_id": null,
+    "head_sha": "e45a9ae778dfbb0796da23ad516befc1939f7266",
+    "wheel_file": null,
+    "lane": "canary",
+    "base_image": "rocm/pytorch:latest@sha256:a3867e22ca44c458b1feda92026c6dc289e7e447093cf55914d1fd56ef6d7372"
+  },
+  "summary": {
+    "total": 12,
+    "pass": 0,
+    "fail": 1,
+    "record": 0,
+    "skip": 11
+  },
+  "entries": [
+    {
+      "entry": "gpu_smoke",
+      "recipe": "recipes/ci/gpu-smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 1 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "inference_offline",
+      "recipe": "recipes/inference/example-inference-smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 1 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "training_ddp",
+      "recipe": "recipes/training/example-training-ddp-smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 2 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "training_fsdp",
+      "recipe": "recipes/training/example-training-fsdp-smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 2 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "race",
+      "recipe": "recipes/race/race_smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 2 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 2 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "training_ddp_8gpu",
+      "recipe": "recipes/training/example-training-ddp-smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 8 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "training_fsdp_8gpu",
+      "recipe": "recipes/training/example-training-fsdp-smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 8 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "race_8gpu",
+      "recipe": "recipes/race/race_smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 8 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 8 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "tokenspeed_serve_smoke",
+      "recipe": "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml",
+      "cell": null,
+      "verdict": "skip",
+      "reasons": [
+        "needs 1 GPU(s), have 0"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": null
+    },
+    {
+      "entry": "_nightly_eval",
+      "recipe": null,
+      "cell": null,
+      "verdict": "fail",
+      "reasons": [
+        "no matrix entry ran (empty matrix or all skipped -- check GPUs)"
+      ],
+      "metrics": {},
+      "deltas": {},
+      "duration_sec": 0.0,
+      "error": "zero_work",
+      "matrix_path": null
+    }
+  ]
+}
