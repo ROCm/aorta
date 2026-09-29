@@ -128,8 +128,8 @@ class PromptProfile:
     build: Callable[[list[dict[str, Any]], list[str]], tuple[str, str]] | None
     #: Ask the chat template not to open a reasoning block.
     disable_thinking: bool
-    #: Whether the direct LiteLLM path constrains the reply with
-    #: ``response_format={"type": "json_object"}``.
+    #: Whether the direct LiteLLM path constrains the reply with a
+    #: ``response_format`` JSON schema (``llm._step_response_format``).
     json_mode: bool
 
     def extra_body(self) -> dict[str, Any]:
