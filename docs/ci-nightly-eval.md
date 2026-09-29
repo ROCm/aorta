@@ -26,7 +26,12 @@ nightly evaluation, dashboard, alerting, baselines, and automated bumps.
 
 ## Flow (nightly-eval.yml)
 
-Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatch`):
+Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatch`).
+That fires when the whole wheel workflow completes, so `nightly.yml` holds only
+the wheel job; the chat index is published by its own `chat-index-nightly.yml`,
+which follows the same wheel run in parallel with this one rather than ahead of
+it (#486).
+
 
 1. Build/start the pinned ROCm container (`rocm-ci-setup`).
 2. Install the **released nightly wheel** `amd-aorta[hw-queue]` (constrained by

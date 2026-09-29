@@ -176,7 +176,7 @@ This row is checked **before every exemption above it**, `--public-only`
 included. The exemptions answer "is this a narrowing, or an index that cannot
 be queried anyway" — questions that presume an index is what is there, which is
 the one thing this case does not establish. A typo is a typo on the CI path
-too. It costs the published build nothing: `nightly.yml` and `release.yml` run
+too. It costs the published build nothing: `chat-index-nightly.yml` and `release.yml` run
 on a fresh workspace and never restore `index-out/`, so their first write is to
 a path that does not exist and every later one is over complete sidecars.
 
