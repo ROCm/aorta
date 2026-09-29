@@ -85,3 +85,18 @@ def test_rejects_non_positive_max_walltime(bad):
 def test_accepts_none_and_positive_max_walltime():
     assert AgentPolicy(max_walltime_sec=None).max_walltime_sec is None
     assert AgentPolicy(max_walltime_sec=30.0).max_walltime_sec == 30.0
+
+
+def test_nccl_launch_order_implicit_needs_approval():
+    """It crashes every rank instead of resolving the hang (aorta#512), so an
+    operator who asked to approve risky mitigations must be asked about it."""
+    assert AgentPolicy(require_approval=True).needs_approval("nccl_launch_order_implicit")
+
+
+def test_approval_gate_holds_only_gated_names_and_only_when_asked():
+    proposed = ["xnack", "nccl_launch_order_implicit", "tf32_off", "hip_launch_blocking"]
+    assert AgentPolicy(require_approval=True).pending_approvals(proposed) == [
+        "nccl_launch_order_implicit",
+        "hip_launch_blocking",
+    ]
+    assert AgentPolicy().pending_approvals(proposed) == []
