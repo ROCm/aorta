@@ -737,16 +737,13 @@ class TestADetectorDeclaresItsCategory:
 
     A `custom:` id is free-form, so the keyword legs above cannot be finished:
     no conjunction of positive tokens excludes a word whose job is to negate.
-    `custom_patterns[*].category` is read first, and name inference is what is
-    left when no fired detector declared anything.
+    `custom_patterns[*].category` is read first; names, and then the symptom,
+    are read only when the declarations settle nothing.
     """
 
     @pytest.mark.parametrize(
         ("detector", "inferred", "declared"),
         [
-            # The worked example: it names a sanitizer and a hazard, and "host"
-            # is the word that makes it not an intra-kernel race.
-            ("custom:consan_host_data_race", "gpu_race", "unknown"),
             # A library mismatch found at startup, read as a collective hang
             # because the id says "rccl".
             ("custom:rccl_version_mismatch", "rccl_hang", "launch_error"),
@@ -758,8 +755,21 @@ class TestADetectorDeclaresItsCategory:
         self, detector, inferred, declared
     ):
         """The first assert is the precondition: in each row the name says otherwise."""
-        assert _infer_category_from_detectors([detector]) == inferred
-        assert _infer_category_from_detectors([detector], {detector: declared}) == declared
+        assert _fake_step(detectors=[detector]).category == inferred
+        assert _declared_step([detector], {detector: declared}).category == declared
+
+    def test_the_worked_example_stops_answering_for_the_evidence_beside_it(self):
+        """`custom:consan_host_data_race` names a sanitizer and a hazard.
+
+        So its name satisfies the kernel-race leg, which runs ahead of the
+        hang's and decides the pair, and the probe then downgrades that to
+        `unknown`. Declared `unknown`, its name is not read, and the hang is.
+        """
+        fired = ["tier2:hang", "custom:consan_host_data_race"]
+        assert _infer_category_from_detectors(fired) == "gpu_race"
+        assert _fake_step(detectors=fired).category == "unknown"
+        declared = {"custom:consan_host_data_race": "unknown"}
+        assert _declared_step(fired, declared).category == "rccl_hang"
 
     def test_a_declaration_outranks_an_undeclared_detector_beside_it(self):
         """`tier1:exit_nonzero` fires beside nearly every failure.
@@ -768,31 +778,26 @@ class TestADetectorDeclaresItsCategory:
         declared detector would almost never decide anything.
         """
         fired = ["tier1:exit_nonzero", "custom:allocator_retries_exhausted"]
-        assert _infer_category_from_detectors(fired) == "launch_error"
+        assert _fake_step(detectors=fired).category == "launch_error"
         declared = {"custom:allocator_retries_exhausted": "oom_fragment"}
-        assert _infer_category_from_detectors(fired, declared) == "oom_fragment"
+        assert _declared_step(fired, declared).category == "oom_fragment"
 
     @pytest.mark.parametrize(
         ("detector", "expected"),
         [
-            ("custom:consan_data_race", "gpu_race"),
-            ("custom:ts_kernel_numerics_mismatch", "numeric_silent"),
             ("tier2:hang", "rccl_hang"),
             ("tier4:hip_error", "illegal_mem"),
             ("tier1:exit_nonzero", "launch_error"),
+            ("custom:checkpoint_memory_fault", "checkpoint_race"),
         ],
     )
     def test_a_declaration_for_a_detector_that_did_not_fire_changes_nothing(
         self, detector, expected
     ):
-        """Narrowness control, and the fallback the review kept.
-
-        Only a fired detector's declaration is read, and an undeclared id is
-        still read off its name -- so the reachable sanitizer spellings still
-        label, which is why every `custom:*` id was not mapped to `unknown`.
-        """
+        """Narrowness control: only a fired detector's declaration is read, and
+        an undeclared one is still read off its name."""
         declared = {"custom:tokens_per_sec_below_floor": "perf_regression"}
-        assert _infer_category_from_detectors([detector], declared) == expected
+        assert _declared_step([detector], declared).category == expected
 
     @pytest.mark.parametrize(
         ("first", "second", "expected"),
@@ -808,19 +813,31 @@ class TestADetectorDeclaresItsCategory:
     def test_how_two_declarations_combine(self, first, second, expected):
         fired = ["custom:signal_a", "custom:signal_b"]
         declared = {"custom:signal_a": first, "custom:signal_b": second}
-        assert _infer_category_from_detectors(fired, declared) == expected
+        assert _declared_step(fired, declared).category == expected
 
-    def test_the_proposer_reads_the_declarations_it_is_given(self):
-        detector = "custom:rccl_version_mismatch"
-        assert _fake_step(detectors=[detector]).category == "rccl_hang"
-        assert _declared_step([detector], {detector: "launch_error"}).category == "launch_error"
+    @pytest.mark.parametrize(
+        ("symptom", "heard"),
+        [("oom killer took the process", "oom_fragment"), ("ranks hang in allreduce", "rccl_hang")],
+    )
+    def test_a_conflict_is_not_settled_by_the_symptom(self, symptom, heard):
+        """The symptom is read when the declarations settle nothing, not when
+        they disagree: its keywords would otherwise rank two labels the author
+        gave, or replace both with a third."""
+        fired = ["custom:signal_a", "custom:signal_b"]
+        assert _fake_step(detectors=fired, symptom=symptom).category == heard
+        declared = {"custom:signal_a": "oom_fragment", "custom:signal_b": "launch_error"}
+        assert _declared_step(fired, declared, symptom=symptom).category == "unknown"
 
     def test_a_declared_evidence_only_label_is_still_downgraded(self):
-        """A declaration describes evidence; it does not widen what a probe step may say."""
+        """A declaration describes evidence; it does not widen what a probe step may say.
+
+        The symptom is the witness that the declaration was read: ignored, it
+        would have left the symptom to label the step.
+        """
         detector = "custom:lds_conflict"
-        declared = {detector: "gpu_race"}
-        assert _infer_category_from_detectors([detector], declared) == "gpu_race"
-        step = _declared_step([detector], declared)
+        symptom = "oom killer took the process"
+        assert _fake_step(detectors=[detector], symptom=symptom).category == "oom_fragment"
+        step = _declared_step([detector], {detector: "gpu_race"}, symptom=symptom)
         assert step.category == "unknown"
         assert AgentPolicy().validate_step(step).category == "unknown"
 

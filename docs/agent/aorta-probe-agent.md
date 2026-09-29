@@ -134,9 +134,10 @@ custom_patterns:
 ```
 
 * `unknown` is a declaration too, and it abstains: it stops the name being
-  read without contradicting another detector's label.
+  read without contradicting another detector's label. Undeclared detectors
+  beside it are still read off their IDs, and `--symptom` is still heard.
 * Fired detectors that declare two different labels give `unknown`; neither is
-  ranked above the other.
+  ranked above the other, and `--symptom` does not break the tie.
 * Any of the eleven names may be declared, because a declaration describes
   evidence. A probe step still reports an evidence-only label as `unknown`.
 * Built-in `tier1`–`tier4` detectors declare nothing and are still read off
