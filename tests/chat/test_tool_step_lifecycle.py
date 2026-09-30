@@ -71,6 +71,32 @@ async def test_the_completion_arrives_after_the_tool_returns(stream, monkeypatch
     assert stream.events[-1].get("done") is True
 
 
+async def test_completion_is_emitted_by_the_awaited_tool_task(monkeypatch):
+    """Do not let a detached done callback race the answer onto the screen.
+
+    LangGraph multiplexes custom events with node updates and accumulated state.
+    A Task done callback can enqueue its custom completion after the act node
+    has returned and the final state is already being rendered. Keeping both
+    tool events in the awaited producer establishes a real ordering barrier.
+    """
+    producer = asyncio.current_task()
+    completion_tasks = []
+
+    def record(payload):
+        if payload.get("done"):
+            completion_tasks.append(asyncio.current_task())
+
+    async def execute(name, kwargs):
+        return "ok"
+
+    monkeypatch.setattr(nodes, "get_stream_writer", lambda: record)
+    monkeypatch.setattr(nodes, "_execute_tool", execute)
+
+    await nodes._execute_tool_async("read_file", {})
+
+    assert completion_tasks == [producer]
+
+
 async def test_start_and_end_carry_the_same_call_id(stream, monkeypatch):
     """The UI closes a specific step, so the pair has to be identifiable."""
     await run_tool(monkeypatch, lambda: "ok")

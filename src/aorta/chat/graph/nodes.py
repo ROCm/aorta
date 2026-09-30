@@ -716,10 +716,13 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
 
     worker = asyncio.create_task(run())
 
-    def announce_done(_worker: asyncio.Task) -> None:
-        # A callback on the work, not a finally on the waiter: cancellation of
-        # the chat task can no longer close the step while its executor callable
-        # and Slurm allocation are still alive.
+    def announce_done() -> None:
+        # Emit from this awaited producer, not a detached Task callback.
+        # LangGraph multiplexes custom events with node updates and accumulated
+        # state; a done callback can enqueue this event after the act node has
+        # returned and the final answer is already being rendered. The
+        # cancellation path below waits for the worker to stop, so reaching the
+        # finally means "done" is true on every exit path.
         payload = {
             "tool": name,
             "id": call,
@@ -733,7 +736,6 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
             payload["cancelled"] = "stopped"
         _announce_tool(payload)
 
-    worker.add_done_callback(announce_done)
     try:
         # Shield keeps cancellation of this waiter from cancelling the Task
         # that represents the still-running executor callable.
@@ -752,6 +754,9 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
             except Exception:
                 break
         raise
+    finally:
+        if worker.done():
+            announce_done()
 
 
 
