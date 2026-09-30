@@ -78,6 +78,10 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
+
+
 __all__ = [
     "create_reproducer",
     "DefaultModeReproducer",
