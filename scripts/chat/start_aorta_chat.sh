@@ -8,7 +8,7 @@ set -euo pipefail
 LOGIN_HOST="${AORTA_CHAT_LOGIN_HOST:-ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com}"
 RUNTIME_DIR="${AORTA_CHAT_RUNTIME_DIR:-/apps/avsharma/aorta-chat-runtime}"
 UI_PORT="${AORTA_CHAT_UI_PORT:-8080}"
-UI_STARTUP_TIMEOUT="${AORTA_CHAT_UI_STARTUP_TIMEOUT:-180}"
+UI_STARTUP_TIMEOUT="${AORTA_CHAT_UI_STARTUP_TIMEOUT:-360}"
 REPO_ROOT="$(
   cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1
   pwd
@@ -33,7 +33,7 @@ Options:
   --runtime-dir PATH  Shared endpoint, PID, and log directory.
   --port PORT         Local and remote UI port (default: 8080).
   --startup-timeout SEC
-                      Maximum remote UI startup wait (default: 180).
+                      Maximum remote UI startup wait (default: 360).
   --repo PATH         Shared AORTA checkout.
   --no-cia            Start ordinary chat without cluster-submitting tools.
   -h, --help          Show this help.
@@ -110,8 +110,45 @@ UI_PID_FILE="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.pid"
 UI_LOG="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.log"
 TUNNEL_LOG="${RUNTIME_DIR}/aorta-chat-tunnel-${UI_PORT}.log"
 STOP_REQUEST_FILE="${RUNTIME_DIR}/aorta-chat-stop-${UI_PORT}.requested"
+UI_LOCK_DIR="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.lock"
 ROCJITSU_PREBUILT="${RUNTIME_DIR}/rocjitsu-prebuilt"
 ROCJITSU_BUILD="${RUNTIME_DIR}/rocjitsu-build"
+
+ui_lock_held=false
+acquire_ui_lock() {
+  local owner_host="" owner_pid="" this_host
+  this_host="$(hostname)"
+
+  if mkdir "$UI_LOCK_DIR" 2>/dev/null; then
+    printf '%s %s\n' "$this_host" "$$" >"${UI_LOCK_DIR}/owner"
+    ui_lock_held=true
+    return
+  fi
+
+  if [[ -r "${UI_LOCK_DIR}/owner" ]]; then
+    read -r owner_host owner_pid <"${UI_LOCK_DIR}/owner" || true
+  fi
+  if [[ "$owner_host" == "$this_host" &&
+        "$owner_pid" =~ ^[0-9]+$ ]] &&
+     ! kill -0 "$owner_pid" 2>/dev/null; then
+    rm -f "${UI_LOCK_DIR}/owner"
+    rmdir "$UI_LOCK_DIR" 2>/dev/null || true
+    mkdir "$UI_LOCK_DIR" ||
+      die "could not recover stale UI lock $UI_LOCK_DIR"
+    printf '%s %s\n' "$this_host" "$$" >"${UI_LOCK_DIR}/owner"
+    ui_lock_held=true
+    return
+  fi
+
+  die "AORTA Chat launcher is already running for port $UI_PORT (owner: ${owner_host:-unknown} ${owner_pid:-unknown})"
+}
+
+release_ui_lock() {
+  [[ "$ui_lock_held" == true ]] || return 0
+  rm -f "${UI_LOCK_DIR}/owner"
+  rmdir "$UI_LOCK_DIR" 2>/dev/null || true
+  ui_lock_held=false
+}
 
 stop_remote_ui() {
   local expected remote_script
@@ -243,6 +280,10 @@ if [[ "$MODE" == "stop" ]]; then
   exit 0
 fi
 rm -f "$STOP_REQUEST_FILE"
+acquire_ui_lock
+trap release_ui_lock EXIT
+printf 'Starting AORTA Chat on port %s (the first import can take a few minutes)...\n' \
+  "$UI_PORT"
 
 require_command curl
 [[ -s "$ENDPOINT_FILE" ]] ||
@@ -350,6 +391,7 @@ cleanup() {
     wait "$remote_ssh_pid" 2>/dev/null || true
   fi
 
+  release_ui_lock
   set -e
   return "$exit_code"
 }

@@ -80,8 +80,12 @@ def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
     assert 'MODE="stop"' in source
     assert 'aorta-chat-ui-${UI_PORT}.pid' in source
     assert 'aorta-chat-stop-${UI_PORT}.requested' in source
+    assert 'UI_LOCK_DIR="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.lock"' in source
+    assert "acquire_ui_lock" in source
+    assert "release_ui_lock" in source
+    assert "Starting AORTA Chat on port" in source
     assert "--port ${UI_PORT}" in source
-    assert 'AORTA_CHAT_UI_STARTUP_TIMEOUT:-180' in source
+    assert 'AORTA_CHAT_UI_STARTUP_TIMEOUT:-360' in source
     assert "export AORTA_CHAT_LLM_PROVIDER=vllm" in source
     assert "export AORTA_CHAT_LLM_TOOL_MODE=native" in source
 

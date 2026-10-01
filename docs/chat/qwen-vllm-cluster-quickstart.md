@@ -44,6 +44,8 @@ scripts/chat/start_aorta_chat.sh
 
 The launcher explicitly selects the `vllm` provider and native tool protocol,
 overriding any different provider saved in the user's chat profile.
+It prints a startup message immediately and uses a per-port lock, so retrying
+the command cannot silently launch a second Chainlit server on the same port.
 
 Open <http://127.0.0.1:8080>. Keep the second command running. `Ctrl-C` stops
 the remote UI and SSH tunnel without leaving either process behind.
