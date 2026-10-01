@@ -23,6 +23,7 @@ MODE="start"
 WORKER=false
 VERBOSE=false
 PROGRESS_INTERVAL=30
+LAST_STOP_SECONDS=0
 
 usage() {
   cat <<'EOF'
@@ -91,7 +92,9 @@ job_status() {
 
 wait_for_job_exit() {
   local job_id="$1"
-  local status
+  local status last_status=""
+  local started=$SECONDS
+  local last_progress_report=$SECONDS
   while true; do
     if ! status="$(job_status "$job_id")"; then
       printf 'error: could not query Slurm job %s through %s\n' \
@@ -99,9 +102,20 @@ wait_for_job_exit() {
       return 1
     fi
     [[ -n "$status" ]] || break
-    printf '%s\n' "$status"
+    if [[ "$status" != "$last_status" ]]; then
+      printf '%s\n' "$status"
+      last_status="$status"
+      last_progress_report=$SECONDS
+    elif [[ "$VERBOSE" == true ]]; then
+      printf '%s\n' "$status"
+    elif ((SECONDS - last_progress_report >= PROGRESS_INTERVAL)); then
+      printf 'Still waiting for Slurm job %s to stop (%s elapsed).\n' \
+        "$job_id" "$(format_duration "$((SECONDS - started))")"
+      last_progress_report=$SECONDS
+    fi
     sleep 2
   done
+  LAST_STOP_SECONDS=$((SECONDS - started))
 }
 
 cancel_job() {
@@ -356,7 +370,8 @@ if [[ "$MODE" == "stop" ]]; then
   if [[ "$pending_job" == "$recorded_job" ]]; then
     rm -f "$PENDING_FILE"
   fi
-  printf 'Qwen vLLM is stopped.\n'
+  printf 'Qwen vLLM is stopped after %s.\n' \
+    "$(format_duration "$LAST_STOP_SECONDS")"
   exit 0
 fi
 
