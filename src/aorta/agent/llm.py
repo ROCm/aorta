@@ -524,8 +524,36 @@ def _infer_category_from_symptom(low: str) -> str:
     return "unknown"
 
 
+def _declared_category(detectors: list[str], declared: Mapping[str, str]) -> str | None:
+    """What the fired detectors' declarations settle, or None if they settle nothing.
+
+    ``declared`` maps a detector ID to the category its recipe declared for it
+    (``custom_patterns[*].category``). A declaration outranks anything read off
+    a name: a ``custom:`` id is free-form, and ``custom:consan_host_data_race``
+    passes every leg of `_infer_category_from_detectors` that a ConSan race
+    report does while saying the race is on the host.
+
+    ``unknown`` is a detector abstaining, so it settles nothing and contradicts
+    nothing. Two different labels settle on ``unknown``: both are the author's,
+    and ranking them -- by a name or by the symptom -- would be the guess a
+    declaration replaces.
+    """
+    labels = {declared[d] for d in detectors if d in declared} - {"unknown"}
+    if not labels:
+        return None
+    return labels.pop() if len(labels) == 1 else "unknown"
+
+
 class FakeLLMProposer:
-    """Deterministic proposer: heuristic category + round-robin mitigations."""
+    """Deterministic proposer: heuristic category + round-robin mitigations.
+
+    ``detector_categories`` maps a detector ID to the category its recipe
+    declared for it. What the fired detectors declare is read first; names and
+    then the symptom are read only when the declarations settle nothing.
+    """
+
+    def __init__(self, *, detector_categories: Mapping[str, str] | None = None) -> None:
+        self._detector_categories = dict(detector_categories or {})
 
     def propose(
         self,
@@ -537,9 +565,13 @@ class FakeLLMProposer:
     ) -> AgentStep:
         last = cell_summaries[-1] if cell_summaries else {}
         detectors = list(last.get("failure_detectors_fired") or [])
-        category = _infer_category_from_detectors(detectors)
-        if symptom and category == "unknown":
-            category = _infer_category_from_symptom(symptom.lower())
+        declared = self._detector_categories
+        category = _declared_category(detectors, declared)
+        if category is None:
+            # A declared detector's name is not read even when it abstains.
+            category = _infer_category_from_detectors([d for d in detectors if d not in declared])
+            if symptom and category == "unknown":
+                category = _infer_category_from_symptom(symptom.lower())
         # The two chains above label *evidence*, and evidence can say
         # `gpu_race` or `numeric_silent`. A probe step may not: `AgentPolicy`
         # validates against `PROBE_CATEGORIES`, so returning one of those here
@@ -1041,6 +1073,7 @@ def make_proposer(
     *,
     model: str | None = None,
     prompt_profile: str = DEFAULT_PROMPT_PROFILE,
+    detector_categories: Mapping[str, str] | None = None,
 ) -> LLMProposer:
     """Build the proposer for ``--llm-backend``.
 
@@ -1063,6 +1096,10 @@ def make_proposer(
     before the backend, so a misspelt profile fails whichever backend was
     asked for. ``fake`` sends no prompt, so it refuses any profile but
     ``default`` rather than accept one and ignore it.
+
+    ``detector_categories`` -- the categories a recipe's detectors declare --
+    is read by ``fake`` alone. A real backend takes its category from the
+    model, and no profile puts the declarations in a prompt.
     """
     get_prompt_profile(prompt_profile)
     if backend == "fake":
@@ -1071,7 +1108,7 @@ def make_proposer(
                 f"prompt profile {prompt_profile!r} needs a real model: "
                 "--llm-backend=fake builds no prompt, so it would be ignored"
             )
-        return FakeLLMProposer()
+        return FakeLLMProposer(detector_categories=detector_categories)
     if backend == "litellm" and not _chat_layer_available():
         return LiteLLMProposer(model=model or "gpt-4o-mini", prompt_profile=prompt_profile)
     if backend in CHAT_PROVIDER_BACKENDS:

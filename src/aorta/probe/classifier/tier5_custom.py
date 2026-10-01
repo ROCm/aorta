@@ -24,6 +24,10 @@ fires detectors per-trial. Each pattern has:
   True and the pattern does NOT fire, the verdict resolver
   injects ``meta:missing_pass_signal`` into
   ``failure_detectors_fired`` (rubric §2.B FR 2.8.c).
+* ``category`` (optional) -- the autopsy category the detector
+  reports, one of :data:`aorta.agent.llm.AUTOPSY_CATEGORIES`. The
+  offline heuristic reads it before inferring a category from the
+  ID; omitted means no declaration, not ``unknown``.
 
 The runner is purely text-driven so it's testable without a real
 subprocess: pass a log string and a list of ``CompiledPattern``s
@@ -46,7 +50,7 @@ _VALID_ON_MATCH: frozenset[str] = frozenset({"fail", "warn", "info"})
 # Per-pattern key bank. ``required_for_pass`` is allowed only when
 # ``on_match == "fail"`` (a warn/info pattern can't be required for
 # pass — it doesn't change the verdict). Validated at load time.
-_VALID_PATTERN_KEYS = frozenset({"id", "match", "on_match", "required_for_pass"})
+_VALID_PATTERN_KEYS = frozenset({"id", "match", "on_match", "required_for_pass", "category"})
 _VALID_MATCH_KEYS = frozenset({"regex", "condition"})
 
 
@@ -70,6 +74,8 @@ class CompiledPattern:
         on_match: ``"fail"`` / ``"warn"`` / ``"info"``.
         required_for_pass: When True and the pattern doesn't fire,
             the verdict resolver injects ``meta:missing_pass_signal``.
+        category: The autopsy category the recipe declared for this
+            detector, or None when it declared none.
     """
 
     detector_id: str
@@ -78,6 +84,7 @@ class CompiledPattern:
     condition_source: str | None
     on_match: OnMatch
     required_for_pass: bool = False
+    category: str | None = None
 
 
 @dataclass
@@ -123,6 +130,7 @@ def validate_custom_patterns(raw: object) -> tuple[CompiledPattern, ...]:
       ``on_match == "fail"``. Rejected with a clear error when
       paired with warn/info because the user almost certainly
       didn't mean it.
+    * ``category`` (if present) ∈ ``AUTOPSY_CATEGORIES``.
     * Unknown keys at either level reject with the allowed set.
     """
     if raw is None:
@@ -227,6 +235,18 @@ def _validate_one(
             f"(got on_match={on_match_raw!r}); a warn/info pattern cannot be required for pass"
         )
 
+    category = entry.get("category")
+    if "category" in entry:
+        # Imported at call time: aorta.agent imports the agent loop, which
+        # reaches this module through the probe recipe builder.
+        from aorta.agent.llm import AUTOPSY_CATEGORIES
+
+        if not isinstance(category, str) or category not in AUTOPSY_CATEGORIES:
+            raise RecipeSchemaError(
+                f"{path}.category: must be one of {sorted(AUTOPSY_CATEGORIES)}, "
+                f"got {category!r}"
+            )
+
     return CompiledPattern(
         detector_id=detector_id,
         regex=compiled_regex,
@@ -234,6 +254,7 @@ def _validate_one(
         condition_source=condition_source,
         on_match=on_match_raw,
         required_for_pass=required,
+        category=category,
     )
 
 

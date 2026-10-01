@@ -128,6 +128,11 @@ def _recipe_template_dict(config: AgentConfig) -> dict[str, Any]:
         if key in raw:
             template[key] = raw[key]
     template["_mitigation_axis_order"] = list(recipe.probe_extras.mitigation_axis)
+    template["_detector_categories"] = {
+        p.detector_id: p.category
+        for p in recipe.probe_extras.custom_patterns
+        if p.category is not None
+    }
     if recipe.ticket:
         template["ticket"] = recipe.ticket
     return template
@@ -386,6 +391,7 @@ def run_agent_loop(
             config.llm_backend,
             model=config.llm_model,
             prompt_profile=config.prompt_profile,
+            detector_categories=recipe_template.get("_detector_categories"),
         )
 
     candidates = _list_candidate_mitigations(config, recipe_template)

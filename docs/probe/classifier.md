@@ -184,6 +184,15 @@ fields are sandbox-validated at recipe load via
 pattern does **not** fire, the verdict resolver injects
 `meta:missing_pass_signal` and `verdict = "fail"`.
 
+`category` (optional): the autopsy category the detector reports, one of
+the eleven names in `aorta.agent.llm.AUTOPSY_CATEGORIES`, validated at
+recipe load. It does not change the verdict. The offline proposer
+(`aorta agent --llm-backend fake`) reads a fired detector's declared
+category before inferring one from detector IDs — see
+[the agent doc](../agent/aorta-probe-agent.md#declaring-a-detectors-category).
+Omitting it means the detector declares nothing, not that it declares
+`unknown`.
+
 ## Meta Detectors
 
 | ID | Source |
