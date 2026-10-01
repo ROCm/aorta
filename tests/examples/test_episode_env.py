@@ -437,6 +437,35 @@ def test_each_step_carries_its_own_prompt(tmp_path):
     assert [len(p["candidates"]) for p in prompts] == [4, 3, 2]
 
 
+def test_the_prompt_leaves_out_the_error_detectors_the_loop_names(tmp_path):
+    """A hung baseline: the hang fails it, and the loop's row names the timeout too.
+
+    The trained prompt has no slot for that, so the policy is shown what it
+    would be shown without it.
+    """
+    root = build_archive(tmp_path, resolver=DELTA)
+    (root / "none-none" / "trial_0" / "result.json").write_text(
+        json.dumps(
+            {
+                "cell_name": "none-none",
+                "verdict": "fail",
+                "exit_code": -1,
+                "failure_detectors_fired": ["tier2:hang"],
+                "error_detectors_fired": ["tier1:timeout"],
+                "warn_detectors_fired": [],
+                "capture": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario = make_scenario(root)
+    (baseline,) = scenario.summaries_for(["none-none"])
+    assert baseline.pop("error_detectors_fired") == ["tier1:timeout"]
+    prompt = env.Episode(scenario=scenario, index=0, policy=AgentPolicy()).observe()
+    assert prompt == env.user_message([baseline], MENU)
+    assert "tier1:timeout" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # 5. events a single reply cannot fire
 # ---------------------------------------------------------------------------
