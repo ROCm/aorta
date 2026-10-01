@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from langchain_core.tools import tool
 
 pytest.importorskip("langgraph", reason="requires the chat extra")
 
 from aorta.chat.graph import nodes
+from aorta.chat.tools.outcome import tool_failure
 
 
 class Recorder:
@@ -133,7 +135,28 @@ async def test_a_failing_tool_still_completes(stream, monkeypatch):
     ],
 )
 async def test_builtin_failure_results_are_marked_failed(stream, monkeypatch, result):
-    await run_tool(monkeypatch, lambda: result)
+    await run_tool(monkeypatch, lambda: tool_failure(result))
+
+    assert stream.ends()[0].get("failed") is True
+
+
+async def test_failure_looking_plain_text_is_not_inferred_as_status(stream, monkeypatch):
+    await run_tool(monkeypatch, lambda: "Error: this text came from a source file")
+
+    assert stream.ends()[0].get("failed") is not True
+
+
+async def test_structured_failure_survives_langchain_tool_invocation(
+    stream, monkeypatch
+):
+    @tool
+    def reports_failure() -> str:
+        """Return one expected tool failure."""
+        return tool_failure("Error reading file: disk error")
+
+    monkeypatch.setitem(nodes.TOOL_REGISTRY, reports_failure.name, reports_failure)
+
+    await nodes._execute_tool_async(reports_failure.name, {})
 
     assert stream.ends()[0].get("failed") is True
 

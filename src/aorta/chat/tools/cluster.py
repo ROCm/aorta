@@ -42,6 +42,7 @@ from aorta.chat.tools._sandbox import JOBS_ROOT_LABEL, resolve_within
 from aorta.chat.tools.cache import current_tool_cache
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
+from aorta.chat.tools.outcome import tool_failure, tool_result_failed
 
 def _arch() -> str:
     """The GPU this cluster builds for.
@@ -305,7 +306,9 @@ def _run_triage(extra_args: list[str], label: str) -> str:
 
     stop = current_cancel_token() or threading.Event()
     if stop.is_set():
-        return "Error: triage was cancelled before it entered the worker pool."
+        return tool_failure(
+            "Error: triage was cancelled before it entered the worker pool."
+        )
     future = _triage_pool().submit(run_triage, argv, stop=stop)
     deadline = time.monotonic() + settings.triage_timeout
     result = None
@@ -322,7 +325,9 @@ def _run_triage(extra_args: list[str], label: str) -> str:
                 pass
             except Exception:
                 pass
-            return "Error: triage was cancelled and its worker has stopped."
+            return tool_failure(
+                "Error: triage was cancelled and its worker has stopped."
+            )
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -334,7 +339,7 @@ def _run_triage(extra_args: list[str], label: str) -> str:
                 pass
             except Exception:
                 pass
-            return (
+            return tool_failure(
                 f"Error: triage exceeded {settings.triage_timeout}s. "
                 f"Check {settings.jobs_root} for a partial bundle."
             )
@@ -347,18 +352,20 @@ def _run_triage(extra_args: list[str], label: str) -> str:
             continue
         except Exception as exc:
             stop.set()
-            return f"Error: triage failed: {type(exc).__name__}: {exc}"
+            return tool_failure(f"Error: triage failed: {type(exc).__name__}: {exc}")
 
     if not result.get("ok"):
         if result.get("stage") == "compile":
             diags = "\n".join(f"  {d}" for d in result.get("compile_diagnostics") or [])
-            return (
+            return tool_failure(
                 "The submitted kernel did not compile, so nothing was analysed.\n"
                 f"Compiler diagnostics:\n{diags or '  (none captured)'}\n"
                 f"Job directory: {result.get('job_dir')}"
             )
-        return (f"Triage failed at stage {result.get('stage', '?')}: "
-                f"{result.get('error', 'unknown error')}")
+        return tool_failure(
+            f"Triage failed at stage {result.get('stage', '?')}: "
+            f"{result.get('error', 'unknown error')}"
+        )
 
     # A sweep run is a sanitizer run by construction: write_asm_recipe asks for
     # waitcheck and sets on_missing_backend=fail, and the kernel recipe
@@ -513,9 +520,9 @@ def triage_kernel_source(
         try:
             source = _read_staged(source_file, "kernel")
         except ValueError as exc:
-            return f"Error: {exc}"
+            return tool_failure(f"Error: {exc}")
     if not source.strip():
-        return (
+        return tool_failure(
             "Error: pass either source (the kernel text) or source_file (a "
             "kernel staged for this conversation)."
         )
@@ -531,7 +538,9 @@ def triage_kernel_source(
             fill_byte=fill,
         )
     except HarnessError as exc:
-        return f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}"
+        return tool_failure(
+            f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}"
+        )
 
     cache = current_tool_cache().triage
     cache_key = (
@@ -632,7 +641,7 @@ def triage_kernel_source(
     # that would have worked.
     if "Autopsy verdict:" in rendered and _DID_NOT_RUN not in rendered:
         cache.put(cache_key, rendered)
-    return rendered
+    return tool_failure(rendered) if tool_result_failed(body) else rendered
 
 
 #: Printed by the assemble command when the node has no amdgcn assembler, so a
@@ -759,10 +768,10 @@ def triage_assembly_source(
         try:
             source = _read_staged(source_file, "listing")
         except ValueError as exc:
-            return f"Error: {exc}"
+            return tool_failure(f"Error: {exc}")
 
     if not source.strip():
-        return (
+        return tool_failure(
             "Error: pass either source (the assembly text) or source_file (a "
             "listing staged for this conversation)."
         )
@@ -772,7 +781,7 @@ def triage_assembly_source(
         # compiler's target are checked against each other at assemble time.
         prepared = prepare_asm(source, arch=_arch())
     except AsmHarnessError as exc:
-        return f"Cannot analyse this assembly: {exc}"
+        return tool_failure(f"Cannot analyse this assembly: {exc}")
 
     cache = current_tool_cache().asm
     cache_key = source.strip()
@@ -792,14 +801,14 @@ def triage_assembly_source(
     try:
         proc = _assemble(_assemble_command(asm_path, obj_path))
     except subprocess.TimeoutExpired:
-        return (
+        return tool_failure(
             f"The assemble did not finish within {settings.waitcheck_timeout}s, so "
             "nothing was analysed. This is usually a busy queue rather than a "
             "problem with what you pasted -- the job was still waiting for a node.\n"
             f"Wrapped source kept at: {asm_path}"
         )
     except OSError as exc:
-        return (
+        return tool_failure(
             "The assembler could not be reached, so this assembly was not "
             f"analysed: {exc}\n"
             f"Wrapped source kept at: {asm_path}"
@@ -807,12 +816,12 @@ def triage_assembly_source(
 
     if not obj_path.is_file():
         if _NO_ASSEMBLER in (proc.stderr or ""):
-            return _no_assembler_message()
+            return tool_failure(_no_assembler_message())
         diagnostics = "\n".join(
             line for line in (proc.stderr or "").splitlines()
             if "unused during compilation" not in line
         )
-        return (
+        return tool_failure(
             "The pasted assembly did not assemble, so nothing was analysed.\n"
             f"Assembler output:\n{diagnostics[-1200:] or '(none captured)'}\n"
             f"Wrapped source kept at: {asm_path}"
@@ -846,7 +855,7 @@ def triage_assembly_source(
     # paste has not changed.
     if "Autopsy verdict:" in result and _DID_NOT_RUN not in result:
         cache.put(cache_key, result)
-    return result
+    return tool_failure(result) if tool_result_failed(body) else result
 
 @tool
 def triage_workload(
@@ -877,16 +886,16 @@ def triage_workload(
     """
     if source_file.strip():
         if command.strip():
-            return (
+            return tool_failure(
                 "Error: pass either a workload to run or a command line, not "
                 "both. source_file is the workload."
             )
         try:
             source = _read_staged(source_file, "script")
         except ValueError as exc:
-            return f"Error: {exc}"
+            return tool_failure(f"Error: {exc}")
     if bool(source.strip()) == bool(command.strip()):
-        return (
+        return tool_failure(
             "Error: pass either source (code to run) or command (a command "
             "line), not both and not neither."
         )
@@ -981,7 +990,7 @@ def list_cluster_jobs(limit: int = 10) -> str:
     """
     root = settings.jobs_root
     if not root.is_dir():
-        return f"Error: jobs root {root} does not exist."
+        return tool_failure(f"Error: jobs root {root} does not exist.")
 
     # A job is a directory with a job.json in it. The tools above also write
     # under this root -- chat-kernels, chat-asm, staged -- and those are touched
@@ -1052,10 +1061,12 @@ def read_autopsy_report(job_id: str) -> str:
             settings.jobs_root, f"{job_id}/bundle/report.json", JOBS_ROOT_LABEL
         )
     except ValueError as exc:
-        return f"Error: {exc}"
+        return tool_failure(f"Error: {exc}")
     if not report.is_file():
-        return (f"Error: no report at {report}. "
-                f"Use list_cluster_jobs to see jobs that have a verdict.")
+        return tool_failure(
+            f"Error: no report at {report}. "
+            f"Use list_cluster_jobs to see jobs that have a verdict."
+        )
     text = report.read_text(encoding="utf-8", errors="replace")
     if len(text) > 8000:
         text = text[:8000] + f"\n... (truncated, {len(text)} total chars)"

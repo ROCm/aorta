@@ -30,6 +30,7 @@ from aorta.chat.plugins import ChatTool, enabled_builtins, load_chat_tools
 from aorta.chat.rag.repo_map import load_repo_map
 from aorta.chat.rag.retriever import get_retriever
 from aorta.chat.redaction import redact_for_send
+from aorta.chat.tools.outcome import tool_failure, tool_result_failed
 
 from langgraph.config import get_stream_writer
 
@@ -596,15 +597,15 @@ async def _execute_tool(tool_name: str, kwargs: dict) -> str:
     tool_fn = TOOL_REGISTRY.get(name)
     if tool_fn is None:
         logger.warning("Model asked for unknown tool %r", tool_name)
-        return (
+        return tool_failure(
             f"Error: there is no tool named {name!r}. Available tools: "
             f"{', '.join(sorted(TOOL_REGISTRY))}."
         )
     try:
         result = await tool_fn.ainvoke(kwargs)
     except Exception as exc:
-        result = f"Tool error: {exc}"
-    return str(result)
+        return tool_failure(f"Tool error: {exc}")
+    return result if isinstance(result, str) else str(result)
 
 
 # ──────────────────── Router ─────────────────────
@@ -670,21 +671,6 @@ async def router_node(state: AgentState) -> dict[str, Any]:
 #: Numbers the tool calls in a process so a completion can be matched to the
 #: announcement it belongs to.
 _tool_calls = itertools.count(1)
-
-# Built-in tools return user-readable strings rather than raising for expected
-# failures. Keep their documented failure forms in one place so progress
-# metadata does not have a different definition of failure per tool.
-_TOOL_FAILURE_PREFIXES = (
-    "Error:",
-    "Tool error:",
-    "DENIED:",
-    "Triage failed at stage ",
-)
-
-
-def _tool_result_failed(result: object) -> bool:
-    return str(result).lstrip().startswith(_TOOL_FAILURE_PREFIXES)
-
 
 def _announce_tool(payload: dict) -> None:
     """Put a tool progress event on the stream, if anything is listening."""
@@ -759,7 +745,7 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
             failure = worker.exception()
             if failure is not None:
                 payload["failed"] = True
-            elif _tool_result_failed(worker.result()):
+            elif tool_result_failed(worker.result()):
                 payload["failed"] = True
         _announce_tool(payload)
 
