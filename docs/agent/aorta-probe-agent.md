@@ -113,6 +113,38 @@ Three distinctions the glosses exist to enforce, because the names alone do not:
   accepts it. Guessing a specific label to avoid `unknown` is worse than
   `unknown`, because the loop routes on the label.
 
+### Declaring a detector's category
+
+`--llm-backend fake` labels a failure without a model. It reads what the
+failure detectors that fired *declare* first — `custom_patterns[*].category` in
+the recipe. Only when the declarations settle nothing (none was made, or every
+one was `unknown`) does it infer a category from the IDs of the undeclared
+detectors, and then from `--symptom`. A `warn` or `info` pattern may declare a
+category too, but it is not a failure detector, so this proposer never reads it.
+
+Declare a category whenever an ID could mislead: `custom:` IDs are free-form,
+so `custom:consan_host_data_race` names a sanitizer and a race and reads as
+`gpu_race`, although the race it reports is on the host.
+
+```yaml
+custom_patterns:
+  - id: consan_host_data_race
+    match:
+      regex: "host data race"
+    category: unknown   # fits no label; read off its name it would be gpu_race
+```
+
+* `unknown` is a declaration too, and it abstains: it stops the name being
+  read without contradicting another detector's label. Undeclared detectors
+  beside it are still read off their IDs, and `--symptom` is still heard.
+* Fired detectors that declare two different labels give `unknown`; neither is
+  ranked above the other, and `--symptom` does not break the tie.
+* Any of the eleven names may be declared, because a declaration describes
+  evidence. A probe step still reports an evidence-only label as `unknown`.
+* Built-in `tier1`–`tier4` detectors declare nothing and are still read off
+  their IDs. Only the offline proposer reads declarations: a real backend takes
+  its category from the model, and no prompt carries them.
+
 ---
 
 ## Safety Boundaries (Non-Negotiable)

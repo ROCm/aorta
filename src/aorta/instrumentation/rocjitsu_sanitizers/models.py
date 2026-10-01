@@ -312,6 +312,9 @@ class Finding:
     message: str
     kernel_name: str | None = None
     code_object: str | None = None
+    # The kernel's entry offset in its code object, as on KernelIdentity -- never
+    # an instruction offset. A ConSan conflict keeps its two accesses' offsets in
+    # metadata (first_instruction / second_instruction).
     entry_offset: int | None = None
     metadata: tuple[tuple[str, str], ...] = ()
 
@@ -490,6 +493,8 @@ class CheckResult:
     reason: str | None = None
     returncode: int | None = None
     findings: tuple[Finding, ...] = ()
+    # The same findings broken down per kernel, not additional ones: count
+    # ``findings`` or these, never both.
     kernel_results: tuple[KernelCheckResult, ...] = ()
     coverage: tuple[ObjectCoverage, ...] = ()
     backend: tuple[tuple[str, str], ...] = ()

@@ -128,6 +128,11 @@ def _recipe_template_dict(config: AgentConfig) -> dict[str, Any]:
         if key in raw:
             template[key] = raw[key]
     template["_mitigation_axis_order"] = list(recipe.probe_extras.mitigation_axis)
+    template["_detector_categories"] = {
+        p.detector_id: p.category
+        for p in recipe.probe_extras.custom_patterns
+        if p.category is not None
+    }
     if recipe.ticket:
         template["ticket"] = recipe.ticket
     return template
@@ -199,6 +204,7 @@ def _read_cell_summaries(run_dir: Path) -> list[dict[str, Any]]:
         # passing cell is not hidden behind trial_0.
         failure_detectors: list[str] = []
         warn_detectors: list[str] = []
+        error_detectors: list[str] = []
         for data in trial_results:
             for det in data.get("failure_detectors_fired") or []:
                 if det not in failure_detectors:
@@ -206,20 +212,26 @@ def _read_cell_summaries(run_dir: Path) -> list[dict[str, Any]]:
             for det in data.get("warn_detectors_fired") or []:
                 if det not in warn_detectors:
                     warn_detectors.append(det)
+            for det in data.get("error_detectors_fired") or []:
+                if det not in error_detectors:
+                    error_detectors.append(det)
         evidence = next(
             (d for d in trial_results if d.get("verdict") not in (None, "pass")),
             trial_results[0],
         )
-        summaries.append(
-            {
-                "cell_name": trial_results[0].get("cell_name", cell_dir.name),
-                "verdict": aggregate_cell_verdict(trial_results),
-                "failure_detectors_fired": failure_detectors,
-                "warn_detectors_fired": warn_detectors,
-                "capture": evidence.get("capture") or {},
-                "exit_code": evidence.get("exit_code"),
-            }
-        )
+        row: dict[str, Any] = {
+            "cell_name": trial_results[0].get("cell_name", cell_dir.name),
+            "verdict": aggregate_cell_verdict(trial_results),
+            "failure_detectors_fired": failure_detectors,
+            "warn_detectors_fired": warn_detectors,
+            "capture": evidence.get("capture") or {},
+            "exit_code": evidence.get("exit_code"),
+        }
+        # Only when one fired: the default prompt sends this row verbatim, so
+        # every other cell keeps the bytes it rendered before the key existed.
+        if error_detectors:
+            row["error_detectors_fired"] = error_detectors
+        summaries.append(row)
     return summaries
 
 
@@ -407,6 +419,7 @@ def run_agent_loop(
             config.llm_backend,
             model=config.llm_model,
             prompt_profile=config.prompt_profile,
+            detector_categories=recipe_template.get("_detector_categories"),
         )
 
     candidates = _list_candidate_mitigations(config, recipe_template)

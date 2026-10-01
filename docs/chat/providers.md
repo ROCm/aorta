@@ -83,13 +83,18 @@ tokenspeed serve Qwen/Qwen3-8B --reasoning-parser qwen3 --sampling-backend trito
   the agent's prompt Qwen3-8B's first proposal named a mitigation that fixes the
   failure 19–21% of the time, against 40–43% with thinking on; many replies gave
   up at `unknown` and proposed nothing.
-- **JSON mode** (`response_format={"type": "json_object"}`, which
-  `--llm-backend litellm` sends on an `[agent]`-only install) needs the parser.
-  Without it the grammar applies from the first token while the template has
-  thinking on, and 12–14% of Qwen3-8B's first replies listed 15 or more
-  mitigation names ([#510](https://github.com/ROCm/aorta/issues/510)). With the
-  parser the model thinks before the grammar applies, and none did (0 of 448
-  first replies from a Qwen3-8B fine-tune that showed the tail without it). On
+- **JSON mode** (a `response_format` JSON schema, which `--llm-backend litellm`
+  sends on an `[agent]`-only install) needs the parser. Without it the grammar
+  applies from the first token while the template has thinking on. Under the
+  earlier bare `{"type": "json_object"}`, 12–14% of Qwen3-8B's first replies
+  listed 15 or more mitigation names
+  ([#510](https://github.com/ROCm/aorta/issues/510)); the schema now caps
+  `next_mitigations` at five, so one reply can no longer take the whole menu,
+  but the grammar still applies before any thinking. With the parser the model
+  thinks before the grammar applies, and none showed the tail (0 of 448 first
+  replies from a Qwen3-8B fine-tune that showed it without the parser). The
+  server has to accept `json_schema` response formats — vLLM, TokenSpeed with a
+  grammar backend, and OpenAI's `gpt-4o-mini` and later do. On
   TokenSpeed, JSON mode combined with `enable_thinking: false` *and* the parser
   parsed only 3–4% of replies (vLLM was unaffected); aorta's clients never send
   that combination.

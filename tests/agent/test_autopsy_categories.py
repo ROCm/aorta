@@ -724,6 +724,138 @@ class TestTheProbeSaysOnlyWhatItMayAssert:
         assert _fake_step(symptom="oom killer took the process").category == "oom_fragment"
 
 
+def _declared_step(detectors: list[str], declared: dict[str, str], symptom: str | None = None):
+    summaries = [{"cell_name": "none-none", "verdict": "fail",
+                  "failure_detectors_fired": detectors}]
+    return FakeLLMProposer(detector_categories=declared).propose(
+        symptom=symptom, cell_summaries=summaries, candidates=["tf32_off"], tried=[]
+    )
+
+
+class TestADetectorDeclaresItsCategory:
+    """aorta#515: a recipe says what its detector reports, and the heuristic believes it.
+
+    A `custom:` id is free-form, so the keyword legs above cannot be finished:
+    no conjunction of positive tokens excludes a word whose job is to negate.
+    `custom_patterns[*].category` is read first; names, and then the symptom,
+    are read only when the declarations settle nothing.
+    """
+
+    @pytest.mark.parametrize(
+        ("detector", "inferred", "declared"),
+        [
+            # A library mismatch found at startup, read as a collective hang
+            # because the id says "rccl".
+            ("custom:rccl_version_mismatch", "rccl_hang", "launch_error"),
+            # A label no keyword leg reaches at all.
+            ("custom:tokens_per_sec_below_floor", "unknown", "perf_regression"),
+        ],
+    )
+    def test_the_declaration_decides_where_the_name_would_not(
+        self, detector, inferred, declared
+    ):
+        """The first assert is the precondition: in each row the name says otherwise."""
+        assert _fake_step(detectors=[detector]).category == inferred
+        assert _declared_step([detector], {detector: declared}).category == declared
+
+    def test_the_worked_example_stops_answering_for_the_evidence_beside_it(self):
+        """`custom:consan_host_data_race` names a sanitizer and a hazard.
+
+        So its name satisfies the kernel-race leg, which runs ahead of the
+        hang's and decides the pair, and the probe then downgrades that to
+        `unknown`. Declared `unknown`, its name is not read, and the hang is.
+        """
+        fired = ["tier2:hang", "custom:consan_host_data_race"]
+        assert _infer_category_from_detectors(fired) == "gpu_race"
+        assert _fake_step(detectors=fired).category == "unknown"
+        declared = {"custom:consan_host_data_race": "unknown"}
+        assert _declared_step(fired, declared).category == "rccl_hang"
+
+    def test_a_declaration_outranks_an_undeclared_detector_beside_it(self):
+        """`tier1:exit_nonzero` fires beside nearly every failure.
+
+        If an undeclared detector's name competed with a declaration, a
+        declared detector would almost never decide anything.
+        """
+        fired = ["tier1:exit_nonzero", "custom:allocator_retries_exhausted"]
+        assert _fake_step(detectors=fired).category == "launch_error"
+        declared = {"custom:allocator_retries_exhausted": "oom_fragment"}
+        assert _declared_step(fired, declared).category == "oom_fragment"
+
+    @pytest.mark.parametrize(
+        ("detector", "expected"),
+        [
+            ("tier2:hang", "rccl_hang"),
+            ("tier4:hip_error", "illegal_mem"),
+            ("tier1:exit_nonzero", "launch_error"),
+            ("custom:checkpoint_memory_fault", "checkpoint_race"),
+        ],
+    )
+    def test_a_declaration_for_a_detector_that_did_not_fire_changes_nothing(
+        self, detector, expected
+    ):
+        """Narrowness control: only a fired detector's declaration is read, and
+        an undeclared one is still read off its name."""
+        declared = {"custom:tokens_per_sec_below_floor": "perf_regression"}
+        assert _declared_step([detector], declared).category == expected
+
+    @pytest.mark.parametrize(
+        ("first", "second", "expected"),
+        [
+            ("oom_fragment", "oom_fragment", "oom_fragment"),
+            # Both are the author's; ranking one above the other is a guess.
+            ("oom_fragment", "launch_error", "unknown"),
+            # `unknown` is the vocabulary's word for no label, so it abstains
+            # rather than contradicting the other declaration.
+            ("unknown", "oom_fragment", "oom_fragment"),
+        ],
+    )
+    def test_how_two_declarations_combine(self, first, second, expected):
+        fired = ["custom:signal_a", "custom:signal_b"]
+        declared = {"custom:signal_a": first, "custom:signal_b": second}
+        assert _declared_step(fired, declared).category == expected
+
+    @pytest.mark.parametrize(
+        ("symptom", "heard"),
+        [("oom killer took the process", "oom_fragment"), ("ranks hang in allreduce", "rccl_hang")],
+    )
+    def test_a_conflict_is_not_settled_by_the_symptom(self, symptom, heard):
+        """The symptom is read when the declarations settle nothing, not when
+        they disagree: its keywords would otherwise rank two labels the author
+        gave, or replace both with a third."""
+        fired = ["custom:signal_a", "custom:signal_b"]
+        assert _fake_step(detectors=fired, symptom=symptom).category == heard
+        declared = {"custom:signal_a": "oom_fragment", "custom:signal_b": "launch_error"}
+        assert _declared_step(fired, declared, symptom=symptom).category == "unknown"
+
+    def test_a_declared_evidence_only_label_is_still_downgraded(self):
+        """A declaration describes evidence; it does not widen what a probe step may say.
+
+        The symptom is the witness that the declaration was read: ignored, it
+        would have left the symptom to label the step.
+        """
+        detector = "custom:lds_conflict"
+        symptom = "oom killer took the process"
+        assert _fake_step(detectors=[detector], symptom=symptom).category == "oom_fragment"
+        step = _declared_step([detector], {detector: "gpu_race"}, symptom=symptom)
+        assert step.category == "unknown"
+        assert AgentPolicy().validate_step(step).category == "unknown"
+
+    def test_a_declared_unknown_lets_the_symptom_be_heard(self):
+        """The worked example, end to end through the proposer.
+
+        Read off its name it is `gpu_race`, which the probe downgrades to
+        `unknown` without consulting the symptom. Declared `unknown`, the
+        detectors settle nothing, and the symptom is read as it is for any
+        evidence that fits no label.
+        """
+        detector = "custom:consan_host_data_race"
+        symptom = "oom killer took the process"
+        assert _fake_step(detectors=[detector], symptom=symptom).category == "unknown"
+        step = _declared_step([detector], {detector: "unknown"}, symptom=symptom)
+        assert step.category == "oom_fragment"
+
+
 class TestTheDocsAgree:
     @pytest.mark.parametrize("category", sorted(AUTOPSY_CATEGORIES))
     def test_the_operator_doc_lists_every_label(self, category):

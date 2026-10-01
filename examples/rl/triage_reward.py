@@ -391,7 +391,16 @@ def score_answer(answer: Answer, label: Label) -> Score:
     return score
 
 
-def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
+def _skip(path: Path, why: str, skipped: list[dict[str, str]] | None) -> None:
+    """Name a file the sweep could not score, and record it for the caller."""
+    print(f"  skipped {path}: {why}", file=sys.stderr)
+    if skipped is not None:
+        skipped.append({"source": str(path), "reason": why})
+
+
+def load_runs(
+    root: Path, *, skipped: list[dict[str, str]] | None = None
+) -> list[tuple[str, dict[str, Any]]]:
     """Every readable ``result.json`` under a directory of archived probe runs.
 
     Unreadable files are skipped *loudly*. Dropping them silently meant a
@@ -399,6 +408,10 @@ def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
     nothing to say it had been computed over fewer runs than the directory
     holds -- and the sanitizer-report loader beside this one already prints its
     skips, so the quiet one was the odd case rather than the convention.
+
+    Each skip is also appended to ``skipped`` when one is given. Stderr does
+    not reach a consumer reading ``--json``, and a mean over the runs that
+    loaded is only honest beside the list of runs that did not.
 
     **Parsing is not the same as loading.** A file holding `[]` or `"fail"` is
     syntactically valid JSON, so it survived the decode and was appended, and
@@ -412,13 +425,12 @@ def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
     for path in sorted(root.rglob("result.json")):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"  skipped {path}: unreadable ({exc})", file=sys.stderr)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _skip(path, f"unreadable ({exc})", skipped)
             continue
         if not isinstance(doc, dict):
-            print(f"  skipped {path}: root is a JSON {type(doc).__name__}, not "
-                  f"an object, so it carries no detector lists to label",
-                  file=sys.stderr)
+            _skip(path, f"root is a JSON {type(doc).__name__}, not an object, "
+                        f"so it carries no detector lists to label", skipped)
             continue
         # The detector lists, checked here for the reason the root shape is:
         # this is the seam that reports rejections, and `label_run` is called
@@ -430,8 +442,7 @@ def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
             for key in ("failure_detectors_fired", "error_detectors_fired"):
                 _detector_list(doc, key)
         except TypeError as exc:
-            print(f"  skipped {path}: malformed detector list ({exc})",
-                  file=sys.stderr)
+            _skip(path, f"malformed detector list ({exc})", skipped)
             continue
         out.append((str(path), doc))
     return out
@@ -529,11 +540,14 @@ def label_sanitizer_report(doc: dict[str, Any], source: str | None = None) -> La
     )
 
 
-def load_sanitizer_reports(root: Path) -> list[tuple[str, Label]]:
+def load_sanitizer_reports(
+    root: Path, *, skipped: list[dict[str, str]] | None = None
+) -> list[tuple[str, Label]]:
     """Every loadable ``sanitizer_report.json`` under a directory.
 
     A report that fails aorta's own consistency check is skipped and named,
     never silently coerced: that is the corpus-rot signal for this label source.
+    Skips are recorded in ``skipped`` as :func:`load_runs` records them.
 
     The root-shape check is the same one `load_runs` makes and is here for the
     same reason: `SanitizerReport.from_dict` on a list raises `AttributeError`,
@@ -544,19 +558,17 @@ def load_sanitizer_reports(root: Path) -> list[tuple[str, Label]]:
     for path in sorted(root.rglob("sanitizer_report.json")):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"  skipped {path}: unreadable ({exc})", file=sys.stderr)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _skip(path, f"unreadable ({exc})", skipped)
             continue
         if not isinstance(doc, dict):
-            print(f"  skipped {path}: root is a JSON {type(doc).__name__}, not "
-                  f"an object, so it is not a sanitizer report",
-                  file=sys.stderr)
+            _skip(path, f"root is a JSON {type(doc).__name__}, not an object, "
+                        f"so it is not a sanitizer report", skipped)
             continue
         try:
             out.append((str(path), label_sanitizer_report(doc, source=str(path))))
         except (ValueError, KeyError, TypeError) as exc:
-            print(f"  skipped {path}: rejected by aorta's report model ({exc})",
-                  file=sys.stderr)
+            _skip(path, f"rejected by aorta's report model ({exc})", skipped)
     return out
 
 
@@ -811,6 +823,7 @@ def run_demo(
     include_disagreements: bool = False,
 ) -> int:
     families: dict[str, int] = {}
+    skipped: list[dict[str, str]] = []
     if corpus is not None:
         rows = load_corpus(corpus, include_disagreements=include_disagreements)
         if not rows:
@@ -820,15 +833,16 @@ def run_demo(
         for _, _, family in rows:
             families[family] = families.get(family, 0) + 1
     elif runs_root is not None:
-        loaded = load_runs(runs_root)
+        loaded = load_runs(runs_root, skipped=skipped)
         labelled = [(src, label_run(doc, src)) for src, doc in loaded]
         # Sanitizer reports live alongside probe results in a real run tree, and
         # both are evidence for the same question, so one --runs sweep collects
         # both rather than making the caller know which kind they have.
-        labelled += load_sanitizer_reports(runs_root)
+        labelled += load_sanitizer_reports(runs_root, skipped=skipped)
         if not labelled:
             print(
-                f"no result.json or sanitizer_report.json found under {runs_root}",
+                f"no scorable result.json or sanitizer_report.json under "
+                f"{runs_root} ({len(skipped)} skipped)",
                 file=sys.stderr,
             )
             return 2
@@ -871,12 +885,16 @@ def run_demo(
             "workload_families": families,
             "policies": policies,
             "stale": [s for s, _ in stale],
+            "skipped": skipped,
         }, indent=2))
         return 0
 
     print("Seam demonstration: triage-classification reward, labelled by aorta.")
     print(f"reward = {VERDICT_WEIGHT} * verdict-correct + {ATTRIBUTION_WEIGHT} * attribution-F1\n")
     print(f"{len(labelled)} run(s); verdict distribution: {distribution}")
+    if skipped:
+        print(f"{len(skipped)} file(s) could not be scored and are in none of the "
+              "means below; each is named on stderr")
     if families:
         print(f"workload families: {families}")
     print()

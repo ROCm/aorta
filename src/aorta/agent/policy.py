@@ -29,10 +29,13 @@ _CELL_SAFE_MITIGATION_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 
 
 # Mitigations that may require explicit operator approval before run.
+# nccl_launch_order_implicit is here because it has been seen to SIGSEGV every
+# rank rather than resolve the hang it is registered for (aorta#512).
 _APPROVAL_REQUIRED: frozenset[str] = frozenset(
     {
         "hip_launch_blocking",
         "hsa_disable_cache",
+        "nccl_launch_order_implicit",
     }
 )
 

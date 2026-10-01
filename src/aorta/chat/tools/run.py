@@ -17,6 +17,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from aorta.chat.config import settings
+from aorta.chat.tools.outcome import tool_failure
 
 _BLOCKED_PATTERNS = [
     "rm -rf",
@@ -135,11 +136,11 @@ def run_terminal_command(command: str) -> str:
     """
     error = _validate_command(command)
     if error:
-        return f"DENIED: {error}"
+        return tool_failure(f"DENIED: {error}")
 
     cwd = settings.aorta_root
     if not cwd.exists():
-        return f"Error: aorta_path '{cwd}' does not exist."
+        return tool_failure(f"Error: aorta_path '{cwd}' does not exist.")
 
     # Synchronous by design. This tool is called from inside a running event
     # loop, where ``get_event_loop().run_until_complete()`` can only raise --
@@ -156,9 +157,11 @@ def run_terminal_command(command: str) -> str:
             timeout=settings.command_timeout,
         )
     except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {settings.command_timeout}s."
+        return tool_failure(
+            f"Error: command timed out after {settings.command_timeout}s."
+        )
     except OSError as exc:
-        return f"Error: could not run the command: {exc}"
+        return tool_failure(f"Error: could not run the command: {exc}")
 
     return _format_output(result.stdout + result.stderr, result.returncode)
 
@@ -167,4 +170,5 @@ def _format_output(output: str, exit_code: int) -> str:
     max_chars = 4000
     if len(output) > max_chars:
         output = output[:max_chars] + "\n... (truncated)"
-    return f"Exit code: {exit_code}\n{output}"
+    rendered = f"Exit code: {exit_code}\n{output}"
+    return tool_failure(rendered) if exit_code else rendered
