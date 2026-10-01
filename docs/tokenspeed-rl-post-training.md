@@ -793,8 +793,8 @@ already narrowed to what is still available (allowlist minus tried minus the
 `none` baseline), so the model is never offered a mitigation it cannot use.
 
 `cell_summaries` is the entire evidence the model gets, and it is narrow.
-`_read_cell_summaries` builds one dict per probe cell with six keys and nothing
-else:
+`_read_cell_summaries` builds one dict per probe cell with six keys, and a
+seventh only where an error detector fired:
 
 ```json
 {
@@ -806,6 +806,12 @@ else:
   "exit_code": null
 }
 ```
+
+The seventh, `error_detectors_fired`, names `tier1:timeout`, `tier1:exec_failed`
+or a `meta:` infra error the workload recorded. It is what tells a timeout from
+a command that never launched, since both are `error` with no failure detector;
+every other cell's dict, and so its part of the prompt, is exactly the six keys
+above.
 
 That matters for the reward design more than anything else in this section: the
 model is not given raw logs, it is given the classifier's own detector IDs plus

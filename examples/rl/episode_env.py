@@ -300,7 +300,8 @@ def render_cell_summary(row: dict[str, Any]) -> dict[str, Any]:
     was measured against. What the policy gives up is the failure/warn split,
     which costs nothing on a corpus with no warn detector (a test asserts that
     for the real archives) and is a real difference from what a production
-    proposer is shown.
+    proposer is shown. It also never sees ``error_detectors_fired``, which the
+    loop writes only on a row where an error detector fired.
     """
     detectors = set(row.get("failure_detectors_fired") or [])
     detectors.update(row.get("warn_detectors_fired") or [])

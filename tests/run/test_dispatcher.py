@@ -3221,3 +3221,20 @@ class TestAortaTrialEnv:
         # Value never echoed, and the canary never leaked into the process env.
         assert "has\x00nul" not in str(exc.value)
         assert canary not in os.environ
+
+
+class TestProbeExtrasSummary:
+    def test_a_declared_category_survives_into_the_trial_record(self):
+        """aorta#515: the per-trial JSON is the record of what each detector is."""
+        from aorta.probe.classifier.tier5_custom import validate_custom_patterns
+
+        patterns = validate_custom_patterns(
+            [
+                {"id": "oom", "match": {"regex": "out of memory"}, "category": "oom_fragment"},
+                {"id": "slow", "match": {"regex": "slow"}},
+            ]
+        )
+        config = {"_aorta_probe_extras": {"custom_patterns": list(patterns)}}
+        dispatcher_module._sanitize_probe_extras_for_json(config)
+        summary = json.loads(json.dumps(config))["_aorta_probe_extras"]["custom_patterns"]
+        assert [entry["category"] for entry in summary] == ["oom_fragment", None]
