@@ -76,6 +76,7 @@ def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
     assert 'aorta-chat-stop-${UI_PORT}.requested' in source
     assert "--port ${UI_PORT}" in source
     assert 'AORTA_CHAT_UI_STARTUP_TIMEOUT:-180' in source
+    assert "export AORTA_CHAT_LLM_PROVIDER=vllm" in source
     assert "export AORTA_CHAT_LLM_TOOL_MODE=native" in source
 
 
