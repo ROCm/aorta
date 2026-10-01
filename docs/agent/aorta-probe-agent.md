@@ -247,6 +247,7 @@ audit. `wake()` replays tried mitigations and last category.
 | `exhausted_candidates` | No more registered mitigations left to try |
 | `agent_stop` | Proposer ended search for another reason |
 | `proposal_unresolved` | Every mitigation the proposer named was dropped by the candidate filter (unregistered, already tried, outside the allowlist, or the `none` baseline, which is never a candidate), and the proposer did not ask to stop. An agent-side name-resolution failure, not a decision by the model — the names are in `unresolved_mitigations` in `agent_log.jsonl` |
+| `proposal_redundant` | Every mitigation the proposer named was removed by validation as redundant — only the `none` baseline can empty a proposal this way — and the proposer did not ask to stop. Agent-side normalisation, not a decision by the model — the names are in `redundant_mitigations` in `agent_log.jsonl` |
 
 ### Tests
 
