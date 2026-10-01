@@ -104,6 +104,7 @@ def test_slurm_query_failure_preserves_the_endpoint_record(tmp_path: Path) -> No
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+        "AORTA_QWEN_HF_CACHE": str(tmp_path / "hf-cache"),
     }
 
     started = subprocess.run(
