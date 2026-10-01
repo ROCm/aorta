@@ -154,8 +154,10 @@ class Grade:
     reason: str | None = None
     warnings: list[str] = field(default_factory=list)
     nearest_committed: tuple[str, float] | None = None
-    novelty_multiplier: float = 1.0
-    memorised: bool = False
+    # None until `_finish` has compared the candidate against a corpus: a grade
+    # the novelty gate never looked at must not read as one it found novel.
+    novelty_multiplier: float | None = None
+    memorised: bool | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -305,7 +307,15 @@ def grade_recipe_text(
     corpus: dict[str, str] | None = None,
     sidecar_files: tuple[Path, ...] = (),
 ) -> Grade:
-    """Grade one candidate recipe. Never raises -- a bad candidate is a low tier.
+    """Grade one candidate recipe. A bad candidate is a low tier, never a raise.
+
+    ``corpus`` is what the novelty gate compares against, and ``None`` is how a
+    caller switches the gate off: the reward is then the tier reward, and the
+    grade makes no novelty claim -- ``novelty_multiplier`` and ``memorised``
+    stay ``None``. An empty mapping is a different request and raises
+    :class:`EmptyCorpus`. It asks for the gate and gives it nothing to compare
+    against, which is a fault in the grader rather than in the candidate, and
+    grading anyway would pay a verbatim copy of a committed recipe full marks.
 
     ``sidecar_files`` is the operator's ``--mitigations-file`` set, the same
     argument ``aorta triage`` and ``aorta probe`` pass to ``load_recipe``.
@@ -576,23 +586,37 @@ def _finish(grade: Grade, text: str, corpus: dict[str, str] | None) -> Grade:
     grade.tier_reward = grade.tier / MAX_TIER
     grade.reward = grade.tier_reward
 
-    if not corpus:
+    if corpus is None:
         return grade
+    if not corpus:
+        raise EmptyCorpus(
+            "the novelty gate was given an empty corpus, so it has nothing to "
+            "compare against and a copy of a committed recipe would score full "
+            "marks. Pass a corpus with recipes in it, or corpus=None to score "
+            "the tier ladder alone."
+        )
 
     candidate = canonicalise(text)
-    best_name, best_ratio = None, 0.0
-    for name, committed in corpus.items():
-        ratio = difflib.SequenceMatcher(None, candidate, canonicalise(committed)).ratio()
-        if ratio > best_ratio:
-            best_name, best_ratio = name, ratio
-    if best_name is None:
-        return grade
+    # Every non-empty corpus yields a nearest recipe, including one sharing no
+    # character with the candidate: that candidate was compared and is novel,
+    # not unchecked.
+    best_name, best_ratio = max(
+        (
+            (name, difflib.SequenceMatcher(None, candidate, canonicalise(committed)).ratio())
+            for name, committed in corpus.items()
+        ),
+        key=lambda pair: pair[1],
+    )
 
     grade.nearest_committed = (best_name, best_ratio)
     grade.novelty_multiplier = novelty_multiplier(best_ratio)
     grade.memorised = best_ratio >= MEMORISATION_HARD
     grade.reward = round(grade.tier_reward * grade.novelty_multiplier, 4)
     return grade
+
+
+class EmptyCorpus(Exception):
+    """The novelty gate was asked for and given nothing to compare against."""
 
 
 class UnreadableCorpus(Exception):
@@ -617,7 +641,7 @@ def load_corpus(root: Path) -> dict[str, str]:
     for path in sorted(root.rglob("*.yaml")):
         try:
             corpus[str(path.relative_to(root.parent))] = path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise UnreadableCorpus(
                 f"{path} could not be read ({exc}), so the novelty gate cannot "
                 "compare against it and a copy of it would score full marks. "
@@ -819,13 +843,11 @@ def main(argv: list[str] | None = None) -> int:
     # The gate is on by default: it is part of the reward, not a diagnostic, and
     # a scorer that silently omits it pays full marks for retrieval.
     #
-    # Refused rather than degraded when the root cannot be read. `_finish`
-    # treats a `None` or empty corpus exactly as `--no-novelty-gate` does, so a
-    # typo'd `--recipes-root`, or a directory with no recipes in it, silently
-    # turned the gate off and paid a verbatim copy full marks -- while the CLI
-    # still reported the gate as on. Switching the gate off is a decision the
-    # caller is allowed to make, and it has a flag; it must not be something a
-    # path typo makes for them.
+    # Refused rather than degraded when the root cannot be read, and here
+    # rather than left to `_finish`: `_finish` refuses an empty corpus too, but
+    # only once a candidate has been graded and without naming the root.
+    # Switching the gate off is a decision the caller is allowed to make, and
+    # it has a flag; it must not be something a path typo makes for them.
     corpus = None
     if not args.no_novelty_gate:
         root = args.recipes_root or (Path(__file__).resolve().parents[2] / "recipes")
