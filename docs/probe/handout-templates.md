@@ -13,8 +13,13 @@ without manual scrubbing.
 | [`probe-template-bash.yaml`](../../recipes/probe/probe-template-bash.yaml) | Shell script / Makefile wrapper | `bash launch.sh --profile production` |
 
 All three templates use a 2×2 mitigation × diagnostic matrix (`none` /
-`tf32_off` × `none` / `xnack`), three trials, and a 30-minute
-`timeout_per_trial` (1800 seconds).
+`pytorch_no_cuda_memory_caching` × `none` / `xnack`), three trials, and a
+30-minute `timeout_per_trial` (1800 seconds).
+
+`pytorch_no_cuda_memory_caching` turns off PyTorch's caching allocator, so it
+only acts on a PyTorch workload. For anything else, swap it for a built-in that
+your stack reads; a cell for one it cannot read is a second baseline. See
+"Built-ins that cannot act on some stacks" in `src/aorta/registry/README.md`.
 
 ## Workflow
 

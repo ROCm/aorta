@@ -2847,3 +2847,48 @@ def test_a_known_absent_variable_is_not_attributed_to_a_library_elsewhere():
         "library contains them, yet ENV_KNOB_REGISTRY names a library that "
         "reads them. Correct the attribution or retire the exemption."
     )
+
+
+# Exhaustive by design: it sweeps every runtime built-in, stack-conditional
+# ones included, so a cell its stack cannot read is expected there.
+_EXHAUSTIVE_SWEEPS = frozenset({"probe/probe-flag-sweep.yaml"})
+
+
+def shipped_probe_recipes_using_known_absent(recipes_root: Path) -> list[tuple[str, str]]:
+    """``(recipe, mitigation)`` pairs where a shipped probe recipe puts a name
+    on an axis although every variable that name sets is in KNOWN_ABSENT."""
+    import yaml
+
+    absent: dict[str, set[str]] = {}
+    for name, variable in KNOWN_ABSENT:
+        absent.setdefault(name, set()).add(variable)
+    dead = {
+        name
+        for name, env in BUILTIN_MITIGATIONS.items()
+        if env and set(env) <= absent.get(name, set())
+    }
+    hits = []
+    for path in sorted(recipes_root.rglob("*.yaml")):
+        rel = path.relative_to(recipes_root).as_posix()
+        if rel in _EXHAUSTIVE_SWEEPS:
+            continue
+        doc = yaml.safe_load(path.read_text())
+        if not isinstance(doc, dict) or doc.get("mode") != "probe":
+            continue
+        for axis in ("mitigation_axis", "diagnostic_axis"):
+            for name in doc.get(axis) or []:
+                if name in dead:
+                    hits.append((rel, name))
+    return hits
+
+
+def test_no_shipped_probe_recipe_puts_a_known_absent_mitigation_on_an_axis():
+    """A handout that teaches a name nothing reads hands out a second baseline.
+
+    The probe templates and the smoke recipe taught ``tf32_off`` (aorta#500).
+    """
+    hits = shipped_probe_recipes_using_known_absent(_REPO_ROOT / "recipes")
+    assert not hits, (
+        f"{hits}: every variable these mitigations set is in KNOWN_ABSENT, so "
+        "the cell is a second baseline. Use a built-in the stack reads."
+    )

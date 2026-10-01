@@ -184,7 +184,10 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         library="workload",
         consumer="read by no ROCm or PyTorch library; only a workload that reads it itself (aorta#500)",
         category="gemm_numeric",
-        source_reference="absent from every ROCm and torch binary (tests/registry/test_mitigation_variable_presence.py)",
+        source_reference=(
+            "absent from the libraries tests/registry/test_mitigation_variable_presence.py "
+            "scans; aorta#500 records a whole-image sweep"
+        ),
         reference_build=NOT_BUILD_SCOPED,
     ),
     EnvironmentKnob(

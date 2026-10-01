@@ -30,7 +30,7 @@ trials: 2
 
 mitigation_axis:
   - none
-  - tf32_off
+  - pytorch_no_cuda_memory_caching
 
 diagnostic_axis:
   - none
