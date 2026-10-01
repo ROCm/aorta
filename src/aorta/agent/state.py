@@ -12,10 +12,13 @@ import json
 import logging
 import os
 import stat
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from aorta.registry.mitigations import BUILTIN_MITIGATIONS, OBSERVABILITY_MITIGATIONS
 
 log = logging.getLogger(__name__)
 
@@ -27,22 +30,53 @@ _BASELINE_NAME = "none"
 
 
 def winning_mitigation(cell_name: str, verdict: str | None) -> str | None:
-    """Return the mitigation iff ``cell_name`` is a genuine convergence win.
+    """Return the name a passing cell credits, or None if it credits nothing.
 
-    A win is a *non-baseline mitigation* passing with the *baseline
-    diagnostic* -- i.e. a ``{mitigation}-none`` cell where ``mitigation !=
-    "none"``. A pass on a diagnostic-only cell (``none-xnack``) or on a
-    mitigation+diagnostic cell (``tf32_off-xnack``) is NOT attributable to the
-    mitigation alone, and ``none`` is never a "winning mitigation". The
-    diagnostic is taken as the last ``-`` segment so mitigation names that
-    themselves contain ``-`` still parse correctly.
+    A win is one non-baseline name passing with the other axis at baseline.
+    ``{mitigation}-none`` credits the mitigation. ``none-{diagnostic}``
+    credits the diagnostic when it is a built-in that changes what the
+    workload does: both axes stamp the same environment, so the cell is the
+    same experiment as ``{diagnostic}-none``. A diagnostic in
+    ``OBSERVABILITY_MITIGATIONS`` is never credited -- a pass under logging
+    is not a fix -- and neither is one the registry cannot classify (a plugin
+    or sidecar entry).
+
+    A pass with both axes non-baseline (``tf32_off-xnack``) is attributable to
+    neither name alone, and ``none`` never wins. The diagnostic is taken as the
+    last ``-`` segment so mitigation names that themselves contain ``-`` still
+    parse correctly.
     """
     if verdict != "pass" or "-" not in cell_name:
         return None
     mitigation, diagnostic = cell_name.rsplit("-", 1)
-    if mitigation == _BASELINE_NAME or diagnostic != _BASELINE_NAME:
-        return None
-    return mitigation
+    if diagnostic == _BASELINE_NAME:
+        return None if mitigation == _BASELINE_NAME else mitigation
+    if (
+        mitigation == _BASELINE_NAME
+        and diagnostic in BUILTIN_MITIGATIONS
+        and diagnostic not in OBSERVABILITY_MITIGATIONS
+    ):
+        return diagnostic
+    return None
+
+
+def winning_cell(cells: Iterable[tuple[str, str | None]]) -> tuple[str, str] | None:
+    """The ``(cell_name, winner)`` a matrix converges on, from ``(cell, verdict)`` pairs.
+
+    A mitigation-axis win outranks a diagnostic-axis one, so crediting the
+    diagnostic axis never changes the winner of a matrix with a passing
+    ``{m}-none`` cell. Within an axis the first win in ``cells`` order counts.
+    """
+    diagnostic_win: tuple[str, str] | None = None
+    for cell_name, verdict in cells:
+        win = winning_mitigation(cell_name, verdict)
+        if win is None:
+            continue
+        if cell_name.rsplit("-", 1)[1] == _BASELINE_NAME:
+            return cell_name, win
+        if diagnostic_win is None:
+            diagnostic_win = (cell_name, win)
+    return diagnostic_win
 
 
 def _utc_now_iso() -> str:
@@ -201,16 +235,19 @@ def wake(run_dir: Path, *, ticket: str) -> AgentState:
                 state.winning_mitigation = win
 
     verdicts = _scan_cell_verdicts(run_dir)
-    for cell_name, verdict in verdicts.items():
+    for cell_name in verdicts:
         if "-" not in cell_name:
             continue
         mitigation = cell_name.rsplit("-", 1)[0]
         if mitigation != _BASELINE_NAME and mitigation not in state.tried_mitigations:
             state.tried_mitigations.append(mitigation)
-        win = winning_mitigation(cell_name, verdict)
-        if win is not None and state.winning_mitigation is None:
-            state.winning_mitigation = win
-            state.converged = True
+    # The loop ends on a passing baseline before it looks for a win, so a pass
+    # beside one is not a fix on resume either.
+    baseline_passed = verdicts.get(f"{_BASELINE_NAME}-{_BASELINE_NAME}") == "pass"
+    win = None if baseline_passed else winning_cell(verdicts.items())
+    if win is not None and state.winning_mitigation is None:
+        state.winning_mitigation = win[1]
+        state.converged = True
 
     return state
 
@@ -222,5 +259,6 @@ __all__ = [
     "append_log_event",
     "read_trial_results",
     "wake",
+    "winning_cell",
     "winning_mitigation",
 ]

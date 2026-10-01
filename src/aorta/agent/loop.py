@@ -20,7 +20,7 @@ from aorta.agent.state import (
     append_log_event,
     read_trial_results,
     wake,
-    winning_mitigation,
+    winning_cell,
 )
 from aorta.probe.recipe_builder import build_probe_recipe_from_dict
 from aorta.registry import load_mitigations
@@ -340,12 +340,13 @@ def _resolve_stop_outcome(
     )
 
 
+def _find_winning_cell(summaries: list[dict[str, Any]]) -> tuple[str, str] | None:
+    return winning_cell((row.get("cell_name") or "", row.get("verdict")) for row in summaries)
+
+
 def _find_winning_mitigation(summaries: list[dict[str, Any]]) -> str | None:
-    for row in summaries:
-        win = winning_mitigation(row.get("cell_name") or "", row.get("verdict"))
-        if win is not None:
-            return win
-    return None
+    win = _find_winning_cell(summaries)
+    return None if win is None else win[1]
 
 
 def _execute_probe_matrix(
@@ -470,20 +471,23 @@ def run_agent_loop(
                 append_log_event(run_dir, "baseline_pass", {})
                 break
 
-            winner = _find_winning_mitigation(summaries)
-            if winner:
+            win = _find_winning_cell(summaries)
+            if win:
+                cell, winner = win
                 state.winning_mitigation = winner
                 state.converged = True
                 outcome = "converged"
                 recommended = (
                     f"Re-run the repro with mitigation `{winner}` applied "
-                    f"(see cell `{winner}-{_BASELINE_DIAGNOSTIC}` probe.env or matrix)."
+                    f"(see cell `{cell}` probe.env or matrix)."
                 )
-                append_log_event(
-                    run_dir,
-                    "converged",
-                    {"winning_mitigation": winner},
-                )
+                converged_payload: dict[str, Any] = {"winning_mitigation": winner}
+                # Only a diagnostic-axis win names its cell: `{winner}-none` is
+                # implied by the name, and leaving the key off those events
+                # keeps already-archived trajectories comparable.
+                if cell != f"{winner}-{_BASELINE_DIAGNOSTIC}":
+                    converged_payload["winning_cell"] = cell
+                append_log_event(run_dir, "converged", converged_payload)
                 break
 
             # Budget bounds the number of PROPOSAL cycles. Checked here -- after

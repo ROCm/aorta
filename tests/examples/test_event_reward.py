@@ -325,8 +325,8 @@ def test_a_refuted_name_and_an_unmeasured_name_are_different_events(grid):
 
 
 def test_a_pass_under_a_diagnostic_is_not_a_resolver(tmp_path):
-    """``winning_mitigation`` credits only ``{m}-none``: a pass with a
-    diagnostic on is not attributable to the mitigation alone."""
+    """A pass with a mitigation and a diagnostic both on is attributable to
+    neither name alone, so ``winning_mitigation`` credits nothing."""
     root = tmp_path / "DIAG"
     _write_cell(root, "none-none", "fail", NAN)
     _write_cell(root, f"{REFUTED}-none", "fail", NAN)
@@ -334,6 +334,33 @@ def test_a_pass_under_a_diagnostic_is_not_a_resolver(tmp_path):
     grid = grid_from_matrix(root)
     assert grid.resolution.resolvers == frozenset()
     assert grid.measured_mitigations == frozenset({REFUTED})
+
+
+def test_a_behavioural_diagnostic_passing_alone_resolves_it(tmp_path):
+    """``none-{d}`` is the experiment ``{d}-none`` would be, so it resolves the
+    failure as the loop converges on it -- but it is not a cell a proposal
+    buys, so it measures nothing. A pass under logging resolves nothing."""
+    root = tmp_path / "DIAGONLY"
+    _write_cell(root, "none-none", "fail", NAN)
+    _write_cell(root, f"{REFUTED}-none", "fail", NAN)
+    _write_cell(root, "none-hip_launch_blocking", "pass", [])
+    _write_cell(root, "none-amd_log_level_4", "pass", [])
+    grid = grid_from_matrix(root)
+    assert grid.resolution.resolvers == frozenset({"hip_launch_blocking"})
+    assert grid.measured_mitigations == frozenset({REFUTED})
+
+
+def test_a_converged_episode_names_the_cell_that_passed(tmp_path):
+    diagnostic = _write_log(
+        tmp_path / "DIAGWIN",
+        [{"type": "converged", "winning_mitigation": "hip_launch_blocking",
+          "winning_cell": "none-hip_launch_blocking"}],
+    )
+    mitigation = _write_log(
+        tmp_path / "MITWIN", [{"type": "converged", "winning_mitigation": RESOLVER}]
+    )
+    assert episode_from_log(diagnostic).terminal_why == "cell 'none-hip_launch_blocking' passed"
+    assert episode_from_log(mitigation).terminal_why == f"cell {RESOLVER!r}-none passed"
 
 
 def test_a_matrix_with_no_baseline_cell_has_no_failure_to_resolve(tmp_path):

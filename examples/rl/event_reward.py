@@ -443,10 +443,10 @@ class MatrixGrid:
     def measured_mitigations(self) -> frozenset[str]:
         """Mitigations with a ``{m}-none`` cell, so the matrix can speak to them.
 
-        Keyed on the baseline-diagnostic cell specifically, because it is the
-        only cell whose verdict is attributable to the mitigation alone -- the
-        rule ``state.winning_mitigation`` applies when it decides what counts
-        as a win.
+        Keyed on ``{m}-none`` because it is the cell the loop runs when a
+        policy proposes ``m``: a policy only ever grows the mitigation axis. A
+        diagnostic's ``none-{d}`` cell can make ``d`` a resolver (see
+        ``grid_from_matrix``), but it is not a cell a proposal buys.
         """
         names = set()
         for cell in self.verdicts:
@@ -474,9 +474,10 @@ def grid_from_matrix(root: Path, scenario_id: str | None = None) -> MatrixGrid:
     reward cannot disagree about what a cell said.
 
     A resolver is decided by ``state.winning_mitigation``, the function the
-    loop itself uses, which credits a pass only on ``{m}-none``: a pass on a
-    cell with a non-baseline diagnostic is not attributable to the mitigation
-    alone. ``baseline_failed`` is False when the ``none-none`` cell is absent
+    loop itself uses: a pass on ``{m}-none``, or on ``none-{d}`` for a
+    built-in diagnostic that changes behaviour. A pass with both axes
+    non-baseline is attributable to neither name alone and resolves nothing.
+    ``baseline_failed`` is False when the ``none-none`` cell is absent
     or unreadable -- a matrix that cannot show a failure has nothing to resolve,
     and treating the missing cell as a failure would manufacture a scenario.
     """
@@ -926,7 +927,12 @@ def episode_from_log(
                 mitigation_axis.append(name)
         elif etype == "converged":
             terminal = "converged"
-            why = f"cell {event.get('winning_mitigation')!r}-none passed"
+            cell = event.get("winning_cell")
+            why = (
+                f"cell {cell!r} passed"
+                if cell
+                else f"cell {event.get('winning_mitigation')!r}-none passed"
+            )
         elif etype == "baseline_pass":
             terminal, why = "other", "the baseline cell passed: there was nothing to search for"
         elif etype == "policy_stop":
