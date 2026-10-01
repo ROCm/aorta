@@ -74,6 +74,9 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
         "DEBUG_CLR_BATCH_CPU_SYNC_SIZE": "0",
     },
     # --- RCCL / NCCL ---
+    # Orders launches by each device's host program order, so it cannot fix
+    # ranks that issue collectives in different orders; seen to SIGSEGV every
+    # rank instead (aorta#512). Approval-gated in agent/policy.py.
     "nccl_launch_order_implicit": {
         "NCCL_LAUNCH_ORDER_IMPLICIT": "1",
     },

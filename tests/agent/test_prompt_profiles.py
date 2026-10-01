@@ -39,6 +39,7 @@ from aorta.agent.llm import (
     _build_prompt,
     _profile_prompt,
     _step_from_content,
+    _step_response_format,
     make_proposer,
 )
 from aorta.agent.loop import AgentConfig, AgentLoopResult, run_agent_loop
@@ -215,7 +216,7 @@ class TestDefaultIsUnchanged:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "response_format": {"type": "json_object"},
+            "response_format": _step_response_format(),
         }
 
     def test_a_default_run_logs_no_profile(self, tmp_path, monkeypatch):
@@ -239,6 +240,17 @@ class TestRlEpisodeIsFrozen:
         assert system == RL_EPISODE_SYSTEM
         assert user == TRAINED_USER
         assert _sha256(user) == TRAINED_USER_SHA256
+
+    def test_an_error_detector_on_a_row_does_not_reach_the_trained_layout(self):
+        """The loop names the error detector on a row where one fired.
+
+        The trained layout has no slot for it, so the rendering must not move.
+        """
+        summaries = copy.deepcopy(SUMMARIES)
+        error_row = next(row for row in summaries if row["verdict"] == "error")
+        error_row["error_detectors_fired"] = ["tier1:exec_failed"]
+        _, user = build_rl_episode_prompt(summaries, list(REMAINING))
+        assert user == TRAINED_USER
 
     def test_the_symptom_and_tried_list_are_not_sent(self):
         """The policy never saw either; what was tried is on screen as cells."""

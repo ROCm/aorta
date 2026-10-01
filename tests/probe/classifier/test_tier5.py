@@ -6,6 +6,7 @@ import re
 
 import pytest
 
+from aorta.agent.llm import AUTOPSY_CATEGORIES
 from aorta.probe.classifier.tier5_custom import (
     CompiledPattern,
     CustomScanResult,
@@ -343,3 +344,36 @@ def test_validate_accepts_condition_at_load_time():
     compiled = validate_custom_patterns(raw)
     assert compiled[0].condition_code is not None
     assert compiled[0].condition_source == "int(capture['used']) > 1000"
+
+
+# ---- category: what the detector reports (issue #515) ---------------------
+
+
+def test_validate_carries_a_declared_category():
+    raw = [{"id": "oom", "match": {"regex": "out of memory"}, "category": "oom_fragment"}]
+    assert validate_custom_patterns(raw)[0].category == "oom_fragment"
+
+
+def test_an_omitted_category_is_no_declaration():
+    """Not ``unknown``: an undeclared detector leaves the heuristic to read its ID."""
+    raw = [{"id": "oom", "match": {"regex": "out of memory"}}]
+    assert validate_custom_patterns(raw)[0].category is None
+
+
+@pytest.mark.parametrize("category", sorted(AUTOPSY_CATEGORIES))
+def test_validate_accepts_every_name_in_the_shared_vocabulary(category):
+    """Evidence-only names included.
+
+    A declaration describes evidence, and a ConSan detector really does report
+    ``gpu_race``. Narrowing to what a probe step may assert is the proposer's
+    job, and it already does it.
+    """
+    raw = [{"id": "p", "match": {"regex": "x"}, "category": category}]
+    assert validate_custom_patterns(raw)[0].category == category
+
+
+@pytest.mark.parametrize("category", ["lds_race", "GPU_RACE", "", None, ["oom_fragment"]])
+def test_validate_rejects_a_category_outside_the_vocabulary(category):
+    raw = [{"id": "p", "match": {"regex": "x"}, "category": category}]
+    with pytest.raises(RecipeSchemaError, match=r"custom_patterns\[0\]\.category: must be one of"):
+        validate_custom_patterns(raw)

@@ -1,4 +1,4 @@
-"""The agents reach a model through the configuration the rest of chat uses.
+"""The agents reach Qwen through the endpoint configuration chat uses.
 
 ``docs/chat/providers.md`` is explicit: a model comes from ``get_chat_llm()``,
 selected by ``llm_provider`` and configured through ``~/.config/aorta/chat.toml``
@@ -8,7 +8,8 @@ LITELLM_API_BASE / LITELLM_API_KEY / LITELLM_MODEL -- defaulting to
 
 So a user who had run ``aorta chat config init --profile openai`` had chat
 talking to their provider and a Watch and Autopsy talking to a proxy that was
-not running, with nothing to say the two disagreed.
+not running, with nothing to say the two disagreed. CIA now pins its own model
+and request mode while continuing to share the endpoint and credentials.
 
 The settings are read; the provider layer is not. ``aorta.chat.config`` needs
 pydantic and stdlib and none of the chat extras, so the agents still run on a
@@ -20,8 +21,6 @@ from __future__ import annotations
 import subprocess
 import sys
 
-import pytest
-
 PROBE = """
 import json, os, sys
 from aorta.cia import llm as m
@@ -29,9 +28,9 @@ built = {}
 # build_lm returns a RedactingLM, so that is what has to be intercepted.
 m.RedactingLM = lambda **kw: built.update(kw) or object()
 try:
-    m.build_lm()
+    m.build_cia_lm()
     print(json.dumps({"base": built.get("api_base"), "model": built.get("model"),
-                      "key": built.get("api_key")}))
+                      "key": built.get("api_key"), "extra_body": built.get("extra_body")}))
 except m.ProviderNotConfigured as exc:
     print(json.dumps({"refused": str(exc)}))
 """
@@ -44,9 +43,7 @@ def _resolve(env: dict[str, str]) -> dict:
 
     clean = {k: v for k, v in os.environ.items() if not k.startswith(("AORTA_CHAT_", "LITELLM_"))}
     clean.update(env)
-    out = subprocess.run(
-        [sys.executable, "-c", PROBE], capture_output=True, text=True, env=clean
-    )
+    out = subprocess.run([sys.executable, "-c", PROBE], capture_output=True, text=True, env=clean)
     assert out.returncode == 0, out.stderr[-800:]
     return json.loads(out.stdout.strip().splitlines()[-1])
 
@@ -61,8 +58,9 @@ class TestConfiguringChatConfiguresTheAgents:
             }
         )
         assert got["base"] == "http://proxy.example:4000/v1"
-        assert got["model"] == "openai/qwen3-35b"
+        assert got["model"] == "openai/Qwen/Qwen3.8-27B"
         assert got["key"] == "sk-real"
+        assert got["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
     def test_it_never_reaches_the_proxy_this_package_used_to_assume(self):
         """localhost:4000 with key "dummy" was the old silent default."""
@@ -78,7 +76,7 @@ class TestConfiguringChatConfiguresTheAgents:
                 "AORTA_CHAT_REMOTE_LLM_API_KEY": "sk-remote",
             }
         )
-        assert got["model"] == "openai/gpt-4o-mini"
+        assert got["model"] == "openai/Qwen/Qwen3.8-27B"
         assert got["key"] == "sk-remote"
 
 
@@ -87,7 +85,7 @@ class TestDeploymentsOnTheOlderVariables:
         """Reading chat's defaults instead would silently move their endpoint."""
         got = _resolve({"LITELLM_API_BASE": "http://legacy:4000", "LITELLM_MODEL": "old"})
         assert got["base"] == "http://legacy:4000"
-        assert got["model"] == "openai/old"
+        assert got["model"] == "openai/Qwen/Qwen3.8-27B"
 
     def test_configured_chat_outranks_them(self):
         got = _resolve(

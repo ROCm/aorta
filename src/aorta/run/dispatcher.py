@@ -1635,6 +1635,7 @@ def _sanitize_probe_extras_for_json(config: Any) -> None:
                 "on_match": getattr(p, "on_match", None),
                 "required_for_pass": getattr(p, "required_for_pass", False),
                 "condition_source": getattr(p, "condition_source", None),
+                "category": getattr(p, "category", None),
             }
         )
     extras["custom_patterns"] = summarized
