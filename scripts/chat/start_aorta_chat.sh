@@ -106,16 +106,16 @@ done
 ((UI_STARTUP_TIMEOUT >= 1)) || die "--startup-timeout must be positive"
 
 ENDPOINT_FILE="${RUNTIME_DIR}/qwen38-endpoint.env"
-UI_PID_FILE="${RUNTIME_DIR}/aorta-chat-ui.pid"
-UI_LOG="${RUNTIME_DIR}/aorta-chat-ui.log"
-TUNNEL_LOG="${RUNTIME_DIR}/aorta-chat-tunnel.log"
-STOP_REQUEST_FILE="${RUNTIME_DIR}/aorta-chat-stop.requested"
+UI_PID_FILE="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.pid"
+UI_LOG="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.log"
+TUNNEL_LOG="${RUNTIME_DIR}/aorta-chat-tunnel-${UI_PORT}.log"
+STOP_REQUEST_FILE="${RUNTIME_DIR}/aorta-chat-stop-${UI_PORT}.requested"
 ROCJITSU_PREBUILT="${RUNTIME_DIR}/rocjitsu-prebuilt"
 ROCJITSU_BUILD="${RUNTIME_DIR}/rocjitsu-build"
 
 stop_remote_ui() {
   local expected remote_script
-  expected="${REPO_ROOT}/.venv-ui/bin/aorta chat ui"
+  expected="${REPO_ROOT}/.venv-ui/bin/aorta chat ui --host 127.0.0.1 --port ${UI_PORT}"
   remote_script='
 set -u
 pid_file=$1
