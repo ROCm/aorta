@@ -241,6 +241,17 @@ class TestRlEpisodeIsFrozen:
         assert user == TRAINED_USER
         assert _sha256(user) == TRAINED_USER_SHA256
 
+    def test_an_error_detector_on_a_row_does_not_reach_the_trained_layout(self):
+        """The loop names the error detector on a row where one fired.
+
+        The trained layout has no slot for it, so the rendering must not move.
+        """
+        summaries = copy.deepcopy(SUMMARIES)
+        error_row = next(row for row in summaries if row["verdict"] == "error")
+        error_row["error_detectors_fired"] = ["tier1:exec_failed"]
+        _, user = build_rl_episode_prompt(summaries, list(REMAINING))
+        assert user == TRAINED_USER
+
     def test_the_symptom_and_tried_list_are_not_sent(self):
         """The policy never saw either; what was tried is on screen as cells."""
         _, user = _profile_prompt(

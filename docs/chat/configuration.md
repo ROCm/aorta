@@ -248,6 +248,14 @@ while the profile pointed another is the failure the shared name prevents.
 | `triage_timeout` | — | `1800` | Seconds before one triage stops being waited for. The agents have their own internal timeouts; this is the backstop that keeps a wedged cluster job from hanging a chat turn. The abandoned run is asked to stop rather than left going. |
 | `waitcheck_timeout` | — | `300` | Seconds for one static assembly analysis, which needs no GPU and no queue. |
 
+CIA Launch, Watch, and Autopsy use `Qwen/Qwen3.8-27B`. They reuse the endpoint
+and API key selected by the chat provider, but not its model setting, so that
+endpoint must serve the Qwen model under that exact ID. CIA sends
+`chat_template_kwargs.enable_thinking = false` on every model request; Qwen
+answers directly instead of producing its default reasoning trace first.
+Ordinary `aorta chat` turns continue to use the configured `vllm_model` or
+`remote_llm_model`.
+
 The scheduler knobs the agents read directly — `CIA_PARTITION`, `CIA_TIME_LIMIT`,
 `CIA_SSH_USER`, `CIA_SSH_HOST`, `CIA_SEARCH_ROOTS`, `CIA_CONTAINER_IMAGE`,
 `CIA_SBATCH_EXTRA` — have no chat setting. They describe the cluster rather than
@@ -264,10 +272,10 @@ regenerated.
 
 | Setting | Shipped as | Why |
 | --- | --- | --- |
-| `allow_origins` | `["http://localhost:8000", "http://127.0.0.1:8000"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
+| `allow_origins` | `["http://localhost:8080", "http://127.0.0.1:8080"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
 | `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and a Slurm cluster. |
 
-**Serving anywhere other than `localhost:8000` means editing `allow_origins`.**
+**Serving anywhere other than `localhost:8080` means editing `allow_origins`.**
 Those two are `aorta chat ui`'s own defaults, and they have to stay in step with
 it: Chainlit reads `allow_origins` from the file and has no environment
 override, so a port listed here that the command never serves on refuses the

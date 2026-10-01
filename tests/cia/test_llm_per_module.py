@@ -20,6 +20,7 @@ import pytest
 
 from aorta.cia import llm as llm_mod
 from aorta.cia.llm import (
+    CIA_MODEL,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     build_lm,
@@ -92,6 +93,19 @@ class TestBudget:
         assert built[0]["max_tokens"] == 8192
 
 
+class TestLaunchAndWatchShareTheCIADefault:
+    def test_every_shared_lm_entry_point_uses_ensure_configured(self):
+        import inspect
+
+        from aorta.cia.launch.discovery import ClusterDiscovery
+        from aorta.cia.launch.planner import LaunchPlanner
+        from aorta.cia.watch.log_finder import LogFinder
+        from aorta.cia.watch.watcher import LogWatcher
+
+        for module in (ClusterDiscovery, LaunchPlanner, LogFinder, LogWatcher):
+            assert "ensure_configured()" in inspect.getsource(module), module.__name__
+
+
 class TestTheRouterKeepsItsOwnSettings:
     @staticmethod
     def _bind(monkeypatch):
@@ -124,8 +138,7 @@ class TestTheRouterKeepsItsOwnSettings:
 
         assert router_mod.TriageRouter.MAX_TOKENS > 1024
 
-    def test_the_router_follows_the_model_the_operator_configured(self, built, monkeypatch):
-        """Pinning a model in code would override the deployment's choice."""
+    def test_the_router_uses_the_cia_model_not_the_chat_model(self, built, monkeypatch):
         monkeypatch.setattr(
             llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "qwen3-35b", "vllm")
         )
@@ -133,7 +146,8 @@ class TestTheRouterKeepsItsOwnSettings:
 
         router_mod.TriageRouter("/tmp")
 
-        assert bound[0].kwargs["model"] == "openai/qwen3-35b"
+        assert bound[0].kwargs["model"] == f"openai/{CIA_MODEL}"
+        assert bound[0].kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
     def test_the_router_closes_its_bound_lm(self, monkeypatch):
         router_mod, _bound = self._bind(monkeypatch)
@@ -143,28 +157,30 @@ class TestTheRouterKeepsItsOwnSettings:
             def close(self):
                 closes.append(True)
 
-        monkeypatch.setattr(router_mod, "build_lm", lambda **_kwargs: LM())
+        monkeypatch.setattr(router_mod, "build_cia_lm", lambda **_kwargs: LM())
         router = router_mod.TriageRouter("/tmp")
 
         router.close()
 
         assert closes == [True]
 
-    def test_the_router_does_not_name_a_model_of_its_own(self):
-        """A vendor model in the code is the site-specific default in disguise."""
+    def test_the_router_uses_the_shared_cia_model_helper(self):
+        """Launch, Watch, and Autopsy must not grow separate model constants."""
         import inspect
 
         import aorta.cia.autopsy.router as router_mod
 
         source = inspect.getsource(router_mod.TriageRouter)
-        assert "claude" not in source.lower()
-        assert "gpt-" not in source.lower()
+        assert "build_cia_lm" in source
+        assert CIA_MODEL not in source
 
 
 class TestEnsureConfiguredSaysWhenItDiscards:
     def test_the_first_caller_configures_the_default(self, built):
         ensure_configured()
         assert len(built) == 1
+        assert built[0]["model"] == f"openai/{CIA_MODEL}"
+        assert built[0]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
     def test_a_later_caller_passing_nothing_is_silent(self, built, caplog):
         ensure_configured()
