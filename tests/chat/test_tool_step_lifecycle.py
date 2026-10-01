@@ -123,8 +123,17 @@ async def test_a_failing_tool_still_completes(stream, monkeypatch):
     assert stream.ends()[0].get("failed") is True
 
 
-async def test_a_tool_error_result_is_marked_failed(stream, monkeypatch):
-    await run_tool(monkeypatch, lambda: "Tool error: cluster unreachable")
+@pytest.mark.parametrize(
+    "result",
+    [
+        "Error: file not found",
+        "Tool error: cluster unreachable",
+        "DENIED: command is not allowlisted",
+        "Triage failed at stage launch: scheduler unavailable",
+    ],
+)
+async def test_builtin_failure_results_are_marked_failed(stream, monkeypatch, result):
+    await run_tool(monkeypatch, lambda: result)
 
     assert stream.ends()[0].get("failed") is True
 
@@ -138,6 +147,8 @@ async def test_a_cancelled_turn_still_completes(stream, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await run_tool(monkeypatch, body)
     assert len(stream.ends()) == 1, "a cancelled tool left its step open"
+    assert stream.ends()[0].get("cancelled") == "stopped"
+    assert stream.ends()[0].get("failed") is not True
 
 
 async def test_the_duration_is_reported(stream, monkeypatch):

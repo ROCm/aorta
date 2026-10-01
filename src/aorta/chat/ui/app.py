@@ -229,15 +229,15 @@ class _ToolSteps:
             return  # a completion with nothing open; nothing to close
         _, activity = _tool_progress(name)
         took = f" in {seconds:g}s" if isinstance(seconds, (int, float)) else ""
-        if failed:
-            step.output = f"{activity}\n\nThe operation could not complete{took}."
-        elif cancellation in {"stopped", True}:
+        if cancellation in {"stopped", True}:
             step.output = f"{activity}\n\nThe operation stopped after cancellation{took}."
         elif cancellation == "still running":
             step.output = (
                 f"{activity}\n\nCancellation was requested{took}, but the "
                 "underlying work is still running."
             )
+        elif failed:
+            step.output = f"{activity}\n\nThe operation could not complete{took}."
         else:
             step.output = f"{activity}\n\nFinished{took}."
         step.end = utc_now()

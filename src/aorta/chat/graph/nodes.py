@@ -671,6 +671,20 @@ async def router_node(state: AgentState) -> dict[str, Any]:
 #: announcement it belongs to.
 _tool_calls = itertools.count(1)
 
+# Built-in tools return user-readable strings rather than raising for expected
+# failures. Keep their documented failure forms in one place so progress
+# metadata does not have a different definition of failure per tool.
+_TOOL_FAILURE_PREFIXES = (
+    "Error:",
+    "Tool error:",
+    "DENIED:",
+    "Triage failed at stage ",
+)
+
+
+def _tool_result_failed(result: object) -> bool:
+    return str(result).lstrip().startswith(_TOOL_FAILURE_PREFIXES)
+
 
 def _announce_tool(payload: dict) -> None:
     """Put a tool progress event on the stream, if anything is listening."""
@@ -739,16 +753,14 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
             # can run, so "stopped" is a fact rather than a request. The UI also
             # accepts "still running" from a producer with a bounded wait.
             payload["cancelled"] = "stopped"
-        if worker.cancelled():
+        elif worker.cancelled():
             payload["failed"] = True
         else:
             failure = worker.exception()
             if failure is not None:
                 payload["failed"] = True
-            else:
-                result = str(worker.result()).lstrip()
-                if result.startswith(("Error:", "Tool error:")):
-                    payload["failed"] = True
+            elif _tool_result_failed(worker.result()):
+                payload["failed"] = True
         _announce_tool(payload)
 
     try:

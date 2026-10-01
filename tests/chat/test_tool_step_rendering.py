@@ -146,6 +146,15 @@ async def test_a_stopped_tool_stays_visible_after_the_answer(steps):
     assert steps[0].removes == 0
 
 
+async def test_cancellation_wording_wins_over_a_defensive_failure_flag(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle({**STOPPED, "failed": True})
+
+    assert "stopped after cancellation" in steps[0].output
+    assert "could not complete" not in steps[0].output
+
+
 async def test_a_cancellation_request_can_report_work_still_running(steps):
     tracker = app._ToolSteps()
     await tracker.handle(START)
