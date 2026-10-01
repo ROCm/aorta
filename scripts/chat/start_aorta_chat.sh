@@ -179,6 +179,7 @@ run_remote_worker() {
 
   export AORTA_CHAT_VLLM_BASE_URL
   export AORTA_CHAT_VLLM_MODEL
+  export AORTA_CHAT_LLM_PROVIDER=vllm
   export AORTA_CHAT_LLM_TOOL_MODE=native
   export AORTA_CHAT_ALLOW_CLUSTER_JOBS="$CIA_ENABLED"
 
