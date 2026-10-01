@@ -34,6 +34,7 @@ a native function-call probe all pass. It enables Qwen's XML tool parser,
 prints the selected compute-node URL, and never inspects port 8000.
 Startup output is limited to Slurm state changes and one progress message every
 30 seconds; add `--verbose` to print every five-second poll.
+Shutdown follows the same policy instead of printing every `COMPLETING` poll.
 
 Start the CIA-enabled UI:
 
