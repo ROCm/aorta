@@ -49,11 +49,14 @@ def test_the_chat_index_follows_a_successful_wheel_run_from_its_own_workflow():
     assert set(doc[True]) == {"workflow_run"}
 
     job = doc["jobs"]["chat-index"]
-    cond = " ".join(job["if"].split())
-    assert "github.repository == 'ROCm/aorta'" in cond
-    assert "github.event.workflow_run.conclusion == 'success'" in cond
-    assert "github.event.workflow_run.event == 'schedule'" in cond
-    assert "github.event.workflow_run.head_branch == 'main'" in cond
+    # Whole, so that loosening an `&&` or dropping an arm cannot pass.
+    assert " ".join(job["if"].split()) == (
+        "github.repository == 'ROCm/aorta' && "
+        "github.event.workflow_run.conclusion == 'success' && "
+        "((github.event.workflow_run.event == 'schedule') || "
+        "(github.event.workflow_run.event == 'workflow_dispatch' && "
+        "github.event.workflow_run.head_branch == 'main'))"
+    )
 
     # Both write the dev-wheels release; the wheel job force-moves its tag.
     assert doc["concurrency"] == _load("nightly.yml")["concurrency"]
