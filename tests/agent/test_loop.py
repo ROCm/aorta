@@ -427,3 +427,60 @@ def test_dry_run_writes_no_artifacts(mock_run_recipe, tmp_path, monkeypatch):
     assert not (tmp_path / "agent_log.jsonl").exists()
     assert not (tmp_path / "out" / "DRY-1" / "agent_log.jsonl").exists()
     assert not (tmp_path / "out" / "DRY-1" / "agent_report.md").exists()
+
+
+@pytest.mark.parametrize(
+    ("declaration", "expected"),
+    [("    category: launch_error\n", "launch_error"), ("", "rccl_hang")],
+)
+def test_a_recipe_declared_category_reaches_the_offline_proposer(
+    mock_run_recipe, tmp_path, monkeypatch, declaration, expected
+):
+    """aorta#515: the loop hands the recipe's declarations to `--llm-backend fake`.
+
+    Read off its name, `custom:rccl_version_mismatch` is a collective hang. The
+    recipe says it is a launch failure, and the recorded step says so too; the
+    undeclared recipe is the control.
+    """
+    import json
+
+    import aorta.agent.loop as loop_mod
+
+    recipe = tmp_path / "probe.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: probe\n"
+        "trials: 1\n"
+        "mitigation_axis: [none, tf32_off]\n"
+        "diagnostic_axis: [none]\n"
+        "custom_patterns:\n"
+        "  - id: rccl_version_mismatch\n"
+        "    match:\n"
+        "      regex: 'RCCL version mismatch'\n" + declaration,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        loop_mod,
+        "_read_cell_summaries",
+        lambda _d: [
+            {
+                "cell_name": "none-none",
+                "verdict": "fail",
+                "failure_detectors_fired": ["custom:rccl_version_mismatch"],
+                "capture": {},
+            }
+        ],
+    )
+    config = AgentConfig(
+        output_dir=tmp_path / "out",
+        ticket="DECLARED-CATEGORY",
+        subprocess_argv=("true",),
+        policy=AgentPolicy(max_iterations=1),
+        recipe_path=recipe,
+    )
+    result = run_agent_loop(config)
+
+    assert result.state.last_category == expected
+    log = tmp_path / "agent-run" / "agent_log.jsonl"
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [e["category"] for e in events if e["type"] == "llm_step"] == [expected]
