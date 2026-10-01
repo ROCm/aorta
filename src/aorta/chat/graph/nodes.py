@@ -739,6 +739,16 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
             # can run, so "stopped" is a fact rather than a request. The UI also
             # accepts "still running" from a producer with a bounded wait.
             payload["cancelled"] = "stopped"
+        if worker.cancelled():
+            payload["failed"] = True
+        else:
+            failure = worker.exception()
+            if failure is not None:
+                payload["failed"] = True
+            else:
+                result = str(worker.result()).lstrip()
+                if result.startswith(("Error:", "Tool error:")):
+                    payload["failed"] = True
         _announce_tool(payload)
 
     try:

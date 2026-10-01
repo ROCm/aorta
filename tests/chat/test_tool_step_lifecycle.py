@@ -120,6 +120,13 @@ async def test_a_failing_tool_still_completes(stream, monkeypatch):
     with pytest.raises(RuntimeError):
         await run_tool(monkeypatch, body)
     assert len(stream.ends()) == 1, "a failed tool left its step open"
+    assert stream.ends()[0].get("failed") is True
+
+
+async def test_a_tool_error_result_is_marked_failed(stream, monkeypatch):
+    await run_tool(monkeypatch, lambda: "Tool error: cluster unreachable")
+
+    assert stream.ends()[0].get("failed") is True
 
 
 async def test_a_cancelled_turn_still_completes(stream, monkeypatch):

@@ -101,19 +101,19 @@ _TOOL_PROGRESS = {
     ),
     "read_autopsy_report": (
         "Reviewing the diagnostic report",
-        "AORTA is reading the completed diagnostic report and its supporting evidence.",
+        "AORTA is reviewing the completed diagnostic report and its supporting evidence.",
     ),
     "triage_assembly_source": (
         "Analyzing the GPU assembly",
-        "AORTA is assembling the supplied GPU code and checking instruction dependencies for missing waits.",
+        "AORTA is checking diagnostic evidence for missing waits and instruction dependencies in the supplied GPU assembly.",
     ),
     "triage_kernel_source": (
         "Checking the GPU kernel for races",
-        "AORTA is compiling and running the supplied kernel under GPU race diagnostics.",
+        "AORTA is checking GPU race-diagnostic evidence for the supplied kernel.",
     ),
     "triage_workload": (
-        "Running and diagnosing the workload",
-        "AORTA is running the supplied workload on the cluster and examining its logs and artifacts.",
+        "Reviewing the workload diagnosis",
+        "AORTA is checking cluster logs and diagnostic artifacts for the supplied workload.",
     ),
     "run_terminal_command": (
         "Running an approved diagnostic command",
@@ -206,6 +206,7 @@ class _ToolSteps:
                 name,
                 delta.get("seconds"),
                 delta.get("cancelled"),
+                delta.get("failed"),
             )
             return
         title, activity = _tool_progress(name)
@@ -215,13 +216,22 @@ class _ToolSteps:
         await step.send()
         self._open[call] = step
 
-    async def _finish(self, call: str, name, seconds, cancellation=None) -> None:
+    async def _finish(
+        self,
+        call: str,
+        name,
+        seconds,
+        cancellation=None,
+        failed=False,
+    ) -> None:
         step = self._open.pop(call, None)
         if step is None:
             return  # a completion with nothing open; nothing to close
         _, activity = _tool_progress(name)
         took = f" in {seconds:g}s" if isinstance(seconds, (int, float)) else ""
-        if cancellation in {"stopped", True}:
+        if failed:
+            step.output = f"{activity}\n\nThe operation could not complete{took}."
+        elif cancellation in {"stopped", True}:
             step.output = f"{activity}\n\nThe operation stopped after cancellation{took}."
         elif cancellation == "still running":
             step.output = (
@@ -232,7 +242,8 @@ class _ToolSteps:
             step.output = f"{activity}\n\nFinished{took}."
         step.end = utc_now()
         await step.update()
-        self._finished.append(step)
+        if not failed and cancellation not in {"stopped", True, "still running"}:
+            self._finished.append(step)
 
     async def remove_finished(self) -> None:
         """Remove completed progress rows after the final answer is visible."""

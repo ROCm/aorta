@@ -55,6 +55,7 @@ def steps(monkeypatch):
 
 START = {"tool": "triage_kernel_source", "id": "triage_kernel_source:1"}
 DONE = {**START, "done": True, "seconds": 312.0}
+FAILED = {**DONE, "failed": True}
 STOPPED = {**DONE, "cancelled": "stopped"}
 STILL_RUNNING = {**DONE, "cancelled": "still running"}
 
@@ -80,7 +81,7 @@ async def test_the_step_uses_plain_language_not_an_internal_name(steps):
     assert steps[0].name == "Checking the GPU kernel for races"
     assert "triage_kernel_source" not in steps[0].name
     assert "triage_kernel_source" not in steps[0].output
-    assert steps[0].output.startswith("AORTA is compiling")
+    assert steps[0].output.startswith("AORTA is checking")
 
 
 async def test_an_unknown_plugin_uses_generic_copy(steps):
@@ -124,6 +125,25 @@ async def test_a_stopped_tool_is_not_rendered_as_finished(steps):
     assert "stopped after cancellation" in steps[0].output
     assert "finished" not in steps[0].output
     assert not steps[0].running
+
+
+async def test_a_failed_tool_stays_visible_after_the_answer(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(FAILED)
+    await tracker.remove_finished()
+
+    assert "could not complete" in steps[0].output
+    assert steps[0].removes == 0
+
+
+async def test_a_stopped_tool_stays_visible_after_the_answer(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(STOPPED)
+    await tracker.remove_finished()
+
+    assert steps[0].removes == 0
 
 
 async def test_a_cancellation_request_can_report_work_still_running(steps):
