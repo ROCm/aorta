@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 
 from aorta.chat.config import settings
 from aorta.chat.tools._sandbox import AORTA_ROOT_LABEL, resolve_within
+from aorta.chat.tools.outcome import tool_failure
 
 _GITIGNORE_PATTERNS: list[str] = [
     "__pycache__",
@@ -52,11 +53,11 @@ def list_files(path: str = ".") -> str:
     try:
         target = _resolve_safe(path)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return tool_failure(f"Error: {exc}")
     if not target.exists():
-        return f"Error: path '{path}' does not exist."
+        return tool_failure(f"Error: path '{path}' does not exist.")
     if not target.is_dir():
-        return f"Error: '{path}' is not a directory."
+        return tool_failure(f"Error: '{path}' is not a directory.")
 
     root = settings.aorta_root
     lines: list[str] = []
@@ -82,17 +83,17 @@ def read_file(file_path: str) -> str:
     try:
         target = _resolve_safe(file_path)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return tool_failure(f"Error: {exc}")
     if not target.exists():
-        return f"Error: file '{file_path}' does not exist."
+        return tool_failure(f"Error: file '{file_path}' does not exist.")
     if not target.is_file():
-        return f"Error: '{file_path}' is not a file."
+        return tool_failure(f"Error: '{file_path}' is not a file.")
 
     max_chars = 8000
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
-        return f"Error reading file: {exc}"
+        return tool_failure(f"Error reading file: {exc}")
 
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n\n... (truncated, {len(text)} total chars)"

@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from langchain_core.tools import tool
 
 pytest.importorskip("langgraph", reason="requires the chat extra")
 
 from aorta.chat.graph import nodes
+from aorta.chat.tools.outcome import tool_failure
 
 
 class Recorder:
@@ -71,6 +73,32 @@ async def test_the_completion_arrives_after_the_tool_returns(stream, monkeypatch
     assert stream.events[-1].get("done") is True
 
 
+async def test_completion_is_emitted_by_the_awaited_tool_task(monkeypatch):
+    """Do not let a detached done callback race the answer onto the screen.
+
+    LangGraph multiplexes custom events with node updates and accumulated state.
+    A Task done callback can enqueue its custom completion after the act node
+    has returned and the final state is already being rendered. Keeping both
+    tool events in the awaited producer establishes a real ordering barrier.
+    """
+    producer = asyncio.current_task()
+    completion_tasks = []
+
+    def record(payload):
+        if payload.get("done"):
+            completion_tasks.append(asyncio.current_task())
+
+    async def execute(name, kwargs):
+        return "ok"
+
+    monkeypatch.setattr(nodes, "get_stream_writer", lambda: record)
+    monkeypatch.setattr(nodes, "_execute_tool", execute)
+
+    await nodes._execute_tool_async("read_file", {})
+
+    assert completion_tasks == [producer]
+
+
 async def test_start_and_end_carry_the_same_call_id(stream, monkeypatch):
     """The UI closes a specific step, so the pair has to be identifiable."""
     await run_tool(monkeypatch, lambda: "ok")
@@ -94,6 +122,43 @@ async def test_a_failing_tool_still_completes(stream, monkeypatch):
     with pytest.raises(RuntimeError):
         await run_tool(monkeypatch, body)
     assert len(stream.ends()) == 1, "a failed tool left its step open"
+    assert stream.ends()[0].get("failed") is True
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        "Error: file not found",
+        "Tool error: cluster unreachable",
+        "DENIED: command is not allowlisted",
+        "Triage failed at stage launch: scheduler unavailable",
+    ],
+)
+async def test_builtin_failure_results_are_marked_failed(stream, monkeypatch, result):
+    await run_tool(monkeypatch, lambda: tool_failure(result))
+
+    assert stream.ends()[0].get("failed") is True
+
+
+async def test_failure_looking_plain_text_is_not_inferred_as_status(stream, monkeypatch):
+    await run_tool(monkeypatch, lambda: "Error: this text came from a source file")
+
+    assert stream.ends()[0].get("failed") is not True
+
+
+async def test_structured_failure_survives_langchain_tool_invocation(
+    stream, monkeypatch
+):
+    @tool
+    def reports_failure() -> str:
+        """Return one expected tool failure."""
+        return tool_failure("Error reading file: disk error")
+
+    monkeypatch.setitem(nodes.TOOL_REGISTRY, reports_failure.name, reports_failure)
+
+    await nodes._execute_tool_async(reports_failure.name, {})
+
+    assert stream.ends()[0].get("failed") is True
 
 
 async def test_a_cancelled_turn_still_completes(stream, monkeypatch):
@@ -105,6 +170,8 @@ async def test_a_cancelled_turn_still_completes(stream, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await run_tool(monkeypatch, body)
     assert len(stream.ends()) == 1, "a cancelled tool left its step open"
+    assert stream.ends()[0].get("cancelled") == "stopped"
+    assert stream.ends()[0].get("failed") is not True
 
 
 async def test_the_duration_is_reported(stream, monkeypatch):
