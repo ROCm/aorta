@@ -241,7 +241,10 @@ def _resolve_stop_outcome(
     it so the audit log records the same reason that drove ``outcome``
     instead of a bare ``None``.
     """
-    reason: StopReason | None = step.stop_reason
+    # A reason explains a stop, so it counts only when the step stopped -- the
+    # rule `AgentStep.from_dict` applies to a model reply, held here for a
+    # protocol proposer that builds its `AgentStep` itself.
+    reason: StopReason | None = step.stop_reason if step.stop else None
     if reason in ("proposal_unresolved", "proposal_redundant"):
         # The loop owns these reasons, not the proposer. Each is a statement
         # about what the candidate filter or validation did with the names, so

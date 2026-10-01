@@ -166,6 +166,38 @@ class TestStopAttribution:
         outcome, _msg, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
         assert (outcome, reason) == ("proposal_redundant", "proposal_redundant")
 
+    @pytest.mark.parametrize(
+        "claimed", ["agent_requested", "exhausted_candidates", "baseline_pass"]
+    )
+    def test_a_reason_without_a_stop_is_not_taken_as_given(self, claimed):
+        """FAILS BEFORE THE FIX: `stop: false` plus any reason skipped the derivation."""
+        step = _validated(["none"], stop_reason=claimed)
+        outcome, _msg, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
+        assert (outcome, reason) == ("proposal_redundant", "proposal_redundant")
+
+    def test_the_same_holds_for_an_unresolved_proposal(self):
+        """FAILS BEFORE THE FIX: the aorta#449 twin of the case above."""
+        step = _validated(
+            [], stop_reason="agent_requested", unresolved_mitigations=["rccl_p2p_disable"]
+        )
+        outcome, _msg, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
+        assert (outcome, reason) == ("proposal_unresolved", "proposal_unresolved")
+
+    @pytest.mark.parametrize(
+        "claimed", ["agent_requested", "exhausted_candidates", "baseline_pass"]
+    )
+    def test_without_a_stop_a_reason_changes_nothing(self, claimed):
+        """Keyed on `stop`, not on what was removed: inert on any empty proposal."""
+        assert _resolve_stop_outcome(
+            _validated([], stop_reason=claimed), BASELINE_FAILED
+        ) == _resolve_stop_outcome(_validated([]), BASELINE_FAILED)
+
+    def test_a_stop_keeps_the_reason_it_gave(self):
+        """The narrowness case: a proposer that did stop is taken at its word."""
+        step = _validated(["none"], stop=True, stop_reason="exhausted_candidates")
+        outcome, _msg, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
+        assert (outcome, reason) == ("exhausted_candidates", "exhausted_candidates")
+
     def test_the_model_cannot_claim_it_either(self):
         step = AgentStep.from_dict(
             {"next_mitigations": [], "stop": True, "stop_reason": "proposal_redundant"}
@@ -270,6 +302,20 @@ class TestTheLogRecord:
         assert stopped["stop_reason"] == "proposal_redundant"
         assert stopped["redundant_mitigations"] == ["none"]
         assert "unresolved_mitigations" not in stopped
+
+    @pytest.mark.parametrize(
+        "claimed", ["agent_requested", "exhausted_candidates", "baseline_pass"]
+    )
+    def test_a_reason_without_a_stop_does_not_change_the_record(self, loop_env, claimed):
+        """FAILS BEFORE THE FIX: recorded as agent_stop, or as exhausted_candidates."""
+        result, records = loop_env(_Scripted(_step(["none"], stop_reason=claimed)))
+        llm_step = next(r for r in records if r["type"] == "llm_step")
+        stopped = next(r for r in records if r["type"] == "search_stopped")
+        assert (llm_step["stop"], llm_step["stop_reason"]) == (False, claimed)
+        assert (result.outcome, stopped["stop_reason"]) == (
+            "proposal_redundant",
+            "proposal_redundant",
+        )
 
     def test_a_repeat_is_recorded_and_the_search_continues(self, loop_env, monkeypatch):
         """Through the shipped parser and filter, which keep repeats for validation."""
