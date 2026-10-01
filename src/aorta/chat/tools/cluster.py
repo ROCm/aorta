@@ -377,7 +377,10 @@ def _run_triage(extra_args: list[str], label: str) -> str:
     # warning below never fired for exactly the case it was written about -- a
     # kernel that nothing analysed, reported as clean.
     expect_sanitizer = any(arg in extra_args for arg in _SWEEP_ARGS)
-    return _format_result(result, label, expect_sanitizer=expect_sanitizer)
+    rendered = _format_result(result, label, expect_sanitizer=expect_sanitizer)
+    if expect_sanitizer and _DID_NOT_RUN in rendered:
+        return tool_failure(rendered)
+    return rendered
 
 
 _PYTORCH_MARKERS = ("import torch", "nn.Module", "def forward", "torch.nn", "@torch")
