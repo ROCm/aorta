@@ -264,6 +264,15 @@ its 45 hazards ([#480](https://github.com/ROCm/aorta/issues/480)). Set
 that needs the complete count; a higher cap costs analysis time, so the flag,
 not a hard-coded larger default, is what makes the partial result visible.
 
+A ConSan conflict locates its two accesses by reader and text offset
+(`first_instruction` / `second_instruction`, kept in the finding's metadata) and
+never names a kernel. The parser joins those offsets to the itemized
+`coverage_site` records, which name the container at each offset, and sets
+`kernel_name` only when both accesses land in the same kernel. `entry_offset`
+stays the kernel's entry offset, as on `KernelIdentity`. A check's
+`kernel_results[].findings` repeat its `findings` per kernel, so count one list,
+never both ([#451](https://github.com/ROCm/aorta/issues/451)).
+
 The report keeps finding severity and execution completeness separate. For
 example, a Waitcheck warning plus scoped ConSan `not_checked` produces
 `overall_verdict: warn` and `execution_status: partial`.
