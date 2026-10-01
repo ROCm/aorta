@@ -79,7 +79,9 @@ class AgentPolicy:
         # but dropping them unrecorded is how a proposal of only "none" came
         # to read as the proposer choosing to stop (aorta#501). Every removed
         # occurrence is kept, so kept plus redundant is what was proposed.
-        redundant: list[str] = list(step.redundant_mitigations)
+        # Started empty, never from the incoming step: the loop attributes a
+        # stop to validation on this record, so only this pass may write it.
+        redundant: list[str] = []
         for name in step.next_mitigations:
             if not isinstance(name, str) or not name.strip():
                 raise PolicyViolation(f"invalid mitigation name: {name!r}")

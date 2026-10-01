@@ -101,12 +101,18 @@ class TestValidationRecordsWhatItRemoves:
         with pytest.raises(PolicyViolation):
             _validated(["none", "rccl_p2p_disable"])
 
-    def test_validating_twice_keeps_the_first_record(self):
+    def test_a_second_pass_records_only_what_it_removed(self):
+        """The record is per pass: validation is the field's only writer."""
         policy = AgentPolicy()
         once = policy.validate_step(_step(["none", "tf32_off", "tf32_off"]))
         twice = policy.validate_step(once)
+        assert once.redundant_mitigations == ["none", "tf32_off"]
         assert twice.next_mitigations == ["tf32_off"]
-        assert twice.redundant_mitigations == ["none", "tf32_off"]
+        assert twice.redundant_mitigations == []
+
+    def test_a_supplied_record_is_not_trusted(self):
+        """FAILS BEFORE THE FIX: a proposer could hand validation its own record."""
+        assert _validated([], redundant_mitigations=["none"]).redundant_mitigations == []
 
     def test_the_model_cannot_supply_the_field(self):
         step = AgentStep.from_dict(
@@ -197,6 +203,12 @@ class TestStopAttribution:
         step = _validated(["none"], stop=True, stop_reason="exhausted_candidates")
         outcome, _msg, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
         assert (outcome, reason) == ("exhausted_candidates", "exhausted_candidates")
+
+    def test_a_malformed_supplied_record_cannot_reach_the_stop_message(self):
+        """FAILS BEFORE THE FIX: an unhashable entry raised out of the operator message."""
+        step = _validated([], redundant_mitigations=[["none"]])
+        outcome, _msg, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
+        assert (outcome, reason) == ("agent_stop", "agent_requested")
 
     def test_the_model_cannot_claim_it_either(self):
         step = AgentStep.from_dict(
@@ -316,6 +328,25 @@ class TestTheLogRecord:
             "proposal_redundant",
             "proposal_redundant",
         )
+
+    def test_a_supplied_record_cannot_claim_the_loops_outcome(self, loop_env):
+        """FAILS BEFORE THE FIX: recorded as proposal_redundant with nothing removed."""
+        result, records = loop_env(_Scripted(_step([], redundant_mitigations=["none"])))
+        stopped = next(r for r in records if r["type"] == "search_stopped")
+        assert (result.outcome, stopped["stop_reason"]) == ("agent_stop", "agent_requested")
+        for record in records:
+            assert "redundant_mitigations" not in record
+
+    def test_a_supplied_name_is_not_logged_as_removed(self, loop_env):
+        """FAILS BEFORE THE FIX: a name validation never checked reached the log."""
+        _result, records = loop_env(
+            _Scripted(
+                _step(["tf32_off"], redundant_mitigations=["not a name"]),
+                _step([], stop=True, hypothesis="done"),
+            )
+        )
+        for record in records:
+            assert "redundant_mitigations" not in record
 
     def test_a_repeat_is_recorded_and_the_search_continues(self, loop_env, monkeypatch):
         """Through the shipped parser and filter, which keep repeats for validation."""

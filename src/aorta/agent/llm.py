@@ -183,7 +183,7 @@ class AgentStep:
     #: always on the axis, and every repeat of a name already kept. Not
     #: ``unresolved_mitigations``, which holds names that resolved to nothing;
     #: these are valid, and nothing declined them. Set by validation, never by
-    #: the model.
+    #: the model, and a value the proposer supplies is discarded.
     redundant_mitigations: list[str] = field(default_factory=list)
 
     @classmethod
