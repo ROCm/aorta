@@ -32,6 +32,7 @@ from aorta.chat.runs import (
     render_artifact,
 )
 from aorta.chat.tools._sandbox import RUNS_ROOT_LABEL, resolve_within
+from aorta.chat.tools.outcome import tool_failure
 
 #: Cap on one tool's return, mirroring ``read_file``'s 8000. A full matrix for a
 #: wide sweep renders longer than any answer needs, and the untruncated text is
@@ -70,11 +71,11 @@ def list_runs(path: str = ".") -> str:
     try:
         target = _resolve_safe(path)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return tool_failure(f"Error: {exc}")
     if not target.exists():
-        return f"Error: path '{path}' does not exist."
+        return tool_failure(f"Error: path '{path}' does not exist.")
     if not target.is_dir():
-        return f"Error: '{path}' is not a directory."
+        return tool_failure(f"Error: '{path}' is not a directory.")
 
     root = settings.runs_root
     run_dirs = find_run_dirs(target)
@@ -96,9 +97,9 @@ def _read_one(path: str, kind: str, label: str) -> str:
     try:
         target = _resolve_safe(path)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return tool_failure(f"Error: {exc}")
     if not target.exists():
-        return f"Error: path '{path}' does not exist."
+        return tool_failure(f"Error: path '{path}' does not exist.")
 
     if target.is_dir():
         # Given a run directory, find the artifact in it rather than making the
@@ -108,7 +109,7 @@ def _read_one(path: str, kind: str, label: str) -> str:
         # resolves to env.json every time rather than varying per filesystem.
         candidates = [p for p, k in iter_artifacts(target, max_depth=1) if k == kind]
         if not candidates:
-            return (
+            return tool_failure(
                 f"Error: no {label} artifact in '{path}'. "
                 "Use list_runs to see which directories have one."
             )
@@ -120,7 +121,7 @@ def _read_one(path: str, kind: str, label: str) -> str:
         # Not a partial artifact but an absent or unparseable one, which is
         # worth reporting as-is: a truncated matrix.json usually means the run
         # died mid-write, and that is itself the answer to the question.
-        return f"Error: {exc}"
+        return tool_failure(f"Error: {exc}")
 
 
 @tool
@@ -179,7 +180,7 @@ def search_run_artifacts(query: str, k: int | None = None) -> str:
     if k is None:
         k = settings.search_tool_k
     elif k <= 0:
-        return "Error: k must be a positive integer."
+        return tool_failure("Error: k must be a positive integer.")
 
     # Deferred: the RAG stack is heavier than the readers above, and the two
     # direct readers must stay usable when no run collection has been built.
@@ -188,7 +189,7 @@ def search_run_artifacts(query: str, k: int | None = None) -> str:
     try:
         docs = search_run_docs(query, k)
     except (RunCollectionMissingError, FileNotFoundError) as exc:
-        return f"Error: {exc}"
+        return tool_failure(f"Error: {exc}")
 
     if not docs:
         return "No matching run artifacts found in the index."

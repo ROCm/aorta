@@ -101,11 +101,11 @@ screen is never empty while the first real node runs.
 
 | Node | Shown as |
 | --- | --- |
-| `router` | Deciding whether this needs a job |
-| `select` | Choosing a diagnostic tool |
-| `plan` | Planning the steps |
-| `act` | Running tools |
-| `critic` | Checking the answer |
+| `router` | Understanding the request |
+| `select` | Choosing a diagnostic approach |
+| `plan` | Planning the investigation |
+| `act` | Gathering diagnostic evidence |
+| `critic` | Verifying the answer |
 
 Nodes not listed here render nothing: plumbing like `retrieve` stays out of the
 way rather than reporting itself as progress.
@@ -118,11 +118,17 @@ the instant it began, and the wait the announcement exists to explain was the
 part the UI showed as over. The completion is emitted from a `finally`, because
 a step retained until it arrives is only safe if it always arrives.
 
-Each announcement carries the tool's name, an id tying the pair together, and on
-the completion how long the call took. It deliberately does not carry the
-arguments: for `triage_kernel_source` those are the user's entire pasted kernel,
-and the step renders the name. The id is there because one turn can call the
-same tool more than once, and closing by name alone would end the wrong step.
+Each announcement carries an internal tool identifier, an id tying the pair
+together, and on completion how long the call took. It deliberately does not
+carry the arguments. The UI translates the identifier into a plain-language
+activity such as "Analyzing the GPU assembly"; neither the identifier nor any
+arguments are rendered. The id is there because one turn can call the same
+capability more than once, and closing by name alone would end the wrong step.
+
+Completed tool-progress rows are removed after the final answer is visible.
+They explain a long wait while it is happening, but the answer is the durable
+record afterward. Interrupted or failed rows remain so a user can see where the
+turn stopped.
 
 Progress is best-effort. If the browser has gone — a closed tab during a
 five-minute job — reporting fails, the failure is logged once, and the run

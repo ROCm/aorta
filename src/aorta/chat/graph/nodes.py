@@ -30,6 +30,7 @@ from aorta.chat.plugins import ChatTool, enabled_builtins, load_chat_tools
 from aorta.chat.rag.repo_map import load_repo_map
 from aorta.chat.rag.retriever import get_retriever
 from aorta.chat.redaction import redact_for_send
+from aorta.chat.tools.outcome import tool_failure, tool_result_failed
 
 from langgraph.config import get_stream_writer
 
@@ -71,7 +72,7 @@ RULES:
    you think you can see the bug by reading it. Reading produces a guess, and a guess \
    that happens to be right is indistinguishable, to the person reading your answer, \
    from one that is not. Only say a thing was observed if a tool observed it.
-13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
+13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (describe the diagnostic in plain language, then give the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
 14. A tool tells you what happened; the user's own paste often tells you why. \
     When the tool has localised a failure but not explained it, and the reason \
     is visible in the code the user gave you, say so -- naming which line you \
@@ -88,6 +89,11 @@ RULES:
     to fix a wait. If you must show surrounding lines for context, copy them \
     character for character from what the user gave you, and never from what \
     you remember of it.
+16. Internal tool-call and Python function names are implementation details. \
+    In a final answer, describe what AORTA did in complete, user-facing \
+    sentences instead of exposing those identifiers. Name an internal \
+    identifier only when the user explicitly asks about that API or code. \
+    Identifiers from the user's own program remain evidence and should be named.
 
 RETRIEVED CONTEXT:
 {context}
@@ -591,15 +597,15 @@ async def _execute_tool(tool_name: str, kwargs: dict) -> str:
     tool_fn = TOOL_REGISTRY.get(name)
     if tool_fn is None:
         logger.warning("Model asked for unknown tool %r", tool_name)
-        return (
+        return tool_failure(
             f"Error: there is no tool named {name!r}. Available tools: "
             f"{', '.join(sorted(TOOL_REGISTRY))}."
         )
     try:
         result = await tool_fn.ainvoke(kwargs)
     except Exception as exc:
-        result = f"Tool error: {exc}"
-    return str(result)
+        return tool_failure(f"Tool error: {exc}")
+    return result if isinstance(result, str) else str(result)
 
 
 # ──────────────────── Router ─────────────────────
@@ -666,7 +672,6 @@ async def router_node(state: AgentState) -> dict[str, Any]:
 #: announcement it belongs to.
 _tool_calls = itertools.count(1)
 
-
 def _announce_tool(payload: dict) -> None:
     """Put a tool progress event on the stream, if anything is listening."""
     try:
@@ -716,10 +721,13 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
 
     worker = asyncio.create_task(run())
 
-    def announce_done(_worker: asyncio.Task) -> None:
-        # A callback on the work, not a finally on the waiter: cancellation of
-        # the chat task can no longer close the step while its executor callable
-        # and Slurm allocation are still alive.
+    def announce_done() -> None:
+        # Emit from this awaited producer, not a detached Task callback.
+        # LangGraph multiplexes custom events with node updates and accumulated
+        # state; a done callback can enqueue this event after the act node has
+        # returned and the final answer is already being rendered. The
+        # cancellation path below waits for the worker to stop, so reaching the
+        # finally means "done" is true on every exit path.
         payload = {
             "tool": name,
             "id": call,
@@ -731,9 +739,16 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
             # can run, so "stopped" is a fact rather than a request. The UI also
             # accepts "still running" from a producer with a bounded wait.
             payload["cancelled"] = "stopped"
+        elif worker.cancelled():
+            payload["failed"] = True
+        else:
+            failure = worker.exception()
+            if failure is not None:
+                payload["failed"] = True
+            elif tool_result_failed(worker.result()):
+                payload["failed"] = True
         _announce_tool(payload)
 
-    worker.add_done_callback(announce_done)
     try:
         # Shield keeps cancellation of this waiter from cancelling the Task
         # that represents the still-running executor callable.
@@ -752,6 +767,9 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
             except Exception:
                 break
         raise
+    finally:
+        if worker.done():
+            announce_done()
 
 
 
@@ -1656,7 +1674,8 @@ _FINAL_ANSWER_MSG = (
     "command output you saw; the answer to the question as far as you can give "
     "it; and, if you were part-way through something, exactly what remains and "
     "the commands the user should run to finish it. Do not promise further "
-    "work, and do not ask to continue."
+    "work, and do not ask to continue. Describe evidence-gathering in plain "
+    "language and do not expose internal tool-call names."
 )
 
 
@@ -2686,6 +2705,9 @@ Check for these problems:
 1. Commands referencing scripts or files that were NOT found by the tools
 2. Invented flags, arguments, or paths not present in the actual codebase
 3. Commands that contradict what the tools revealed about the codebase
+4. Internal tool-call names exposed as user-facing process descriptions. The \
+response should explain what AORTA did in plain language unless the user \
+explicitly asked about that tool API.
 
 Code the user supplied is evidence too, and reading it is not inventing. If the
 response points at something visible in the user's own paste -- a learning rate,
