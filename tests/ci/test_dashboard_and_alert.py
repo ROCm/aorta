@@ -2413,18 +2413,11 @@ def test_the_scoped_refresh_reaches_the_container_as_environment():
     the `run` body would let a dispatch value close the quote and run arbitrary
     commands on the self-hosted GPU runner. Inputs must arrive as env vars.
 
-    Scoped to the four workflows this gating change owns. `gemm-sweep-analysis`
-    and `rccl-warp-speed-analysis` interpolate dispatch inputs into shell bodies
-    today; that is pre-existing and out of scope here, not an endorsement.
+    Checked over every workflow rather than the ones this gating change owns:
+    any dispatch or `workflow_call` input is the same free text.
     """
-    owned = (
-        "refresh-baselines.yml",
-        "eval-reusable.yml",
-        "nightly-eval.yml",
-        "bump-validate.yml",
-    )
-    for name in owned:
-        for job_name, job in (_load_workflow(name).get("jobs") or {}).items():
+    for name, doc in _all_workflow_docs().items():
+        for job_name, job in (doc.get("jobs") or {}).items():
             for step in job.get("steps") or []:
                 run = step.get("run") or ""
                 leaked = re.findall(r"\$\{\{[^}]*\binputs\.[A-Za-z0-9_]+[^}]*\}\}", run)

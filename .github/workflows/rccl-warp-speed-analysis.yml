@@ -51,40 +51,43 @@ jobs:
           ref: ${{ github.ref }}
           path: aorta
 
-      # Security: Validate and sanitize all user inputs
+      # Security: Validate and sanitize all user inputs. They arrive as env
+      # vars because `${{ }}` is substituted before bash runs, which would let
+      # a value escape its quotes before any of the checks below could see it.
       - name: Validate inputs
         id: validate
+        env:
+          CONFIG_PAIRS: ${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}
+          BASELINE_CONFIG: ${{ github.event.inputs.baseline_config || '56,256' }}
+          TRAINING_CONFIG: ${{ github.event.inputs.training_config || 'config/single_node/gemm_overlap_comm.yaml' }}
+          GPU_TARGET: ${{ github.event.inputs.gpu_target || 'gfx950' }}
+          RCCL_BRANCH: ${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}
         run: |
           # Validate config_pairs format (CU,threads space-separated pairs)
-          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
           if ! echo "$CONFIG_PAIRS" | grep -qE '^[0-9]+,[0-9]+( [0-9]+,[0-9]+)*$'; then
             echo "Error: Invalid config_pairs format. Must be space-separated CU,threads pairs"
             exit 1
           fi
 
           # Validate baseline_config format (CU,threads)
-          BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
           if ! echo "$BASELINE_CONFIG" | grep -qE '^[0-9]+,[0-9]+$'; then
             echo "Error: Invalid baseline_config format. Must be CU,threads"
             exit 1
           fi
 
           # Validate training_config path (prevent path traversal)
-          TRAINING_CONFIG="${{ github.event.inputs.training_config || 'config/single_node/gemm_overlap_comm.yaml' }}"
           if echo "$TRAINING_CONFIG" | grep -qE '(\.\.\/|^\/|\$|`|\||;|&)'; then
             echo "Error: Invalid training_config path"
             exit 1
           fi
 
           # Validate gpu_target (alphanumeric only)
-          GPU_TARGET="${{ github.event.inputs.gpu_target || 'gfx950' }}"
           if ! echo "$GPU_TARGET" | grep -qE '^[a-zA-Z0-9]+$'; then
             echo "Error: Invalid gpu_target. Must be alphanumeric"
             exit 1
           fi
 
           # Validate rccl_branch (alphanumeric, dashes, underscores only)
-          RCCL_BRANCH="${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}"
           if ! echo "$RCCL_BRANCH" | grep -qE '^[a-zA-Z0-9_-]+$'; then
             echo "Error: Invalid rccl_branch name"
             exit 1
