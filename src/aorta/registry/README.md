@@ -492,11 +492,12 @@ refer to them. See aorta#511.
 | `fa_prefer_aotriton` | `TORCH_ROCM_FA_PREFER_CK=0` reads as unset, and unset already means AOTriton | unless the environment exports `1` on a stack where `fa_prefer_ck` can act |
 | `hsa_enable_cache` | `HSA_DISABLE_CACHE=0` is libhsakmt's default | unless the environment exports any value other than exactly `0`, even an empty one |
 | `hsa_no_scratch_reclaim` | the image already exports `HSA_NO_SCRATCH_RECLAIM=1` | `rocm/primus` images |
-| `rccl_gfx942_cheap_fence_off` | RCCL 10.0 turns the cheap fence off by default | RCCL 10.0; it acts on RCCL 7.1 and 7.2 |
+| `rccl_gfx942_cheap_fence_off` | RCCL 10.0 turns the cheap fence off by default | RCCL 10.0; it acts on RCCL 7.1.0 through 7.2 |
 
 `rccl_gfx942_cheap_fence_off` keeps its original name and sets both
-`RCCL_GFX9_CHEAP_FENCE_OFF`, the variable RCCL has read since 7.2, and
-`RCCL_GFX942_CHEAP_FENCE_OFF`, the spelling RCCL 7.1 reads.
+`RCCL_GFX9_CHEAP_FENCE_OFF`, the variable RCCL has read since ROCm 7.1.1, and
+`RCCL_GFX942_CHEAP_FENCE_OFF`, the spelling only ROCm 7.1.0 reads. ROCm 7.0.2
+and earlier have neither.
 
 `nccl_launch_order_implicit` is a different case: it acts, and has been seen
 to crash every rank (aorta#512).

@@ -7,8 +7,8 @@ like a mitigation that was tried and did not help -- a second baseline under a
 different name, which is the failure the probe harness exists to prevent.
 
 ``tf32_off`` (aorta#500) is in that state on the stack probes run on today.
-``rccl_gfx942_cheap_fence_off`` was too, until it was also pointed at the name RCCL
-7.2 renamed its variable to (aorta#511). Both were found the expensive way, by
+``rccl_gfx942_cheap_fence_off`` was too, until it was also pointed at the name ROCm
+7.1.1 renamed its variable to (aorta#511). Both were found the expensive way, by
 building a scenario around the knob and watching it not invert. This check
 finds them in milliseconds.
 
@@ -155,8 +155,8 @@ KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
     ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"): Exemption(
         claimed_consumer="librccl.so",
         reason=(
-            "The pre-7.2 spelling, read by RCCL 7.1 and earlier and kept so the "
-            "entry still acts there. Newer RCCL reads RCCL_GFX9_CHEAP_FENCE_OFF, "
+            "The spelling only ROCm 7.1.0's RCCL reads, kept so the entry still "
+            "acts there. ROCm 7.1.1 and later read RCCL_GFX9_CHEAP_FENCE_OFF, "
             "which the same entry also sets."
         ),
     ),
