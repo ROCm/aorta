@@ -28,6 +28,9 @@ ticket: PROBE-188-SMOKE
 
 trials: 2
 
+# `echo hi` reads nothing, so both cells pass alike. The second cell exercises
+# cell synthesis and env stamping, not a mitigation; give a real workload a
+# built-in it reads.
 mitigation_axis:
   - none
   - pytorch_no_cuda_memory_caching
