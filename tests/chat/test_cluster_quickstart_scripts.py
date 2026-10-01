@@ -53,6 +53,10 @@ def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
     assert "--enable-auto-tool-choice" in source
     assert "--tool-call-parser qwen3_xml" in source
     assert '"aorta_tool_protocol_probe"' in source
+    assert "PROGRESS_INTERVAL=30" in source
+    assert "--verbose" in source
+    assert "Still waiting for Qwen" in source
+    assert "Qwen is ready after %s" in source
     assert 'PENDING_FILE="${RUNTIME_DIR}/qwen38-pending-job"' in source
     assert 'LOCK_DIR="${RUNTIME_DIR}/qwen38-launch.lock"' in source
     assert 'while ! mkdir "$LOCK_DIR"' in source
