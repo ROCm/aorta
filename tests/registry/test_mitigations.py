@@ -37,7 +37,10 @@ PROBE_FLAG_BUILTIN_EXPECTED: dict[str, dict[str, str]] = {
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     },
     "pytorch_no_cuda_memory_caching": {"PYTORCH_NO_CUDA_MEMORY_CACHING": "1"},
-    "rccl_gfx942_cheap_fence_off": {"RCCL_GFX9_CHEAP_FENCE_OFF": "1"},
+    "rccl_gfx942_cheap_fence_off": {
+        "RCCL_GFX9_CHEAP_FENCE_OFF": "1",
+        "RCCL_GFX942_CHEAP_FENCE_OFF": "1",
+    },
     "roc_aql_queue_size_1024": {"ROC_AQL_QUEUE_SIZE": "1024"},
     "roc_signal_pool_16k": {"ROC_SIGNAL_POOL_SIZE": "16384"},
 }

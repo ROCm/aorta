@@ -83,10 +83,12 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
         "NCCL_LAUNCH_ORDER_IMPLICIT": "1",
     },
     # RCCL 7.2 renamed RCCL_GFX942_CHEAP_FENCE_OFF to RCCL_GFX9_CHEAP_FENCE_OFF;
-    # the entry keeps its name so recipes and archived cells still resolve.
-    # RCCL 10.0 defaults the variable to 1, so there it re-asserts the default.
+    # both are set so the entry acts on RCCL 7.1 and 7.2, and it keeps its name
+    # so recipes and archived cells still resolve. RCCL 10.0 defaults the new
+    # variable to 1, so there it re-asserts the default.
     "rccl_gfx942_cheap_fence_off": {
         "RCCL_GFX9_CHEAP_FENCE_OFF": "1",
+        "RCCL_GFX942_CHEAP_FENCE_OFF": "1",
     },
     # --- PyTorch CCA ---
     "pytorch_no_cuda_memory_caching": {
