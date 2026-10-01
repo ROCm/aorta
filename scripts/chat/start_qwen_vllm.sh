@@ -21,6 +21,8 @@ STARTUP_TIMEOUT="${AORTA_QWEN_STARTUP_TIMEOUT:-900}"
 
 MODE="start"
 WORKER=false
+VERBOSE=false
+PROGRESS_INTERVAL=30
 
 usage() {
   cat <<'EOF'
@@ -44,6 +46,7 @@ Options:
   --port-start PORT      First candidate model port (minimum: 8001).
   --port-end PORT        Last candidate model port.
   --startup-timeout SEC  Maximum model startup wait.
+  --verbose              Print every five-second startup poll.
   -h, --help             Show this help.
 
 Environment variables with the AORTA_QWEN_* names shown by the defaults near
@@ -62,6 +65,15 @@ require_command() {
 
 is_uint() {
   [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+format_duration() {
+  local total="$1"
+  if ((total >= 60)); then
+    printf '%dm%02ds' "$((total / 60))" "$((total % 60))"
+  else
+    printf '%ds' "$total"
+  fi
 }
 
 remote_command() {
@@ -157,6 +169,10 @@ while (($#)); do
     --startup-timeout)
       STARTUP_TIMEOUT="${2:?--startup-timeout requires a value}"
       shift 2
+      ;;
+    --verbose)
+      VERBOSE=true
+      shift
       ;;
     -h|--help)
       usage
@@ -344,6 +360,7 @@ if [[ "$MODE" == "stop" ]]; then
   exit 0
 fi
 
+startup_started=$SECONDS
 active_job=""
 if [[ -s "$ENDPOINT_FILE" ]]; then
   # shellcheck disable=SC1090
@@ -446,6 +463,8 @@ remaining_startup_budget() {
   printf '%s\n' "$remaining"
 }
 
+last_status=""
+last_progress_report=$SECONDS
 while [[ ! -s "$ENDPOINT_FILE" ]]; do
   if ! status="$(job_status "$active_job")"; then
     die "could not query Slurm job $active_job through $LOGIN_HOST"
@@ -455,7 +474,17 @@ while [[ ! -s "$ENDPOINT_FILE" ]]; do
       "sacct -j ${active_job} -o JobID,State,ExitCode" || true
     die "vLLM job $active_job exited before publishing an endpoint"
   }
-  printf '%s\n' "$status"
+  if [[ "$status" != "$last_status" ]]; then
+    printf '%s\n' "$status"
+    last_status="$status"
+    last_progress_report=$SECONDS
+  elif [[ "$VERBOSE" == true ]]; then
+    printf '%s\n' "$status"
+  elif ((SECONDS - last_progress_report >= PROGRESS_INTERVAL)); then
+    printf 'Still waiting for the model endpoint (%s elapsed).\n' \
+      "$(format_duration "$((SECONDS - startup_started))")"
+    last_progress_report=$SECONDS
+  fi
   ((SECONDS < deadline)) || die "timed out waiting for the vLLM endpoint file"
   sleep 5
 done
@@ -472,13 +501,26 @@ if [[ -f "$PENDING_FILE" ]] &&
 fi
 
 health_url="${AORTA_CHAT_VLLM_BASE_URL%/v1}/health"
+health_wait_announced=false
+last_progress_report=$SECONDS
 while ! curl --fail --silent --max-time 5 "$health_url" >/dev/null 2>&1; do
   if ! status="$(job_status "$active_job")"; then
     die "could not query Slurm job $active_job through $LOGIN_HOST"
   fi
   [[ -n "$status" ]] || die "vLLM job $active_job exited before becoming ready"
   ((SECONDS < deadline)) || die "timed out waiting for $health_url"
-  printf 'Waiting for Qwen at %s ...\n' "$health_url"
+  if [[ "$health_wait_announced" == false ]]; then
+    printf 'Waiting for Qwen at %s (cold startup can take several minutes).\n' \
+      "$health_url"
+    health_wait_announced=true
+    last_progress_report=$SECONDS
+  elif [[ "$VERBOSE" == true ]]; then
+    printf 'Waiting for Qwen at %s ...\n' "$health_url"
+  elif ((SECONDS - last_progress_report >= PROGRESS_INTERVAL)); then
+    printf 'Still waiting for Qwen (%s elapsed).\n' \
+      "$(format_duration "$((SECONDS - startup_started))")"
+    last_progress_report=$SECONDS
+  fi
   sleep 5
 done
 
@@ -592,7 +634,8 @@ if arguments.get("source") != "READY":
 keep_job=true
 trap - EXIT INT TERM
 
-printf '\nQwen is ready.\n'
+printf '\nQwen is ready after %s.\n' \
+  "$(format_duration "$((SECONDS - startup_started))")"
 printf '  job:      %s\n' "$active_job"
 printf '  endpoint: %s\n' "$AORTA_CHAT_VLLM_BASE_URL"
 printf '  env file: %s\n' "$ENDPOINT_FILE"
