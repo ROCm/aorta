@@ -46,6 +46,7 @@ def _cell(name: str, verdict: str = "pass") -> dict:
 
 
 BASELINE_FAILS = _cell("none-none", "fail")
+BASELINE_FAILS_ON_DISK = ("none-none", "fail")
 
 
 # ── the rule ──────────────────────────────────────────────────────────────
@@ -111,12 +112,16 @@ class TestPrecedence:
 
 
 def _write_cells(run_dir, cells):
-    for name, verdict in cells:
-        trial = run_dir / name / "trial_0"
-        trial.mkdir(parents=True)
-        (trial / "result.json").write_text(
-            json.dumps({"cell_name": name, "verdict": verdict}), encoding="utf-8"
-        )
+    """Write each cell's trials; a tuple of verdicts writes one trial per entry."""
+    for name, verdicts in cells:
+        if isinstance(verdicts, str):
+            verdicts = (verdicts,)
+        for i, verdict in enumerate(verdicts):
+            trial = run_dir / name / f"trial_{i}"
+            trial.mkdir(parents=True)
+            (trial / "result.json").write_text(
+                json.dumps({"cell_name": name, "verdict": verdict}), encoding="utf-8"
+            )
 
 
 class TestWake:
@@ -133,8 +138,116 @@ class TestWake:
         )
         assert wake(tmp_path, ticket="A504").winning_mitigation == "xnack"
 
+    @pytest.mark.parametrize("passing", ["none-hip_launch_blocking", "tf32_off-none"])
+    def test_a_pass_beside_a_passing_baseline_is_not_rebuilt_as_a_win(self, tmp_path, passing):
+        _write_cells(tmp_path, [("none-none", "pass"), (passing, "pass")])
+        state = wake(tmp_path, ticket="A504")
+        assert state.converged is False
+        assert state.winning_mitigation is None
 
-# ── the loop ──────────────────────────────────────────────────────────────
+    @pytest.mark.parametrize(
+        "baseline",
+        [[], [("none-none", ("pass", "fail"))]],
+        ids=["no baseline verdict yet", "baseline passing one trial of two"],
+    )
+    def test_a_win_beside_a_baseline_that_did_not_pass_is_rebuilt(self, tmp_path, baseline):
+        _write_cells(tmp_path, [*baseline, ("none-hip_launch_blocking", "pass")])
+        state = wake(tmp_path, ticket="A504")
+        assert state.converged is True
+        assert state.winning_mitigation == "hip_launch_blocking"
+
+
+#: Matrices a live run can leave on disk. The baseline-pass rows are the ones a
+#: resume could misread: the live loop stops on them before it looks for a win.
+RESUME_MATRICES = {
+    "baseline and a behavioural diagnostic": (
+        [("none-none", "pass"), ("none-hip_launch_blocking", "pass")],
+        ("baseline_pass", None),
+    ),
+    "baseline and a mitigation": (
+        [("none-none", "pass"), ("tf32_off-none", "pass")],
+        ("baseline_pass", None),
+    ),
+    "baseline and logging": (
+        [("none-none", "pass"), ("none-amd_log_level_4", "pass")],
+        ("baseline_pass", None),
+    ),
+    "baseline alone": ([("none-none", "pass")], ("baseline_pass", None)),
+    "baseline passing one trial of two": (
+        [("none-none", ("pass", "fail")), ("none-hip_launch_blocking", "pass")],
+        ("converged", "hip_launch_blocking"),
+    ),
+    "no baseline verdict yet": (
+        [("none-hip_launch_blocking", "pass")],
+        ("converged", "hip_launch_blocking"),
+    ),
+    "a behavioural diagnostic": (
+        [BASELINE_FAILS_ON_DISK, ("none-hip_launch_blocking", "pass")],
+        ("converged", "hip_launch_blocking"),
+    ),
+    "a mitigation beside a diagnostic": (
+        [BASELINE_FAILS_ON_DISK, ("none-hip_launch_blocking", "pass"), ("xnack-none", "pass")],
+        ("converged", "xnack"),
+    ),
+    "logging alone": (
+        [BASELINE_FAILS_ON_DISK, ("none-amd_log_level_4", "pass")],
+        ("agent_stop", None),
+    ),
+    "both axes off baseline": (
+        [BASELINE_FAILS_ON_DISK, ("xnack-hip_launch_blocking", "pass")],
+        ("agent_stop", None),
+    ),
+    "nothing passes": (
+        [BASELINE_FAILS_ON_DISK, ("none-hip_launch_blocking", "fail")],
+        ("agent_stop", None),
+    ),
+}
+
+
+class TestResumeAgreesWithTheLiveRun:
+    """A resumed run reports the outcome and the winner the live run reported.
+
+    The live run starts on an empty run dir and its matrix lands on disk only
+    when the probe runs, as in production; the resume reads that same dir back
+    through ``wake()``. Nothing but ``run_recipe`` is stubbed.
+    """
+
+    @pytest.mark.parametrize(
+        ("cells", "expected"), RESUME_MATRICES.values(), ids=RESUME_MATRICES.keys()
+    )
+    def test_live_and_resumed_attribution_agree(self, monkeypatch, tmp_path, cells, expected):
+        import aorta.agent.loop as loop_mod
+
+        run_dir = tmp_path / "out" / "A504"
+
+        def _probe(*_args, **_kwargs):
+            if not (run_dir / cells[0][0]).exists():
+                _write_cells(run_dir, cells)
+            return run_dir
+
+        monkeypatch.setattr(loop_mod, "run_recipe", _probe)
+        config = AgentConfig(
+            output_dir=tmp_path / "out",
+            ticket="A504",
+            subprocess_argv=("echo", "hi"),
+            policy=AgentPolicy(max_iterations=2),
+            mitigations_allowlist=("none", "tf32_off"),
+        )
+
+        def _attribution():
+            result = run_agent_loop(config, proposer=_Stops())
+            report = result.report_path.read_text(encoding="utf-8")
+            return (
+                result.outcome,
+                result.state.converged,
+                result.state.winning_mitigation,
+                "Winning mitigation" in report,
+            )
+
+        live = _attribution()
+        outcome, winner = expected
+        assert live == (outcome, winner is not None, winner, winner is not None)
+        assert _attribution() == live
 
 
 class _NeverCalled:

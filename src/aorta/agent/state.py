@@ -241,7 +241,10 @@ def wake(run_dir: Path, *, ticket: str) -> AgentState:
         mitigation = cell_name.rsplit("-", 1)[0]
         if mitigation != _BASELINE_NAME and mitigation not in state.tried_mitigations:
             state.tried_mitigations.append(mitigation)
-    win = winning_cell(verdicts.items())
+    # The loop ends on a passing baseline before it looks for a win, so a pass
+    # beside one is not a fix on resume either.
+    baseline_passed = verdicts.get(f"{_BASELINE_NAME}-{_BASELINE_NAME}") == "pass"
+    win = None if baseline_passed else winning_cell(verdicts.items())
     if win is not None and state.winning_mitigation is None:
         state.winning_mitigation = win[1]
         state.converged = True
