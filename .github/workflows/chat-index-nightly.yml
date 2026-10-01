@@ -19,7 +19,9 @@ permissions:
 
 # nightly.yml's group. This run starts only after the wheel run has finished
 # force-moving the dev-wheels tag, and the shared group keeps it from racing a
-# later wheel run or a cleanup_releases.yml prune on the same release.
+# later wheel run or a cleanup_releases.yml prune on the same release. It does
+# not keep a wheel run already waiting on the group from going first; the tag
+# check before the upload handles that.
 concurrency:
   group: dev-wheels-release
   cancel-in-progress: false
@@ -161,8 +163,38 @@ jobs:
           AORTA_CHAT_INDEX_PATH: index-out/aorta-chat-index.sqlite
         run: aorta chat index eval || echo "::warning::Retrieval eval failed; index still published."
 
-      - name: Publish the rolling main index
+      # This run joins dev-wheels-release only after the wheel run that triggered
+      # it has completed and released the group, so a wheel run already waiting
+      # on the group goes first and moves the tag on. The upload attaches by tag
+      # name, so it would put this commit's index on that newer commit. Publish
+      # only while the tag still names the commit the index was built from; the
+      # newer wheel run has an index run of its own.
+      - name: Check dev-wheels still points at the built commit
+        id: tag
         if: steps.digest.outputs.changed == 'true'
+        env:
+          BUILT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -uo pipefail
+          rc=0
+          refs="$(git ls-remote --exit-code origin refs/tags/dev-wheels)" || rc=$?
+          case "${rc}" in
+            0) tagged="$(printf '%s\n' "${refs}" | awk '$2 == "refs/tags/dev-wheels" { print $1 }')" ;;
+            2) tagged="" ;;
+            *)
+              echo "::error::Could not read the dev-wheels tag (git ls-remote exited ${rc})."
+              exit 1
+              ;;
+          esac
+          if [ -n "${tagged}" ] && [ "${tagged}" = "${BUILT_SHA}" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::dev-wheels points at ${tagged:-nothing}, not ${BUILT_SHA}, which this index was built from. A later wheel run moved it; skipping the upload, which that run's index run makes instead."
+          fi
+
+      - name: Publish the rolling main index
+        if: steps.digest.outputs.changed == 'true' && steps.tag.outputs.current == 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: dev-wheels
