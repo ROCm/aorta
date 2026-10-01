@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
@@ -50,49 +49,119 @@ def _unavailable_message(reason: str) -> str:
 #: What each node contributes that is worth showing. A node absent from this
 #: map renders nothing, which keeps plumbing like retrieve out of the way.
 _NODE_TITLES = {
-    "router": "Deciding whether this needs a job",
-    "select": "Choosing a diagnostic tool",
-    "plan": "Planning the steps",
-    "act": "Running tools",
-    "critic": "Checking the answer",
+    "router": "Understanding the request",
+    "select": "Choosing a diagnostic approach",
+    "plan": "Planning the investigation",
+    "act": "Gathering diagnostic evidence",
+    "critic": "Verifying the answer",
 }
 
+# User-facing activity, never Python function names. Unknown/plugin tools use
+# the generic fallback rather than leaking an implementation identifier.
+_TOOL_PROGRESS = {
+    "list_files": (
+        "Inspecting the project structure",
+        "AORTA is checking which project files and directories are available.",
+    ),
+    "read_file": (
+        "Reading relevant source",
+        "AORTA is reading a relevant project file for concrete evidence.",
+    ),
+    "search_code": (
+        "Searching the codebase",
+        "AORTA is searching the codebase for semantically related implementation details.",
+    ),
+    "grep_code": (
+        "Searching for exact matches",
+        "AORTA is checking the codebase for exact names and patterns.",
+    ),
+    "search_repo_map": (
+        "Locating relevant code",
+        "AORTA is checking the project index for relevant functions and classes.",
+    ),
+    "list_runs": (
+        "Finding previous runs",
+        "AORTA is locating previous run artifacts that may contain useful evidence.",
+    ),
+    "read_run_matrix": (
+        "Reviewing the run matrix",
+        "AORTA is reviewing the recorded outcomes for each tested configuration.",
+    ),
+    "read_run_env": (
+        "Reviewing the recorded environment",
+        "AORTA is checking the software and hardware environment captured for the run.",
+    ),
+    "search_run_artifacts": (
+        "Searching previous run evidence",
+        "AORTA is searching recorded run artifacts for matching symptoms.",
+    ),
+    "list_cluster_jobs": (
+        "Finding recent cluster diagnostics",
+        "AORTA is checking recent cluster diagnostics for an existing result.",
+    ),
+    "read_autopsy_report": (
+        "Reviewing the diagnostic report",
+        "AORTA is reading the completed diagnostic report and its supporting evidence.",
+    ),
+    "triage_assembly_source": (
+        "Analyzing the GPU assembly",
+        "AORTA is assembling the supplied GPU code and checking instruction dependencies for missing waits.",
+    ),
+    "triage_kernel_source": (
+        "Checking the GPU kernel for races",
+        "AORTA is compiling and running the supplied kernel under GPU race diagnostics.",
+    ),
+    "triage_workload": (
+        "Running and diagnosing the workload",
+        "AORTA is running the supplied workload on the cluster and examining its logs and artifacts.",
+    ),
+    "run_terminal_command": (
+        "Running an approved diagnostic command",
+        "AORTA is running an allowlisted command to gather additional evidence.",
+    ),
+}
+_DEFAULT_TOOL_PROGRESS = (
+    "Gathering additional evidence",
+    "AORTA is using an analysis capability to gather additional evidence.",
+)
 
-def _as_code_block(text: str) -> str:
-    """Fence tool output so that none of it can escape the block.
 
-    Tool output is arbitrary -- ``read_file`` on any of this repository's
-    Markdown returns fences of its own -- and a fixed ``` opener ends at the
-    first one inside the content, leaving the rest to render as Markdown. The
-    fence has to be longer than the longest run the content contains.
-
-    An indented block would also contain it, but consecutive ones separated by
-    a blank line are a single block in CommonMark, which would run each tool's
-    output into the next.
-    """
-    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
-    fence = "`" * max(3, longest + 1)
-    return f"{fence}\n{text}\n{fence}"
+def _tool_progress(name: object) -> tuple[str, str]:
+    """Human-facing title and sentence for a tool progress event."""
+    return _TOOL_PROGRESS.get(str(name), _DEFAULT_TOOL_PROGRESS)
 
 
 def _node_reasoning(node: str, delta: dict) -> str:
-    """What a node recorded, in the words it recorded it."""
+    """A plain-language progress sentence without internal state or names."""
     if node == "router":
-        return f"Route: **{delta.get('route') or 'unknown'}**"
+        if delta.get("route") == "action":
+            return "This request needs diagnostic evidence before AORTA can answer."
+        if delta.get("route") == "question":
+            return "This request can be answered from the available project context."
+        return "AORTA is determining how to handle this request."
     if node == "select":
         tools = delta.get("candidate_tools") or []
-        why = delta.get("selection_rationale") or ""
         if not tools:
-            return why or "No tool matched; the agent will see the full list."
-        ranked = "\n".join(f"{i}. `{t}`" for i, t in enumerate(tools, 1))
-        return f"{why}\n\n{ranked}" if why else ranked
+            return "AORTA did not identify a specialized diagnostic and will use general evidence gathering."
+        activities = "\n".join(
+            f"{index}. {_tool_progress(tool)[0]}"
+            for index, tool in enumerate(tools, 1)
+        )
+        return f"AORTA selected this diagnostic approach:\n\n{activities}"
     if node == "plan":
-        return str(delta.get("plan") or "")
+        if not delta.get("plan"):
+            return ""
+        return "AORTA has planned which evidence to gather and in what order."
     if node == "act":
         trace = delta.get("tool_trace") or []
-        return "\n\n".join(_as_code_block(entry[:1500]) for entry in trace)
+        if not trace:
+            return ""
+        noun = "result" if len(trace) == 1 else "results"
+        return f"AORTA gathered {len(trace)} diagnostic {noun} for the answer."
     if node == "critic":
-        return str(delta.get("critic_feedback") or "Accepted.")
+        if delta.get("critic_feedback"):
+            return "The draft needed stronger evidence, so AORTA is revising it."
+        return "The answer is supported by the evidence gathered during this turn."
     return ""
 
 
@@ -122,6 +191,7 @@ class _ToolSteps:
 
     def __init__(self) -> None:
         self._open: dict[str, cl.Step] = {}
+        self._finished: list[cl.Step] = []
 
     async def handle(self, delta: dict) -> None:
         """Open a step on a tool's announcement, close it on its completion."""
@@ -138,9 +208,10 @@ class _ToolSteps:
                 delta.get("cancelled"),
             )
             return
-        step = cl.Step(name=f"Running {name}", type="tool")
+        title, activity = _tool_progress(name)
+        step = cl.Step(name=title, type="tool")
         step.start = utc_now()
-        step.output = f"`{name}`\n\nWork on the cluster can take several minutes."
+        step.output = activity
         await step.send()
         self._open[call] = step
 
@@ -148,18 +219,29 @@ class _ToolSteps:
         step = self._open.pop(call, None)
         if step is None:
             return  # a completion with nothing open; nothing to close
+        _, activity = _tool_progress(name)
         took = f" in {seconds:g}s" if isinstance(seconds, (int, float)) else ""
         if cancellation in {"stopped", True}:
-            step.output = f"`{name}` stopped after cancellation{took}."
+            step.output = f"{activity}\n\nThe operation stopped after cancellation{took}."
         elif cancellation == "still running":
             step.output = (
-                f"`{name}` cancellation requested{took}; its underlying work "
-                "is still running."
+                f"{activity}\n\nCancellation was requested{took}, but the "
+                "underlying work is still running."
             )
         else:
-            step.output = f"`{name}` finished{took}."
+            step.output = f"{activity}\n\nFinished{took}."
         step.end = utc_now()
         await step.update()
+        self._finished.append(step)
+
+    async def remove_finished(self) -> None:
+        """Remove completed progress rows after the final answer is visible."""
+        while self._finished:
+            step = self._finished.pop()
+            try:
+                await step.remove()
+            except Exception:  # noqa: BLE001 - a dead session must not affect the answer
+                logger.debug("Could not remove finished step %r", step.name, exc_info=True)
 
     async def close_all(self) -> None:
         """Leave nothing rendering as running once the turn is over.
@@ -483,6 +565,7 @@ async def on_message(message: cl.Message):
     await _retire_thinking()
     cl.user_session.set("history", history)
     await cl.Message(content=reply).send()
+    await running.remove_finished()
     await _deliver_notice(notice_state)
 
 

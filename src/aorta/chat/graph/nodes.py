@@ -71,7 +71,7 @@ RULES:
    you think you can see the bug by reading it. Reading produces a guess, and a guess \
    that happens to be right is indistinguishable, to the person reading your answer, \
    from one that is not. Only say a thing was observed if a tool observed it.
-13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
+13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (describe the diagnostic in plain language, then give the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
 14. A tool tells you what happened; the user's own paste often tells you why. \
     When the tool has localised a failure but not explained it, and the reason \
     is visible in the code the user gave you, say so -- naming which line you \
@@ -88,6 +88,11 @@ RULES:
     to fix a wait. If you must show surrounding lines for context, copy them \
     character for character from what the user gave you, and never from what \
     you remember of it.
+16. Internal tool-call and Python function names are implementation details. \
+    In a final answer, describe what AORTA did in complete, user-facing \
+    sentences instead of exposing those identifiers. Name an internal \
+    identifier only when the user explicitly asks about that API or code. \
+    Identifiers from the user's own program remain evidence and should be named.
 
 RETRIEVED CONTEXT:
 {context}
@@ -1661,7 +1666,8 @@ _FINAL_ANSWER_MSG = (
     "command output you saw; the answer to the question as far as you can give "
     "it; and, if you were part-way through something, exactly what remains and "
     "the commands the user should run to finish it. Do not promise further "
-    "work, and do not ask to continue."
+    "work, and do not ask to continue. Describe evidence-gathering in plain "
+    "language and do not expose internal tool-call names."
 )
 
 
@@ -2691,6 +2697,9 @@ Check for these problems:
 1. Commands referencing scripts or files that were NOT found by the tools
 2. Invented flags, arguments, or paths not present in the actual codebase
 3. Commands that contradict what the tools revealed about the codebase
+4. Internal tool-call names exposed as user-facing process descriptions. The \
+response should explain what AORTA did in plain language unless the user \
+explicitly asked about that tool API.
 
 Code the user supplied is evidence too, and reading it is not inventing. If the
 response points at something visible in the user's own paste -- a learning rate,
