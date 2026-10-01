@@ -51,6 +51,11 @@ it (#486).
    failure; comments + closes it when green.
 5. **Publish** (`publish` job on `ubuntu-latest`): appends
    `results/<date>.json` to the **`ci-results`** data branch (history only).
+   Only a run triggered by *Nightly wheels* writes that date key. A
+   `workflow_dispatch` has no upstream wheel run (`build.upstream_run_id` is
+   empty) and publishes to `results/dispatch/<date>-<run_id>.json` instead, so
+   it can never replace that night's scheduled record, and the dashboard's
+   per-day series does not see it.
 6. **Deploy** (`pages.yml`): a repo has a single Pages site, shared with the
    project docs, so one workflow owns the deploy. On main pushes, after each
    Nightly Evaluation completes, and on demand, `pages.yml` builds the Jekyll
@@ -263,6 +268,8 @@ The publish step keeps only the **most recent 180** `results/<date>.json` files 
 the `ci-results` data branch (older ones are pruned), and the dashboard renders at
 most the last 180 builds (`gen_dashboard.py --max-builds`). Files are tiny; adjust
 the cap in `nightly-eval.yml` / the flag if a longer window is wanted.
+Dispatched records under `results/dispatch/` have their own 180-file window and
+do not count against the scheduled one.
 
 The **sanitizer** nightly keeps its own rolling window on the `sanitizer-results`
 data branch, and it has **two** bounds rather than one:

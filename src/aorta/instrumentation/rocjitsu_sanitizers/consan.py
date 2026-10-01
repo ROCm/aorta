@@ -64,6 +64,13 @@ _SAMPLED_INCOMPLETE_COUNTS = (
     "sampled_unsupported_sync",
 )
 _KV = re.compile(r"(\w+)=(\S+)")
+_COVERAGE_SITE = f"{_CONSAN_PREFIX} coverage_site "
+# Where a conflict record puts the text offsets of its two accesses: the current
+# and Sampled renderers spell them one way, the Record/Replay renderer the other.
+_ACCESS_OFFSET_KEYS = (
+    ("first_instruction", "second_instruction"),
+    ("first_inst", "second_inst"),
+)
 # glibc's ld.so message when a needed DT_NEEDED library is not on any search
 # path. Written to stderr, and paired with exit 127 there it means the repro
 # never reached main -- see ``_launch_diagnostic``, which reads that stream only.
@@ -235,6 +242,59 @@ def _parse_waitcheck(
         tuple(resolved),
         "; ".join(analysis_errors) if analysis_errors else None,
     )
+
+
+def _text_offset(raw: str | None) -> int | None:
+    """A hex text offset, or None for the words the renderer writes instead."""
+    if raw is None or not raw.lower().startswith("0x"):
+        return None
+    try:
+        return int(raw, 16)
+    except ValueError:
+        return None
+
+
+def _site_containers(lines: list[str]) -> dict[tuple[str, int], set[tuple[str, str]]]:
+    """Every container an itemized coverage site places at a reader and offset."""
+    containers: dict[tuple[str, int], set[tuple[str, str]]] = {}
+    for raw_line in lines:
+        line = raw_line.strip()
+        if _COVERAGE_SITE not in line:
+            continue
+        fields = _kv(line)
+        offset = _text_offset(fields.get("text"))
+        if "reader" not in fields or offset is None or "container" not in fields:
+            continue
+        containers.setdefault((fields["reader"], offset), set()).add(
+            (fields["container"], fields.get("scope", ""))
+        )
+    return containers
+
+
+def _conflict_kernel(
+    fields: dict[str, str], containers: dict[tuple[str, int], set[tuple[str, str]]]
+) -> str | None:
+    """The kernel holding both accesses of a conflict record, if the log proves one.
+
+    A conflict names its accesses by reader and text offset, never by kernel, and
+    each itemized coverage site names the container at its offset. Both accesses
+    have to resolve, in the conflict's own reader, to the same kernel-scope
+    container: anything less leaves the kernel unknown rather than guessed.
+    """
+    keys = next((pair for pair in _ACCESS_OFFSET_KEYS if pair[0] in fields), None)
+    if keys is None:
+        return None
+    holders: set[tuple[str, str]] = set()
+    for key in keys:
+        offset = _text_offset(fields.get(key))
+        found = containers.get((fields.get("reader", ""), offset)) if offset is not None else None
+        if not found:
+            return None
+        holders |= found
+    if len(holders) != 1:
+        return None
+    ((container, scope),) = holders
+    return container if scope == "kernel" else None
 
 
 def _itemized_by_reader(findings: list[Finding]) -> dict[str, int]:
@@ -409,6 +469,7 @@ def parse_consan_output(
     sampled_details: list[Finding] = []
     replay_summaries: list[dict[str, str]] = []
     auto_reports: list[dict[str, str]] = []
+    containers = _site_containers(lines)
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -421,9 +482,13 @@ def parse_consan_output(
                 Finding(
                     sanitizer="consan",
                     severity=FindingSeverity.RACE,
-                    code=fields.get("kind", "record_replay_conflict"),
+                    code=(
+                        f"record_replay_conflict_kind_{fields['kind']}"
+                        if "kind" in fields
+                        else "record_replay_conflict"
+                    ),
                     message=line,
-                    kernel_name=fields.get("kernel"),
+                    kernel_name=fields.get("kernel") or _conflict_kernel(fields, containers),
                     code_object=fields.get("code_object"),
                     metadata=tuple(sorted(fields.items())),
                 )
@@ -435,7 +500,7 @@ def parse_consan_output(
                     severity=FindingSeverity.RACE,
                     code="sampled_conflict",
                     message=line,
-                    kernel_name=fields.get("kernel"),
+                    kernel_name=fields.get("kernel") or _conflict_kernel(fields, containers),
                     code_object=fields.get("code_object"),
                     metadata=tuple(sorted(fields.items())),
                 )

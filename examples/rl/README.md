@@ -88,7 +88,9 @@ python examples/rl/recipe_reward.py
 
 Grade real files. The novelty gate — which checks a candidate against the
 committed recipes so a memorised copy cannot score as a new one — is on by
-default; `--no-novelty-gate` turns it off.
+default; `--no-novelty-gate` turns it off. With the gate off the grade makes no
+novelty claim: `novelty_multiplier` and `memorised` are `null` in `--json`
+output, and the reward is the tier reward.
 
 ```bash
 python examples/rl/recipe_reward.py recipes/tokenspeed/tokenspeed-serve-load.yaml
