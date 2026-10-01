@@ -26,7 +26,11 @@ import importlib.util
 import pytest
 
 from aorta.chat.config import reset_settings
-from aorta.chat.graph.nodes import ANSWER_PROMPT, _build_system_message
+from aorta.chat.graph.nodes import (
+    ANSWER_PROMPT,
+    _CRITIC_VALIDATION_PROMPT,
+    _build_system_message,
+)
 
 _TRIAGE = ("triage_kernel_source", "triage_assembly_source", "triage_workload")
 
@@ -114,6 +118,21 @@ class TestTheContextStillInterpolates:
             assert "{diagnosis_scope}" not in text
             assert "{diagnostic_tools}" not in text
             assert "{context}" not in text
+
+
+class TestFinalAnswersHideImplementationNames:
+    def test_the_answer_rule_requires_plain_language(self, prompt):
+        text = " ".join(prompt(cluster_jobs=True).split())
+
+        assert "Internal tool-call and Python function names" in text
+        assert "complete, user-facing sentences" in text
+        assert "describe the diagnostic in plain language" in text
+
+    def test_the_critic_rejects_internal_names_as_process_descriptions(self):
+        text = " ".join(_CRITIC_VALIDATION_PROMPT.split())
+
+        assert "Internal tool-call names exposed" in text
+        assert "plain language" in text
 
 
 class TestTheToolFreePathSaysWhyItCannot:
