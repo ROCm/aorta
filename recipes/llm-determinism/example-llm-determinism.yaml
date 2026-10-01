@@ -58,8 +58,9 @@ cells:
       num_layers: 12
       capture_dir: ./llm_det_capture/bf16-12L
 
-  # Same shape as baseline but with tf32_off mitigation. Catches matmul
-  # paths whose determinism depends on TF32 reduction ordering.
+  # Same shape and depth as baseline-bf16-24L, plus tf32_off. DISABLE_TF32 is
+  # read by no ROCm or PyTorch library, and llm_determinism does not read it
+  # either, so this cell is a second baseline (aorta#500).
   - name: tf32_off-bf16-24L
     mitigations: [tf32_off]
     environment: local

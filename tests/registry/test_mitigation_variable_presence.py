@@ -144,10 +144,8 @@ KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
         claimed_consumer="libhipblaslt.so",
         reason=(
             "DISABLE_TF32 appears in no ROCm or torch binary; aorta#500. The "
-            "registry attributes it to hipBLASLt (registry/mitigations.py: "
-            "'consumed by hipBLASLt itself') and "
-            "instrumentation/env_knobs.py attributes it to pytorch, and "
-            "neither holds."
+            "registry once attributed it to hipBLASLt, the claim this entry "
+            "excuses; the entry is kept only so existing names resolve."
         ),
     ),
     ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"): Exemption(
@@ -2826,3 +2824,97 @@ def test_a_name_that_is_not_a_tail_does_not_flag_its_exemption(monkeypatch, tmp_
     assert NameEvidence(frozenset({name}), frozenset()).hosts_of(name) == frozenset(), (
         "a name is not the tail of itself"
     )
+
+
+def test_a_known_absent_variable_is_not_attributed_to_a_library_elsewhere():
+    """The repo must not contradict this list about who reads a variable.
+
+    ``DISABLE_TF32`` was excused here as read by nothing while
+    ``instrumentation/env_knobs.py`` attributed it to pytorch (aorta#500). A
+    captured knob may stay in that manifest, since a workload can read it, but
+    its ``library`` has to say so.
+    """
+    from aorta.instrumentation.env_knobs import ENV_KNOB_REGISTRY
+
+    absent = {variable for _, variable in KNOWN_ABSENT}
+    attributed = sorted(
+        (knob.name, knob.library)
+        for knob in ENV_KNOB_REGISTRY
+        if knob.name in absent and knob.library != "workload"
+    )
+    assert not attributed, (
+        f"{attributed}: these variables are in KNOWN_ABSENT, i.e. no scanned "
+        "library contains them, yet ENV_KNOB_REGISTRY names a library that "
+        "reads them. Correct the attribution or retire the exemption."
+    )
+
+
+#: ``(recipe, mitigation)`` pairs allowed to name a KNOWN_ABSENT mitigation,
+#: and why. Per pair, so a new dead name in an exempt recipe is still caught.
+_KNOWN_ABSENT_RECIPE_EXEMPTIONS = {
+    ("probe/probe-flag-sweep.yaml", "rccl_gfx942_cheap_fence_off"): (
+        "sweeps every runtime built-in by design, stack-conditional ones "
+        "included, so a cell its stack cannot read is expected there"
+    ),
+    ("llm-determinism/example-llm-determinism.yaml", "tf32_off"): (
+        "keeps its tf32_off cell, commented as a second baseline, so earlier "
+        "runs keep their cell names (aorta#500)"
+    ),
+}
+
+
+def shipped_recipes_using_known_absent(recipes_root: Path) -> list[tuple[str, str]]:
+    """``(recipe, mitigation)`` pairs where a shipped recipe names a mitigation
+    whose every variable is in KNOWN_ABSENT, on a probe axis or in a cell."""
+    import yaml
+
+    absent: dict[str, set[str]] = {}
+    for name, variable in KNOWN_ABSENT:
+        absent.setdefault(name, set()).add(variable)
+    dead = {
+        name
+        for name, env in BUILTIN_MITIGATIONS.items()
+        if env and set(env) <= absent.get(name, set())
+    }
+    hits = []
+    for path in sorted(recipes_root.rglob("*.yaml")):
+        rel = path.relative_to(recipes_root).as_posix()
+        doc = yaml.safe_load(path.read_text())
+        if not isinstance(doc, dict):
+            continue
+        names: list[str] = []
+        if doc.get("mode") == "probe":
+            for axis in ("mitigation_axis", "diagnostic_axis"):
+                names += doc.get(axis) or []
+        for cell in doc.get("cells") or []:
+            if isinstance(cell, dict):
+                names += cell.get("mitigations") or []
+        hits += [
+            (rel, name)
+            for name in names
+            if name in dead and (rel, name) not in _KNOWN_ABSENT_RECIPE_EXEMPTIONS
+        ]
+    return hits
+
+
+def test_no_shipped_recipe_names_a_known_absent_mitigation():
+    """A handout that teaches a name nothing reads hands out a second baseline.
+
+    The probe templates, the probe smoke recipe and the FSDP quick-start recipe
+    all taught ``tf32_off`` (aorta#500).
+    """
+    hits = shipped_recipes_using_known_absent(_REPO_ROOT / "recipes")
+    assert not hits, (
+        f"{hits}: every variable these mitigations set is in KNOWN_ABSENT, so "
+        "the cell is a second baseline. Use a built-in the stack reads, or add "
+        "the pair to _KNOWN_ABSENT_RECIPE_EXEMPTIONS with the reason."
+    )
+
+
+def test_every_recipe_exemption_names_a_shipped_recipe():
+    """An exemption for a file that moved or was deleted guards nothing."""
+    missing = sorted(
+        rel for rel, _ in _KNOWN_ABSENT_RECIPE_EXEMPTIONS
+        if not (_REPO_ROOT / "recipes" / rel).is_file()
+    )
+    assert not missing, f"{missing}: exempted recipes that do not exist"
