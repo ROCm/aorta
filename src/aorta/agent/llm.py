@@ -689,6 +689,54 @@ def _build_prompt(
     return system, user
 
 
+#: The most names one reply may carry in ``next_mitigations``, where the
+#: request can say so (:func:`_step_response_format`). The same model and
+#: prompt decoded without a grammar name at most this many nine times in ten,
+#: so the cap leaves those replies alone and removes the near-full-menu tail,
+#: in which one reply takes the whole axis in one charged iteration and the
+#: search stops there (aorta#510).
+MAX_PROPOSED_MITIGATIONS = 5
+
+
+def _step_response_format() -> dict[str, Any]:
+    """The ``response_format`` of a JSON-mode request: the reply ``_build_prompt`` asks for.
+
+    A schema rather than ``{"type": "json_object"}``, which puts no bound on
+    the array: under it, about 11% of replies named nearly every candidate.
+    The bound is the server's to enforce. A wider reply from a server that
+    ignores ``maxItems`` is read exactly as before.
+
+    Nothing else is constrained. No ``enum`` on the names or the category: an
+    unregistered name has to reach the candidate filter to be recorded as
+    unresolved, and a category outside the probe set has to reach
+    ``AgentPolicy.validate_step`` to be refused. A grammar that made them
+    unsayable would hide both.
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "agent_step",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string"},
+                    "hypothesis": {"type": "string"},
+                    "next_mitigations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": MAX_PROPOSED_MITIGATIONS,
+                    },
+                    "confidence": {"type": "number"},
+                    "stop": {"type": "boolean"},
+                },
+                "required": ["category", "hypothesis", "next_mitigations", "confidence", "stop"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _profile_prompt(
     profile: PromptProfile,
     symptom: str | None,
@@ -896,7 +944,7 @@ class LiteLLMProposer:
         system, user = _profile_prompt(self._profile, symptom, cell_summaries, remaining, tried)
         request: dict[str, Any] = {}
         if self._profile.json_mode:
-            request["response_format"] = {"type": "json_object"}
+            request["response_format"] = _step_response_format()
         extra_body = self._profile.extra_body()
         if extra_body:
             request["extra_body"] = extra_body
