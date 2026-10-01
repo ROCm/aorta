@@ -39,6 +39,9 @@ Start the CIA-enabled UI:
 scripts/chat/start_aorta_chat.sh
 ```
 
+The launcher explicitly selects the `vllm` provider and native tool protocol,
+overriding any different provider saved in the user's chat profile.
+
 Open <http://127.0.0.1:8080>. Keep the second command running. `Ctrl-C` stops
 the remote UI and SSH tunnel without leaving either process behind.
 If the terminal is closed or killed before its cleanup trap runs, recover with:
@@ -347,6 +350,7 @@ source /apps/avsharma/aorta-chat-runtime/qwen38-endpoint.env
 : "${AORTA_CHAT_VLLM_BASE_URL:?Start the vLLM job and source its endpoint file first}"
 : "${AORTA_CHAT_VLLM_MODEL:?The endpoint file did not specify a model}"
 
+export AORTA_CHAT_LLM_PROVIDER=vllm
 export AORTA_CHAT_LLM_TOOL_MODE=native
 aorta chat ui --host 127.0.0.1 --port 8080
 ```
@@ -386,6 +390,7 @@ ssh -t ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com '
   : "${AORTA_CHAT_VLLM_BASE_URL:?Start the vLLM job first}"
   : "${AORTA_CHAT_VLLM_MODEL:?The endpoint file did not specify a model}"
 
+  export AORTA_CHAT_LLM_PROVIDER=vllm
   export AORTA_CHAT_LLM_TOOL_MODE=native
   export AORTA_CHAT_ALLOW_CLUSTER_JOBS=true
   export AORTA_CHAT_JOBS_PATH=/apps/avsharma/cia-chat-jobs
