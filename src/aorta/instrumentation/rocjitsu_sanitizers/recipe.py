@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -44,6 +45,10 @@ _SUPPORTED_CONSAN_POLICIES = frozenset({"strict", "lenient"})
 # object. The recipe has to say so: the command is a binary built elsewhere, so
 # nothing the loader can read would tell it.
 _SUPPORTED_CONSAN_DRIVERS = frozenset({"load", "dispatch"})
+# Where policy.expected_error keys are declared, resolved against the recipe like
+# its other fixture paths. For every recipe the sanitizer nightly runs, this is
+# the file scripts/sanitizers/compare_verdict_baselines.py reads.
+_VERDICT_BASELINES = "fixtures/expected/verdict_baselines.json"
 _SUPPORTED_MISSING_BACKEND = frozenset({"fail"})
 _KERNEL_SPEC_FIELDS = frozenset(
     {"name", "code_object", "code_object_sha256", "code_object_index", "entry_offset"}
@@ -210,6 +215,30 @@ def _resolve_path(raw: str, *, recipe_path: Path) -> Path:
     return (recipe_path.parent / candidate).resolve()
 
 
+def _require_expected_error_declaration(key: str, *, recipe_path: Path) -> None:
+    """Reject a ``policy.expected_error`` key that names no declaration.
+
+    Only that the declaration exists is checked here. Its fields are the
+    comparator's to judge, and it refuses the whole baselines file if any
+    declaration in it is malformed.
+    """
+
+    baselines = _resolve_path(_VERDICT_BASELINES, recipe_path=recipe_path)
+    try:
+        data = json.loads(baselines.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RecipeSchemaError(
+            f"sanitizer_plan.policy.expected_error={key!r} cannot be checked against "
+            f"{baselines}: {exc}"
+        ) from exc
+    entry = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(entry, dict) or not isinstance(entry.get("expected_error"), dict):
+        raise RecipeSchemaError(
+            f"sanitizer_plan.policy.expected_error={key!r} names no expected_error "
+            f"declaration in {baselines}"
+        )
+
+
 def _optional_timeout_seconds(block: Mapping[str, object]) -> float | None:
     """Parse an optional positive ``timeout_seconds`` (seconds) from a block.
 
@@ -313,6 +342,8 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
     # The key of this recipe's expected_error declaration in the committed
     # verdict baselines, so the loader and the vacuity sweep read one sign-off.
     expected_error = _require_str(policy, "expected_error") if "expected_error" in policy else None
+    if expected_error is not None:
+        _require_expected_error_declaration(expected_error, recipe_path=path)
     output = _require_mapping(plan.get("output"), name="sanitizer_plan.output")
     report_name = _require_str(output, "report")
 

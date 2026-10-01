@@ -693,11 +693,61 @@ def test_loader_accepts_strict_policy_with_dispatching_driver(tmp_path: Path) ->
     assert load_sanitizer_recipe(recipe).consan_driver == "dispatch"
 
 
+_COMMITTED_BASELINES = _FIXTURES / "expected" / "verdict_baselines.json"
+
+
+def _place_baselines(recipe_dir: Path, text: str | None = None) -> None:
+    """Put a verdict_baselines.json where a recipe in ``recipe_dir`` resolves it."""
+    target = recipe_dir / "fixtures" / "expected" / "verdict_baselines.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if text is None:
+        text = _COMMITTED_BASELINES.read_text(encoding="utf-8")
+    target.write_text(text, encoding="utf-8")
+
+
 def test_loader_accepts_strict_load_only_driver_with_declared_outcome(tmp_path: Path) -> None:
+    _place_baselines(tmp_path)
     recipe = _write_kernel_consan_recipe(
         tmp_path, consan_driver="load", expected_error="consan_tiny"
     )
     assert load_sanitizer_recipe(recipe).expected_error == "consan_tiny"
+
+
+# consan_clean is a real baseline key with no expected_error declaration, and
+# consan-tiny is the case directory's spelling rather than the key.
+@pytest.mark.parametrize("key", ["not-a-real-key", "consan_clean", "consan-tiny"])
+@pytest.mark.parametrize("consan_policy", ["strict", "lenient"])
+def test_loader_rejects_expected_error_naming_no_declaration(
+    tmp_path: Path, key: str, consan_policy: str
+) -> None:
+    _place_baselines(tmp_path)
+    recipe = _write_kernel_consan_recipe(
+        tmp_path, consan_driver="load", consan_policy=consan_policy, expected_error=key
+    )
+    with pytest.raises(RecipeSchemaError, match=f"expected_error='{key}' names no expected_error"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_loader_rejects_expected_error_whose_declaration_is_not_an_object(tmp_path: Path) -> None:
+    _place_baselines(tmp_path, json.dumps({"consan_tiny": {"expected_error": True}}))
+    recipe = _write_kernel_consan_recipe(
+        tmp_path, consan_driver="load", expected_error="consan_tiny"
+    )
+    with pytest.raises(RecipeSchemaError, match="names no expected_error declaration"):
+        load_sanitizer_recipe(recipe)
+
+
+@pytest.mark.parametrize("baselines", [None, "{not json"], ids=["missing", "malformed"])
+def test_loader_rejects_expected_error_it_cannot_check(
+    tmp_path: Path, baselines: str | None
+) -> None:
+    if baselines is not None:
+        _place_baselines(tmp_path, baselines)
+    recipe = _write_kernel_consan_recipe(
+        tmp_path, consan_driver="load", expected_error="consan_tiny"
+    )
+    with pytest.raises(RecipeSchemaError, match="cannot be checked against"):
+        load_sanitizer_recipe(recipe)
 
 
 def test_loader_leaves_an_undeclared_driver_unchecked(tmp_path: Path) -> None:
@@ -811,4 +861,16 @@ def test_daily_consan_tiny_loads_only_through_its_declared_outcome(tmp_path: Pat
         tmp_path, "daily-consan-tiny.yaml", "    expected_error: consan_tiny\n", ""
     )
     with pytest.raises(RecipeSchemaError, match="ROCm/aorta#450"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_daily_consan_tiny_with_a_mistyped_key_is_rejected(tmp_path: Path) -> None:
+    _place_baselines(tmp_path)
+    recipe = _committed_recipe_variant(
+        tmp_path,
+        "daily-consan-tiny.yaml",
+        "    expected_error: consan_tiny\n",
+        "    expected_error: consan_tiyn\n",
+    )
+    with pytest.raises(RecipeSchemaError, match="'consan_tiyn' names no expected_error"):
         load_sanitizer_recipe(recipe)
