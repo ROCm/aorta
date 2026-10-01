@@ -511,6 +511,104 @@ def test_sampled_conflict_without_a_fingerprint_or_instruction_parses() -> None:
     assert dict(finding.metadata).get("first_lanes") == "unavailable"
 
 
+def _sites_holding(first: str, second: str, *, scope: str = "kernel") -> str:
+    """Current healthy coverage whose two itemized sites hold the conflict's accesses.
+
+    ``_current_conflict`` names its accesses at 0x40 and 0x48, while the stock
+    sites sit at 0x4 and 0x8 in a container called ``k``.
+    """
+    return (
+        _current_healthy_coverage()
+        .replace(
+            "container=k scope=kernel text=0x4 ", f"container={first} scope={scope} text=0x40 "
+        )
+        .replace(
+            "container=k scope=kernel text=0x8 ", f"container={second} scope={scope} text=0x48 "
+        )
+    )
+
+
+def _one_conflict(coverage: str, *, conflict: str | None = None) -> str:
+    return "\n".join(
+        (conflict or _current_conflict(), _current_report(conflicts=1, examples=1), coverage)
+    )
+
+
+def test_conflict_names_the_kernel_holding_both_accesses() -> None:
+    parsed = parse_consan_output(_one_conflict(_sites_holding("_Z4racePj", "_Z4racePj")))
+
+    (finding,) = parsed.consan_findings
+    assert finding.kernel_name == "_Z4racePj"
+    # entry_offset is the kernel's entry point; the access offsets stay in metadata.
+    assert finding.entry_offset is None
+    assert dict(finding.metadata)["second_instruction"] == "0x48"
+
+
+def test_conflict_across_two_kernels_names_neither() -> None:
+    parsed = parse_consan_output(_one_conflict(_sites_holding("_Z1aPj", "_Z1bPj")))
+
+    (finding,) = parsed.consan_findings
+    assert finding.kernel_name is None
+
+
+@pytest.mark.parametrize("second", ["second_instruction=0x50", "second_instruction=unavailable"])
+def test_conflict_with_an_unplaced_access_names_no_kernel(second: str) -> None:
+    conflict = _current_conflict().replace("second_instruction=0x48", second)
+    parsed = parse_consan_output(
+        _one_conflict(_sites_holding("_Z4racePj", "_Z4racePj"), conflict=conflict)
+    )
+
+    (finding,) = parsed.consan_findings
+    assert finding.kernel_name is None
+
+
+def test_conflict_is_not_attributed_to_sites_in_another_reader() -> None:
+    reader_2 = (
+        _sites_holding("_Z4racePj", "_Z4racePj")
+        .replace("reader=1", "reader=2")
+        .replace("load=1", "load=2")
+    )
+    output = "\n".join(
+        (
+            _current_conflict(reader=1),
+            _current_report(reader=1, conflicts=1, examples=1),
+            _current_report(reader=2),
+            _current_healthy_coverage(),
+            reader_2,
+        )
+    )
+
+    (finding,) = parse_consan_output(output).consan_findings
+    assert finding.kernel_name is None
+
+
+def test_conflict_container_outside_kernel_scope_is_not_a_kernel() -> None:
+    parsed = parse_consan_output(
+        _one_conflict(_sites_holding("helper", "helper", scope="function"))
+    )
+
+    (finding,) = parsed.consan_findings
+    assert finding.kernel_name is None
+
+
+def test_record_replay_conflict_is_coded_by_name_and_attributed() -> None:
+    output = "\n".join(
+        (
+            (
+                f"{_PREFIX} MOI auto replay diagnostic reader=1 index=0 kind=1 "
+                "first_inst=0x4 second_inst=0x8"
+            ),
+            f"{_PREFIX} MOI auto replay reader=1 diagnostics=1 conflict=true",
+            _healthy_evidence(),
+        )
+    )
+
+    (finding,) = parse_record_replay_output(output).consan_findings
+    assert finding.code == "record_replay_conflict_kind_1"
+    assert dict(finding.metadata)["kind"] == "1"
+    assert finding.kernel_name == "k"
+
+
 def test_malformed_sampled_counts_never_pass() -> None:
     output = "\n".join(
         (
