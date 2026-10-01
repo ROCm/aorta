@@ -7,6 +7,8 @@ handler with the events the graph emits and assert on that.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 cl = pytest.importorskip("chainlit", reason="requires the chat-ui extra")
@@ -27,6 +29,7 @@ class FakeStep:
         self.end = None
         self.sends = 0
         self.updates = 0
+        self.removes = 0
         FakeStep.instances.append(self)
 
     async def send(self):
@@ -34,6 +37,9 @@ class FakeStep:
 
     async def update(self):
         self.updates += 1
+
+    async def remove(self):
+        self.removes += 1
 
     @property
     def running(self) -> bool:
@@ -49,6 +55,7 @@ def steps(monkeypatch):
 
 START = {"tool": "triage_kernel_source", "id": "triage_kernel_source:1"}
 DONE = {**START, "done": True, "seconds": 312.0}
+FAILED = {**DONE, "failed": True}
 STOPPED = {**DONE, "cancelled": "stopped"}
 STILL_RUNNING = {**DONE, "cancelled": "still running"}
 
@@ -65,6 +72,24 @@ async def test_the_step_appears_immediately(steps):
     tracker = app._ToolSteps()
     await tracker.handle(START)
     assert steps[0].sends == 1
+
+
+async def test_the_step_uses_plain_language_not_an_internal_name(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+
+    assert steps[0].name == "Checking the GPU kernel for races"
+    assert "triage_kernel_source" not in steps[0].name
+    assert "triage_kernel_source" not in steps[0].output
+    assert steps[0].output.startswith("AORTA is checking")
+
+
+async def test_an_unknown_plugin_uses_generic_copy(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle({"tool": "private_plugin_name", "id": "plugin:1"})
+
+    assert steps[0].name == "Gathering additional evidence"
+    assert "private_plugin_name" not in steps[0].output
 
 
 async def test_the_completion_closes_it(steps):
@@ -89,6 +114,7 @@ async def test_the_wait_is_reported(steps):
     await tracker.handle(START)
     await tracker.handle(DONE)
     assert "312s" in steps[0].output
+    assert "triage_kernel_source" not in steps[0].output
 
 
 async def test_a_stopped_tool_is_not_rendered_as_finished(steps):
@@ -101,12 +127,40 @@ async def test_a_stopped_tool_is_not_rendered_as_finished(steps):
     assert not steps[0].running
 
 
+async def test_a_failed_tool_stays_visible_after_the_answer(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(FAILED)
+    await tracker.remove_finished()
+
+    assert "could not complete" in steps[0].output
+    assert steps[0].removes == 0
+
+
+async def test_a_stopped_tool_stays_visible_after_the_answer(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(STOPPED)
+    await tracker.remove_finished()
+
+    assert steps[0].removes == 0
+
+
+async def test_cancellation_wording_wins_over_a_defensive_failure_flag(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle({**STOPPED, "failed": True})
+
+    assert "stopped after cancellation" in steps[0].output
+    assert "could not complete" not in steps[0].output
+
+
 async def test_a_cancellation_request_can_report_work_still_running(steps):
     tracker = app._ToolSteps()
     await tracker.handle(START)
     await tracker.handle(STILL_RUNNING)
 
-    assert "cancellation requested" in steps[0].output
+    assert "cancellation was requested" in steps[0].output.lower()
     assert "still running" in steps[0].output
     assert "finished" not in steps[0].output
 
@@ -166,6 +220,53 @@ async def test_a_finished_step_is_not_reopened_by_close_all(steps):
     await tracker.handle(DONE)
     await tracker.close_all()
     assert "Interrupted" not in steps[0].output
+
+
+async def test_finished_steps_are_removed_after_the_answer(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(DONE)
+    await tracker.remove_finished()
+
+    assert steps[0].removes == 1
+
+
+async def test_a_running_step_is_not_removed(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.remove_finished()
+
+    assert steps[0].removes == 0
+
+
+async def test_removing_finished_steps_is_idempotent(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(DONE)
+    await tracker.remove_finished()
+    await tracker.remove_finished()
+
+    assert steps[0].removes == 1
+
+
+async def test_removing_finished_steps_survives_a_dead_session(steps, monkeypatch):
+    async def gone(self):
+        raise RuntimeError("session closed")
+
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(DONE)
+    monkeypatch.setattr(FakeStep, "remove", gone)
+
+    await tracker.remove_finished()  # must not mask the completed answer
+
+
+def test_finished_steps_are_removed_only_after_the_final_answer():
+    source = inspect.getsource(app.on_message)
+
+    answer = source.index("await cl.Message(content=reply).send()")
+    cleanup = source.index("await running.remove_finished()")
+    assert answer < cleanup
 
 
 def test_our_timestamp_matches_chainlits():

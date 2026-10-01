@@ -48,6 +48,9 @@ def _origins(path: Path) -> list[str]:
 
 
 class TestTheShippedPolicyAdmitsTheDefaultUI:
+    def test_the_command_defaults_to_port_8080(self):
+        assert _defaults() == ("127.0.0.1", 8080)
+
     def test_the_packaged_config_covers_the_default_bind(self):
         """The copy a wheel installs, which is most installs."""
         if not _SHIPPED.is_file():

@@ -128,6 +128,28 @@ class TestMakeProposer:
         for name in ("fake", *CHAT_PROVIDER_BACKENDS):
             assert name in message
 
+    def test_fake_reads_the_categories_a_recipe_declares(self):
+        proposer = make_proposer("fake", detector_categories={"custom:x": "oom_fragment"})
+        step = proposer.propose(
+            symptom=None,
+            cell_summaries=[
+                {"cell_name": "none-none", "verdict": "fail",
+                 "failure_detectors_fired": ["custom:x"]}
+            ],
+            candidates=CANDIDATES,
+            tried=TRIED,
+        )
+        assert step.category == "oom_fragment"
+
+    @pytest.mark.parametrize("backend", sorted(CHAT_PROVIDER_BACKENDS))
+    def test_a_real_backend_accepts_declarations_it_does_not_read(self, backend):
+        """The loop passes a recipe's declarations whatever the backend.
+
+        Refusing them would make every recipe that declares a category unusable
+        with a model.
+        """
+        assert make_proposer(backend, detector_categories={"custom:x": "oom_fragment"})
+
 
 class TestOfflineDefault:
     def test_the_fake_proposer_imports_nothing(self, monkeypatch):

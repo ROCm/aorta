@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 from aorta.chat.config import settings
 from aorta.chat.rag.walk import is_symlink, prune_dirnames
 from aorta.chat.tools._sandbox import AORTA_ROOT_LABEL, resolve_within
+from aorta.chat.tools.outcome import tool_failure
 
 
 def _search_docs(query: str, k: int) -> list:
@@ -79,14 +80,14 @@ def grep_code(pattern: str, path: str = ".", max_results: int = 20) -> str:
     try:
         target = resolve_within(root, path, AORTA_ROOT_LABEL)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return tool_failure(f"Error: {exc}")
     if not target.exists():
-        return f"Error: path '{path}' does not exist."
+        return tool_failure(f"Error: path '{path}' does not exist.")
 
     try:
         compiled = re.compile(pattern, re.IGNORECASE)
     except re.error as exc:
-        return f"Error: invalid regex pattern: {exc}"
+        return tool_failure(f"Error: invalid regex pattern: {exc}")
 
     matches: list[str] = []
     for dirpath, dirnames, filenames in os.walk(target):
