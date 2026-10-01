@@ -234,7 +234,7 @@ POINTS: dict[str, float] = {
     # It must not be CHEAPER than giving up, or the reward invents an exploit:
     # the cheapest way out of an episode becomes one already-tried name (-1.0)
     # instead of an honest empty proposal (-3.0). At equality the stall costs
-    #     -1.0 more than the quit, so nothing is bought by stalling. A test pins it.
+    # -1.0 more than the quit, so nothing is bought by stalling. A test pins it.
     "terminal_proposal_unresolved": -3.0,
     # The same ending reached by validation: every name was `none` or a repeat,
     # so nothing was left to run (aorta#501). Equal to giving up for the same
@@ -846,11 +846,11 @@ def classify_stop(
     ``proposal_unresolved`` and ``proposal_redundant`` are checked FIRST, and
     are read off the loop's own stop reason rather than re-derived: they are
     the endings that are not the policy's, and every branch below attributes a
-    decision. The empty list at
-    that stop is the filter's, so it must not be adjudicated as the claim
-    "nothing resolves this". An explicit ``stop: true`` carries
-    ``agent_requested`` and never reaches that branch, which is correct: the
-    policy said so, even if the filter also dropped a name from the same reply.
+    decision. The empty list at either stop is the filter's or validation's, so
+    it must not be adjudicated as the claim "nothing resolves this". An explicit
+    ``stop: true`` carries ``agent_requested`` and never reaches either branch,
+    which is correct: the policy said so, even if the filter or validation also
+    removed a name from the same reply.
     """
     if stop_reason == "proposal_unresolved":
         return (
