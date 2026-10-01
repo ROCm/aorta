@@ -84,8 +84,10 @@ The short version:
   [3.4](#34-the-current-contract-versus-the-target-one) reconciles them with the
   chatbot's root-cause-and-fix target — they are the same pair, compressed. The
   two paths differ in one way this document depends on: the direct path sends
-  `response_format: {"type": "json_object"}` and the shared one does not, so
-  format-validity numbers measured on one are not numbers for the other.
+  a JSON-schema `response_format` (`{"type": "json_object"}` before
+  [#510](https://github.com/ROCm/aorta/issues/510)) and the shared one sends
+  none, so format-validity numbers measured on one are not numbers for the
+  other.
   Pointing the agent at a self-hosted model needs **no code change** either way,
   but the configuration is not the same — see
   [3.3](#33-pointing-it-at-a-self-hosted-model-no-code-change).
