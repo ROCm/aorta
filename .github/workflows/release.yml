@@ -68,6 +68,7 @@ jobs:
           # the shell, to avoid script injection (bump_version.py also validates).
           BUMP: ${{ github.event.inputs.bump }}
           EXPLICIT_VERSION: ${{ github.event.inputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             # A manual run creates a NEW tag, so it must run on a branch: a tag
@@ -80,8 +81,8 @@ jobs:
             # "Latest" and publishes to PyPI), so a manual run must originate
             # from the default branch -- never an unmerged feature branch.
             # Tag-push releases are unaffected: they take the else branch below.
-            if [ "${GITHUB_REF}" != "refs/heads/${{ github.event.repository.default_branch }}" ]; then
-              echo "::error::Manual releases must run from the default branch (${{ github.event.repository.default_branch }}), not ${GITHUB_REF_NAME}."
+            if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+              echo "::error::Manual releases must run from the default branch (${DEFAULT_BRANCH}), not ${GITHUB_REF_NAME}."
               exit 1
             fi
             if [ -n "${EXPLICIT_VERSION}" ]; then
