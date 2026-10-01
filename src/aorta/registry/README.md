@@ -488,9 +488,9 @@ refer to them. See aorta#511.
 |---|---|---|
 | `tf32_off` | `DISABLE_TF32` is read by no ROCm or PyTorch library | every stack; aorta#500 |
 | `pytorch_alloc_expandable_segments` | PyTorch reads the option and refuses it: *expandable_segments not supported on this platform* | PyTorch builds without expandable-segment support |
-| `fa_prefer_ck` | PyTorch reads it, warns *Cannot set preferred SDPA backend to CK*, and stays on AOTriton | PyTorch builds without CK SDPA |
-| `fa_prefer_aotriton` | `TORCH_ROCM_FA_PREFER_CK=0` reads as unset, and unset already means AOTriton | unless the environment exports `1` |
-| `hsa_enable_cache` | `HSA_DISABLE_CACHE=0` is libhsakmt's default | unless the environment exports `1` |
+| `fa_prefer_ck` | PyTorch reads it, warns *Cannot set preferred SDPA backend to CK*, and stays on AOTriton | PyTorch builds without CK SDPA, or with any visible GPU outside CK's architecture list |
+| `fa_prefer_aotriton` | `TORCH_ROCM_FA_PREFER_CK=0` reads as unset, and unset already means AOTriton | unless the environment exports `1` on a stack where `fa_prefer_ck` can act |
+| `hsa_enable_cache` | `HSA_DISABLE_CACHE=0` is libhsakmt's default | unless the environment exports any value other than exactly `0`, even an empty one |
 | `hsa_no_scratch_reclaim` | the image already exports `HSA_NO_SCRATCH_RECLAIM=1` | `rocm/primus` images |
 | `rccl_gfx942_cheap_fence_off` | RCCL 10.0 turns the cheap fence off by default | RCCL 10.0; it acts on RCCL 7.2 |
 

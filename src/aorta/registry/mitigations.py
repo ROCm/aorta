@@ -60,8 +60,9 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "hsa_disable_cache": {
         "HSA_DISABLE_CACHE": "1",
     },
-    # "0" is libhsakmt's default, so this only acts against an environment
-    # that exports HSA_DISABLE_CACHE=1 (aorta#511).
+    # "0" is libhsakmt's default. Every other value, even an empty one,
+    # disables the cache (fmm.c compares against "0" with strcmp), so this
+    # acts unless HSA_DISABLE_CACHE is unset or exactly "0" (aorta#511).
     "hsa_enable_cache": {
         "HSA_DISABLE_CACHE": "0",
     },
@@ -101,12 +102,14 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
         "AMD_LOG_LEVEL": "4",
     },
     # --- SDPA backend pin ---
-    # Refused, with a warning, by PyTorch builds without CK SDPA (aorta#511).
+    # Refused, with a warning, by PyTorch builds without CK SDPA, and when any
+    # visible GPU is outside CK's architecture list (aorta#511).
     "fa_prefer_ck": {
         "TORCH_ROCM_FA_PREFER_CK": "1",
     },
     # "0" reads as unset, and PyTorch's unset default is already AOTriton, so
-    # this only acts against an environment that exports "1" (aorta#511).
+    # this only acts against an environment that exports "1", and only where
+    # PyTorch would accept CK at all (aorta#511).
     "fa_prefer_aotriton": {
         "TORCH_ROCM_FA_PREFER_CK": "0",
     },
