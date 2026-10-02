@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLATION = (
     ROOT / "docs" / "chat" / "installation.md"
@@ -37,7 +36,8 @@ def test_reading_and_submitting_tools_are_distinguished() -> None:
     ):
         assert name in INSTALLATION
     assert "read-only" in INSTALLATION
-    assert "submit scheduler work" in INSTALLATION
+    assert "execute diagnostic work" in INSTALLATION
+    assert "single-node Slurm is not required" in INSTALLATION
 
 
 def test_verification_missing_extra_and_security_links_are_present() -> None:

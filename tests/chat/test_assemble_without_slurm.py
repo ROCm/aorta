@@ -26,6 +26,8 @@ def cluster(tmp_path, monkeypatch):
     import aorta.chat.tools.cluster as module
 
     monkeypatch.setattr(module.settings, "jobs_path", str(tmp_path), raising=False)
+    monkeypatch.setattr(module.settings, "cia_job_backend", "auto", raising=False)
+    monkeypatch.setattr(module, "resolve_backend", lambda _requested: "slurm")
     return module
 
 
@@ -78,6 +80,39 @@ class TestAMachineWithNoScheduler:
 
         assert isinstance(answer, str)
         assert "No AMD assembler was found" in answer
+
+
+class TestAnExplicitLocalBackend:
+    def test_it_never_attempts_srun(self, cluster, monkeypatch):
+        seen: list[list[str]] = []
+        monkeypatch.setattr(cluster.settings, "cia_job_backend", "local", raising=False)
+        monkeypatch.setattr(cluster, "resolve_backend", lambda _requested: "local")
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(cluster.subprocess, "run", run)
+        cluster._assemble("true")
+
+        assert [argv[0] for argv in seen] == ["bash"]
+
+
+class TestAnExplicitSlurmBackend:
+    def test_missing_srun_does_not_silently_run_locally(self, cluster, monkeypatch):
+        monkeypatch.setattr(cluster.settings, "cia_job_backend", "slurm", raising=False)
+        seen: list[str] = []
+
+        def no_srun(argv, **kwargs):
+            seen.append(argv[0])
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+        monkeypatch.setattr(cluster.subprocess, "run", no_srun)
+
+        with pytest.raises(FileNotFoundError):
+            cluster._assemble("true")
+
+        assert seen == ["srun"]
 
 
 class TestAQueueThatNeverGetsRoundToUs:

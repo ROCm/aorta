@@ -12,8 +12,9 @@ below carry a stop flag and a timeout. Triage's own progress goes through
 :mod:`logging` for the same reason; Watch and the probe still print theirs,
 which lands on this process's stdout.
 
-The cluster is still reached the old way, through the scheduler: srun and
-sbatch are subprocesses because that is what talking to Slurm is.
+Launch selects Slurm when it is available and otherwise runs the same script as
+a detached local process. This lets a GPU workstation use the full diagnostic
+pipeline without installing a scheduler.
 """
 
 from __future__ import annotations
@@ -22,8 +23,8 @@ import json
 import os
 import re
 import shlex
-import sys
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -37,21 +38,25 @@ from langchain_core.tools import tool
 
 from aorta.chat.cancellation import current_cancel_token
 from aorta.chat.config import settings
-from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
 from aorta.chat.tools._sandbox import JOBS_ROOT_LABEL, resolve_within
 from aorta.chat.tools.cache import current_tool_cache
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
 from aorta.chat.tools.outcome import tool_failure, tool_result_failed
+from aorta.cia.launch import resolve_backend
+from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
+
 
 def _arch() -> str:
-    """The GPU this cluster builds for.
+    """The GPU these diagnostics build for.
 
     Read per call rather than captured at import: the setting answers to both
     AORTA_CHAT_GPU_ARCH and CIA_GPU_ARCH, and a module constant would freeze
     whichever was in the environment when the first tool happened to load.
     """
     return settings.gpu_arch
+
+
 # The assembler lives with ROCm on the compute nodes, not on the login node.
 #
 # The default used to name one machine's installed patch release, which is
@@ -65,8 +70,6 @@ def _arch() -> str:
 # is where one of these was last time.)
 _ROCM_ROOT = os.environ.get("ROCM_PATH", "/opt/rocm")
 _ROCM_LLVM = os.environ.get("ROCM_LLVM_BIN", f"{_ROCM_ROOT}/lib/llvm/bin")
-
-
 
 
 # ConSan encodes the access type numerically in its conflict records. The mapping
@@ -138,6 +141,17 @@ def _fmt_sanitizer(san: dict) -> list[str]:
     return lines
 
 
+def _execution_identity(result: dict) -> tuple[str, str]:
+    """Backend and concise native handle for a user-facing summary."""
+    backend = result.get("scheduler") or ("slurm" if result.get("slurm_job_id") else "unknown")
+    native_id = str(result.get("scheduler_job_id") or result.get("slurm_job_id", "?"))
+    if backend == "local" and native_id.startswith("local:"):
+        # The full handle carries Linux process start ticks to guard against PID
+        # reuse. That safety token is useful to cancellation, not to a reader.
+        native_id = native_id.split(":", 2)[1]
+    return backend, native_id
+
+
 def _fmt_tools_used(result: dict) -> list[str]:
     """Name the agents and sanitizers that actually ran.
 
@@ -149,19 +163,17 @@ def _fmt_tools_used(result: dict) -> list[str]:
     checks = san.get("checks") or []
     lines = ["Tools used on this run:"]
     if result.get("compiled_from_source"):
-        lines.append(
-            f"  - hipcc — compiled the submitted kernel for {_arch()} on the GPU node"
-        )
+        lines.append(f"  - hipcc — compiled the submitted kernel for {_arch()} on the GPU node")
     # The node named here used to be a constant, so every run claimed an MI355X
-    # whatever the scheduler picked -- a hardware claim in an evidence summary,
-    # made without checking. Slurm is asked, and where it will not say, this
-    # says that instead of naming something.
+    # whatever executed it -- a hardware claim made without checking.
     node = result.get("node") or ""
-    where = f"to {node}" if node else "to a node the scheduler chose"
-    lines.append(
-        f"  - CIA Launch agent — submitted slurm job {result.get('slurm_job_id', '?')} "
-        f"{where}"
-    )
+    backend, native_id = _execution_identity(result)
+    if backend == "local":
+        where = f" on {node}" if node else " on this workstation"
+        lines.append(f"  - CIA Launch agent — started local process {native_id}{where}")
+    else:
+        where = f" to {node}" if node else " to a node the scheduler chose"
+        lines.append(f"  - CIA Launch agent — submitted slurm job {native_id}{where}")
     lines.append(
         f"  - CIA Watch agent — monitored the job log "
         f"({'raised an alert' if result.get('watch_alerted') else 'no alert raised'})"
@@ -195,10 +207,12 @@ _SWEEP_ARGS = ("--recipe", "--source")
 
 
 def _format_result(result: dict, label: str, *, expect_sanitizer: bool = False) -> str:
+    backend, native_id = _execution_identity(result)
+    state = result.get("scheduler_state") or result.get("slurm_state")
     lines = [
-        f"Job {result['job_id']} (slurm {result.get('slurm_job_id', '?')}) — {label}",
+        f"Job {result['job_id']} ({backend} {native_id}) — {label}",
         f"Recipe:   {result.get('recipe')}",
-        f"State:    {result.get('slurm_state')}",
+        f"State:    {state}",
         f"Bundle:   {result.get('bundle')}",
     ]
     if result.get("kernel"):
@@ -250,7 +264,7 @@ def _format_result(result: dict, label: str, *, expect_sanitizer: bool = False) 
     return "\n".join(lines)
 
 
-#: Triage runs off the event loop so a wedged cluster job cannot hang the chat,
+#: Triage runs off the event loop so a wedged diagnostic job cannot hang the chat,
 #: and the work outlives the answer when it does: the tool gives up after
 #: ``triage_timeout`` while the run carries on. A pool per call meant a thread
 #: per abandoned run, accumulating for the life of the server, and
@@ -278,13 +292,18 @@ def _run_triage(extra_args: list[str], label: str) -> str:
 
     The agents live in this environment now, so this is a call rather than a
     subprocess. The timeout still stands: the work happens on a worker thread,
-    so a wedged cluster job cannot hang the chat, and on expiry that thread is
+    so a wedged diagnostic job cannot hang the chat, and on expiry that thread is
     asked to stop rather than left running.
     """
     argv = [
-        "--jobs-root", str(settings.jobs_root),
-        "--arch", _arch(),
-        "--label", label,
+        "--jobs-root",
+        str(settings.jobs_root),
+        "--arch",
+        _arch(),
+        "--job-backend",
+        settings.cia_job_backend,
+        "--label",
+        label,
         *extra_args,
     ]
     if settings.cia_demo_node:
@@ -306,9 +325,7 @@ def _run_triage(extra_args: list[str], label: str) -> str:
 
     stop = current_cancel_token() or threading.Event()
     if stop.is_set():
-        return tool_failure(
-            "Error: triage was cancelled before it entered the worker pool."
-        )
+        return tool_failure("Error: triage was cancelled before it entered the worker pool.")
     future = _triage_pool().submit(run_triage, argv, stop=stop)
     deadline = time.monotonic() + settings.triage_timeout
     result = None
@@ -317,7 +334,7 @@ def _run_triage(extra_args: list[str], label: str) -> str:
             # cancel() handles a task that has not started; the shared event
             # handles one already running. Wait for either case to finish so
             # the graph cannot announce completion while run_triage or its
-            # Slurm allocation still exists.
+            # local process / Slurm allocation still exists.
             future.cancel()
             try:
                 future.result()
@@ -325,9 +342,7 @@ def _run_triage(extra_args: list[str], label: str) -> str:
                 pass
             except Exception:
                 pass
-            return tool_failure(
-                "Error: triage was cancelled and its worker has stopped."
-            )
+            return tool_failure("Error: triage was cancelled and its worker has stopped.")
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -441,9 +456,9 @@ def _stage_dir(parent: Path, name: str) -> Path:
     parent.mkdir(parents=True, exist_ok=True)
     resolved_parent = parent.resolve(strict=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    created = Path(
-        tempfile.mkdtemp(prefix=f"{stem}-{stamp}-", dir=resolved_parent)
-    ).resolve(strict=True)
+    created = Path(tempfile.mkdtemp(prefix=f"{stem}-{stamp}-", dir=resolved_parent)).resolve(
+        strict=True
+    )
     try:
         created.relative_to(resolved_parent)
     except ValueError as exc:
@@ -481,7 +496,7 @@ def triage_kernel_source(
 ) -> str:
     """Compile a HIP kernel the user supplied and run it under a sanitizer.
 
-    Builds the kernel for this cluster's GPU on a GPU node, generates a launch
+    Builds the kernel for the configured GPU, generates a launch
     harness if the source is a bare __global__ function rather than a whole
     program, and runs it twice under record/replay. Reports accesses that two
     waves made to the same shared-memory bytes with nothing ordering them,
@@ -541,9 +556,7 @@ def triage_kernel_source(
             fill_byte=fill,
         )
     except HarnessError as exc:
-        return tool_failure(
-            f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}"
-        )
+        return tool_failure(f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}")
 
     cache = current_tool_cache().triage
     cache_key = (
@@ -560,7 +573,7 @@ def triage_kernel_source(
     if cached is not None:
         return (
             "(Reusing the triage already run for this exact kernel in this "
-            "conversation — no second cluster job was submitted.)\n\n" + cached
+            "conversation — no second diagnostic job was started.)\n\n" + cached
         )
 
     stem = _staged_stem(prepared.kernel, "kernel")
@@ -668,11 +681,11 @@ def _assemble_command(asm_path: Path, obj_path: Path) -> str:
     """
     pinned = shlex.quote(f"{_ROCM_LLVM}/clang")
     return (
-        f'CLANG={pinned}; '
+        f"CLANG={pinned}; "
         '[ -x "$CLANG" ] || CLANG="$(command -v clang || true)"; '
         f'if [ -z "$CLANG" ]; then echo {_NO_ASSEMBLER} >&2; exit 127; fi; '
         f'"$CLANG" -target amdgcn-amd-amdhsa -mcpu={shlex.quote(_arch())} '
-        f'{shlex.quote(str(asm_path))} -o {shlex.quote(str(obj_path))}'
+        f"{shlex.quote(str(asm_path))} -o {shlex.quote(str(obj_path))}"
     )
 
 
@@ -689,27 +702,45 @@ def _assemble(build: str) -> subprocess.CompletedProcess:
     round to us, ``OSError`` if even bash is missing. Those belong to the
     caller, which has a paste to answer for.
     """
+    local_argv = ["bash", "-c", build]
+    if resolve_backend(settings.cia_job_backend) == "local":
+        return subprocess.run(
+            local_argv,
+            capture_output=True,
+            text=True,
+            timeout=settings.waitcheck_timeout,
+            stdin=subprocess.DEVNULL,
+        )
+
     argv = ["srun", "--nodes=1", "-t", "5", "bash", "-c", build]
     try:
         return subprocess.run(
-            argv, capture_output=True, text=True, timeout=settings.waitcheck_timeout,
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=settings.waitcheck_timeout,
             stdin=subprocess.DEVNULL,
         )
     except FileNotFoundError:
+        if settings.cia_job_backend == "slurm":
+            raise
         return subprocess.run(
-            ["bash", "-c", build], capture_output=True, text=True,
-            timeout=settings.waitcheck_timeout, stdin=subprocess.DEVNULL,
+            local_argv,
+            capture_output=True,
+            text=True,
+            timeout=settings.waitcheck_timeout,
+            stdin=subprocess.DEVNULL,
         )
 
 
 def _no_assembler_message() -> str:
     """Say that the toolchain is missing, rather than blaming the paste."""
     return (
-        "No AMD assembler was found on the compute node, so this assembly was "
+        "No AMD assembler was found where the diagnostic ran, so this assembly was "
         "not analysed. Nothing is wrong with what you pasted -- the toolchain "
         "this needs is not installed where the job ran.\n"
-        f"Looked for {_ROCM_LLVM}/clang, then for clang on the node's PATH.\n"
-        "Point ROCM_PATH at the ROCm install on the compute nodes (or set "
+        f"Looked for {_ROCM_LLVM}/clang, then for clang on that machine's PATH.\n"
+        "Point ROCM_PATH at the ROCm install (or set "
         "ROCM_LLVM_BIN directly) and try again."
     )
 
@@ -735,19 +766,15 @@ def _read_staged(source_file: str, what: str) -> str:
     try:
         return staged.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(
-            f"could not read {source_file!r}: {type(exc).__name__}"
-        ) from exc
+        raise ValueError(f"could not read {source_file!r}: {type(exc).__name__}") from exc
 
 
 @tool
-def triage_assembly_source(
-    source: str = "", label: str = "", source_file: str = ""
-) -> str:
+def triage_assembly_source(source: str = "", label: str = "", source_file: str = "") -> str:
     """Assemble AMD GPU assembly the user supplied and analyse it for wait hazards.
 
     Wraps the pasted instructions in a minimal kernel if they are a fragment,
-    assembles them for the architecture this cluster runs, and runs the static
+    assembles them for the configured architecture, and runs the static
     wait checker over the resulting code object. Reports instructions whose
     result is consumed before any wait guarantees it has landed, naming the
     producing and consuming instructions, their byte offsets and the register
@@ -821,7 +848,8 @@ def triage_assembly_source(
         if _NO_ASSEMBLER in (proc.stderr or ""):
             return tool_failure(_no_assembler_message())
         diagnostics = "\n".join(
-            line for line in (proc.stderr or "").splitlines()
+            line
+            for line in (proc.stderr or "").splitlines()
             if "unused during compilation" not in line
         )
         return tool_failure(
@@ -859,6 +887,7 @@ def triage_assembly_source(
     if "Autopsy verdict:" in result and _DID_NOT_RUN not in result:
         cache.put(cache_key, result)
     return tool_failure(result) if tool_result_failed(body) else result
+
 
 @tool
 def triage_workload(
@@ -918,7 +947,7 @@ def triage_workload(
     if cached is not None:
         return (
             "(Reusing the triage already run for this exact workload in this "
-            "conversation — no second cluster job was submitted.)\n\n" + cached
+            "conversation — no second diagnostic job was started.)\n\n" + cached
         )
 
     if command.strip():
@@ -972,16 +1001,14 @@ def _within_jobs_root(job_dir: Path, relative: str) -> Path | None:
     and say so, where a single read should refuse outright.
     """
     try:
-        return resolve_within(
-            settings.jobs_root, f"{job_dir.name}/{relative}", JOBS_ROOT_LABEL
-        )
+        return resolve_within(settings.jobs_root, f"{job_dir.name}/{relative}", JOBS_ROOT_LABEL)
     except ValueError:
         return None
 
 
 @tool
 def list_cluster_jobs(limit: int = 10) -> str:
-    """List recent Cluster Intelligence jobs and whether they have a verdict.
+    """List recent CIA diagnostic jobs and whether they have a verdict.
 
     Use this to find a previous GPU failure to explain, before running anything new.
 
@@ -1043,7 +1070,7 @@ def list_cluster_jobs(limit: int = 10) -> str:
 
 @tool
 def read_autopsy_report(job_id: str) -> str:
-    """Read the full Autopsy report for a cluster job.
+    """Read the full Autopsy report for a CIA diagnostic job.
 
     Args:
         job_id: The CIA job id, e.g. cia-20260819-232554-6ec890.
@@ -1060,9 +1087,7 @@ def read_autopsy_report(job_id: str) -> str:
     # is inside the jobs root, while showing the contents of a file that is
     # not. Nothing in the answer says the two differ.
     try:
-        report = resolve_within(
-            settings.jobs_root, f"{job_id}/bundle/report.json", JOBS_ROOT_LABEL
-        )
+        report = resolve_within(settings.jobs_root, f"{job_id}/bundle/report.json", JOBS_ROOT_LABEL)
     except ValueError as exc:
         return tool_failure(f"Error: {exc}")
     if not report.is_file():

@@ -35,9 +35,7 @@ def test_the_dead_gate_is_gone():
 def test_nothing_refers_to_it(name):
     """Including a stale import that would fail only when it ran."""
     hits = [
-        str(p.relative_to(ROOT))
-        for p in CIA.rglob("*.py")
-        if name in p.read_text(encoding="utf-8")
+        str(p.relative_to(ROOT)) for p in CIA.rglob("*.py") if name in p.read_text(encoding="utf-8")
     ]
     assert not hits, f"{name} still referenced in {hits}"
 
@@ -51,7 +49,7 @@ def test_the_package_still_imports_without_it():
 
 
 def test_submission_goes_through_the_seam(monkeypatch, tmp_path):
-    """What launch() is for: one place a scheduler-less backend would branch.
+    """What launch() is for: one place the execution backends branch.
 
     Asserted here as well as in test_launch_seam.py because the reason the gate
     looked plausible is that submission has a single documented entry point --
@@ -70,6 +68,7 @@ def test_submission_goes_through_the_seam(monkeypatch, tmp_path):
         job_name="j",
         log_path=str(tmp_path / "l"),
         script_path=tmp_path / "s.sbatch",
+        backend="slurm",
     )
 
     assert (job_id, error) == ("42", "")

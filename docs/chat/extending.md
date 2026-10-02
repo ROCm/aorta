@@ -47,15 +47,16 @@ Two rules the built-in tools follow and yours should too:
 
 ### The exception, and why it is one
 
-The cluster diagnostic tools do not keep that bound, and it is worth being
+The CIA diagnostic tools do not keep that bound, and it is worth being
 plain about rather than leaving a reader to infer the rule still holds.
 `triage_kernel_source`, `triage_assembly_source` and `triage_workload` write
-under `jobs_root` rather than the source root, reach a scheduler over SSH, and
-run source the user pasted on a GPU node. A single chat turn can start a job
-that occupies one for minutes. `run_terminal_command` would refuse every one of
-those operations, and the container the agents use when `CIA_CONTAINER_IMAGE`
-is set runs with `--security-opt seccomp=unconfined` and the shared filesystem
-mounted.
+under `jobs_root` rather than the source root and run source the user pasted on
+a GPU. Depending on `cia_job_backend`, they either reach Slurm or start a
+detached process with the chat server's account on the current workstation. A
+single chat turn can occupy a GPU for minutes. `run_terminal_command` would
+refuse these operations, and the container the agents use when
+`CIA_CONTAINER_IMAGE` is set runs with `--security-opt seccomp=unconfined` and
+the configured filesystem mounts.
 
 So they are off unless you turn them on. `allow_cluster_jobs` defaults to
 `false`, and while it is false those three are absent from the registry and
