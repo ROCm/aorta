@@ -100,6 +100,13 @@ def run_aorta_probe(
     if stopped(stop):
         print("[probe] caller gave up; not launching a production sweep")
         return None
+    if getattr(job, "scheduler", "") == "local":
+        # The diagnostic itself and Autopsy both run locally. This optional
+        # escalation is the one remaining SSH-only path; local mode must not
+        # reinterpret a workstation hostname as a compute node and contact a
+        # configured Slurm head node behind the user's back.
+        print("[probe] local job: skipping the SSH production-sweep escalation")
+        return None
     if not valid_host(job.node):
         print(f"[probe] {job.node!r} is not a hostname; not probing")
         return None

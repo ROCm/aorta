@@ -20,11 +20,14 @@ aorta chat                       # interactive REPL
 To add Cluster Intelligence diagnostics, install the `cia` extra beside the
 chat extra you use, for example `pip install 'amd-aorta[chat-cli,cia]'`.
 `allow_cluster_jobs` remains `false` until you change it, so the tools that
-submit work are not offered; `aorta chat tools` shows the effective list. See
+submit work are not offered; `aorta chat tools` shows the effective list. The
+submitting tools can use Slurm or run directly on one Linux workstation, so
+single-node Slurm is not required. See
 [installation](installation.md#add-cia-backed-cluster-diagnostics) for every
-install combination, the Python ranges, and the tools each setting adds, and
-read [cluster configuration and security](configuration.md#the-cluster-diagnostic-tools)
-before you enable submissions.
+install combination, the Python ranges, and the tools each setting adds. Read
+[cluster configuration and security](configuration.md#the-cluster-diagnostic-tools)
+before enabling submissions, or follow the
+[no-Slurm workstation quickstart](workstation-diagnostics.md).
 
 ## `aorta chat` or `aorta agent`?
 

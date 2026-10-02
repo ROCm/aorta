@@ -435,7 +435,7 @@ class TestNoSweepBeginsAfterCancellation:
         stop = threading.Event()
         launches = []
 
-        def reconcile_then_stop(_jobs_root):
+        def reconcile_then_stop(_jobs_root, _backend=""):
             stop.set()
             return 0
 

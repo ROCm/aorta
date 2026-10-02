@@ -37,6 +37,22 @@ def _launch_line(cluster, result: dict) -> str:
 
 
 class TestTheSummaryNamesWhatRanIt:
+    def test_a_workstation_run_is_not_called_slurm(self, cluster):
+        line = _launch_line(
+            cluster,
+            {
+                "scheduler": "local",
+                "scheduler_job_id": "local:123:456",
+                "node": "workstation",
+            },
+        )
+
+        assert "local process" in line
+        assert "123" in line
+        assert "456" not in line
+        assert "workstation" in line
+        assert "slurm" not in line.lower()
+
     def test_the_resolved_node_is_reported(self, cluster):
         line = _launch_line(cluster, {"slurm_job_id": "12345", "node": "node07"})
 

@@ -26,6 +26,7 @@ from aorta.chat.config import ENV_PREFIX, Settings, get_settings, reset_settings
 #: The facts both halves need, and the agents' own spelling of each.
 _SHARED = [
     ("jobs_path", "CIA_JOBS_ROOT", "/tmp/somewhere-shared"),
+    ("cia_job_backend", "CIA_JOB_BACKEND", "local"),
     ("cia_demo_node", "CIA_DEMO_NODE", "node42"),
     ("gpu_arch", "CIA_GPU_ARCH", "gfx942"),
 ]
@@ -135,6 +136,13 @@ class TestBothHalvesGetTheSameValue:
 
         assert argv[argv.index("--node") + 1] == "node42"
 
+    def test_the_job_backend_reaches_launch(self, monkeypatch):
+        monkeypatch.setenv("CIA_JOB_BACKEND", "local")
+        reset_settings()
+        argv = self._argv(monkeypatch)
+
+        assert argv[argv.index("--job-backend") + 1] == "local"
+
 
 class TestTheArchIsNotFrozenAtImport:
     """It was a module constant, so the first import decided it for the process."""
@@ -167,6 +175,7 @@ class TestTheDocsListThem:
         "field",
         [
             "jobs_path",
+            "cia_job_backend",
             "gpu_arch",
             "cia_demo_node",
             "rocjitsu_build",

@@ -35,7 +35,7 @@ def _job(**overrides) -> JobRecord:
     return JobRecord(**{**fields, **overrides})
 
 
-class _Launched(Exception):
+class _LaunchedError(Exception):
     """Raised once the sweep is issued, to stop before the four-hour wait loop."""
 
 
@@ -45,7 +45,7 @@ def _capture_host(monkeypatch) -> list[str]:
 
     def fake_ssh(node, cmd, **kwargs):
         seen.append(node)
-        raise _Launched
+        raise _LaunchedError
 
     monkeypatch.setattr(probe, "_ssh", fake_ssh)
     return seen
@@ -74,7 +74,7 @@ class TestTheHeadNode:
         seen = _capture_host(monkeypatch)
 
         job = _job(head_node="from.the.job", recipe_path="/jobs/r.yaml")
-        with pytest.raises(_Launched):
+        with pytest.raises(_LaunchedError):
             probe.run_aorta_probe(tmp_path, job)
 
         assert seen[0] == "from.the.job"
@@ -84,10 +84,25 @@ class TestTheHeadNode:
         seen = _capture_host(monkeypatch)
 
         job = _job(head_node="from.the.job", recipe_path="/jobs/r.yaml")
-        with pytest.raises(_Launched):
+        with pytest.raises(_LaunchedError):
             probe.run_aorta_probe(tmp_path, job, head_node="from.the.caller")
 
         assert seen[0] == "from.the.caller"
+
+    def test_a_local_job_never_contacts_the_configured_head_node(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("CIA_SSH_HOST", "head.example.invalid")
+        seen = _capture_host(monkeypatch)
+
+        result = probe.run_aorta_probe(
+            tmp_path,
+            _job(scheduler="local", recipe_path="/jobs/r.yaml"),
+        )
+
+        assert result is None
+        assert seen == []
+        assert "local job" in capsys.readouterr().out
 
 
 class TestTheLogin:
