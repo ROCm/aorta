@@ -28,6 +28,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -43,7 +44,16 @@ from aorta.cia.cancellation import Stop, pause, stopped
 # is a branch in one place rather than an edit at every call site, and the only
 # production submitter calling submit_sbatch directly is how that stops being
 # true. An unused abstraction rots.
-from aorta.cia.launch import cancel, launch
+from aorta.cia.launch import (
+    backend_for_job,
+    cancel,
+    launch,
+    record_cancellation,
+    resolve_backend,
+)
+from aorta.cia.launch import (
+    state as launch_state,
+)
 from aorta.cia.launch.job import (
     JobRecord,
     _utc_now,
@@ -52,11 +62,45 @@ from aorta.cia.launch.job import (
     update_job_status,
     write_job_json,
 )
+from aorta.cia.launch.local import ALREADY_FINISHED
 from aorta.cia.watch.poll import poll_jobs
 
 log = logging.getLogger(__name__)
 
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"}
+
+
+def _job_status_for_terminal_state(state: str) -> str:
+    if state == "COMPLETED":
+        return "completed"
+    if state == "CANCELLED":
+        return "cancelled"
+    return "failed"
+
+
+class _WatchStop:
+    """Stop Watch independently while still observing the caller's token."""
+
+    def __init__(self, upstream: threading.Event):
+        self._upstream = upstream
+        self._local = threading.Event()
+
+    def set(self) -> None:
+        self._local.set()
+
+    def is_set(self) -> bool:
+        return self._local.is_set() or self._upstream.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if self.is_set():
+            return True
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if remaining == 0:
+                return False
+            self._local.wait(0.05 if remaining is None else min(0.05, remaining))
+        return True
 
 
 def _default_aorta_root() -> str:
@@ -80,7 +124,7 @@ def _default_aorta_root() -> str:
 def venv_bin(name: str) -> str:
     """Absolute path to a console script in the venv running this driver.
 
-    The batch job activates whichever virtualenv submitted it, which is the
+    The job activates whichever virtualenv submitted it, which is the
     chatbot's rather than the agents'. Naming these tools bare would leave them
     resolved by an inherited PATH: it works from a shell that once activated the
     agents' venv and fails with 'command not found' from a clean one.
@@ -132,20 +176,49 @@ def sacct_nodelist(slurm_id: str) -> str:
     return ""
 
 
-def wait_for_job(slurm_id: str, timeout: int, interval: int = 5, *, stop: Stop = None) -> str:
+def scheduler_state(job_id: str, job_dir: Path | None = None, backend: str = "") -> str:
+    """State for either a Slurm allocation or a local process."""
+    selected = backend or backend_for_job(job_id)
+    if selected == "local":
+        return launch_state(job_id, job_dir or Path())
+    return sacct_state(job_id)
+
+
+def scheduler_node(job_id: str, backend: str) -> str:
+    """The machine that actually executed this job."""
+    if backend == "local":
+        return socket.gethostname()
+    return sacct_nodelist(job_id)
+
+
+def wait_for_job(
+    job_id: str,
+    timeout: int,
+    interval: int = 5,
+    *,
+    stop: Stop = None,
+    job_dir: Path | None = None,
+    backend: str = "",
+) -> str:
     deadline = time.time() + timeout
     state = "UNKNOWN"
+    selected = backend or backend_for_job(job_id)
+    subject = "local process" if selected == "local" else "slurm"
+    # Reading one small local sidecar is cheap and local commands often finish
+    # in under a second. Keeping Slurm's five-second accounting interval here
+    # would add five seconds to every workstation diagnosis.
+    poll_interval = min(interval, 0.2) if selected == "local" else interval
     while time.time() < deadline:
-        state = sacct_state(slurm_id)
+        state = scheduler_state(job_id, job_dir, selected)
         if state in TERMINAL_STATES:
-            log.info(f"slurm {slurm_id} reached {state}")
+            log.info(f"{subject} {job_id} reached {state}")
             return state
-        log.info(f"slurm {slurm_id} state={state} ...")
+        log.info(f"{subject} {job_id} state={state} ...")
         # This is where the wait actually spends its time: up to fifteen
         # minutes of five-second sleeps, and the caller may have given up
         # during any one of them.
-        if pause(stop, interval):
-            log.info(f"slurm {slurm_id} still {state}; caller gave up, so we stop waiting")
+        if pause(stop, poll_interval):
+            log.info(f"{subject} {job_id} still {state}; caller gave up, so we stop waiting")
             return f"ABANDONED({state})"
     return f"TIMEOUT_WAITING({state})"
 
@@ -229,12 +302,14 @@ def write_asm_recipe(
     return recipe_path
 
 
-def reconcile_stale_jobs(jobs_root: Path) -> int:
+def reconcile_stale_jobs(jobs_root: Path, backend: str = "") -> int:
     """Mark finished jobs whose record still claims 'running' as terminal.
 
     Watch only monitors jobs the registry considers active, so a record left
     'running' by an earlier interrupted run makes it spend every round tailing a
-    dead job instead of the one we just launched.
+    dead job instead of the one we just launched. Explicit local mode skips
+    Slurm records; it must not contact a scheduler merely because the jobs root
+    still contains an old cluster record.
     """
     fixed = 0
     for job_json in jobs_root.glob("*/job.json"):
@@ -244,10 +319,15 @@ def reconcile_stale_jobs(jobs_root: Path) -> int:
             continue
         if record.status != "running" or not record.scheduler_job_id:
             continue
-        state = sacct_state(record.scheduler_job_id)
+        record_backend = record.scheduler or backend_for_job(record.scheduler_job_id)
+        if backend == "local" and record_backend != "local":
+            continue
+        state = scheduler_state(record.scheduler_job_id, job_json.parent, record_backend)
         if state in TERMINAL_STATES:
             update_job_status(
-                jobs_root, record.job_id, "completed" if state == "COMPLETED" else "failed"
+                jobs_root,
+                record.job_id,
+                _job_status_for_terminal_state(state),
             )
             fixed += 1
     if fixed:
@@ -366,6 +446,15 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     ap.add_argument("--arch", default=os.environ.get("CIA_GPU_ARCH", "gfx950"))
     ap.add_argument("--jobs-root", default=os.environ.get("CIA_JOBS_ROOT", ""))
     ap.add_argument("--node", default=os.environ.get("CIA_DEMO_NODE", ""))
+    ap.add_argument(
+        "--job-backend",
+        choices=("auto", "slurm", "local"),
+        default=os.environ.get("CIA_JOB_BACKEND", "auto"),
+        help=(
+            "Where Launch runs work. auto uses Slurm when sbatch is installed "
+            "and otherwise runs on this workstation."
+        ),
+    )
     ap.add_argument("--aorta-root", default=os.environ.get("AORTA_PATH", _default_aorta_root()))
     ap.add_argument("--job-timeout", type=int, default=900)
     ap.add_argument(
@@ -373,7 +462,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Extra variable to export in the batch job. The sanitizers "
+        help="Extra variable to export in the diagnostic job. The sanitizers "
         "need ROCJITSU_BUILD and LD_PRELOAD, which used to reach the "
         "job by being set in a subprocess this driver no longer runs in.",
     )
@@ -457,8 +546,9 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
             target=args.arch,
             ticket=f"CHAT-{kernel_name}",
         )
-        # Compile on the compute node: hipcc lives with ROCm on the GPU nodes, not
-        # on the login node where the chatbot runs.
+        # Compile where the diagnostic runs: on a cluster hipcc normally lives
+        # on compute nodes rather than the login node; locally it comes from the
+        # workstation's ROCm installation.
         command = (
             f"hipcc --offload-arch={shlex.quote(args.arch)} "
             f"-o {shlex.quote(str(binary))} {shlex.quote(str(staged))} && "
@@ -492,6 +582,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
             f"--output {shlex.quote(aorta_output)}" + echo_findings
         )
 
+    selected_backend = resolve_backend(args.job_backend)
     record = JobRecord(
         job_id=job_id,
         node=args.node,
@@ -502,8 +593,8 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         status="running",
         launch_command=command,
         working_dir=args.aorta_root,
-        scheduler="slurm",
-        launcher="sbatch",
+        scheduler=selected_backend,
+        launcher="sbatch" if selected_backend == "slurm" else "aorta_direct",
         env_vars=job_env_vars,
     )
 
@@ -511,7 +602,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         f"job_id={job_id} recipe={recipe.name if recipe else '(raw command)'} "
         f"label={args.label or '-'}"
     )
-    reconcile_stale_jobs(jobs_root)
+    reconcile_stale_jobs(jobs_root, selected_backend)
     log.info("── Launch ──")
 
     # Source preparation and stale-job reconciliation can both take long
@@ -526,11 +617,11 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
             "job_dir": str(job_dir),
         }
 
-    slurm_id, err = launch(
+    scheduler_id, err = launch(
         command=command,
         job_name=job_id,
         log_path=log_path,
-        script_path=job_dir / "launch.sbatch",
+        script_path=job_dir / ("launch.sbatch" if selected_backend == "slurm" else "launch.sh"),
         working_dir=args.aorta_root,
         env_vars=record.env_vars,
         node=args.node,
@@ -546,36 +637,71 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         # scheduler's state, so the record agreed. The run looked clean because
         # nothing was left to say otherwise.
         tolerate_nonzero=recipe is not None,
+        backend=selected_backend,
     )
 
     if err:
         return {"ok": False, "stage": "launch", "error": err, "job_id": job_id}
 
-    record.scheduler_job_id = slurm_id
+    # The native handle is authoritative. This also keeps callers that replace
+    # launch() in tests or plugins compatible: unprefixed handles are Slurm,
+    # while local handles carry their backend and process identity.
+    selected_backend = backend_for_job(scheduler_id)
+    record.scheduler = selected_backend
+    record.launcher = "sbatch" if selected_backend == "slurm" else "aorta_direct"
+    record.scheduler_job_id = scheduler_id
+    if selected_backend == "local" and not record.node:
+        record.node = socket.gethostname()
     write_job_json(record, jobs_root)
-    log.info(f"submitted slurm job {slurm_id}")
+    log.info(f"started {selected_backend} job {scheduler_id}")
 
-    # Cancellation can race with the scheduler call itself. The allocation now
-    # exists, so release it before Watch (or any later triage stage) can start.
+    # Cancellation can race with launch itself. The allocation/process now
+    # exists, so stop it before Watch (or any later triage stage) can start.
     if stopped(work_stop):
-        cancelled, why = cancel(slurm_id)
+        state_before_cancel = scheduler_state(scheduler_id, job_dir, selected_backend)
+        cancelled, why = cancel(scheduler_id)
         if cancelled:
-            log.info(f"cancelled slurm {slurm_id}; the allocation is released")
-            update_job_status(jobs_root, job_id, "cancelled")
+            if state_before_cancel in TERMINAL_STATES or why == ALREADY_FINISHED:
+                launch_terminal_state = (
+                    state_before_cancel
+                    if state_before_cancel in TERMINAL_STATES
+                    else scheduler_state(scheduler_id, job_dir, selected_backend)
+                )
+                update_job_status(
+                    jobs_root,
+                    job_id,
+                    _job_status_for_terminal_state(launch_terminal_state),
+                )
+                log.info(
+                    f"{selected_backend} job {scheduler_id} had already reached "
+                    f"{launch_terminal_state}"
+                )
+            else:
+                log.info(f"cancelled {selected_backend} job {scheduler_id}")
+                record_cancellation(
+                    scheduler_id,
+                    job_dir,
+                    preserve_terminal=False,
+                )
+                update_job_status(jobs_root, job_id, "cancelled")
         else:
             log.warning(
-                f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
-                "node until its time limit"
+                f"{selected_backend} job {scheduler_id} could not be cancelled ({why}); "
+                "it may still be running"
             )
-        return {
+        launch_cancel_result = {
             "ok": False,
             "stage": "launch",
             "error": "abandoned by caller during launch",
             "job_id": job_id,
-            "slurm_job_id": slurm_id,
+            "scheduler": selected_backend,
+            "scheduler_job_id": scheduler_id,
             "cancelled": cancelled,
             "job_dir": str(job_dir),
         }
+        if selected_backend == "slurm":
+            launch_cancel_result["slurm_job_id"] = scheduler_id
+        return launch_cancel_result
 
     bundle = job_dir / "bundle"
     report_path = bundle / "report.json"
@@ -590,24 +716,31 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # chunk, and any of them could alert and trigger an Autopsy on a job it had
     # nothing to do with. The standalone `aorta cia watch` still takes them all,
     # which is what it is for.
+    watch_stop = _WatchStop(work_stop)
     watcher = threading.Thread(
         target=poll_jobs,
         kwargs={
             "jobs_root": jobs_root,
             "max_rounds": args.watch_rounds,
-            "stop": work_stop,
+            "stop": watch_stop,
             "only": job_id,
         },
         daemon=True,
     )
     watcher.start()
 
-    state = wait_for_job(slurm_id, timeout=args.job_timeout, stop=work_stop)
+    state = wait_for_job(
+        scheduler_id,
+        timeout=args.job_timeout,
+        stop=work_stop,
+        job_dir=job_dir,
+        backend=selected_backend,
+    )
 
-    # Giving up on the answer has to give back the node. The allocation outlives
-    # this process otherwise -- until its own time limit, four hours by default
-    # -- so a chat turn that stopped waiting would leave a GPU occupied by a run
-    # whose result nobody will read, and the next person queues behind it.
+    # Giving up on the answer has to stop the work. A Slurm allocation outlives
+    # this process until its own time limit; a detached local process also
+    # continues after the request. Either would leave a GPU occupied by a run
+    # whose result nobody will read.
     #
     # Both ways of stopping owe that, and only abandonment paid it. A run that
     # hit job_timeout fell through to the grace window and the bundle fallback
@@ -616,46 +749,73 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # node longest.
     if state.startswith("ABANDONED") or state.startswith("TIMEOUT_WAITING"):
         work_stop.set()
-        cancelled, why = cancel(slurm_id)
+        state_before_cancel = scheduler_state(scheduler_id, job_dir, selected_backend)
+        cancelled, why = cancel(scheduler_id)
         if cancelled:
-            log.info(f"cancelled slurm {slurm_id}; the allocation is released")
+            if state_before_cancel in TERMINAL_STATES or why == ALREADY_FINISHED:
+                wait_terminal_state = (
+                    state_before_cancel
+                    if state_before_cancel in TERMINAL_STATES
+                    else scheduler_state(scheduler_id, job_dir, selected_backend)
+                )
+                update_job_status(
+                    jobs_root,
+                    job_id,
+                    _job_status_for_terminal_state(wait_terminal_state),
+                )
+                log.info(
+                    f"{selected_backend} job {scheduler_id} had already reached "
+                    f"{wait_terminal_state}"
+                )
+            else:
+                log.info(f"cancelled {selected_backend} job {scheduler_id}")
+                record_cancellation(
+                    scheduler_id,
+                    job_dir,
+                    preserve_terminal=False,
+                )
+                update_job_status(jobs_root, job_id, "cancelled")
         else:
             log.warning(
-                f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
-                "node until its time limit"
+                f"{selected_backend} job {scheduler_id} could not be cancelled ({why}); "
+                "it may still be running"
             )
-        # Terminal scheduler status removes this from Watch's active log path.
-        # Durable unsettled Autopsy state is recovered separately; leaving the
-        # job 'running' would also make every later round poll a dead log.
-        update_job_status(jobs_root, job_id, "cancelled")
+        # A confirmed terminal state removes this from Watch's active scan.
+        # A failed cancellation deliberately remains running so a later Watch
+        # or stale-job reconciliation can still observe the live work.
         # Watch owns its own bounded Autopsy pool. Give it a bounded chance to
         # observe the same stop event and persist queued/running work before the
         # triage reports cancellation complete.
-        # External cancellation (chat/API or CLI SIGINT) promises that Watch
-        # has observed the stop before the caller gets its answer. A legacy
-        # library caller with no token still gets the internal event above,
-        # but does not pay this grace period synchronously.
-        if stop is not None:
-            watcher.join(timeout=5)
-        if stop is not None and watcher.is_alive():
+        # Every caller waits for this bounded shutdown. Returning while the
+        # daemon still scans a job whose cancellation failed lets its callbacks
+        # and monkeypatch-visible state leak into the next request/test.
+        watcher.join(timeout=5)
+        if watcher.is_alive():
             log.warning(
                 "Watch is still unwinding after cancellation; its stop flag is "
                 "set and it will start no new Autopsy work"
             )
-        return {
+        wait_cancel_result = {
             "ok": False,
             "stage": "wait",
-            # The job is gone either way; which way matters to whoever reads it.
+            # The cancellation flag below says whether the job is actually gone.
             "error": (
                 "abandoned by caller"
                 if state.startswith("ABANDONED")
-                else f"timed out after {args.job_timeout}s waiting on slurm {slurm_id}"
+                else (
+                    f"timed out after {args.job_timeout}s waiting on "
+                    f"{selected_backend} job {scheduler_id}"
+                )
             ),
             "job_id": job_id,
-            "slurm_job_id": slurm_id,
+            "scheduler": selected_backend,
+            "scheduler_job_id": scheduler_id,
             "cancelled": cancelled,
             "job_dir": str(job_dir),
         }
+        if selected_backend == "slurm":
+            wait_cancel_result["slurm_job_id"] = scheduler_id
+        return wait_cancel_result
 
     # Give Watch a bounded window to notice the finished log, alert, assemble the
     # bundle and trigger Autopsy before falling back to doing it directly.
@@ -672,6 +832,8 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # Normal completion can wait for report finalization. Cancellation cannot:
     # Watch has its own bounded shutdown/abandonment path and the caller should
     # not pay this historical thirty-second join on top of it.
+    if not stopped(work_stop) and watcher.is_alive():
+        watch_stop.set()
     watcher.join(timeout=5 if stopped(work_stop) else 30)
     watch_events = read_watch_events(job_dir)
     watch_tail = [
@@ -736,12 +898,13 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     result: dict = {
         "ok": True,
         "job_id": job_id,
-        "slurm_job_id": slurm_id,
+        "scheduler": selected_backend,
+        "scheduler_job_id": scheduler_id,
         "label": args.label,
         "recipe": str(recipe) if recipe else "(raw command)",
-        "slurm_state": state,
+        "scheduler_state": state,
         # What ran it, not what was asked for: args.node is often empty.
-        "node": sacct_nodelist(slurm_id) or args.node,
+        "node": scheduler_node(scheduler_id, selected_backend) or args.node,
         "arch": args.arch,
         "job_dir": str(job_dir),
         "bundle": str(bundle),
@@ -751,6 +914,10 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         "kernel": kernel_name,
         "compiled_from_source": compiled_from_source,
     }
+    if selected_backend == "slurm":
+        # Compatibility for consumers written before local execution existed.
+        result["slurm_job_id"] = scheduler_id
+        result["slurm_state"] = state
 
     # A compile failure short-circuits the sweep, which otherwise looks like a
     # silent no-report run. Report it as such so the caller can show the diagnostics
