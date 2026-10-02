@@ -32,13 +32,16 @@ uv pip install -e ".[chat-cli,cia]"
 `allow_cluster_jobs` remains `false`. The installed CIA layer initially adds
 only `list_cluster_jobs` and `read_autopsy_report`; enabling the setting adds
 the three submitting tools (`triage_kernel_source`, `triage_assembly_source`,
-`triage_workload`). Run `aorta chat tools` to verify the effective list. If
+`triage_workload`). Those jobs can run through Slurm or directly on one Linux
+workstation; single-node Slurm is not required. Run `aorta chat tools` to verify
+the effective list. If
 `cia` is absent, chat remains usable and reports that those five tools were not
 offered, with `pip install 'amd-aorta[cia]'` as the remedy. See
 [installation](installation.md#add-cia-backed-cluster-diagnostics) for all
 published/editable combinations and
 [cluster configuration and security](configuration.md#the-cluster-diagnostic-tools)
-before enabling submissions.
+before enabling submissions. Workstation users can follow the
+[no-Slurm quickstart](workstation-diagnostics.md).
 
 ## `aorta chat` or `aorta agent`?
 

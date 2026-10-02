@@ -226,9 +226,10 @@ directory cannot be pip-upgraded cleanly.
 
 ### The cluster diagnostic tools
 
-These only apply where the `cia` extra is installed and the chat server can
-reach a Slurm cluster. Without it the diagnostic tools are not registered and
-none of this is read.
+These only apply where the `cia` extra is installed. Diagnostic jobs can run
+through Slurm or as detached processes on the workstation serving Chat; see
+[the no-Slurm setup](workstation-diagnostics.md). Without the extra the
+diagnostic tools are not registered and none of this is read.
 
 Each of these names something the chat tools and the agents both need to agree
 on, so a single setting answers to two environment variables: the chat prefix,
@@ -239,13 +240,14 @@ while the profile pointed another is the failure the shared name prevents.
 
 | Setting | Also reads | Default | Meaning |
 | --- | --- | --- | --- |
-| `allow_cluster_jobs` | — | `false` | Register the three tools that submit work: `triage_kernel_source`, `triage_assembly_source`, `triage_workload`. Off by default because they are outside the bound every other tool keeps — see [extending](extending.md#the-exception-and-why-it-is-one). While off they are absent from the registry and the prompts, not refused at call time. Reading past jobs does not need it. |
-| `jobs_path` | `CIA_JOBS_ROOT` | *(the agents' own default, `~/cia-jobs`)* | Where job records and bundles are written. Must be readable from every node that runs work, which on most clusters means a shared filesystem rather than `/tmp`. |
+| `allow_cluster_jobs` | — | `false` | Register the three tools that execute work: `triage_kernel_source`, `triage_assembly_source`, `triage_workload`. The historical setting name covers local and Slurm jobs. It is off by default because these tools are outside the bound every other tool keeps — see [extending](extending.md#the-exception-and-why-it-is-one). While off they are absent from the registry and prompts, not refused at call time. Reading past jobs does not need it. |
+| `jobs_path` | `CIA_JOBS_ROOT` | *(the agents' own default, `~/cia-jobs`)* | Where job records and bundles are written. A local run may use a local path. Slurm runs need a path readable from every compute node, which usually means a shared filesystem rather than `/tmp`. |
+| `cia_job_backend` | `CIA_JOB_BACKEND` | `auto` | `auto` uses Slurm when `sbatch` is installed and otherwise runs on this workstation. `local` never contacts Slurm; use it when Slurm clients are installed but no usable cluster is configured. `slurm` requires scheduler submission and never silently falls back locally. |
 | `gpu_arch` | `CIA_GPU_ARCH` | `gfx950` | The GPU the submitted work is built for. Used for the assembler target and passed to the agents as `--arch`, so both name the same chip. |
-| `cia_demo_node` | `CIA_DEMO_NODE` | *(empty)* | Pin work to one node. Empty lets the scheduler choose, which is correct everywhere except a demo. |
+| `cia_demo_node` | `CIA_DEMO_NODE` | *(empty)* | Pin Slurm work to one node. Leave it empty for local execution; a local backend refuses a remote node name instead of pretending it ran there. |
 | `rocjitsu_build` | — | *(empty)* | The sanitizer backend. Unset means a sweep reports that it could not run, which is the honest outcome rather than reporting it found nothing. |
 | `rocjitsu_preload` | — | *(empty)* | Preloaded into the sanitized process. ConSan's hook is dlopened into one that has already loaded the host libstdc++, so without a newer one the tool library fails to load and the run reports a guardrail it never exercised. |
-| `triage_timeout` | — | `1800` | Seconds before one triage stops being waited for. The agents have their own internal timeouts; this is the backstop that keeps a wedged cluster job from hanging a chat turn. The abandoned run is asked to stop rather than left going. |
+| `triage_timeout` | — | `1800` | Seconds before one triage stops being waited for. The agents have their own internal timeouts; this keeps a wedged local process or cluster job from hanging a chat turn. The abandoned run is asked to stop rather than left going. |
 | `waitcheck_timeout` | — | `300` | Seconds for one static assembly analysis, which needs no GPU and no queue. |
 
 CIA Launch, Watch, and Autopsy use `Qwen/Qwen3.8-27B`. They reuse the endpoint
@@ -256,10 +258,11 @@ answers directly instead of producing its default reasoning trace first.
 Ordinary `aorta chat` turns continue to use the configured `vllm_model` or
 `remote_llm_model`.
 
-The scheduler knobs the agents read directly — `CIA_PARTITION`, `CIA_TIME_LIMIT`,
-`CIA_SSH_USER`, `CIA_SSH_HOST`, `CIA_SEARCH_ROOTS`, `CIA_CONTAINER_IMAGE`,
-`CIA_SBATCH_EXTRA` — have no chat setting. They describe the cluster rather than
-the assistant, and are read from the environment the chat server runs in.
+The Slurm-only knobs the agents read directly — `CIA_PARTITION`,
+`CIA_TIME_LIMIT`, `CIA_SSH_USER`, `CIA_SSH_HOST`, `CIA_SEARCH_ROOTS`, and
+`CIA_SBATCH_EXTRA` — have no chat setting. `CIA_CONTAINER_IMAGE` wraps the
+workload for either backend. These are read from the environment the chat
+server runs in.
 
 
 ## The web UI's own settings
@@ -272,8 +275,8 @@ regenerated.
 
 | Setting | Shipped as | Why |
 | --- | --- | --- |
-| `allow_origins` | `["http://localhost:8080", "http://127.0.0.1:8080"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
-| `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and a Slurm cluster. |
+| `allow_origins` | `["http://localhost:8080", "http://127.0.0.1:8080"]` | Chainlit's default is `["*"]`. The tools behind this UI can start GPU diagnostics, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU. |
+| `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and, when configured, a Slurm cluster. |
 
 **Serving anywhere other than `localhost:8080` means editing `allow_origins`.**
 Those two are `aorta chat ui`'s own defaults, and they have to stay in step with

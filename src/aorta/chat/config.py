@@ -30,7 +30,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 try:
     import tomllib
@@ -185,10 +185,14 @@ class Settings(BaseSettings):
     # guessed node is worse than an unset one: it does not fail, it runs
     # somewhere nobody meant and reports nothing useful.
     #: Where job records and bundles are written. Empty means the agents'
-    #: own default. Must be readable from every node that runs work.
+    #: own default. Slurm runs need a path visible from every compute node.
     jobs_path: str = Field("", validation_alias=_either("JOBS_PATH", "CIA_JOBS_ROOT"))
-    #: Pin work to one node. Empty lets the scheduler choose, which is correct
-    #: everywhere except a demo.
+    #: Where CIA diagnostic jobs execute. ``auto`` keeps cluster behavior when
+    #: sbatch is present and otherwise uses a detached process on this machine.
+    cia_job_backend: Literal["auto", "slurm", "local"] = Field(
+        "auto", validation_alias=_either("CIA_JOB_BACKEND")
+    )
+    #: Pin Slurm work to one node. Local execution accepts only this machine.
     cia_demo_node: str = Field("", validation_alias=_either("CIA_DEMO_NODE"))
     #: Which GPU the submitted work is built for. Read by the chat tools for the
     #: assembler target and handed to the agents as ``--arch``.
@@ -213,7 +217,7 @@ class Settings(BaseSettings):
     #: exercised.
     rocjitsu_preload: str = ""
     #: Ceiling on one triage. The agents have their own internal timeouts; this
-    #: is the backstop that keeps a wedged cluster job from hanging a chat turn.
+    #: keeps a wedged local or Slurm job from hanging a chat turn.
     triage_timeout: int = 1800
     #: Ceiling on a single static analysis, which needs no GPU and no queue.
     waitcheck_timeout: int = 300
@@ -297,11 +301,11 @@ class Settings(BaseSettings):
     # is a deliberate act by the operator, not a default anyone inherits by
     # installing the extra.
     enable_shell_tool: bool = False
-    #: Register the tools that submit work to the cluster. Off by default, for
+    #: Register the tools that execute diagnostic jobs. Off by default, for
     #: the same reason the shell tool is: they are outside the bound every other
     #: tool keeps. They write under ``jobs_root`` rather than the source root,
-    #: reach a scheduler over SSH, and run source the user pasted on a GPU node
-    #: -- and a single chat turn can start a job that occupies one for minutes.
+    #: may reach Slurm, and run source the user pasted on a GPU -- and a single
+    #: chat turn can start a job that occupies it for minutes.
     #: That is the product, but it is not something to inherit by installing an
     #: extra. While off they are absent from the registry and the prompts, not
     #: refused at call time, so nothing the model is told about can be talked

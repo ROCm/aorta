@@ -43,7 +43,8 @@ most people type first.
 
 The Cluster Intelligence Agents are a separate `cia` extra. Install it beside
 the chat interface you use; installing a chat extra alone deliberately leaves
-all five cluster tools out.
+all five CIA tools out. The submitting tools can use either Slurm or the
+current workstation; installing single-node Slurm is not required.
 
 ```bash
 # Published package: choose one chat interface.
@@ -68,7 +69,7 @@ available:
 - `list_cluster_jobs`
 - `read_autopsy_report`
 
-The three tools that write staged inputs and submit scheduler work remain
+The three tools that write staged inputs and execute diagnostic work remain
 absent until an operator sets `allow_cluster_jobs = true`:
 
 - `triage_kernel_source`
@@ -81,11 +82,13 @@ Set it persistently in `~/.config/aorta/chat.toml`, or for one process:
 export AORTA_CHAT_ALLOW_CLUSTER_JOBS=true
 ```
 
-Before enabling it, configure the shared jobs path, GPU architecture, scheduler,
-and sanitizer backend in
+Before enabling it, configure the jobs path, GPU architecture, execution
+backend, and sanitizer backend in
 [the cluster diagnostic settings](configuration.md#the-cluster-diagnostic-tools),
 and read [why submitting tools are a separate security capability](extending.md#the-exception-and-why-it-is-one)
 plus the [redaction boundary](redaction.md).
+For a machine without Slurm, follow the
+[single-workstation setup](workstation-diagnostics.md).
 
 Verify the effective registry rather than inferring it from what pip installed:
 
@@ -97,7 +100,7 @@ aorta chat tools --json
 At the safe default, the first command includes `list_cluster_jobs` and
 `read_autopsy_report`, but no `triage_*` tools. After enabling cluster jobs it
 includes all five. Without `cia`, chat still starts and its ordinary code/run
-tools still work; startup prints that the five cluster diagnostic tools were
+tools still work; startup prints that the five CIA diagnostic tools were
 not offered and names the remedy:
 `pip install 'amd-aorta[cia]'`.
 

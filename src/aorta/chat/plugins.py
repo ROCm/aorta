@@ -72,7 +72,7 @@ OPTIONAL_CHAT_TOOLS: dict[str, BaseTool] = {
     "run_terminal_command": run_terminal_command,
 }
 
-#: The diagnostic tools, which reach the cluster agents and therefore DSPy.
+#: The diagnostic tools, which reach the CIA agents and therefore DSPy.
 #: Imported on use rather than at module scope: the chain from here is
 #: chat.tools.cluster -> cia.triage -> cia.watch.poll -> cia.watch.watcher ->
 #: dspy, and dspy is in the [cia] extra, not in chat-cli or chat-ui. Eagerly,
@@ -88,11 +88,11 @@ _DIAGNOSTIC_READ_TOOLS = (
     "read_autopsy_report",
 )
 
-#: Submitting work. These write outside the source root, reach a scheduler over
-#: SSH, and run pasted source on a GPU node, so one chat turn can occupy one for
-#: minutes. Registered only when ``allow_cluster_jobs`` is set, for the reason
-#: the shell tool is: a capability this far outside the documented bound is an
-#: operator's decision, not something an extra brings with it.
+#: Submitting work. These write outside the source root and run pasted source
+#: locally or through Slurm, so one chat turn can occupy a GPU for minutes.
+#: Registered only when ``allow_cluster_jobs`` is set, for the reason the shell
+#: tool is: a capability this far outside the documented bound is an operator's
+#: decision, not something an extra brings with it.
 _DIAGNOSTIC_JOB_TOOLS = (
     "triage_kernel_source",
     "triage_assembly_source",
@@ -113,17 +113,14 @@ def _missing_optional_dspy(error: ImportError) -> bool:
     """
     current: BaseException | None = error
     while current is not None:
-        if (
-            isinstance(current, ModuleNotFoundError)
-            and current.name == "dspy"
-        ):
+        if isinstance(current, ModuleNotFoundError) and current.name == "dspy":
             return True
         current = current.__cause__
     return False
 
 
 def diagnostic_tools() -> dict[str, BaseTool]:
-    """The cluster diagnostic tools, or nothing when their extra is absent.
+    """The CIA diagnostic tools, or nothing when their extra is absent.
 
     Absent is a shipped configuration, not a fault: chat without [cia] is a
     working assistant over the codebase and past runs, minus the tools that
@@ -150,7 +147,7 @@ def diagnostic_tools() -> dict[str, BaseTool]:
         names += list(_DIAGNOSTIC_JOB_TOOLS)
     else:
         logger.info(
-            "%s are not registered: they submit work to a cluster, which is off "
+            "%s are not registered: they execute diagnostic jobs, which is off "
             "unless allow_cluster_jobs is set. Reading past jobs still works.",
             ", ".join(_DIAGNOSTIC_JOB_TOOLS),
         )

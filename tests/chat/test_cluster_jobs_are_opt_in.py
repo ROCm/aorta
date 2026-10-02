@@ -1,10 +1,10 @@
-"""Submitting work to a cluster is not something an extra should bring with it.
+"""Executing diagnostic work is not something an extra should enable by itself.
 
 Every other tool keeps a bound the integration docs state plainly: paths
 resolve under a configured root and anything that escapes is refused. The three
 triage tools do the opposite. They write under ``jobs_root`` rather than the
-source root, reach a scheduler over SSH, and run source the user pasted on a
-GPU node -- so one chat turn can occupy one for minutes.
+source root and run source the user pasted locally or through Slurm -- so one
+chat turn can occupy a GPU for minutes.
 ``run_terminal_command`` would refuse every one of those operations, and it is
 off by default for less.
 
@@ -114,14 +114,14 @@ class TestTurningItOn:
         welcome = importlib.reload(importlib.import_module("aorta.chat.ui.welcome"))
         said = welcome.capabilities()
 
-        assert "occupy a node for minutes" in said
+        assert "occupy a GPU for minutes" in said
 
     def test_and_does_not_when_it_is_off(self, monkeypatch):
         import importlib
 
         welcome = importlib.reload(importlib.import_module("aorta.chat.ui.welcome"))
 
-        assert "occupy a node" not in welcome.capabilities()
+        assert "occupy a GPU" not in welcome.capabilities()
 
 
 class TestReadingIsStillBounded:
@@ -144,9 +144,7 @@ class TestReadingIsStillBounded:
     def test_an_absolute_path_outside_the_jobs_root_is_refused(self, tmp_path):
         outside = tmp_path / "elsewhere"
         (outside / "bundle").mkdir(parents=True)
-        (outside / "bundle" / "report.json").write_text(
-            '{"category":"leaked"}', encoding="utf-8"
-        )
+        (outside / "bundle" / "report.json").write_text('{"category":"leaked"}', encoding="utf-8")
 
         answer = self._read(str(outside))
 
@@ -172,6 +170,7 @@ class TestReadingIsStillBounded:
     def test_it_uses_the_shared_rule(self):
         """A fifth copy would drift the same way the first three did."""
         import inspect
+
         pytest.importorskip("dspy", reason="needs the [cia] extra")
 
         from aorta.chat.tools import cluster
@@ -202,10 +201,8 @@ class TestTheBoundIsWrittenDown:
         assert "allow_cluster_jobs" in doc
         assert "seccomp=unconfined" in doc, "the container's own bound should be stated"
 
-    def test_it_says_a_turn_can_occupy_a_node(self):
-        assert "occupies one for minutes" in self._doc(
-            "extending.md"
-        ) or "occupy a node" in self._doc("extending.md")
+    def test_it_says_a_turn_can_occupy_a_gpu(self):
+        assert "occupy a GPU for minutes" in self._doc("extending.md")
 
     def test_configuration_documents_the_switch(self):
         doc = self._doc("configuration.md")
