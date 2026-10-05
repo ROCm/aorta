@@ -118,10 +118,15 @@ class Exemption(NamedTuple):
     one binary that could retire the entry was the one binary never opened,
     and :func:`test_known_absent_entries_are_still_absent` could only ever
     confirm what it already assumed.
+
+    ``read_by_nothing`` says whether the absence holds on every stack or only
+    on the ones scanned. It is required, so each entry states its scope:
+    a spelling an older release reads is absent here and still read there.
     """
 
     claimed_consumer: str
     reason: str
+    read_by_nothing: bool
 
 
 #: ``(mitigation, variable)`` pairs known to be absent from every scanned
@@ -149,6 +154,7 @@ KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
             "registry once attributed it to hipBLASLt, the claim this entry "
             "excuses; the entry is kept only so existing names resolve."
         ),
+        read_by_nothing=True,
     ),
     ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"): Exemption(
         claimed_consumer="librccl.so",
@@ -157,6 +163,7 @@ KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
             "acts there. ROCm 7.1.1 through 7.2 and RCCL 10.0 read "
             "RCCL_GFX9_CHEAP_FENCE_OFF, which the same entry also sets."
         ),
+        read_by_nothing=False,
     ),
 }
 
@@ -2740,6 +2747,7 @@ def _synthetic_exemption(monkeypatch) -> tuple[str, str]:
         Exemption(
             claimed_consumer="libamdhip64.so",
             reason="fixture for this test; never reaches the real backlog",
+            read_by_nothing=True,
         ),
     )
     return ("synthetic_mitigation", "SYNTHETIC_ABSENT")
@@ -2835,19 +2843,24 @@ def test_a_known_absent_variable_is_not_attributed_to_a_library_elsewhere():
     ``DISABLE_TF32`` was excused here as read by nothing while
     ``instrumentation/env_knobs.py`` attributed it to pytorch (aorta#500). A
     captured knob may stay in that manifest, since a workload can read it, but
-    its ``library`` has to say so.
+    its ``library`` has to say so. Only entries marked ``read_by_nothing``
+    apply: a spelling an older release reads may be attributed to it.
     """
     from aorta.instrumentation.env_knobs import ENV_KNOB_REGISTRY
 
-    absent = {variable for _, variable in KNOWN_ABSENT}
+    absent = {
+        variable
+        for (_, variable), exemption in KNOWN_ABSENT.items()
+        if exemption.read_by_nothing
+    }
     attributed = sorted(
         (knob.name, knob.library)
         for knob in ENV_KNOB_REGISTRY
         if knob.name in absent and knob.library != "workload"
     )
     assert not attributed, (
-        f"{attributed}: these variables are in KNOWN_ABSENT, i.e. no scanned "
-        "library contains them, yet ENV_KNOB_REGISTRY names a library that "
+        f"{attributed}: these variables are in KNOWN_ABSENT as read by nothing, "
+        "yet ENV_KNOB_REGISTRY names a library that "
         "reads them. Correct the attribution or retire the exemption."
     )
 
