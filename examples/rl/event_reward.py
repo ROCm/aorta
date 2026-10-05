@@ -123,6 +123,9 @@ Per episode -- decided by the terminal state, at most one fires
     the ``proposal_unresolved`` stop reason, aorta#449. Not a decision, so it is
     not adjudicated as one. Equal to ``terminal_gave_up`` deliberately: see the
     note beside the value in :data:`POINTS` for why it must not be cheaper.
+``terminal_proposal_redundant`` (-3.0)
+    The same, when policy validation removed every name as the ``none``
+    baseline or a repeat -- the ``proposal_redundant`` stop reason, aorta#501.
 
 Per cell -- the running cost
 ----------------------------
@@ -233,6 +236,11 @@ POINTS: dict[str, float] = {
     # instead of an honest empty proposal (-3.0). At equality the stall costs
     # -1.0 more than the quit, so nothing is bought by stalling. A test pins it.
     "terminal_proposal_unresolved": -3.0,
+    # The same ending reached by validation: every name was `none` or a repeat,
+    # so nothing was left to run (aorta#501). Equal to giving up for the same
+    # reason, and here the floor matters more -- a `none` scores no per-name
+    # event, so anything cheaper would make it a free exit.
+    "terminal_proposal_redundant": -3.0,
     # per probe cell
     "cell_spent": -0.2,
 }
@@ -829,6 +837,7 @@ def classify_stop(
     offered: Iterable[str],
     tried: Iterable[str],
     unresolved: Iterable[str] = (),
+    redundant: Iterable[str] = (),
 ) -> tuple[str, str]:
     """The terminal for a ``search_stopped`` ending, shared by both classifiers.
 
@@ -836,19 +845,27 @@ def classify_stop(
     :func:`episode_from_log` afterwards from the log -- and two copies of a
     precedence rule are how a replay and a run come to disagree.
 
-    ``proposal_unresolved`` is checked FIRST, and it is read off the loop's own
-    stop reason rather than re-derived: it is the one ending that is not the
-    policy's, and every branch below attributes a decision. The empty list at
-    that stop is the filter's, so it must not be adjudicated as the claim
-    "nothing resolves this". An explicit ``stop: true`` carries
-    ``agent_requested`` and never reaches that branch, which is correct: the
-    policy said so, even if the filter also dropped a name from the same reply.
+    ``proposal_unresolved`` and ``proposal_redundant`` are checked FIRST, and
+    are read off the loop's own stop reason rather than re-derived: they are
+    the endings that are not the policy's, and every branch below attributes a
+    decision. The empty list at either stop is the filter's or validation's, so
+    it must not be adjudicated as the claim "nothing resolves this". An explicit
+    ``stop: true`` carries ``agent_requested`` and never reaches either branch,
+    which is correct: the policy said so, even if the filter or validation also
+    removed a name from the same reply.
     """
     if stop_reason == "proposal_unresolved":
         return (
             "proposal_unresolved",
             "the loop ran out of resolvable names: every mitigation the policy "
             f"named was dropped by the filter ({sorted(set(unresolved))}), so the "
+            "stop is not a decision the policy made",
+        )
+    if stop_reason == "proposal_redundant":
+        return (
+            "proposal_redundant",
+            "the loop had nothing new to run: every mitigation the policy named "
+            f"was the baseline or a repeat ({sorted(set(redundant))}), so the "
             "stop is not a decision the policy made",
         )
     if unresolvable and proposed_nothing:
@@ -875,7 +892,8 @@ def episode_from_log(
     ``converged``
         a ``converged`` record exists.
     a ``search_stopped`` record
-        :func:`classify_stop` -- ``proposal_unresolved``, an unresolvability
+        :func:`classify_stop` -- ``proposal_unresolved``,
+        ``proposal_redundant``, an unresolvability
         claim (earned or not), ``gave_up``, or ``other``.
     ``other``
         ``baseline_pass``, ``policy_stop`` (a budget), ``approval_required``,
@@ -946,6 +964,7 @@ def episode_from_log(
                 offered=offered,
                 tried=[n for n in mitigation_axis if n != BASELINE],
                 unresolved=event.get("unresolved_mitigations") or [],
+                redundant=event.get("redundant_mitigations") or [],
             )
 
     on_disk = len([c for c in find_probe_cells(run_dir) if read_trial_results(c)])
