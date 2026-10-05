@@ -6,7 +6,8 @@ experiment -- and shipped recipes put ``hip_launch_blocking`` and ``xnack`` on
 either axis. What is protected here:
 
 * a built-in that changes behaviour is credited from either axis, while a
-  pass under logging, or under a name the registry cannot classify, is not;
+  pass under logging, under a knob nothing reads, or under a name the
+  registry cannot classify, is not credited from the diagnostic axis;
 * a mitigation-axis win still decides the winner whenever there is one, so a
   matrix with a passing ``{m}-none`` cell reports the name it always did;
 * a mitigation-axis convergence writes the log it always wrote -- asserted
@@ -65,6 +66,19 @@ class TestTheCreditRule:
     def test_a_pass_under_logging_is_not_a_fix(self):
         assert winning_mitigation("none-amd_log_level_4", "pass") is None
 
+    def test_a_pass_under_a_knob_nothing_reads_is_not_a_fix(self):
+        assert winning_mitigation("none-tf32_off", "pass") is None
+
+    def test_the_mitigation_axis_still_credits_an_inert_name(self):
+        assert winning_mitigation("tf32_off-none", "pass") == "tf32_off"
+
+    def test_the_inert_set_names_only_builtins_that_are_not_logging(self):
+        from aorta.registry.mitigations import INERT_MITIGATIONS, OBSERVABILITY_MITIGATIONS
+
+        assert "tf32_off" in INERT_MITIGATIONS
+        assert INERT_MITIGATIONS <= set(BUILTIN_MITIGATIONS) - {"none"}
+        assert not INERT_MITIGATIONS & OBSERVABILITY_MITIGATIONS
+
     def test_a_diagnostic_the_registry_cannot_classify_is_not_credited(self):
         assert SIDECAR_NAME not in BUILTIN_MITIGATIONS
         assert winning_mitigation(f"none-{SIDECAR_NAME}", "pass") is None
@@ -101,11 +115,12 @@ class TestPrecedence:
             ("none-none", "fail"),
             ("tf32_off-none", "fail"),
             ("none-amd_log_level_4", "pass"),
+            ("none-tf32_off", "pass"),
             ("none-hip_launch_blocking", "pass"),
             ("none-xnack", "pass"),
         ]
         assert winning_cell(cells) == ("none-hip_launch_blocking", "hip_launch_blocking")
-        assert winning_cell(cells[:3]) is None
+        assert winning_cell(cells[:4]) is None
 
 
 # ── resume ────────────────────────────────────────────────────────────────
@@ -192,6 +207,14 @@ RESUME_MATRICES = {
     "logging alone": (
         [BASELINE_FAILS_ON_DISK, ("none-amd_log_level_4", "pass")],
         ("agent_stop", None),
+    ),
+    "an inert diagnostic": (
+        [BASELINE_FAILS_ON_DISK, ("none-tf32_off", "pass")],
+        ("agent_stop", None),
+    ),
+    "an inert diagnostic beside a behavioural one": (
+        [BASELINE_FAILS_ON_DISK, ("none-tf32_off", "pass"), ("none-xnack", "pass")],
+        ("converged", "xnack"),
     ),
     "both axes off baseline": (
         [BASELINE_FAILS_ON_DISK, ("xnack-hip_launch_blocking", "pass")],

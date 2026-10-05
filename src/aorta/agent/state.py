@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from aorta.registry.mitigations import BUILTIN_MITIGATIONS, OBSERVABILITY_MITIGATIONS
+from aorta.registry.mitigations import (
+    BUILTIN_MITIGATIONS,
+    INERT_MITIGATIONS,
+    OBSERVABILITY_MITIGATIONS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +42,10 @@ def winning_mitigation(cell_name: str, verdict: str | None) -> str | None:
     workload does: both axes stamp the same environment, so the cell is the
     same experiment as ``{diagnostic}-none``. A diagnostic in
     ``OBSERVABILITY_MITIGATIONS`` is never credited -- a pass under logging
-    is not a fix -- and neither is one the registry cannot classify (a plugin
-    or sidecar entry).
+    is not a fix -- and neither is one in ``INERT_MITIGATIONS``, whose
+    variable nothing reads, or one the registry cannot classify (a plugin or
+    sidecar entry). The mitigation axis still credits an inert name: a wrapped
+    command can read the variable itself, and archived resolver sets do.
 
     A pass with both axes non-baseline (``tf32_off-xnack``) is attributable to
     neither name alone, and ``none`` never wins. The diagnostic is taken as the
@@ -55,6 +61,7 @@ def winning_mitigation(cell_name: str, verdict: str | None) -> str | None:
         mitigation == _BASELINE_NAME
         and diagnostic in BUILTIN_MITIGATIONS
         and diagnostic not in OBSERVABILITY_MITIGATIONS
+        and diagnostic not in INERT_MITIGATIONS
     ):
         return diagnostic
     return None
