@@ -2853,12 +2853,9 @@ def test_a_known_absent_variable_is_not_attributed_to_a_library_elsewhere():
 
 
 #: ``(recipe, mitigation)`` pairs allowed to name a KNOWN_ABSENT mitigation,
-#: and why. Per pair, so a new dead name in an exempt recipe is still caught.
+#: and why. Per pair, so a new dead name in an exempt recipe is still caught,
+#: and each pair must still match a hit, so a stale one cannot linger.
 _KNOWN_ABSENT_RECIPE_EXEMPTIONS = {
-    ("probe/probe-flag-sweep.yaml", "rccl_gfx942_cheap_fence_off"): (
-        "sweeps every runtime built-in by design, stack-conditional ones "
-        "included, so a cell its stack cannot read is expected there"
-    ),
     ("llm-determinism/example-llm-determinism.yaml", "tf32_off"): (
         "keeps its tf32_off cell, commented as a second baseline, so earlier "
         "runs keep their cell names (aorta#500)"
@@ -2866,9 +2863,10 @@ _KNOWN_ABSENT_RECIPE_EXEMPTIONS = {
 }
 
 
-def shipped_recipes_using_known_absent(recipes_root: Path) -> list[tuple[str, str]]:
+def shipped_recipes_using_known_absent(recipes_root: Path) -> set[tuple[str, str]]:
     """``(recipe, mitigation)`` pairs where a shipped recipe names a mitigation
-    whose every variable is in KNOWN_ABSENT, on a probe axis or in a cell."""
+    whose every variable is in KNOWN_ABSENT, on a probe axis or in a cell.
+    Exemptions are not applied here."""
     import yaml
 
     absent: dict[str, set[str]] = {}
@@ -2879,7 +2877,7 @@ def shipped_recipes_using_known_absent(recipes_root: Path) -> list[tuple[str, st
         for name, env in BUILTIN_MITIGATIONS.items()
         if env and set(env) <= absent.get(name, set())
     }
-    hits = []
+    hits = set()
     for path in sorted(recipes_root.rglob("*.yaml")):
         rel = path.relative_to(recipes_root).as_posix()
         doc = yaml.safe_load(path.read_text())
@@ -2892,11 +2890,7 @@ def shipped_recipes_using_known_absent(recipes_root: Path) -> list[tuple[str, st
         for cell in doc.get("cells") or []:
             if isinstance(cell, dict):
                 names += cell.get("mitigations") or []
-        hits += [
-            (rel, name)
-            for name in names
-            if name in dead and (rel, name) not in _KNOWN_ABSENT_RECIPE_EXEMPTIONS
-        ]
+        hits |= {(rel, name) for name in names if name in dead}
     return hits
 
 
@@ -2907,17 +2901,21 @@ def test_no_shipped_recipe_names_a_known_absent_mitigation():
     all taught ``tf32_off`` (aorta#500).
     """
     hits = shipped_recipes_using_known_absent(_REPO_ROOT / "recipes")
-    assert not hits, (
-        f"{hits}: every variable these mitigations set is in KNOWN_ABSENT, so "
-        "the cell is a second baseline. Use a built-in the stack reads, or add "
-        "the pair to _KNOWN_ABSENT_RECIPE_EXEMPTIONS with the reason."
+    unexempted = sorted(hits - _KNOWN_ABSENT_RECIPE_EXEMPTIONS.keys())
+    assert not unexempted, (
+        f"{unexempted}: every variable these mitigations set is in KNOWN_ABSENT, "
+        "so the cell is a second baseline. Use a built-in the stack reads, or "
+        "add the pair to _KNOWN_ABSENT_RECIPE_EXEMPTIONS with the reason."
     )
 
 
-def test_every_recipe_exemption_names_a_shipped_recipe():
-    """An exemption for a file that moved or was deleted guards nothing."""
-    missing = sorted(
-        rel for rel, _ in _KNOWN_ABSENT_RECIPE_EXEMPTIONS
-        if not (_REPO_ROOT / "recipes" / rel).is_file()
+def test_every_recipe_exemption_still_matches_a_hit():
+    """An exemption that matches nothing guards nothing, and would silently
+    excuse the pair if its mitigation went dead again later. This also covers
+    an exempted recipe that moved or was deleted."""
+    hits = shipped_recipes_using_known_absent(_REPO_ROOT / "recipes")
+    stale = sorted(_KNOWN_ABSENT_RECIPE_EXEMPTIONS.keys() - hits)
+    assert not stale, (
+        f"{stale}: these exemptions no longer match a recipe that names a "
+        "KNOWN_ABSENT mitigation. Remove them."
     )
-    assert not missing, f"{missing}: exempted recipes that do not exist"
