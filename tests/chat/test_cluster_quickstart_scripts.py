@@ -83,6 +83,19 @@ def test_manual_cleanup_preserves_the_endpoint_when_slurm_is_unreachable() -> No
     assert cleanup.index("exit 1") < cleanup.index('rm -f "${ENDPOINT_FILE}"')
 
 
+def test_manual_shutdown_confirms_an_empty_queue_before_reporting_success() -> None:
+    source = QUICKSTART.read_text(encoding="utf-8")
+    shutdown = source[source.index("## 7. Stop everything") :]
+
+    assert "while true; do" in shutdown
+    assert 'if ! JOB_STATUS="$(' in shutdown
+    assert "shutdown is unconfirmed" in shutdown
+    assert '[ -n "${JOB_STATUS}" ] || break' in shutdown
+    assert shutdown.index("shutdown is unconfirmed") < shutdown.index(
+        'echo "vLLM job ${QWEN_VLLM_JOB_ID} has stopped."'
+    )
+
+
 def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
     source = SCRIPTS[1].read_text(encoding="utf-8")
 

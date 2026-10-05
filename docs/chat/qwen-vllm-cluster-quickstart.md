@@ -465,18 +465,26 @@ Cancel the model server while the endpoint file still exists:
 ```bash
 source /apps/avsharma/aorta-chat-runtime/qwen38-endpoint.env
 
-ssh -o BatchMode=yes ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
-  "scancel ${QWEN_VLLM_JOB_ID}"
+if ! ssh -o BatchMode=yes ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
+  "scancel ${QWEN_VLLM_JOB_ID}"; then
+  echo "error: could not cancel Slurm job ${QWEN_VLLM_JOB_ID}" >&2
+  exit 1
+fi
 ```
 
 Cancellation can leave the job in `COMPLETING` briefly while Docker exits.
 Wait until Slurm removes it:
 
 ```bash
-while JOB_STATUS="$(
-  ssh -o BatchMode=yes ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
-    "squeue -h -j ${QWEN_VLLM_JOB_ID} -o '%i %T %M %R'"
-)" && [ -n "${JOB_STATUS}" ]; do
+while true; do
+  if ! JOB_STATUS="$(
+    ssh -o BatchMode=yes ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
+      "squeue -h -j ${QWEN_VLLM_JOB_ID} -o '%i %T %M %R'"
+  )"; then
+    echo "error: could not query Slurm job ${QWEN_VLLM_JOB_ID}; shutdown is unconfirmed" >&2
+    exit 1
+  fi
+  [ -n "${JOB_STATUS}" ] || break
   echo "${JOB_STATUS}"
   sleep 2
 done
