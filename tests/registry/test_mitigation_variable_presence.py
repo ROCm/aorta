@@ -156,8 +156,8 @@ KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
         claimed_consumer="librccl.so",
         reason=(
             "The spelling only ROCm 7.1.0's RCCL reads, kept so the entry still "
-            "acts there. ROCm 7.1.1 and later read RCCL_GFX9_CHEAP_FENCE_OFF, "
-            "which the same entry also sets."
+            "acts there. ROCm 7.1.1 through 7.2 and RCCL 10.0 read "
+            "RCCL_GFX9_CHEAP_FENCE_OFF, which the same entry also sets."
         ),
     ),
 }

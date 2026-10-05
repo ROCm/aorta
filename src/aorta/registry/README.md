@@ -495,9 +495,11 @@ refer to them. See aorta#511.
 | `rccl_gfx942_cheap_fence_off` | RCCL 10.0 turns the cheap fence off by default | RCCL 10.0; it acts on RCCL 7.1.0 through 7.2 |
 
 `rccl_gfx942_cheap_fence_off` keeps its original name and sets both
-`RCCL_GFX9_CHEAP_FENCE_OFF`, the variable RCCL has read since ROCm 7.1.1, and
-`RCCL_GFX942_CHEAP_FENCE_OFF`, the spelling only ROCm 7.1.0 reads. ROCm 7.0.2
-and earlier have neither.
+`RCCL_GFX9_CHEAP_FENCE_OFF`, the variable RCCL reads in ROCm 7.1.1 through 7.2
+and in RCCL 10.0, and `RCCL_GFX942_CHEAP_FENCE_OFF`, the spelling only ROCm
+7.1.0 reads. ROCm 7.0.2 and earlier have neither. Upstream RCCL development
+renames the variable again, to `RCCL_CHEAP_POST_SEND_FENCE_OFF`; a release
+that ships that rename is outside what this entry covers.
 
 `nccl_launch_order_implicit` is a different case: it acts, and has been seen
 to crash every rank (aorta#512).
