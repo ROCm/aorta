@@ -203,6 +203,7 @@ is_uint "$PORT_END" || die "--port-end must be an integer"
 is_uint "$STARTUP_TIMEOUT" || die "--startup-timeout must be an integer"
 ((PORT_START >= 8001)) || die "--port-start must be at least 8001"
 ((PORT_END >= PORT_START)) || die "--port-end must be at least --port-start"
+((PORT_END <= 65535)) || die "--port-end must be at most 65535"
 
 ENDPOINT_FILE="${RUNTIME_DIR}/qwen38-endpoint.env"
 PENDING_FILE="${RUNTIME_DIR}/qwen38-pending-job"
