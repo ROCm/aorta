@@ -55,12 +55,17 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "hsa_no_sdma": {
         "HSA_ENABLE_SDMA": "0",
     },
+    # A second baseline in any image that already exports this, which
+    # rocm/primus does (aorta#511).
     "hsa_no_scratch_reclaim": {
         "HSA_NO_SCRATCH_RECLAIM": "1",
     },
     "hsa_disable_cache": {
         "HSA_DISABLE_CACHE": "1",
     },
+    # "0" is libhsakmt's default. Every other value, even an empty one,
+    # disables the cache (fmm.c compares against "0" with strcmp), so this
+    # acts unless HSA_DISABLE_CACHE is unset or exactly "0" (aorta#511).
     "hsa_enable_cache": {
         "HSA_DISABLE_CACHE": "0",
     },
@@ -80,13 +85,20 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "nccl_launch_order_implicit": {
         "NCCL_LAUNCH_ORDER_IMPLICIT": "1",
     },
+    # ROCm 7.1.1 renamed RCCL_GFX942_CHEAP_FENCE_OFF (read only by 7.1.0) to
+    # RCCL_GFX9_CHEAP_FENCE_OFF; both are set so the entry acts on either. It
+    # keeps its name so recipes and archived cells still resolve. RCCL 10.0
+    # defaults the new variable to 1, so there it re-asserts the default.
     "rccl_gfx942_cheap_fence_off": {
+        "RCCL_GFX9_CHEAP_FENCE_OFF": "1",
         "RCCL_GFX942_CHEAP_FENCE_OFF": "1",
     },
     # --- PyTorch CCA ---
     "pytorch_no_cuda_memory_caching": {
         "PYTORCH_NO_CUDA_MEMORY_CACHING": "1",
     },
+    # Refused, with a warning, by PyTorch builds without expandable-segment
+    # support -- the ROCm builds probes run on today (aorta#511).
     "pytorch_alloc_expandable_segments": {
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     },
@@ -98,9 +110,14 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
         "AMD_LOG_LEVEL": "4",
     },
     # --- SDPA backend pin ---
+    # Refused, with a warning, by PyTorch builds without CK SDPA, and when any
+    # visible GPU is outside CK's architecture list (aorta#511).
     "fa_prefer_ck": {
         "TORCH_ROCM_FA_PREFER_CK": "1",
     },
+    # "0" reads as unset, and PyTorch's unset default is already AOTriton, so
+    # this only acts against an environment that exports "1", and only where
+    # PyTorch would accept CK at all (aorta#511).
     "fa_prefer_aotriton": {
         "TORCH_ROCM_FA_PREFER_CK": "0",
     },
