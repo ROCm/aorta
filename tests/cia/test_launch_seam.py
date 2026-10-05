@@ -1,9 +1,8 @@
 """Launch is reached through one function, and forwards what it is given.
 
-``launch`` exists so a scheduler-less backend is a new branch in one place
-rather than an edit at every call site. It is Slurm today and the tests below
-are about Slurm, but they go through the seam, which is what keeps the seam
-honest -- an unused abstraction rots.
+``launch`` owns the Slurm/local choice so callers do not need scheduler
+branches. The Slurm rendering tests still go through that seam, which keeps
+both routes honest.
 
 The env-var test is the interesting one. Those variables used to reach the job
 by being set in a subprocess that submitted it; when the driver moved
@@ -19,14 +18,15 @@ from aorta.cia.launch import launch
 from aorta.cia.launch.cluster import build_sbatch_script
 
 
-def test_the_seam_reports_a_missing_scheduler_rather_than_raising(tmp_path, monkeypatch):
-    """A launch that did not happen must not read as one that did."""
+def test_forced_slurm_reports_a_missing_scheduler_rather_than_raising(tmp_path, monkeypatch):
+    """Explicit Slurm must fail rather than silently changing execution hosts."""
     monkeypatch.setattr("aorta.cia.launch.cluster.sbatch_available", lambda: False)
     job_id, error = launch(
         command="true",
         job_name="j",
         log_path=str(tmp_path / "j.log"),
         script_path=tmp_path / "j.sbatch",
+        backend="slurm",
     )
     assert job_id == ""
     assert "sbatch" in error

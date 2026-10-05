@@ -1,21 +1,20 @@
-"""Real GPU acceptance for the sanitizer -> Watch -> Autopsy chain.
+"""Real workstation-GPU acceptance for the sanitizer -> Watch -> Autopsy chain.
 
-The ordinary CIA suite mocks scheduler and sanitizer boundaries. This test
-keeps only the scheduler transport local: Launch still renders and submits its
-production batch script, while that script compiles and executes the committed
-racy ConSan repro on the attached GPU. Watch consumes the resulting job log and
-is the only caller that can assemble the bundle and trigger Autopsy.
+The ordinary CIA suite mocks execution and sanitizer boundaries. This test uses
+the scheduler-less Launch backend to execute the committed racy ConSan repro on
+the attached GPU. Watch consumes the resulting job log and is the only caller
+that can assemble the bundle and trigger Autopsy.
 """
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,7 +22,8 @@ import pytest
 import yaml
 
 import aorta.cia.watch.poll as poll_mod
-from aorta.cia.launch import launch
+from aorta.cia.launch import cancel, launch
+from aorta.cia.launch import state as launch_state
 from aorta.cia.launch.job import JobRecord, read_job_json, write_job_json
 from aorta.cia.watch.poll import autopsy_state, poll_jobs
 from aorta.instrumentation.rocjitsu_sanitizers.consan import resolve_consan_hook
@@ -37,14 +37,7 @@ pytestmark = [
 ]
 
 _REPO = Path(__file__).resolve().parents[2]
-_RACY_SOURCE = (
-    _REPO
-    / "recipes"
-    / "sanitizers"
-    / "fixtures"
-    / "repro"
-    / "consan_lds_race_2wave.hip"
-)
+_RACY_SOURCE = _REPO / "recipes" / "sanitizers" / "fixtures" / "repro" / "consan_lds_race_2wave.hip"
 _REQUIRED = os.environ.get("AORTA_CIA_HARDWARE_SMOKE_REQUIRED", "").lower() in {
     "1",
     "true",
@@ -69,11 +62,7 @@ def _hardware_requirements() -> tuple[str, str, Path]:
 
     hipcc = shutil.which("hipcc")
     hook = resolve_consan_hook()
-    missing = [
-        name
-        for name, present in (("hipcc", hipcc), ("ConSan hook", hook))
-        if not present
-    ]
+    missing = [name for name, present in (("hipcc", hipcc), ("ConSan hook", hook)) if not present]
     if missing:
         message = "CIA hardware smoke is missing " + ", ".join(missing)
         if _REQUIRED:
@@ -109,39 +98,6 @@ def _write_recipe(path: Path, *, target: str, binary: Path) -> None:
         },
     }
     path.write_text(yaml.safe_dump(recipe, sort_keys=False), encoding="utf-8")
-
-
-def _write_local_sbatch(path: Path) -> None:
-    """Install a scheduler shim; the production Launch path remains unchanged."""
-    path.write_text(
-        f"""#!{sys.executable}
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-script = Path(sys.argv[-1])
-output = next(
-    line.split("=", 1)[1]
-    for line in script.read_text(encoding="utf-8").splitlines()
-    if line.startswith("#SBATCH --output=")
-)
-env = dict(os.environ)
-env["SLURM_JOB_ID"] = "cia-hardware-smoke"
-with open(output, "w", encoding="utf-8") as stream:
-    result = subprocess.run(
-        ["bash", str(script)],
-        stdout=stream,
-        stderr=subprocess.STDOUT,
-        env=env,
-        check=False,
-    )
-print("cia-hardware-smoke")
-raise SystemExit(result.returncode)
-""",
-        encoding="utf-8",
-    )
-    path.chmod(0o755)
 
 
 def _launch_command(recipe: Path, output: Path, report: Path) -> str:
@@ -203,11 +159,6 @@ def test_consan_launch_watch_autopsy_on_real_gpu(tmp_path: Path, monkeypatch) ->
     recipe = tmp_path / "consan-racy.yaml"
     _write_recipe(recipe, target=target, binary=binary)
 
-    shim_dir = tmp_path / "bin"
-    shim_dir.mkdir()
-    _write_local_sbatch(shim_dir / "sbatch")
-    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("CIA_TOLERATE_NONZERO", "1")
     monkeypatch.setenv("RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE", "1")
 
     watch_log = job_dir / "watch.log"
@@ -221,8 +172,8 @@ def test_consan_launch_watch_autopsy_on_real_gpu(tmp_path: Path, monkeypatch) ->
         watch_files=[str(watch_log)],
         launch_command=_launch_command(recipe, output, report_path),
         working_dir=str(_REPO),
-        scheduler="ci-local",
-        launcher="sbatch",
+        scheduler="local",
+        launcher="aorta_direct",
         recipe_path=str(recipe),
     )
     write_job_json(job, jobs_root)
@@ -231,26 +182,32 @@ def test_consan_launch_watch_autopsy_on_real_gpu(tmp_path: Path, monkeypatch) ->
         "command": job.launch_command,
         "job_name": job_id,
         "log_path": str(watch_log),
-        "script_path": job_dir / "launch.sbatch",
+        "script_path": job_dir / "launch.sh",
         "working_dir": str(_REPO),
+        # Per-call so concurrent triages cannot change one another's policy.
+        "tolerate_nonzero": True,
+        "backend": "local",
     }
-    if "tolerate_nonzero" in inspect.signature(launch).parameters:
-        # PR #424 moved this from process-global environment into the launch
-        # call so concurrent triages cannot change one another's policy.
-        launch_options["tolerate_nonzero"] = True
     scheduler_id, error = launch(
         **launch_options,
     )
     assert error == ""
-    assert scheduler_id == "cia-hardware-smoke"
+    assert scheduler_id.startswith("local:")
+
+    job.scheduler_job_id = scheduler_id
+    write_job_json(job, jobs_root)
+    try:
+        deadline = time.monotonic() + 600
+        while launch_state(scheduler_id, job_dir) == "RUNNING" and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert launch_state(scheduler_id, job_dir) == "COMPLETED"
+    finally:
+        if launch_state(scheduler_id, job_dir) == "RUNNING":
+            cancel(scheduler_id)
     assert watch_log.is_file(), "Launch produced no log for Watch"
 
     sanitizer_report = json.loads(report_path.read_text(encoding="utf-8"))
-    consan = next(
-        check
-        for check in sanitizer_report["checks"]
-        if check["sanitizer"] == "consan"
-    )
+    consan = next(check for check in sanitizer_report["checks"] if check["sanitizer"] == "consan")
     report_debug = json.dumps(sanitizer_report, indent=2)[:6000]
     assert sanitizer_report["execution_status"] == "complete", report_debug
     assert consan["state"] == "ran", "ConSan was selected but did not execute"
@@ -281,26 +238,17 @@ def test_consan_launch_watch_autopsy_on_real_gpu(tmp_path: Path, monkeypatch) ->
     # proves Watch triggered it rather than the test invoking a fallback.
     poll_jobs(jobs_root, config_path=watch_config, max_rounds=1)
 
-    event = json.loads(
-        (job_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
-    )
+    event = json.loads((job_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert event["event_type"] == "watchdog_alert"
     assert event["signal"] == "WATCH_UNKNOWN_ERROR"
     assert "state=ran" in event["excerpt"]
 
     bundle = job_dir / "bundle"
-    manifest = yaml.safe_load(
-        (bundle / "manifest.yaml").read_text(encoding="utf-8")
-    )
+    manifest = yaml.safe_load((bundle / "manifest.yaml").read_text(encoding="utf-8"))
     assert manifest["metadata"]["watch_signal"] == "WATCH_UNKNOWN_ERROR"
 
-    autopsy_report = json.loads(
-        (bundle / "report.json").read_text(encoding="utf-8")
-    )
+    autopsy_report = json.loads((bundle / "report.json").read_text(encoding="utf-8"))
     assert autopsy_report["category"] == "gpu_race"
-    assert any(
-        item.get("signal") == "SAN_CONSAN_RACE"
-        for item in autopsy_report["evidence"]
-    )
+    assert any(item.get("signal") == "SAN_CONSAN_RACE" for item in autopsy_report["evidence"])
     assert autopsy_state(job_dir)["state"] == "done"
     assert read_job_json(job_dir / "job.json").status == "failed"
