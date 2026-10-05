@@ -410,6 +410,7 @@ only together with a checkpoint trained on the new text.
 | `exhausted_candidates` | No mitigations left in allowlist/registry | Manual matrix or new sidecar mitigations |
 | `agent_stop` | Proposer set `stop` (LLM or fake) | Read `agent_report.md` hypothesis |
 | `proposal_unresolved` | The proposer named mitigations, the candidate filter dropped all of them (unregistered, already tried, outside the allowlist, or the `none` baseline), and it did not ask to stop | Check `unresolved_mitigations` in `agent_log.jsonl` against `aorta mitigations list` and `--mitigation`; do *not* read the hypothesis as the reason |
+| `proposal_redundant` | The proposer named only mitigations validation removes as redundant — in practice only the `none` baseline, which is always on the axis — and it did not ask to stop | Check `redundant_mitigations` in `agent_log.jsonl`; a custom proposer should not offer `none` as a next step |
 | `approval_required` | Mitigation needs ack (`--require-approval`) | Operator approves, re-run |
 | `walltime_exhausted` | `--max-walltime-sec` hit | Re-run same ticket to resume |
 | `policy_stop` | e.g. `--max-iterations` hit | Increase budget or narrow allowlist |
@@ -474,6 +475,13 @@ rejections writes exactly the log it wrote before the key existed. It also
 appears on a `llm_step` whose `next_mitigations` is non-empty, which is a
 *partial* rejection: the search continued on the names that survived, and
 this is the only record of the half that was discarded.
+
+`redundant_mitigations` follows the same rule for the names validation
+removes after the filter: the `none` baseline and every repeat of a name
+already kept. Those names resolved and nothing declined them, which is why
+they are not folded into `unresolved_mitigations`. A proposal of only `none`
+empties the list and stops as `proposal_redundant`; a repeat never empties it,
+so the key records the repeat and the search continues.
 
 ### Report (`agent_report.md`)
 
