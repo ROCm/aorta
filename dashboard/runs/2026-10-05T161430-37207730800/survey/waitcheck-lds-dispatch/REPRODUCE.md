@@ -1,14 +1,14 @@
 # Reproduce `waitcheck-lds-dispatch`
 
-Sanitizer case `waitcheck-lds-dispatch` from run `2026-09-28T131255-36318835944` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. Its logs, recipe copy and inputs were pruned for falling outside the nightly's log-retention window. See `index.html` for every file actually published here.
+Sanitizer case `waitcheck-lds-dispatch` from run `2026-10-05T161430-37207730800` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. See `index.html` for every file actually published here.
 
 ## Run
 
-- Commit: `f32e64cf324fdae8fb6f49d3135888c4646b5104`
-- Date: 2026-09-28 13:12:55 UTC
+- Commit: `77d4fbb48a5df62bae68efa858491d36f194f0cd`
+- Date: 2026-10-05 16:14:30 UTC
 - Target: `gfx950`
 - Class: survey (observed-only, non-gating)
-- Workflow run: https://github.com/ROCm/aorta/actions/runs/36318835944
+- Workflow run: https://github.com/ROCm/aorta/actions/runs/37207730800
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
 
 ## Observed
@@ -23,7 +23,7 @@ First, the checkout this run used:
 
 ```
 git clone https://github.com/ROCm/aorta && cd aorta
-git checkout f32e64cf324fdae8fb6f49d3135888c4646b5104
+git checkout 77d4fbb48a5df62bae68efa858491d36f194f0cd
 pip install -e .
 ```
 
@@ -47,16 +47,16 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 
 | Path | SHA-256 |
 |---|---|
-| `fixtures/isa/lds.hsaco` | `cdc3e1b36978259de1d255f34ff7d0a8f32f8aff6d33569c4ba984d1fad84010` |
+| `fixtures/isa/lds.hsaco` | `be4dbfcfbd8f751ab460850c094557eabf55897ac1518b7e8a6a657a82d7ba8e` |
 
 ## Recorded digests
 
 | Key | Value |
 |---|---|
-| `code_object:lds.hsaco` | `cdc3e1b36978259de1d255f34ff7d0a8f32f8aff6d33569c4ba984d1fad84010` |
+| `code_object:lds.hsaco` | `be4dbfcfbd8f751ab460850c094557eabf55897ac1518b7e8a6a657a82d7ba8e` |
 | `path` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck` |
-| `sha256` | `921330d92bb4645e2879a7725f6dc5dc0e7428c4cae22f990435e2bef9f37cf9` |
+| `sha256` | `47bb39deb24b6edefbac160845772d14faadabc1ca70c0c92541410a617e7573` |
 
 ## Files here
 
-See `index.html` for the browsable list. `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
+See `index.html` for the browsable list. Logs are gzipped; `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.

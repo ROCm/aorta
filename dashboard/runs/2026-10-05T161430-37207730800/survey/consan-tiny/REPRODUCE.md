@@ -1,14 +1,14 @@
 # Reproduce `consan-tiny`
 
-Sanitizer case `consan-tiny` from run `2026-09-28T131255-36318835944` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. Its logs, recipe copy and inputs were pruned for falling outside the nightly's log-retention window. See `index.html` for every file actually published here.
+Sanitizer case `consan-tiny` from run `2026-10-05T161430-37207730800` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. See `index.html` for every file actually published here.
 
 ## Run
 
-- Commit: `f32e64cf324fdae8fb6f49d3135888c4646b5104`
-- Date: 2026-09-28 13:12:55 UTC
+- Commit: `77d4fbb48a5df62bae68efa858491d36f194f0cd`
+- Date: 2026-10-05 16:14:30 UTC
 - Target: `gfx950`
 - Class: survey (observed-only, non-gating)
-- Workflow run: https://github.com/ROCm/aorta/actions/runs/36318835944
+- Workflow run: https://github.com/ROCm/aorta/actions/runs/37207730800
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
 
 ## Observed
@@ -24,7 +24,7 @@ First, the checkout this run used:
 
 ```
 git clone https://github.com/ROCm/aorta && cd aorta
-git checkout f32e64cf324fdae8fb6f49d3135888c4646b5104
+git checkout 77d4fbb48a5df62bae68efa858491d36f194f0cd
 pip install -e .
 ```
 
@@ -49,21 +49,21 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 
 | Path | SHA-256 |
 |---|---|
-| `fixtures/isa/tiny.hsaco` | `fc865e9f1f4279325b8a11dbe39b149319da573418659afe96fb2ece15fe1339` |
+| `fixtures/isa/tiny.hsaco` | `4d8020923b6b03e9a7beee28831b0bb11c501b10bbc6f5a03b38d9ad00271009` |
 | `fixtures/bin/consan_tiny_load` | `d110a697d5866e8aedc0b2475ff3437719e1de59836432436ee11862bdaf4f75` |
 
 ## Recorded digests
 
 | Key | Value |
 |---|---|
-| `code_object:tiny.hsaco` | `fc865e9f1f4279325b8a11dbe39b149319da573418659afe96fb2ece15fe1339` |
+| `code_object:tiny.hsaco` | `4d8020923b6b03e9a7beee28831b0bb11c501b10bbc6f5a03b38d9ad00271009` |
 | `command` | `/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_tiny_load` |
 | `command_sha256` | `d110a697d5866e8aedc0b2475ff3437719e1de59836432436ee11862bdaf4f75` |
 | `hook` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so` |
-| `hook_sha256` | `98d60d48d504a553cdce2697553e57ac038a2c9589159645b0dabeb9d9a8bc29` |
-| `selected_identity_sha256` | `985ad1697cb502f912a94ce2567674c9c3436bd63121f89078f5ed2d0b3ee2dd` |
+| `hook_sha256` | `fe6c35b2e60772a93667e8205fbd2d756ab9669a0ad9c8baf146ec6e3e715055` |
+| `selected_identity_sha256` | `1277bfb5a5b8de9f7752e4d0214016c86bc93ace45784eb7ce14fc78d02084d6` |
 | `selected_kernel` | `tiny_vecadd` |
 
 ## Files here
 
-See `index.html` for the browsable list. `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
+See `index.html` for the browsable list. Logs are gzipped; `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.

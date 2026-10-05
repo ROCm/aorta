@@ -1,0 +1,63 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "path": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck",
+        "sha256": "47bb39deb24b6edefbac160845772d14faadabc1ca70c0c92541410a617e7573"
+      },
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [
+        {
+          "diagnostics_truncated": false,
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "4d8020923b6b03e9a7beee28831b0bb11c501b10bbc6f5a03b38d9ad00271009",
+            "entry_offset": null,
+            "name": "tiny_vecadd",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 0,
+          "state": "ran",
+          "verdict": "pass"
+        }
+      ],
+      "reason": null,
+      "returncode": null,
+      "sanitizer": "waitcheck",
+      "state": "ran",
+      "verdict": "pass"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "pass",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "4d8020923b6b03e9a7beee28831b0bb11c501b10bbc6f5a03b38d9ad00271009",
+          "entry_offset": null,
+          "name": "tiny_vecadd",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}

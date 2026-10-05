@@ -1,14 +1,14 @@
 # Reproduce `consan-gemm`
 
-Sanitizer case `consan-gemm` from run `2026-09-28T131255-36318835944` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. Its logs, recipe copy and inputs were pruned for falling outside the nightly's log-retention window. See `index.html` for every file actually published here.
+Sanitizer case `consan-gemm` from run `2026-10-05T161430-37207730800` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. See `index.html` for every file actually published here.
 
 ## Run
 
-- Commit: `f32e64cf324fdae8fb6f49d3135888c4646b5104`
-- Date: 2026-09-28 13:12:55 UTC
+- Commit: `77d4fbb48a5df62bae68efa858491d36f194f0cd`
+- Date: 2026-10-05 16:14:30 UTC
 - Target: `gfx950`
 - Class: survey (observed-only, non-gating)
-- Workflow run: https://github.com/ROCm/aorta/actions/runs/36318835944
+- Workflow run: https://github.com/ROCm/aorta/actions/runs/37207730800
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
 
 ## Observed
@@ -24,7 +24,7 @@ First, the checkout this run used:
 
 ```
 git clone https://github.com/ROCm/aorta && cd aorta
-git checkout f32e64cf324fdae8fb6f49d3135888c4646b5104
+git checkout 77d4fbb48a5df62bae68efa858491d36f194f0cd
 pip install -e .
 ```
 
@@ -60,10 +60,10 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 | `command` | `/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_gemm_load` |
 | `command_sha256` | `6e4ff7c53fcf007e3c6604ec6093510cbff56ae83337fbb1a6057aa245be39ad` |
 | `hook` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so` |
-| `hook_sha256` | `98d60d48d504a553cdce2697553e57ac038a2c9589159645b0dabeb9d9a8bc29` |
+| `hook_sha256` | `fe6c35b2e60772a93667e8205fbd2d756ab9669a0ad9c8baf146ec6e3e715055` |
 | `selected_identity_sha256` | `acd50ca2bb450f4fb8144de0b24d11a502038583bf296d9e36f32091c5fbe079` |
 | `selected_kernel` | `gemm_f32_ss` |
 
 ## Files here
 
-See `index.html` for the browsable list. `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
+See `index.html` for the browsable list. Logs are gzipped; `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
