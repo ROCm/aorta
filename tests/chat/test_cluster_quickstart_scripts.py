@@ -49,6 +49,7 @@ def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
 
     assert "PORT_START=\"${AORTA_QWEN_PORT_START:-8001}\"" in source
     assert "((PORT_START >= 8001))" in source
+    assert "((PORT_END <= 65535))" in source
     assert "localhost:8000" in source  # only the explicit refusal guard/help
     assert "*\"localhost:8000\"*" in source
     assert "--enable-auto-tool-choice" in source
@@ -68,6 +69,18 @@ def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
     assert 'job_status "$active_job" || true' not in source
     assert source.count('--max-time "$request_timeout"') == 3
     assert 'message.get("reasoning_content")' in source
+
+
+def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() -> None:
+    started = subprocess.run(
+        [str(SCRIPTS[0]), "--port-start", "70000", "--port-end", "70000"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert started.returncode != 0
+    assert "--port-end must be at most 65535" in started.stderr
 
 
 def test_manual_cleanup_preserves_the_endpoint_when_slurm_is_unreachable() -> None:
