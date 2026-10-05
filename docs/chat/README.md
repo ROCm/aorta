@@ -17,28 +17,14 @@ aorta chat ask "What does the five-tier failure classifier check?"
 aorta chat                       # interactive REPL
 ```
 
-To add Cluster Intelligence diagnostics, combine `cia` with whichever chat
-interface you install:
-
-```bash
-pip install 'amd-aorta[chat-cli,cia]'  # terminal, Python 3.11–3.14
-pip install 'amd-aorta[chat-ui,cia]'   # Chainlit, Python 3.11–3.13
-pip install 'amd-aorta[chat-all,cia]'  # UI + LiteLLM, Python 3.11–3.13
-
-# Editable checkout:
-uv pip install -e ".[chat-cli,cia]"
-```
-
-`allow_cluster_jobs` remains `false`. The installed CIA layer initially adds
-only `list_cluster_jobs` and `read_autopsy_report`; enabling the setting adds
-the three submitting tools (`triage_kernel_source`, `triage_assembly_source`,
-`triage_workload`). Run `aorta chat tools` to verify the effective list. If
-`cia` is absent, chat remains usable and reports that those five tools were not
-offered, with `pip install 'amd-aorta[cia]'` as the remedy. See
-[installation](installation.md#add-cia-backed-cluster-diagnostics) for all
-published/editable combinations and
-[cluster configuration and security](configuration.md#the-cluster-diagnostic-tools)
-before enabling submissions.
+To add Cluster Intelligence diagnostics, install the `cia` extra beside the
+chat extra you use, for example `pip install 'amd-aorta[chat-cli,cia]'`.
+`allow_cluster_jobs` remains `false` until you change it, so the tools that
+submit work are not offered; `aorta chat tools` shows the effective list. See
+[installation](installation.md#add-cia-backed-cluster-diagnostics) for every
+install combination, the Python ranges, and the tools each setting adds, and
+read [cluster configuration and security](configuration.md#the-cluster-diagnostic-tools)
+before you enable submissions.
 
 ## `aorta chat` or `aorta agent`?
 
@@ -53,7 +39,23 @@ Both drive an LLM, and the line between them is whether you sit and watch.
 `aorta agent` is a namespace over the `aorta.agents` entry-point group; see
 [the agentic testing guide](../agent/agentic-testing-guide.md).
 
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `aorta chat` | Interactive REPL |
+| `aorta chat ask "..."` | Answer once and exit; `--json` / `--plain` for piping |
+| `aorta chat ui` | Chainlit web UI (needs `chat-ui`) |
+| `aorta chat tools` | List the agent tools, built-in and plugin-contributed |
+| `aorta chat index build\|fetch\|status\|runs\|digest\|eval` | Manage the retrieval index; `fetch` takes the prebuilt one, `runs` indexes your own sweep output |
+| `aorta chat doctor` | Check the extras, the backend, the tool protocol, the model cache, the embedding profile, and the index manifest |
+| `aorta chat config init\|show\|validate` | Create and inspect the profile |
+
+`aorta chat --help` is authoritative for flags.
+
 ## Guides
+
+The guides are in reading order.
 
 | Guide | Description |
 | --- | --- |
@@ -93,11 +95,9 @@ rather than after it returns.
 | The answer | Replaces the placeholder, complete | Rendered when it is ready |
 | Token-by-token streaming | No | No |
 
-These are the steps, and the placeholder is gone by the time the first one
-appears — until then it is all there is to show, because the router has to
-finish before anything can be reported and that is an LLM call. A node that
-records nothing renders no step and does not retire the placeholder, so the
-screen is never empty while the first real node runs.
+These are the steps. A node that records nothing renders no step and does not
+retire the placeholder, so the screen is never empty while the first real node
+runs.
 
 | Node | Shown as |
 | --- | --- |
@@ -155,18 +155,3 @@ contract and worth stating plainly, because the part of it people remember —
 requested. The answer is still assembled once, at the end, and still arrives as
 one message replacing the placeholder. What the stream added is progress
 *between* those two moments, not partial text within the answer.
-
-
-## Commands
-
-| Command | Description |
-| --- | --- |
-| `aorta chat` | Interactive REPL |
-| `aorta chat ask "..."` | Answer once and exit; `--json` / `--plain` for piping |
-| `aorta chat ui` | Chainlit web UI (needs `chat-ui`) |
-| `aorta chat tools` | List the agent tools, built-in and plugin-contributed |
-| `aorta chat index build\|fetch\|digest\|eval` | Manage the retrieval index; `fetch` takes the prebuilt one |
-| `aorta chat doctor` | Check the extras, the backend, the tool protocol, the model cache, the embedding profile, and the index manifest |
-| `aorta chat config init\|show\|validate` | Create and inspect the profile |
-
-`aorta chat --help` is authoritative for flags.
