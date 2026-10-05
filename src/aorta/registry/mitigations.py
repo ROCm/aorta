@@ -34,7 +34,10 @@ _GROUP = "aorta.mitigations"
 BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     # --- core ---
     "none":     {},
-    "tf32_off": {"DISABLE_TF32": "1"},  # consumed by hipBLASLt itself
+    # DISABLE_TF32 is read by no ROCm or PyTorch library, so this acts only on a
+    # workload that reads it itself (aorta#500). Kept so recipes and archived
+    # cells that name it still resolve; do not use it as a TF32 axis.
+    "tf32_off": {"DISABLE_TF32": "1"},
     "xnack":    {"HSA_XNACK": "1"},     # consumed by ROCm runtime
     # --- hardware queue & ROCm runtime ---
     "gpu_max_hw_queues_2": {

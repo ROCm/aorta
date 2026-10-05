@@ -144,8 +144,7 @@ KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
         claimed_consumer="libhipblaslt.so",
         reason=(
             "DISABLE_TF32 appears in no ROCm or torch binary; aorta#500. The "
-            "registry attributes it to hipBLASLt (registry/mitigations.py: "
-            "'consumed by hipBLASLt itself') and "
+            "registry once attributed it to hipBLASLt and "
             "instrumentation/env_knobs.py attributes it to pytorch, and "
             "neither holds."
         ),
