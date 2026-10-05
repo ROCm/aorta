@@ -1287,6 +1287,19 @@ def _resolved_tool_mode() -> str:
     return mode
 
 
+def tool_protocol_in_force() -> tuple[str, bool]:
+    """The protocol a query arriving now would use, and whether escalation chose it.
+
+    For the surfaces that report the protocol rather than use it. The web UI
+    greets each browser session separately while the escalation is shared by
+    the process, so a session that opens after it has to be told ``native``:
+    ``settings.llm_tool_mode`` names the protocol the process started on, not
+    the one that session's questions will be sent on.
+    """
+    mode = _resolved_tool_mode()
+    return mode, mode != settings.llm_tool_mode.strip().lower()
+
+
 def _escalate_to_native(response: Any) -> bool:
     """Whether to retry this round in the native protocol.
 
