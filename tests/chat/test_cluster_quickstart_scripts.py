@@ -14,6 +14,7 @@ SCRIPTS = (
     ROOT / "scripts" / "chat" / "start_qwen_vllm.sh",
     ROOT / "scripts" / "chat" / "start_aorta_chat.sh",
 )
+QUICKSTART = ROOT / "docs" / "chat" / "qwen-vllm-cluster-quickstart.md"
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.name)
@@ -67,6 +68,19 @@ def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
     assert 'job_status "$active_job" || true' not in source
     assert source.count('--max-time "$request_timeout"') == 3
     assert 'message.get("reasoning_content")' in source
+
+
+def test_manual_cleanup_preserves_the_endpoint_when_slurm_is_unreachable() -> None:
+    source = QUICKSTART.read_text(encoding="utf-8")
+    cleanup = source[
+        source.index("## 3. Submit the model server") :
+        source.index("Submit through the login node")
+    ]
+
+    assert 'if ! status="$(' in cleanup
+    assert "could not query Slurm job" in cleanup
+    assert "preserving ${ENDPOINT_FILE}" in cleanup
+    assert cleanup.index("exit 1") < cleanup.index('rm -f "${ENDPOINT_FILE}"')
 
 
 def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:

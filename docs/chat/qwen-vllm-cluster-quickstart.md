@@ -228,13 +228,20 @@ ENDPOINT_FILE=/apps/avsharma/aorta-chat-runtime/qwen38-endpoint.env
 
 if [ -s "${ENDPOINT_FILE}" ]; then
   source "${ENDPOINT_FILE}"
-  if [ -n "$(
+  if ! status="$(
     ssh -o BatchMode=yes ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
       "squeue -h -j ${QWEN_VLLM_JOB_ID} -o '%i'"
-  )" ]; then
+  )"; then
+    echo "error: could not query Slurm job ${QWEN_VLLM_JOB_ID}; preserving ${ENDPOINT_FILE}" >&2
+    exit 1
+  fi
+  if [ -n "${status}" ]; then
     echo "Cancelling previous vLLM job ${QWEN_VLLM_JOB_ID}"
-    ssh -o BatchMode=yes ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
-      "scancel ${QWEN_VLLM_JOB_ID}"
+    if ! ssh -o BatchMode=yes ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
+      "scancel ${QWEN_VLLM_JOB_ID}"; then
+      echo "error: could not cancel Slurm job ${QWEN_VLLM_JOB_ID}; preserving ${ENDPOINT_FILE}" >&2
+      exit 1
+    fi
   fi
   rm -f "${ENDPOINT_FILE}"
 fi
