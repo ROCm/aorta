@@ -83,6 +83,15 @@ def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() ->
     assert "--port-end must be at most 65535" in started.stderr
 
 
+def test_reused_endpoint_probes_the_model_recorded_by_its_worker() -> None:
+    source = SCRIPTS[0].read_text(encoding="utf-8")
+    adoption = 'MODEL="$recorded_model"'
+    first_probe = 'AORTA_EXPECTED_MODEL="$MODEL"'
+
+    assert 'recorded_model="${AORTA_CHAT_VLLM_MODEL:-}"' in source
+    assert source.index(adoption) < source.index(first_probe)
+
+
 def test_manual_cleanup_preserves_the_endpoint_when_slurm_is_unreachable() -> None:
     source = QUICKSTART.read_text(encoding="utf-8")
     cleanup = source[
