@@ -87,7 +87,8 @@ job_status() {
   local job_id="$1"
   [[ "$job_id" =~ ^[0-9]+$ ]] || return 1
   ssh -o BatchMode=yes "$LOGIN_HOST" \
-    "squeue -h -j ${job_id} -o '%i %T %R'"
+    "rows=\$(squeue -h -u \"\$(id -un)\" -o '%i %T %R') || exit; \
+printf '%s\n' \"\$rows\" | awk -v id=${job_id} '\$1 == id'"
 }
 
 wait_for_job_exit() {
