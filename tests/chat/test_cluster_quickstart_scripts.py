@@ -169,3 +169,61 @@ def test_slurm_query_failure_preserves_the_endpoint_record(tmp_path: Path) -> No
     assert started.returncode != 0
     assert "could not query Slurm job 12345" in started.stderr
     assert endpoint.is_file(), "transient SSH failure discarded the live-job record"
+
+
+def test_a_purged_job_is_a_successful_empty_queue_result(tmp_path: Path) -> None:
+    """A completed job is absent from the user's queue, not a query outage."""
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    endpoint = runtime / "qwen38-endpoint.env"
+    endpoint.write_text(
+        "\n".join(
+            (
+                "export QWEN_VLLM_JOB_ID=12345",
+                "export AORTA_CHAT_VLLM_BASE_URL=http://compute:8001/v1",
+                "export AORTA_CHAT_VLLM_MODEL=Qwen/Qwen3.8-27B",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        """#!/bin/sh
+case "$*" in
+  *"squeue -h -j"*)
+    echo "Invalid job id specified" >&2
+    exit 1
+    ;;
+  *"squeue -h -u"*)
+    exit 0
+    ;;
+  *)
+    echo "unexpected ssh command: $*" >&2
+    exit 99
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+        "AORTA_QWEN_HF_CACHE": str(tmp_path / "hf-cache"),
+    }
+
+    stopped = subprocess.run(
+        [str(SCRIPTS[0]), "--stop"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+
+    assert stopped.returncode == 0, stopped.stderr
+    assert "Qwen vLLM is stopped" in stopped.stdout
+    assert not endpoint.exists()
