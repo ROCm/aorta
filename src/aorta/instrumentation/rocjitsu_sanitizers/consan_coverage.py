@@ -55,6 +55,7 @@ class CoverageParseError(ValueError):
 
 @dataclass(frozen=True)
 class CoverageRecord:
+    schema: str
     reader: int
     load: int | None
     flavor: str
@@ -79,6 +80,7 @@ class CoverageRecord:
 
 @dataclass(frozen=True)
 class AnalysisVerdict:
+    schema: str
     applicable: bool
     analysis_complete: bool
     static_complete: bool
@@ -102,6 +104,15 @@ class CoverageDecision:
     reasons: tuple[str, ...]
     coverage: tuple[CoverageRecord, ...]
     verdict: AnalysisVerdict
+
+    @property
+    def schema(self) -> str:
+        """The one grammar every record of this run was written in.
+
+        ``parse_coverage_decision`` is the only constructor and refuses a run
+        whose records disagree, so any record names it.
+        """
+        return self.coverage[0].schema
 
 
 @dataclass(frozen=True)
@@ -244,6 +255,7 @@ def _parse_coverage(payload: str, line_number: int) -> CoverageRecord:
     if analysis_complete != complete:
         raise CoverageParseError(f"{context}: analysis_complete contradicts counters")
     return CoverageRecord(
+        schema="current" if has_current_mode else "legacy",
         reader=_count(fields, "reader", context),
         load=_load(fields, context),
         flavor=flavor,
@@ -281,6 +293,7 @@ def _parse_verdict(payload: str, line_number: int) -> AnalysisVerdict:
     )
     pairs = {kind: _pair(fields, kind, context) for kind in _SITE_KINDS}
     return AnalysisVerdict(
+        schema="legacy" if all(legacy_present) else "current",
         applicable=_boolean(fields, "applicable", context),
         analysis_complete=_boolean(fields, "analysis_complete", context),
         static_complete=_boolean(fields, "static_complete", context),
@@ -305,6 +318,7 @@ def _aggregate(verdicts: list[AnalysisVerdict]) -> AnalysisVerdict:
         for kind in _SITE_KINDS
     }
     return AnalysisVerdict(
+        schema="aggregate",
         applicable=bool(applicable),
         analysis_complete=bool(applicable)
         and all(verdict.analysis_complete for verdict in applicable),
@@ -382,6 +396,20 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
         raise CoverageParseError("missing ConSan coverage record")
     if not verdicts:
         raise CoverageParseError("missing ConSan analysis verdict")
+    # One hook build writes one grammar, so every record of a run shares a
+    # schema. Requiring a single schema over coverage and verdicts together
+    # rejects a mixed stream as well as a straight disagreement: verdicts carry
+    # no identity to pair with a coverage record, so in a mixed stream a legacy
+    # verdict stripped of all four replay counters reads as a current one, and
+    # comparing the two schema sets would still find them equal.
+    coverage_schemas = {record.schema for record in coverage}
+    verdict_schemas = {verdict.schema for verdict in verdicts}
+    if len(coverage_schemas | verdict_schemas) != 1:
+        raise CoverageParseError(
+            "coverage/verdict schema mismatch: "
+            f"coverage={','.join(sorted(coverage_schemas))} "
+            f"verdict={','.join(sorted(verdict_schemas))}"
+        )
     identities = [record.identity for record in coverage]
     if len(identities) != len(set(identities)):
         raise CoverageParseError("ambiguous duplicate coverage identities")
