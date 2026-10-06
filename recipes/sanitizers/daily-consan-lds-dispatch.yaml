@@ -22,6 +22,7 @@ sanitizer_plan:
       code_object: fixtures/isa/lds.hsaco
       code_object_index: 0
     consan_command: fixtures/bin/lds_dispatch
+    consan_driver: dispatch
     consan_log: true
   scope:
     kind: kernel
