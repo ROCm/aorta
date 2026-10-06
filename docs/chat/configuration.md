@@ -33,7 +33,8 @@ fields that profile needs:
 | --- | --- |
 | `openai` | OpenAI itself |
 | `openai-compatible` | Any OpenAI-wire endpoint: OpenRouter, Groq, Together, Fireworks, a self-hosted gateway |
-| `azure-apim` | An Azure API Management gateway, which wants the key in a named header |
+| `azure-apim` | An Azure API Management gateway that speaks the OpenAI protocol and wants the key in a named header |
+| `azure-openai` | Azure OpenAI, or a gateway that only serves its `/openai/deployments/<name>` path, through LiteLLM (needs `chat-all`) |
 | `anthropic` | Native Anthropic protocol through LiteLLM (needs `chat-all`) |
 | `local-vllm` | A vLLM server you run yourself |
 
@@ -81,7 +82,7 @@ environment. Which of them lower the bill against a metered endpoint is in
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `llm_provider` | `vllm` | `vllm` (local server) / `openai` (any OpenAI-wire endpoint) / `litellm` (native Anthropic, Gemini, Bedrock). An unknown value raises, listing the accepted names. |
+| `llm_provider` | `vllm` | `vllm` (local server) / `openai` (any OpenAI-wire endpoint) / `litellm` (native Anthropic, Gemini, Bedrock, and Azure OpenAI). An unknown value raises, listing the accepted names. |
 | `embedding_provider` | `local` | `local` (a small model on CPU) / `remote` (an embeddings API). Independent of `llm_provider`. Every `config init` profile writes `local`, including the remote-chat ones. `remote` is a manual choice with consequences: see [configuring a remote embedding provider](#configuring-a-remote-embedding-provider-by-hand). |
 | `llm_tool_mode` | `text` | `text` parses `ACTION: tool(arg="v")` lines out of the reply; `native` uses the provider's function-calling API. Reasoning models need `native` — see [providers](providers.md#tool-calling-and-reasoning-models). |
 
@@ -100,6 +101,7 @@ environment. Which of them lower the bill against a metered endpoint is in
 | `remote_llm_model` | `gpt-4o-mini` | The model id as the provider names it. For `litellm`, LiteLLM's own id format. |
 | `remote_llm_api_key` | *(empty)* | Required for `openai`; a missing value fails preflight rather than mid-query. Used by `litellm` too **when set** — only when it is empty does LiteLLM fall back to its own standard variables (`ANTHROPIC_API_KEY`, ...). |
 | `remote_llm_base_url` | *(empty)* | Empty means the provider default. Set it for anything else. |
+| `remote_llm_api_version` | *(empty)* | Azure's `api-version` query parameter, sent with an `azure/` model on `litellm`. Empty leaves it to `AZURE_API_VERSION`, then LiteLLM's default. See [Azure OpenAI Service](providers.md#azure-openai-service). |
 | `remote_llm_auth_header` | *(empty)* | Header name for a gateway that does not take a bearer token. Honoured by both `openai` and `litellm`. |
 | `remote_llm_extra_headers` | *(empty)* | Extra headers a gateway wants, as `user=alice,x-tenant=acme` or a JSON object. Honoured by both `openai` and `litellm`. Values are masked by `config show` and count as a credential for the 0600 check, because a gateway key put here is as sensitive as `remote_llm_api_key`. |
 

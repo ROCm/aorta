@@ -28,7 +28,13 @@ REMOTE_NATIVE_REQUIREMENT = (
 
 @runtime_checkable
 class ChatBackend(Protocol):
-    """A source of chat models, plus its own readiness check."""
+    """A source of chat models, plus its own readiness check.
+
+    A backend may also define ``route_warning() -> str | None``: a request
+    path its configuration gets wrong without failing preflight, which
+    ``aorta chat doctor`` reports as a warning. Optional, so it is not a
+    member here; only the LiteLLM backend has one.
+    """
 
     name: str
 

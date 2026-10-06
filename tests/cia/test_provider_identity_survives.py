@@ -81,6 +81,45 @@ class TestAnOpenAIShapedEndpointStillGetsThePrefix:
         assert _qualified_model("openai/gpt-4o", "vllm", True) == "openai/gpt-4o"
 
 
+class TestLitellmBehindAnEndpointKeepsAProviderPrefix:
+    """#556: ``openai/azure/<deployment>`` posts to /chat/completions and 404s."""
+
+    @pytest.mark.parametrize("model", ["azure/gpt-4o-mini", "anthropic/claude-example"])
+    def test_it_is_passed_through(self, model):
+        assert _qualified_model(model, "litellm", True) == model
+
+    def test_a_namespace_that_is_not_a_provider_still_gets_openai(self):
+        model = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+        assert _qualified_model(model, "litellm", True) == f"openai/{model}"
+
+    def test_the_api_version_reaches_the_lm(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "sk-x", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_lm()
+
+        assert lm.model == "azure/gpt-4o-mini", lm.model
+        assert lm.kwargs["api_version"] == "2024-10-21"
+
+    def test_it_is_not_sent_to_a_model_that_is_not_azure(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("http://proxy:4000/v1", "sk-x", "claude-haiku-4-5", "vllm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_lm()
+
+        assert "api_version" not in lm.kwargs
+
+
 class TestASlashIsNotEnoughToNameAProvider:
     def test_a_hugging_face_organization_is_not_a_provider(self):
         assert _litellm_provider_prefix("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct") is None
