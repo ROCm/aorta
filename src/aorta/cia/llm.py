@@ -277,6 +277,15 @@ def _redaction_enabled() -> bool:
     return bool(getattr(settings, "redact", True))
 
 
+def _remote_api_version() -> str:
+    """``remote_llm_api_version`` from the chat settings, or the environment."""
+    try:
+        from aorta.chat.config import settings
+    except ImportError:
+        return os.environ.get(f"{_ENV_PREFIX}REMOTE_LLM_API_VERSION", "").strip()
+    return str(getattr(settings, "remote_llm_api_version", "") or "").strip()
+
+
 def redact(text: str) -> str:
     """*text* with filesystem paths and addresses rewritten, per Decision 16.
 
@@ -478,6 +487,9 @@ def build_lm(
     request_options: dict[str, Any] = {}
     if extra_body is not None:
         request_options["extra_body"] = extra_body
+    api_version = _remote_api_version() if qualified_model.startswith("azure/") else ""
+    if api_version:
+        request_options["api_version"] = api_version
 
     return RedactingLM(
         model=qualified_model,
@@ -520,23 +532,28 @@ def _qualified_model(model: str, provider: str, has_endpoint: bool) -> str:
     not a LiteLLM provider. Returning it unchanged bypasses the ``openai/``
     route required by the configured OpenAI-compatible vLLM endpoint.
 
-    A direct LiteLLM profile still gets to route its own names. Elsewhere an
-    existing prefix is preserved only when LiteLLM says it is a provider, and
-    ``openai/`` is the only prefix that already satisfies an OpenAI-compatible
-    route.
+    A direct LiteLLM profile still gets to route its own names, and so does
+    one behind an endpoint when the name carries a LiteLLM provider prefix:
+    ``azure/<deployment>`` at a gateway needs Azure's deployment path, and
+    ``openai/azure/...`` posted to ``/chat/completions`` instead (#556).
+    Elsewhere an existing prefix is preserved only when LiteLLM says it is a
+    provider, and ``openai/`` is the only prefix that already satisfies an
+    OpenAI-compatible route.
     """
     provider = provider.strip().lower()
+
+    if provider == "litellm" and (not has_endpoint or _litellm_provider_prefix(model)):
+        # No endpoint means LiteLLM itself owns routing, for both qualified and
+        # bare names. In particular, preserve anthropic/... and bedrock/....
+        # Behind an endpoint only a provider prefix routes; a bare name there
+        # is OpenAI-shaped and falls through.
+        return model
 
     # Decide endpoint routing before looking at the slash. ``deepseek-ai`` is
     # an organization, not a provider, and vLLM still needs
     # openai/deepseek-ai/<model> so DSPy sends it to api_base.
     if provider in {"vllm", "openai"} or has_endpoint:
         return model if model.startswith("openai/") else f"openai/{model}"
-
-    if provider == "litellm":
-        # No endpoint means LiteLLM itself owns routing, for both qualified and
-        # bare names. In particular, preserve anthropic/... and bedrock/....
-        return model
 
     prefix = _litellm_provider_prefix(model)
     if prefix is not None:
