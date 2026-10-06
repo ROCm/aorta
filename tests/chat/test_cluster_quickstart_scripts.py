@@ -158,6 +158,17 @@ def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
     assert "export AORTA_CHAT_LLM_TOOL_MODE=native" in source
 
 
+def test_ui_cleanup_waits_for_the_entire_process_group() -> None:
+    source = SCRIPTS[1].read_text(encoding="utf-8")
+
+    assert source.count('/bin/kill -0 -- "-$1"') >= 2
+    assert 'group_alive "$pid"' in source
+    assert 'process_group_alive "$ui_pid"' in source
+    assert 'kill -0 "$pid"' not in source
+    assert 'kill -0 "$ui_pid"' not in source
+    assert "did not stop; preserving" in source
+
+
 def test_slurm_query_failure_preserves_the_endpoint_record(tmp_path: Path) -> None:
     """A login-host outage is not evidence that the recorded job died."""
     runtime = tmp_path / "runtime"
