@@ -11,6 +11,7 @@ sanitizer_plan:
     variant: racy
     hip: fixtures/repro/consan_lds_race_2wave.hip
     command: fixtures/bin/consan_lds_race_2wave
+    consan_driver: dispatch
     consan_log: true
   scope:
     kind: kernel

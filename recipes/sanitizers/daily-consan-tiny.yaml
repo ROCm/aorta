@@ -44,6 +44,7 @@ sanitizer_plan:
       code_object: fixtures/isa/tiny.hsaco
       code_object_index: 0
     consan_command: fixtures/bin/consan_tiny_load
+    consan_driver: load
     consan_log: true
   scope:
     kind: kernel
@@ -57,6 +58,9 @@ sanitizer_plan:
     # the description. lenient produces the same error with a vaguer reason here,
     # because tiny_vecadd has no ConSan-admissible sites at all.
     consan_policy: strict
+    # strict with a load-only driver is rejected at load time unless the recipe
+    # names the signed-off outcome: this is its key in verdict_baselines.json.
+    expected_error: consan_tiny
     on_missing_backend: fail
   output:
     report: sanitizer_report.json
