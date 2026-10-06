@@ -343,8 +343,74 @@ curl --fail --silent --show-error \
 ```
 
 The response should contain `"content": "READY"` and no reasoning trace.
-The launcher also sends a function schema and requires one structured call with
-`source = "READY"`; startup fails if vLLM returns XML as ordinary text instead.
+
+Reproduce the launcher's required native function-call check. Build the request
+with the model recorded by the running worker:
+
+```bash
+TOOL_REQUEST="$(
+  AORTA_EXPECTED_MODEL="${AORTA_CHAT_VLLM_MODEL}" python3 -c '
+import json
+import os
+
+name = "aorta_tool_protocol_probe"
+print(json.dumps({
+    "model": os.environ["AORTA_EXPECTED_MODEL"],
+    "messages": [{
+        "role": "user",
+        "content": "Call the provided tool with source set to READY. Do not answer in text.",
+    }],
+    "tools": [{
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "Verify native function calling.",
+            "parameters": {
+                "type": "object",
+                "properties": {"source": {"type": "string"}},
+                "required": ["source"],
+            },
+        },
+    }],
+    "tool_choice": {"type": "function", "function": {"name": name}},
+    "temperature": 0,
+    "max_tokens": 128,
+}))
+'
+)"
+
+TOOL_RESPONSE="$(
+  curl --fail --silent --show-error \
+    "${AORTA_CHAT_VLLM_BASE_URL}/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "${TOOL_REQUEST}"
+)"
+```
+
+Validate the response exactly as the launcher does:
+
+```bash
+python3 -c '
+import json
+import sys
+
+message = json.load(sys.stdin)["choices"][0]["message"]
+calls = message.get("tool_calls") or []
+if len(calls) != 1:
+    raise SystemExit(f"native tool-call probe produced {len(calls)} calls: {message!r}")
+function = calls[0].get("function") or {}
+if function.get("name") != "aorta_tool_protocol_probe":
+    raise SystemExit(f"native tool-call probe used the wrong function: {message!r}")
+arguments = function.get("arguments") or {}
+if isinstance(arguments, str):
+    arguments = json.loads(arguments)
+if arguments.get("source") != "READY":
+    raise SystemExit(f"native tool-call probe used the wrong arguments: {message!r}")
+' <<<"${TOOL_RESPONSE}"
+```
+
+Success produces no output. A response containing XML or ordinary text instead
+of one native `tool_calls` entry fails validation.
 
 ## 5. Start the Chat UI
 
