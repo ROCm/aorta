@@ -118,6 +118,25 @@ def test_manual_shutdown_confirms_an_empty_queue_before_reporting_success() -> N
     )
 
 
+def test_quickstart_documents_the_native_function_call_gate() -> None:
+    source = QUICKSTART.read_text(encoding="utf-8")
+    probe = source[
+        source.index("Reproduce the launcher's required native function-call check") :
+        source.index("## 5. Start the Chat UI")
+    ]
+
+    for required in (
+        '"tools": [{',
+        '"parameters": {',
+        '"required": ["source"]',
+        '"tool_choice": {"type": "function"',
+        'name = "aorta_tool_protocol_probe"',
+        'message.get("tool_calls")',
+        'arguments.get("source") != "READY"',
+    ):
+        assert required in probe
+
+
 def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
     source = SCRIPTS[1].read_text(encoding="utf-8")
 
