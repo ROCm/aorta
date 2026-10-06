@@ -266,8 +266,8 @@ cells:
   - name: baseline-local
     mitigations: [none]
     environment: local
-  - name: tf32_off-local
-    mitigations: [tf32_off]
+  - name: no-caching-local
+    mitigations: [pytorch_no_cuda_memory_caching]
     environment: local
 ```
 
