@@ -45,6 +45,33 @@ Two rules the built-in tools follow and yours should too:
   to the configured source root and refuse anything that escapes it. A tool with
   no such bound is a tool an LLM can point anywhere.
 
+### The exception, and why it is one
+
+The cluster diagnostic tools do not keep that bound, and it is worth being
+plain about rather than leaving a reader to infer the rule still holds.
+`triage_kernel_source`, `triage_assembly_source` and `triage_workload` write
+under `jobs_root` rather than the source root, reach a scheduler over SSH, and
+run source the user pasted on a GPU node. A single chat turn can start a job
+that occupies one for minutes. `run_terminal_command` would refuse every one of
+those operations, and the container the agents use when `CIA_CONTAINER_IMAGE`
+is set runs with `--security-opt seccomp=unconfined` and the shared filesystem
+mounted.
+
+So they are off unless you turn them on. `allow_cluster_jobs` defaults to
+`false`, and while it is false those three are absent from the registry and
+from the prompts — not refused at call time. That matters under
+`llm_tool_mode = "native"`, where every registered tool's schema goes to the
+provider's function-calling API: a tool the model is never told about is one no
+prompt-injected text can talk it into reaching for.
+
+Reading what a past job already produced — `list_cluster_jobs`,
+`read_autopsy_report` — stays available, because it is the same shape as the
+file tools on a different root: bounded to `jobs_root`, nothing submitted.
+
+If you are writing a tool of your own that needs this much reach, the honest
+pattern is the same one: ship it, keep it out of the default registry, and let
+an operator decide.
+
 ## Register it
 
 ```toml

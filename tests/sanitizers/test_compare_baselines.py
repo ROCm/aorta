@@ -76,9 +76,10 @@ def _use_baselines(monkeypatch, tmp_path: Path, data: dict) -> None:
 
 
 _RACY_CONFLICT_MESSAGE = (
-    "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=1 index=0 kind=1 "
-    "first_owner=0 second_owner=1 first_lds=[0,4) second_lds=[0,4) "
-    "first_kind=2 second_kind=1"
+    "[rocjitsu-dbi-hooks] ConSan conflict reader=1 first_index=0 second_index=1 "
+    "first_kind=1 second_kind=2 first_owner=0 second_owner=1 "
+    "epoch=2 generation=3 first_bytes=[0,4) second_bytes=[0,4) "
+    "code_object=b1946ac92492d234 first_instruction=0x40 second_instruction=0x48"
 )
 
 
@@ -117,8 +118,8 @@ def test_comparator_rejects_incomplete_execution(tmp_path, monkeypatch) -> None:
 def test_comparator_rejects_missing_finding_shape(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     _write_all_matching(tmp_path)
-    # FAIL verdict is correct, but the expected finding shape ("auto replay
-    # diagnostic") is absent -> the gate must not accept it.
+    # FAIL verdict is correct, but the expected finding shape ("ConSan
+    # conflict") is absent -> the gate must not accept it.
     _write_case(tmp_path, "consan-racy", _check("consan", Verdict.FAIL, message="something else"))
     assert comparator.main(["prog", str(tmp_path)]) == 1
 

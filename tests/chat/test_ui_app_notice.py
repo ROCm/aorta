@@ -96,11 +96,30 @@ def _seed_pending_notice(app_module) -> None:
     )
 
 
+class TestDecisionLogIdentity:
+    async def test_browser_turns_share_an_id_and_increment(self, app, monkeypatch):
+        seen: list[dict] = []
+
+        async def answer(question, history, on_step=None, **decision):
+            seen.append(decision)
+            return "answer", history, {}
+
+        monkeypatch.setattr(app, "invoke_agent", answer)
+
+        await app.on_message(SimpleNamespace(content="first"))
+        await app.on_message(SimpleNamespace(content="second"))
+
+        assert seen[0]["session_id"] == seen[1]["session_id"]
+        assert [call["turn"] for call in seen] == [1, 2]
+
+
 class TestTheNoticeIsDelivered:
     async def test_after_a_successful_answer(self, app, monkeypatch):
         _seed_pending_notice(app)
 
-        async def _answer(question, history):  # noqa: ARG001 - signature match
+        async def _answer(
+            question, history, on_step=None, **_decision
+        ):  # noqa: ARG001 - signature match
             return "the answer", [], {}
 
         monkeypatch.setattr(app, "invoke_agent", _answer)
@@ -113,7 +132,9 @@ class TestTheNoticeIsDelivered:
         """The request already left; the failure does not cancel the disclosure."""
         _seed_pending_notice(app)
 
-        async def _explode(question, history):  # noqa: ARG001 - signature match
+        async def _explode(
+            question, history, on_step=None, **_decision
+        ):  # noqa: ARG001 - signature match
             raise RuntimeError("provider hung up")
 
         monkeypatch.setattr(app, "invoke_agent", _explode)
@@ -126,7 +147,9 @@ class TestTheNoticeIsDelivered:
         """Order matters: the notice annotates the request that just happened."""
         _seed_pending_notice(app)
 
-        async def _explode(question, history):  # noqa: ARG001 - signature match
+        async def _explode(
+            question, history, on_step=None, **_decision
+        ):  # noqa: ARG001 - signature match
             raise RuntimeError("provider hung up")
 
         monkeypatch.setattr(app, "invoke_agent", _explode)
@@ -139,7 +162,9 @@ class TestTheNoticeIsDelivered:
     async def test_it_is_drained_so_the_session_sees_it_once(self, app, monkeypatch):
         _seed_pending_notice(app)
 
-        async def _explode(question, history):  # noqa: ARG001 - signature match
+        async def _explode(
+            question, history, on_step=None, **_decision
+        ):  # noqa: ARG001 - signature match
             raise RuntimeError("provider hung up")
 
         monkeypatch.setattr(app, "invoke_agent", _explode)
@@ -152,7 +177,9 @@ class TestTheNoticeIsDelivered:
         """An empty notice must not become a blank message in the transcript."""
         app.cl.user_session.set(app._NOTICE_STATE_KEY, redaction.NoticeState())
 
-        async def _explode(question, history):  # noqa: ARG001 - signature match
+        async def _explode(
+            question, history, on_step=None, **_decision
+        ):  # noqa: ARG001 - signature match
             raise RuntimeError("provider hung up")
 
         monkeypatch.setattr(app, "invoke_agent", _explode)
@@ -317,7 +344,9 @@ class TestTwoSessionsInOneProcess:
         both_redacted = asyncio.Event()
         arrived = 0
 
-        async def turn(question, history):  # noqa: ARG001 - signature match
+        async def turn(
+            question, history, on_step=None, **_decision
+        ):  # noqa: ARG001 - signature match
             nonlocal arrived
 
             async def node() -> None:
@@ -367,7 +396,13 @@ class TestTwoSessionsInOneProcess:
         assert "IPv4" in _the_notice(bob)
 
     async def test_both_are_told_how_to_turn_it_off(self, app, monkeypatch):
-        """Decision 16's second half, in the same words as the CLI line."""
+        """Decision 16's second half, in terms that work in a browser.
+
+        This asserted the CLI's wording, which named ``--no-redact`` -- a flag
+        ``aorta chat ui`` does not have. Naming the removal without a usable
+        way out leaves people stuck, and naming an unusable one is worse: it
+        sends them to a command line that is not there.
+        """
         self._install(app, monkeypatch, self._overlapping_turn())
         alice, bob = _Browser(), _Browser()
 
@@ -378,8 +413,10 @@ class TestTwoSessionsInOneProcess:
 
         for browser in (alice, bob):
             notice = _the_notice(browser)
-            assert "--no-redact" in notice
             assert "redact = false" in notice
+            assert "--no-redact" not in notice, (
+                "the browser has no command line to pass that on"
+            )
 
     async def test_each_session_is_told_once_across_its_own_turns(self, app, monkeypatch):
         """Once per session, not once per redacting turn, with sessions overlapping."""

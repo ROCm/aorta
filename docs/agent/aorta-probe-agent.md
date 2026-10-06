@@ -56,7 +56,7 @@ flowchart TD
 
 | Field | Meaning |
 |-------|---------|
-| `category` | One of eight generic autopsy labels (see below) |
+| `category` | One of the eight probe labels — `PROBE_CATEGORIES`, see below. Not the full eleven-label shared taxonomy: `validate_step` refuses the three evidence-only names here |
 | `hypothesis` | Short natural-language explanation |
 | `next_mitigations` | Registered mitigation names to try next (never raw argv) |
 | `confidence` | 0.0–1.0 self-reported confidence |
@@ -64,16 +64,86 @@ flowchart TD
 
 ### Autopsy category taxonomy
 
-| Category | Typical probe signals |
+The vocabulary has eleven names and is shared with `aorta.cia`, so a report
+means the same thing whichever front door wrote it. **A probe step may use only
+the eight below**; the three after them are reachable only by reading an
+instrument.
+
+| Probe category (`PROBE_CATEGORIES`) | Typical probe signals |
 |----------|----------------------|
 | `rccl_hang` | `tier2:*` hang detectors, RCCL timeout patterns |
 | `thermal_throttle` | Sustained perf drop + thermal context (when available) |
 | `illegal_mem` | `tier4:hip_error`, illegal-access regex in stderr |
 | `oom_fragment` | OOM / exit 137 patterns |
-| `checkpoint_race` | Barrier / checkpoint boundary signatures |
+| `checkpoint_race` | Checkpoint save/load boundary signatures |
 | `launch_error` | Early exit, launch failures |
 | `perf_regression` | Pass with warn detectors or confound regression |
 | `unknown` | No confident mapping |
+
+Three more are **evidence-only** — reachable by `aorta.cia` reading an
+instrument, never by a probe step:
+
+| Category | Established by |
+|----------|----------------|
+| `gpu_race` | ConSan / waitcheck findings naming sites inside one kernel |
+| `numeric_silent` | `tier4:nan_signature`, Inf/overflow, out-of-tolerance drift |
+| `tooling_gap` | The instrument could not run, or produced no records |
+
+The set is closed: `AgentPolicy.validate_step` raises `PolicyViolation` on
+anything outside `PROBE_CATEGORIES`, so the loop stops rather than recording a
+label nothing downstream can route on. The vocabulary is defined once, in
+`aorta.agent.llm.AUTOPSY_CATEGORY_GUIDANCE`, as name → one-line gloss;
+`AUTOPSY_CATEGORIES` is derived from that mapping, `PROBE_CATEGORIES` is that
+set less the evidence-only three, and the proposer prompt renders the glosses of
+the probe subset — so a new label cannot reach the validator without also
+reaching the model, and the model is never shown a label it has no way to reach.
+
+Three distinctions the glosses exist to enforce, because the names alone do not:
+
+* **`checkpoint_race` is about checkpoint I/O, not about kernels.** An
+  intra-wave LDS race is `gpu_race`. The two were previously conflated —
+  `checkpoint_race` was the nearest available name for a kernel race, and it was
+  the wrong one.
+* **`tooling_gap` is not `unknown`.** `unknown` is evidence that fits no label;
+  `tooling_gap` is evidence never collected, because the sanitizer was rejected
+  or produced no records. Reading the second as the first turns "we did not
+  look" into "we looked and found nothing".
+* **`unknown` is a real answer, not a failure to answer.** It is the correct
+  label when the evidence supports none of the others, and `validate_step`
+  accepts it. Guessing a specific label to avoid `unknown` is worse than
+  `unknown`, because the loop routes on the label.
+
+### Declaring a detector's category
+
+`--llm-backend fake` labels a failure without a model. It reads what the
+failure detectors that fired *declare* first — `custom_patterns[*].category` in
+the recipe. Only when the declarations settle nothing (none was made, or every
+one was `unknown`) does it infer a category from the IDs of the undeclared
+detectors, and then from `--symptom`. A `warn` or `info` pattern may declare a
+category too, but it is not a failure detector, so this proposer never reads it.
+
+Declare a category whenever an ID could mislead: `custom:` IDs are free-form,
+so `custom:consan_host_data_race` names a sanitizer and a race and reads as
+`gpu_race`, although the race it reports is on the host.
+
+```yaml
+custom_patterns:
+  - id: consan_host_data_race
+    match:
+      regex: "host data race"
+    category: unknown   # fits no label; read off its name it would be gpu_race
+```
+
+* `unknown` is a declaration too, and it abstains: it stops the name being
+  read without contradicting another detector's label. Undeclared detectors
+  beside it are still read off their IDs, and `--symptom` is still heard.
+* Fired detectors that declare two different labels give `unknown`; neither is
+  ranked above the other, and `--symptom` does not break the tie.
+* Any of the eleven names may be declared, because a declaration describes
+  evidence. A probe step still reports an evidence-only label as `unknown`.
+* Built-in `tier1`–`tier4` detectors declare nothing and are still read off
+  their IDs. Only the offline proposer reads declarations: a real backend takes
+  its category from the model, and no prompt carries them.
 
 ---
 
@@ -176,6 +246,8 @@ audit. `wake()` replays tried mitigations and last category.
 | `converged` | A non-baseline mitigation cell passed |
 | `exhausted_candidates` | No more registered mitigations left to try |
 | `agent_stop` | Proposer ended search for another reason |
+| `proposal_unresolved` | Every mitigation the proposer named was dropped by the candidate filter (unregistered, already tried, outside the allowlist, or the `none` baseline, which is never a candidate), and the proposer did not ask to stop. An agent-side name-resolution failure, not a decision by the model — the names are in `unresolved_mitigations` in `agent_log.jsonl` |
+| `proposal_redundant` | Every mitigation the proposer named was removed by validation as redundant — only the `none` baseline can empty a proposal this way — and the proposer did not ask to stop. Agent-side normalisation, not a decision by the model — the names are in `redundant_mitigations` in `agent_log.jsonl` |
 
 ### Tests
 

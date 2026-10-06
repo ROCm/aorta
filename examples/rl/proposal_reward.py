@@ -1,0 +1,1202 @@
+#!/usr/bin/env python3
+"""Seam demonstration: a reward for the shape of an `aorta agent` proposal.
+
+The outer layer of the debugging-vertical reward, and the cheapest one: does a
+proposal satisfy the contract `aorta agent` actually demands of an LLM? Strict
+JSON, a `category` from the closed autopsy set, and mitigation names that
+resolve in the registry and sit inside the candidate set the loop offered.
+
+Zero GPU, microseconds per sample, and no labelling: the contract is code.
+
+Why this is scored at all, when the consumer already validates
+--------------------------------------------------------------
+Because the consumer validates *quietly*. `LiteLLMProposer.propose` drops
+unrecognised mitigation names before the policy ever sees them::
+
+    filtered = [m for m in step.next_mitigations if m in remaining]
+
+A proposal naming only mitigations that do not exist therefore arrives at the
+loop as a well-formed step with an empty `next_mitigations`, and
+`run_agent_loop` reads an empty list as a decision to stop searching. The
+outcome is `agent_stop`, carrying the model's own hypothesis as the operator's
+recommended action. Nothing raises, nothing logs a rejection, and the search
+ends early on a fabricated name that looked plausible.
+
+`AgentStep.from_dict` coerces on the same principle: a non-bool `stop` becomes
+`False`, a non-list `next_mitigations` becomes `[]`, a null `category` becomes
+`"unknown"`, and an unparseable numeric `confidence` becomes `0.0`. Those
+defences are right for a *serving* path -- the audit trail must survive a bad
+provider -- but they mean the consumer cannot be used as an oracle for training.
+It reports success on input it silently repaired. A reward has to measure the
+contract as stated, which is what this does.
+
+The one thing the consumer does reject loudly is a category outside the closed
+set: `AgentPolicy.validate_step` raises `PolicyViolation`, the loop catches it,
+and the outcome is `policy_stop`. So a bad category costs the whole search too,
+just more visibly.
+
+Scored through aorta's own code
+-------------------------------
+The tiers call `AgentStep.from_dict`, `AgentPolicy.validate_step` and
+`aorta.registry.get_mitigation` rather than reimplementing them, for the same
+reason `triage_reward.py` recomputes labels through the verdict resolver: a
+reward that restates the contract drifts from it, and a drifted reward still
+trains. If the autopsy set gains a category or the registry gains a mitigation,
+this reward changes in that commit.
+
+The ladder
+----------
+Graded, not pass/fail, so a policy that is nearly right gets a gradient::
+
+    1  parses as a JSON object                                        0.2
+    2  the five demanded keys are present with the demanded types     0.4
+    3  `category` is in the closed autopsy set                        0.6
+    4  a non-empty mitigation list, every name in the registry        0.8
+    5  every name inside the offered candidates, confidence in [0,1]  1.0
+
+Tier 4 is the one that separates a useful proposal from a plausible one. Tier 5
+is the difference between a name that exists and a name that is *available*:
+proposing an already-tried or non-allowlisted mitigation is silently filtered,
+so it costs a wasted iteration in exactly the way tier 4 costs a wasted search.
+
+Why the tier is no longer the whole reward
+------------------------------------------
+The tiers above are *membership* tests, and the first end-to-end run against a
+real model showed that membership alone saturates: Qwen3-8B, a known-perfect
+answer, and two two-line constants that read no input all scored 1.0 on all 45
+recorded proposals, so no GRPO advantage existed to train on. See
+``docs/tokenspeed-rl-e2e-sanitizer-routing.md``. Two of the tiers are therefore
+graded *within* the tier rather than being pass/fail:
+
+* **tier 3 is graded by what the category commits to.** ``unknown`` is a member
+  of ``AUTOPSY_CATEGORIES`` and ``AgentPolicy`` accepts it, so declining to
+  classify used to clear the tier that exists to test classification. It now
+  earns ``ABSTENTION_CREDIT`` of the step instead of all of it.
+* **tiers 4-5 are graded by the length of the mitigation list.** ``run_agent_loop``
+  appends *every* proposed name to the mitigation axis and runs a probe cell for
+  each, while charging the whole proposal a single unit of the iteration budget
+  (``loop.py``, ``check_iteration_budget`` then the ``for mitigation in
+  step.next_mitigations`` append). So a k-cell proposal costs k GPU cells and the
+  budget the policy enforces does not restrain it at all. ``precision_credit``
+  prices that. ``k`` is the count *after* ``AgentPolicy.validate_step`` has
+  dropped ``none`` and collapsed repeats -- see ``probe_cells`` -- because a cell
+  that is never created cannot be a cost.
+
+Two consequences worth stating plainly, because both are deliberate:
+
+* The reward is no longer a pure function of the tier. A wide enough sweep at
+  tier 5 can score below a precise proposal at tier 4, or below a tier-3 miss.
+  That is the intended reading -- twenty cells is a real cost -- and it means
+  the tier and the reward have to be reported separately, which ``Score`` does.
+* Neither graded term can tell a *right* category or name from a wrong one,
+  because nothing here has labels (that is the category-labelling blocker, and
+  the mitigation half needs the probe cell this module explicitly does not run).
+  Both terms therefore score form, and each is gameable in its own direction:
+  see ``ABSTENTION_CREDIT`` and ``FREE_MITIGATIONS`` for which direction, and
+  what was rejected.
+
+`consumer_outcome` records what `run_agent_loop` would do with each proposal --
+`accepted`, `silent_stop`, or `policy_stop` -- so the reward can be read against
+its real consequence rather than as an abstract score.
+
+What this deliberately does not score
+-------------------------------------
+Whether the category is *correct* for the failure (that is `triage_reward.py`)
+and whether the mitigation actually fixes the repro (that needs a probe cell and
+a GPU). This is the format half only. A policy can score 1.0 here while being
+diagnostically useless, which is precisely why it is the outer layer and not the
+reward.
+
+Usage
+-----
+
+    python examples/rl/proposal_reward.py           # fixtures + baselines
+    python examples/rl/proposal_reward.py --json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
+
+from aorta.agent.llm import AUTOPSY_CATEGORIES, AgentStep, _strip_code_fence
+from aorta.agent.policy import AgentPolicy, PolicyViolation
+from aorta.registry import get_mitigation
+from aorta.registry.errors import UnknownMitigationError
+
+MAX_TIER = 5
+TIER_STEP = 1.0 / MAX_TIER
+
+# The legal way to decline, and what declining is worth.
+#
+# `unknown` is in AUTOPSY_CATEGORIES and `AgentPolicy.validate_step` accepts it,
+# so it has to stay legal here -- a reward that rejects what the consumer
+# accepts is a reward that has drifted from the contract, which is the failure
+# this module's docstring is built around. It just stops being worth full marks.
+#
+# The value is half a step, chosen as the neutral point rather than fitted:
+# declining is worth half of committing. What matters is the ordering, not 0.5.
+#
+# Rejected, and why:
+#
+# * **Excluding `unknown` from tier 3's accepted set** (the first option in the
+#   report's §5). It drops an abstention to 0.4 while any in-set category, right
+#   or wrong, still earns 1.0 -- a 0.6 gradient pointing straight at "invent a
+#   confident label". On this corpus that is not hypothetical: no category a
+#   probe step may commit to is correct on any of the nine scenarios -- four
+#   are labelled `unknown`, and the other five carry evidence-only labels that
+#   `AgentPolicy` refuses from a probe step (see `REFERENCE_CATEGORY` in
+#   rescore_e2e.py) -- so the policy it trains is one that emits a wrong label
+#   instead of an honest `unknown`. Strictly worse for an operator, and worse
+#   for the agent loop, which routes on the category.
+# * **Gating the credit on "the evidence genuinely does not support a category"**
+#   (the second option in §5). Not implementable when this was decided: that
+#   predicate needs per-scenario category labels, and there were none. #484 has
+#   since committed them as `examples/rl/corpus/scenario_labels.json`; nothing
+#   here reads them yet. It was the labelling blocker wearing a different hat,
+#   so §5 offered it as an alternative to fix 1 when it is really a restatement
+#   of fix 3.
+# * **Coupling the credit to `confidence`**, docking an abstention that also
+#   claims certainty. Genuinely attractive -- incoherence is checkable without
+#   labels, and it does not push the policy towards a confident wrong label,
+#   because committing and abstaining stay equally available. Rejected on the
+#   data: the recorded model abstains at confidence 0.6-0.95 while the two
+#   constant templates abstain at exactly 0.5, so the term ranks a humble
+#   two-line constant *above* the model on 8 of 9 scenarios. That inverts the
+#   one comparison the whole exercise exists to make. Worth revisiting once a
+#   correctness signal exists to anchor it.
+#
+# What survives the rejections is still not clean, and the honest statement of
+# the residue is: partial credit keeps a wrong-but-specific label worth more
+# than an honest abstention (a full step against half a step). It shrinks that
+# perverse gradient rather than removing it. It was also expected to become
+# correctness-sensitive with no rewrite once the set covered kernel-level
+# races. #484 widened the set and it did not: the race label it added,
+# `gpu_race`, is evidence-only, so a probe step still may not name it and this
+# term still sees membership.
+ABSTENTION_CATEGORY = "unknown"
+ABSTENTION_CREDIT = 0.5
+
+# How many mitigations a proposal may name before hedging starts costing.
+#
+# The cost model is the loop's, not a preference: every name becomes its own
+# probe cell, so a k-name proposal is k GPU runs. A *pair* is the smallest hedge
+# that survives one wrong guess without spending another proposal round, so it
+# is priced free; past that the proposal is a sweep of the candidate set and is
+# priced by its cell count.
+#
+# Two is also what neutralises the specific perversity a brevity term invites.
+# With no correctness signal, "one wrong name" and "the right name" are
+# indistinguishable, so any brevity term makes a 1-name proposal beat a 2-name
+# proposal that contains the right answer. At FREE_MITIGATIONS = 2 that margin
+# is exactly zero: the two tie. `1/len(next_mitigations)` -- the form the report
+# suggested -- puts a 0.2 reward cliff there instead, which is the largest
+# single step the term can produce and points the wrong way.
+#
+# It does not remove the perversity, it relocates it: at three names and up, a
+# single confident wrong name still outscores a list containing the right one.
+# That cannot be fixed by any function of the list's *shape*; it needs the
+# contract's fix half, which is a probe cell and a GPU.
+FREE_MITIGATIONS = 2
+
+# The keys the system prompt demands, and the type each must have. `stop_reason`
+# is optional and is not part of the demanded set.
+REQUIRED_KEYS: dict[str, type | tuple[type, ...]] = {
+    "category": str,
+    "hypothesis": str,
+    "next_mitigations": list,
+    "confidence": (int, float),
+    "stop": bool,
+}
+
+
+@dataclass
+class Proposal:
+    """One model output, plus the loop state it was produced against.
+
+    ``sidecar_files`` is part of that state, not a scoring option. The loop
+    the model was answering ran with some ``AgentPolicy``, and
+    ``--mitigations-file`` puts names in that policy's registry view that are
+    in no other. Scoring against a bare registry answers a question about a
+    *different* loop: every sidecar name reads as hallucinated at tier 4, and
+    the bare ``AgentPolicy()`` replay records ``policy_stop`` for a proposal
+    the real policy accepted. Both errors point the same way -- a correct
+    proposal scored as a wrong one -- so a run using sidecars trains against
+    its own ad-hoc mitigations being punished.
+
+    Empty by default, because a corpus row that recorded no sidecars was
+    produced without them; the default is the fact, not an assumption.
+    """
+
+    name: str
+    raw: str
+    candidates: list[str] = field(default_factory=list)
+    tried: list[str] = field(default_factory=list)
+    sidecar_files: tuple[Path, ...] = ()
+
+    @property
+    def extra_files(self) -> list[Path] | None:
+        """``sidecar_files`` in the shape the registry takes.
+
+        ``None`` rather than ``[]`` for "no sidecars", which is what
+        ``AgentPolicy.validate_step`` passes and what ``get_mitigation``
+        documents; keeping one spelling means the two lookups here and the one
+        inside the policy cannot disagree about what empty means.
+        """
+        return list(self.sidecar_files) or None
+
+    @property
+    def offered(self) -> list[str]:
+        """What `propose` would have put in front of the model.
+
+        Mirrors the proposer: the candidate set minus what has been tried,
+        minus the no-op baseline.
+        """
+        return [c for c in self.candidates if c not in self.tried and c != "none"]
+
+
+def category_credit(category: str) -> float:
+    """What tier 3's step is worth for `category`.
+
+    Full credit for committing to a category, `ABSTENTION_CREDIT` for declining.
+    Blind to *which* category was named, deliberately: there is nothing here
+    that could tell a right one from a wrong one.
+    """
+    return ABSTENTION_CREDIT if category == ABSTENTION_CATEGORY else 1.0
+
+
+def probe_cells(names: list[str]) -> list[str]:
+    """The names the loop will actually run a probe cell for.
+
+    `AgentPolicy.validate_step` normalises the proposal before `run_agent_loop`
+    iterates it: `none` is dropped (it is the no-op baseline, already a cell) and
+    repeats are collapsed (`if name not in cleaned`). So the *written* length and
+    the *charged* length are different numbers, and it is the second one the
+    precision term is pricing. Scoring the first penalised a proposal for cells
+    that will never be created -- which broke the term's whole stated basis,
+    since its justification is the GPU cost the loop incurs.
+
+    Order-preserving, matching `validate_step`, so this stays a mirror of the
+    consumer rather than an independent notion of the same thing.
+    """
+    cells: list[str] = []
+    for name in names:
+        if name == "none" or name in cells:
+            continue
+        cells.append(name)
+    return cells
+
+
+def precision_credit(n_cells: int) -> float:
+    """What the tier 4-5 block is worth for a proposal costing `n_cells` cells.
+
+    Flat up to `FREE_MITIGATIONS`, then the reciprocal of the cell count the
+    loop would spend. Blind to *which* names were chosen, for the same reason
+    `category_credit` is blind to which category.
+    """
+    if n_cells <= 0:
+        return 0.0
+    return min(1.0, FREE_MITIGATIONS / n_cells)
+
+
+TIER4_EXPLICIT_STOP = "explicit_stop"
+TIER4_EMPTY = "empty_mitigations"
+TIER4_NO_CELLS = "no_cells_after_normalising"
+TIER4_UNREGISTERED = "unregistered_mitigation"
+TIER4_POLICY_REJECTED = "policy_rejected"
+TIER4_REASONS = (
+    TIER4_EXPLICIT_STOP, TIER4_EMPTY, TIER4_NO_CELLS, TIER4_UNREGISTERED,
+    TIER4_POLICY_REJECTED,
+)
+
+
+@dataclass
+class Score:
+    tier: int = 0
+    reward: float = 0.0
+    stopped_at: str = ""
+    detail: str = ""
+    consumer_outcome: str = ""
+    # The two graded terms, reported separately so a score can be read back
+    # apart from the tier it was reached at -- the tier no longer determines it.
+    category_credit: float = 1.0
+    precision: float = 1.0
+    # What the model wrote, and what the loop will charge for. They differ when
+    # a proposal repeats a name or includes `none`, both of which the consumer
+    # drops -- so `precision` is priced off the second.
+    n_mitigations: int = 0
+    n_cells: int = 0
+    # Which of tier 4's five refusals stopped the proposal, as a code rather
+    # than as `detail` prose. The tier covers five different outcomes -- an
+    # explicit stop, an empty list, a list that normalises to no cells, an
+    # unregistered name, and a registered name the policy refuses -- and a
+    # caller that told them apart by matching the prose counted four of them
+    # as hallucinated names. Empty when tier 4 did not stop the proposal.
+    tier4_reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "tier": self.tier,
+            "reward": round(self.reward, 4),
+            "stopped_at": self.stopped_at,
+            "detail": self.detail,
+            "consumer_outcome": self.consumer_outcome,
+            "category_credit": round(self.category_credit, 4),
+            "precision": round(self.precision, 4),
+            "n_mitigations": self.n_mitigations,
+            "n_cells": self.n_cells,
+            "tier4_reason": self.tier4_reason,
+        }
+
+    @property
+    def abstained(self) -> bool:
+        return self.tier >= 3 and self.category_credit < 1.0
+
+
+def delivered(row: dict[str, Any]) -> bool:
+    """Did the provider actually return a completion for this row?
+
+    Lives here because ``run_e2e.py`` and ``rescore_e2e.py`` both have to ask
+    it and must not answer it differently -- ``rescore_e2e`` is deliberately
+    free of the GPU-side imports, so this module is the only thing they share.
+
+    A failed call records an empty ``raw``, which scores tier 0 like a model
+    that emitted nothing usable. The two are not the same event and must not
+    land in the same statistic: an empty string from a provider outage is an
+    absent observation, and counting it as model output makes an outage read as
+    malformed output, or -- when a whole group fails -- as a collapsed group,
+    which is the diagnosis for greedy decoding. Rows are kept in the results
+    file either way; it is the *statistics* they are excluded from, and the
+    counts are reported beside them so the exclusion is visible rather than
+    silent.
+    """
+    return not row.get("transport_error")
+
+
+def _consumer_outcome_of_raw(
+    raw: str, offered: list[str], extra_files: list[Path] | None = None
+) -> str:
+    """What the real proposer would do with this reply, fences and all.
+
+    Answers a different question from the tier ladder, and has to be computed
+    differently. The ladder is a format gate and stays strict on the raw text.
+    This is a claim about the production path, and that path is
+    ``LiteLLMProposer``, which calls ``_strip_code_fence`` before
+    ``json.loads``. So a reply wrapped in a ```json fence -- which is what a
+    model does when asked for JSON in prose -- parses for the consumer while
+    failing the gate, and recording ``silent_stop`` for it asserted the loop
+    would stall on a reply the loop accepts.
+
+    Imported from the agent package rather than reimplemented, so the two cannot
+    disagree about what a fence is.
+    """
+    try:
+        raw_obj = json.loads(_strip_code_fence(raw))
+    except json.JSONDecodeError:
+        return "silent_stop"
+    if not isinstance(raw_obj, dict):
+        return "silent_stop"
+    return _consumer_outcome(raw_obj, offered, extra_files)
+
+
+def _consumer_outcome(
+    raw_obj: dict[str, Any], offered: list[str], extra_files: list[Path] | None = None
+) -> str:
+    """What `run_agent_loop` would do with this proposal.
+
+    Replays the two filters the real path applies, in order: the proposer's
+    silent name filter, then the policy's category/registry check.
+    """
+    # A JSON integer has no width limit, and `from_dict` coerces `confidence`
+    # with `float()`, which raises `OverflowError` past ~1.8e308. Uncaught, one
+    # malformed completion aborted the whole scoring batch instead of scoring
+    # low -- a scorer that cannot survive bad model output is not a scorer, and
+    # bad model output is its subject matter. Treated as the policy stopping,
+    # which is what an unusable confidence means to the loop.
+    try:
+        step = AgentStep.from_dict(raw_obj)
+    except (OverflowError, ValueError, TypeError):
+        return "policy_stop"
+    filtered = [m for m in step.next_mitigations if m in offered]
+    step = AgentStep(
+        category=step.category,
+        hypothesis=step.hypothesis,
+        next_mitigations=filtered,
+        confidence=step.confidence,
+        stop=step.stop,
+        stop_reason=step.stop_reason,
+    )
+    try:
+        # The policy the loop ran with, not a bare one. `validate_step` resolves
+        # every name through `get_mitigation(extra_files=self.sidecar_files)`,
+        # so a default-constructed policy refuses `--mitigations-file` names and
+        # this records `policy_stop` for a proposal the real loop accepted --
+        # which is the opposite of what this function claims to report.
+        AgentPolicy(
+            sidecar_files=tuple(extra_files) if extra_files else ()
+        ).validate_step(step)
+    except PolicyViolation:
+        return "policy_stop"
+    if step.stop or not step.next_mitigations:
+        return "silent_stop"
+    return "accepted"
+
+
+def score_proposal(proposal: Proposal) -> Score:
+    """Walk the ladder, stopping at the first tier that fails."""
+    score = Score()
+
+    # Tier 1 -- strict JSON object. `response_format=json_object` asks the
+    # provider for this, but providers return partial and non-object JSON, and
+    # the consumer's own except-clause exists because of it.
+    #
+    # `consumer_outcome` is a *separate* question from the tier, and the two are
+    # deliberately answered from different parses. The tier is the format gate
+    # and stays strict on `proposal.raw`. The outcome claims what the real
+    # consumer would do, and `LiteLLMProposer` runs `_strip_code_fence` before
+    # `json.loads` -- so a fenced reply it accepts was being recorded here as
+    # `silent_stop`, which is a claim about the production path that is false.
+    try:
+        raw_obj = json.loads(proposal.raw)
+    except json.JSONDecodeError as exc:
+        score.stopped_at = "tier1_json"
+        score.detail = f"does not parse: {exc.msg}"
+        score.consumer_outcome = _consumer_outcome_of_raw(
+            proposal.raw, proposal.offered, proposal.extra_files
+        )
+        return score
+    if not isinstance(raw_obj, dict):
+        score.stopped_at = "tier1_json"
+        score.detail = f"parsed as {type(raw_obj).__name__}, not an object"
+        score.consumer_outcome = _consumer_outcome_of_raw(
+            proposal.raw, proposal.offered, proposal.extra_files
+        )
+        return score
+    score.tier = 1
+    score.consumer_outcome = _consumer_outcome(
+        raw_obj, proposal.offered, proposal.extra_files
+    )
+
+    # Tier 2 -- the demanded keys, with the demanded types. Checked against the
+    # raw object rather than the coerced AgentStep: from_dict would have
+    # repaired a wrong type into a plausible default, which is the behaviour
+    # this tier exists to catch.
+    missing = [k for k in REQUIRED_KEYS if k not in raw_obj]
+    if missing:
+        score.stopped_at = "tier2_schema"
+        score.detail = f"missing key(s): {sorted(missing)}"
+        return _finish(score)
+    mistyped = [
+        f"{k}={type(raw_obj[k]).__name__}"
+        for k, want in REQUIRED_KEYS.items()
+        # bool is a subclass of int; a bare `True` confidence is not a number.
+        if not isinstance(raw_obj[k], want) or (k == "confidence" and isinstance(raw_obj[k], bool))
+    ]
+    if mistyped:
+        score.stopped_at = "tier2_schema"
+        score.detail = f"wrong type(s): {sorted(mistyped)}"
+        return _finish(score)
+    # The element type, which `list` does not carry. `REQUIRED_KEYS` can only
+    # say "a list", so `{"next_mitigations": [1, 2, 3]}` and
+    # `[{"name": "..."}]` cleared this tier, and tier 4 then read them through
+    # `[str(m) for m in ...]` -- a coercion that turns `1` into `"1"` and a
+    # dict into its repr, so the names that reached `get_mitigation` were names
+    # the reply never wrote. They are unknown, so the score is wrong in the
+    # forgiving direction rather than the harsh one: the reply is charged for
+    # hallucinating `"1"`, tier 4's `unknown` list reports a name with no
+    # source in the output, and a reader comparing the two cannot reconstruct
+    # what happened.
+    #
+    # Refused here, at the tier that exists for exactly this -- "the demanded
+    # keys, with the demanded types", checked against the raw object precisely
+    # because `from_dict` would repair the shape. A coercion three tiers later
+    # is that same repair, written by hand.
+    non_strings = [
+        f"next_mitigations[{index}]={type(name).__name__}"
+        for index, name in enumerate(raw_obj["next_mitigations"])
+        if not isinstance(name, str)
+    ]
+    if non_strings:
+        score.stopped_at = "tier2_schema"
+        score.detail = f"wrong type(s): {non_strings}"
+        return _finish(score)
+    score.tier = 2
+
+    # Tier 3 -- the closed category set. The only thing the consumer rejects
+    # loudly, via PolicyViolation.
+    category = raw_obj["category"]
+    if category not in AUTOPSY_CATEGORIES:
+        score.stopped_at = "tier3_category"
+        score.detail = f"category {category!r} not in the autopsy set"
+        return _finish(score)
+    score.tier = 3
+    # `unknown` clears the tier -- the consumer accepts it -- but does not earn
+    # all of it. Declining to classify is the task's legal escape hatch, not a
+    # performance of it.
+    score.category_credit = category_credit(category)
+
+    # Tier 4 -- names that exist, and a proposal that is actually a proposal.
+    #
+    # There are two ways a reply can be a decision to stop, and this tier used
+    # to recognise only one of them. An empty list is the implicit spelling and
+    # failed here already. `stop: true` is the explicit one and did not: a reply
+    # that set it while naming valid, offered mitigations walked to tier 5 and
+    # scored a full 1.0, while `_consumer_outcome` recorded `silent_stop` for
+    # the very same reply. `run_agent_loop` honours the flag and breaks before
+    # building any probe cell, so those names are never run -- the reward was
+    # paying full marks for work the loop does not do, and paying it to a
+    # constant policy that terminates every search.
+    #
+    # Checked before the names, because `stop: true` settles the question on its
+    # own: whatever else the reply contains, the loop stops. The invariant this
+    # restores is the one the ladder is for -- reaching MAX_TIER means the real
+    # consumer would accept the proposal and run cells for it.
+    if raw_obj["stop"]:
+        score.stopped_at = "tier4_registry"
+        score.tier4_reason = TIER4_EXPLICIT_STOP
+        score.detail = (
+            "stop is true, so the loop ends the search without running any "
+            f"cell; the {len(raw_obj['next_mitigations'])} name(s) proposed "
+            "alongside it are never tried"
+        )
+        return _finish(score)
+    # No `str(m)`. Tier 2 has already refused a list holding anything else, so
+    # the coercion could only ever have fired on a reply that never got here --
+    # and leaving it in would keep the door open for the next caller.
+    names = list(raw_obj["next_mitigations"])
+    score.n_mitigations = len(names)
+    # What the loop will charge for, after the consumer's own normalisation.
+    # Reported alongside the written count rather than replacing it: a gap
+    # between the two is a proposal that looks wider than it is.
+    cells = probe_cells(names)
+    score.n_cells = len(cells)
+    if not cells:
+        score.stopped_at = "tier4_registry"
+        score.tier4_reason = TIER4_EMPTY if not names else TIER4_NO_CELLS
+        score.detail = (
+            "no mitigation proposed; the loop reads this as a stop"
+            if not names
+            else f"proposal normalises to no cells ({names}); "
+            "`none` and repeats are dropped by AgentPolicy.validate_step, "
+            "so the loop reads this as a stop"
+        )
+        return _finish(score)
+    unknown: list[str] = []
+    for name in names:
+        try:
+            # The sidecars the loop ran with. Without them a `--mitigations-file`
+            # name -- registered, offered, and runnable by the real loop -- is
+            # reported here as an "unregistered mitigation ... silently dropped
+            # by the proposer", so a correct proposal is docked a tier for
+            # naming a mitigation the operator supplied on purpose.
+            get_mitigation(name, extra_files=proposal.extra_files)
+        except UnknownMitigationError:
+            unknown.append(name)
+    if unknown:
+        score.stopped_at = "tier4_registry"
+        score.tier4_reason = TIER4_UNREGISTERED
+        score.detail = (
+            f"unregistered mitigation(s) {sorted(unknown)}; "
+            "silently dropped by the proposer"
+        )
+        return _finish(score)
+    # Registered is not the same as acceptable, and re-deriving half of
+    # `validate_step` here is what let the two drift apart. The policy rejects
+    # a name for three reasons this tier checked only one of: it is not in the
+    # registry, it looks like shell/argv (a space, or a leading `-`), or it
+    # does not match `[A-Za-z0-9_][A-Za-z0-9_.-]*` and so would not survive the
+    # round trip through a probe cell directory name -- which is how the loop
+    # recovers tried and winning mitigations afterwards. A sidecar mitigation
+    # whose name contains `/` is registered *and* refused, and it walked to
+    # tier 5 with a full reward while `consumer_outcome` on the same reply
+    # recorded `policy_stop`.
+    #
+    # That is the invariant the `stop: true` branch above was added to restore,
+    # failing on the other side: reaching MAX_TIER has to mean the real
+    # consumer would accept this proposal and run cells for it. So the question
+    # is put to the real consumer rather than to a copy of its rules -- the
+    # same reason this file imports `get_mitigation` instead of listing names.
+    #
+    # `confidence` and `stop` are placeholders: `stop` is settled above and
+    # `validate_step` only clamps the confidence, which tier 5 owns. Building
+    # the step here rather than through `AgentStep.from_dict` keeps an
+    # unrepresentable confidence landing on tier 5, where it belongs, instead
+    # of being reported as a policy violation.
+    try:
+        AgentPolicy(sidecar_files=proposal.sidecar_files).validate_step(
+            AgentStep(
+                category=category,
+                hypothesis=str(raw_obj["hypothesis"]),
+                next_mitigations=names,
+                confidence=0.0,
+                stop=False,
+            )
+        )
+    except PolicyViolation as exc:
+        score.stopped_at = "tier4_registry"
+        score.tier4_reason = TIER4_POLICY_REJECTED
+        score.detail = f"AgentPolicy would reject the step: {exc}"
+        return _finish(score)
+    score.tier = 4
+    # Every surviving name is a probe cell the loop will run, so the block that
+    # rewards naming things is scaled by how many cells the proposal spends.
+    score.precision = precision_credit(len(cells))
+
+    # Tier 5 -- names that are available, and a usable confidence. Registered
+    # but not offered is still silently dropped.
+    #
+    # Checked against `cells`, not the raw list, for the same reason the
+    # precision term above is: `cells` is what `AgentPolicy.validate_step`
+    # leaves for the loop to run. `none` is registered and deliberately absent
+    # from `offered` -- it is the baseline cell, not a candidate -- so
+    # `["none", "tf32_off"]` is a proposal the real consumer accepts, and
+    # scoring the raw list stopped it here at tier 5 for naming a mitigation the
+    # loop drops before it looks at availability at all.
+    unavailable = [n for n in cells if n not in proposal.offered]
+    if unavailable:
+        score.stopped_at = "tier5_available"
+        score.detail = (
+            f"mitigation(s) {sorted(unavailable)} are registered but were not "
+            "offered (already tried, or outside the allowlist)"
+        )
+        return _finish(score)
+    # Same overflow route as `_consumer_outcome` above: an unbounded JSON
+    # integer here raised out of the scorer rather than scoring the proposal.
+    # A confidence that cannot be represented is outside [0, 1] by any reading,
+    # so it lands on the branch that already exists for that.
+    try:
+        confidence = float(raw_obj["confidence"])
+    except (OverflowError, ValueError, TypeError):
+        score.stopped_at = "tier5_available"
+        score.detail = (
+            f"confidence {raw_obj['confidence']!r} is not a usable number"
+        )
+        return _finish(score)
+    # NaN is reachable -- `json.loads` accepts the bare `NaN` token by default,
+    # and tier 2 sees a genuine `float` -- and it is already rejected here,
+    # because every comparison against NaN is False, so `0.0 <= nan <= 1.0` is
+    # False and `not` of it is True. `isfinite` changes no verdict; it makes
+    # the rejection structural rather than incidental. The current spelling
+    # stops working if anyone reorders the chain into `confidence >= 0.0 and
+    # confidence <= 1.0`, or clamps first -- and clamping is what the consumer
+    # does: `AgentPolicy.validate_step` runs `max(0.0, min(1.0, x))`, which
+    # turns NaN into 1.0 and carries a confident-looking proposal into the
+    # loop. This is the one place the two are allowed to disagree, so it
+    # should not disagree by accident.
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        score.stopped_at = "tier5_available"
+        score.detail = f"confidence {confidence} outside [0, 1]"
+        return _finish(score)
+    score.tier = MAX_TIER
+    score.detail = "on contract"
+    return _finish(score)
+
+
+def _finish(score: Score) -> Score:
+    """Turn a reached tier into a reward, grading the two tiers that saturate.
+
+    Tiers 1-2 are pure form and stay pass/fail: there is no partial way to
+    parse. Tier 3's step is scaled by what the category commits to, and the
+    tier 4-5 block by the cost of the mitigation list. Every tier still has to
+    be *reached* first, so the gate ordering is unchanged.
+    """
+    reward = TIER_STEP * min(score.tier, 2)
+    if score.tier >= 3:
+        reward += TIER_STEP * score.category_credit
+    if score.tier >= 4:
+        reward += TIER_STEP * (score.tier - 3) * score.precision
+    score.reward = reward
+    return score
+
+
+# --------------------------------------------------------------------------- #
+# Fixtures
+#
+# Every failure mode below is one an LLM actually produces on this prompt, and
+# each is drawn from the debugging vertical rather than being generically
+# malformed. The candidate set is the real registry's, narrowed the way an
+# operator narrows it with --mitigation.
+# --------------------------------------------------------------------------- #
+
+_CANDIDATES = [
+    "nccl_launch_order_implicit",
+    "hsa_no_sdma",
+    "gpu_max_hw_queues_2",
+    "hip_launch_blocking",
+    "pytorch_alloc_expandable_segments",
+    "tf32_off",
+]
+
+
+def _ok(**over: Any) -> str:
+    body: dict[str, Any] = {
+        "category": "rccl_hang",
+        "hypothesis": "tier4:collective_timeout on all ranks; suspect launch ordering.",
+        "next_mitigations": ["nccl_launch_order_implicit"],
+        "confidence": 0.7,
+        "stop": False,
+    }
+    body.update(over)
+    return json.dumps(body)
+
+
+def _without(key: str) -> dict[str, Any]:
+    body = json.loads(_ok())
+    body.pop(key)
+    return body
+
+
+FIXTURES: tuple[Proposal, ...] = (
+    Proposal("on-contract rccl hang proposal", _ok(), _CANDIDATES),
+    Proposal(
+        "on-contract oom proposal",
+        _ok(
+            category="oom_fragment",
+            hypothesis="exit 137 with vram growth; fragmentation, not a true OOM.",
+            next_mitigations=["pytorch_alloc_expandable_segments"],
+        ),
+        _CANDIDATES,
+    ),
+    # Prose around the object is the commonest real failure on models that do
+    # not honour response_format.
+    Proposal(
+        "JSON wrapped in prose",
+        "Here is my analysis:\n" + _ok(),
+        _CANDIDATES,
+    ),
+    Proposal("truncated JSON", _ok()[:-3], _CANDIDATES),
+    Proposal("a JSON list, not an object", '[{"category": "rccl_hang"}]', _CANDIDATES),
+    Proposal(
+        "confidence as a string",
+        _ok(confidence="high"),
+        _CANDIDATES,
+    ),
+    Proposal(
+        "stop as a string",
+        _ok(stop="false"),
+        _CANDIDATES,
+    ),
+    Proposal("hypothesis omitted", json.dumps(_without("hypothesis")), _CANDIDATES),
+    # A category that reads like a real one but is not in the closed set.
+    Proposal(
+        "invented category",
+        _ok(category="rccl_timeout"),
+        _CANDIDATES,
+    ),
+    Proposal(
+        "free-text category",
+        _ok(category="RCCL hang on rank 3"),
+        _CANDIDATES,
+    ),
+    # The dangerous one: a plausible env-var name that is not registered.
+    Proposal(
+        "hallucinated mitigation",
+        _ok(next_mitigations=["rccl_p2p_disable"]),
+        _CANDIDATES,
+    ),
+    Proposal(
+        "shell command as a mitigation",
+        _ok(next_mitigations=["export NCCL_P2P_DISABLE=1"]),
+        _CANDIDATES,
+    ),
+    Proposal(
+        "one real name, one invented",
+        _ok(next_mitigations=["nccl_launch_order_implicit", "rccl_disable_p2p"]),
+        _CANDIDATES,
+    ),
+    Proposal("empty mitigation list", _ok(next_mitigations=[]), _CANDIDATES),
+    # Registered, but already tried: silently dropped, so the iteration is spent
+    # re-proposing something the loop has already ruled out.
+    Proposal(
+        "re-proposes an already-tried mitigation",
+        _ok(next_mitigations=["hsa_no_sdma"]),
+        _CANDIDATES,
+        tried=["hsa_no_sdma"],
+    ),
+    # Registered, but outside what the operator allowed.
+    Proposal(
+        "proposes outside the allowlist",
+        _ok(next_mitigations=["xnack"]),
+        _CANDIDATES,
+    ),
+    Proposal("confidence out of range", _ok(confidence=42.0), _CANDIDATES),
+    # The two saturation routes the first real run found. Both are on contract
+    # -- they reach tier 5 and the consumer accepts them -- and both used to
+    # score exactly what a diagnosis scores.
+    Proposal(
+        "declines to classify",
+        _ok(category="unknown", hypothesis="Cannot attribute from this evidence."),
+        _CANDIDATES,
+    ),
+    Proposal(
+        "declines and shotguns the candidate set",
+        _ok(
+            category="unknown",
+            hypothesis="",
+            next_mitigations=list(_CANDIDATES),
+        ),
+        _CANDIDATES,
+    ),
+    Proposal(
+        "commits, then shotguns the candidate set",
+        _ok(next_mitigations=list(_CANDIDATES)),
+        _CANDIDATES,
+    ),
+    # A primary and one fallback: the hedge the loop can absorb without a
+    # second proposal round, so it is priced the same as naming one.
+    Proposal(
+        "names a primary and one fallback",
+        _ok(next_mitigations=["nccl_launch_order_implicit", "hsa_no_sdma"]),
+        _CANDIDATES,
+    ),
+)
+
+
+def _fixture_expectations() -> dict[str, int]:
+    """The tier each fixture should reach, asserted by the test suite."""
+    return {
+        "on-contract rccl hang proposal": 5,
+        "on-contract oom proposal": 5,
+        "JSON wrapped in prose": 0,
+        "truncated JSON": 0,
+        "a JSON list, not an object": 0,
+        "confidence as a string": 1,
+        "stop as a string": 1,
+        "hypothesis omitted": 1,
+        "invented category": 2,
+        "free-text category": 2,
+        "hallucinated mitigation": 3,
+        "shell command as a mitigation": 3,
+        "one real name, one invented": 3,
+        "empty mitigation list": 3,
+        "re-proposes an already-tried mitigation": 4,
+        "proposes outside the allowlist": 4,
+        "confidence out of range": 4,
+        "declines to classify": 5,
+        "declines and shotguns the candidate set": 5,
+        "commits, then shotguns the candidate set": 5,
+        "names a primary and one fallback": 5,
+    }
+
+
+def _reward_expectations() -> dict[str, float]:
+    """The reward each fixture should earn, asserted by the test suite.
+
+    Separate from `_fixture_expectations` because the tier no longer fixes the
+    reward: the four fixtures that reach tier 5 span 0.63 to 1.00, which is the
+    range fixes 1 and 2 exist to create.
+    """
+    step = TIER_STEP
+    offered = len([c for c in _CANDIDATES if c != "none"])
+    return {
+        # Form tiers: ungraded, so still tier/MAX_TIER.
+        "JSON wrapped in prose": 0.0,
+        "truncated JSON": 0.0,
+        "a JSON list, not an object": 0.0,
+        "confidence as a string": step,
+        "stop as a string": step,
+        "hypothesis omitted": step,
+        "invented category": 2 * step,
+        "free-text category": 2 * step,
+        # Committed category, so tier 3's step is whole.
+        "hallucinated mitigation": 3 * step,
+        "shell command as a mitigation": 3 * step,
+        "one real name, one invented": 3 * step,
+        "empty mitigation list": 3 * step,
+        "re-proposes an already-tried mitigation": 4 * step,
+        "proposes outside the allowlist": 4 * step,
+        "confidence out of range": 4 * step,
+        "on-contract rccl hang proposal": 1.0,
+        "on-contract oom proposal": 1.0,
+        "names a primary and one fallback": 1.0,
+        # Fix 1: declining costs half of tier 3's step.
+        "declines to classify": 1.0 - step * (1.0 - ABSTENTION_CREDIT),
+        # Fix 2: the tier 4-5 block is scaled by the cell count.
+        "commits, then shotguns the candidate set": (
+            3 * step + 2 * step * precision_credit(offered)
+        ),
+        # Both at once, which is what the recorded model and the constant
+        # templates both did.
+        "declines and shotguns the candidate set": (
+            2 * step
+            + step * ABSTENTION_CREDIT
+            + 2 * step * precision_credit(offered)
+        ),
+    }
+
+
+def baselines() -> list[dict[str, Any]]:
+    """Degenerate policies, so a real score is read against something.
+
+    The first is the one that matters: a policy that always returns the same
+    on-contract proposal scores 1.0 here, because this reward measures form and
+    nothing else. That is the ceiling a format reward can give you, and the
+    reason it cannot be the only term.
+
+    The two abstaining rows are the constants the first end-to-end run found
+    tying a real model at 1.0. They no longer tie it, but note what they are
+    still worth: `always abstain, one mitigation` reaches 0.9 while reading
+    nothing at all, because a single-name honest abstention is a *cheap* answer
+    and cheapness is most of what this reward can see.
+
+    `always stop, naming valid mitigations` is here because it used to score a
+    full 1.0 -- the ladder read the names and ignored the flag, so the cheapest
+    possible policy, one that ends every search on its first reply, sat at the
+    top of this table. It is kept as a row rather than deleted with the defect
+    so the table goes on showing that it is priced.
+    """
+    rows = []
+    for name, raw in (
+        ("always the same valid proposal", _ok()),
+        (
+            "always stop, naming valid mitigations",
+            _ok(stop=True, next_mitigations=["nccl_launch_order_implicit"]),
+        ),
+        (
+            "always abstain, one mitigation",
+            _ok(
+                category="unknown",
+                hypothesis="",
+                next_mitigations=["nccl_launch_order_implicit"],
+            ),
+        ),
+        (
+            "always abstain, shotgun everything",
+            _ok(category="unknown", hypothesis="", next_mitigations=list(_CANDIDATES)),
+        ),
+        ("always an empty object", "{}"),
+        ("always prose", "The RCCL collective timed out on rank 3."),
+    ):
+        scores = [
+            score_proposal(Proposal(name, raw, f.candidates, f.tried))
+            for f in FIXTURES
+        ]
+        n = len(scores) or 1
+        rows.append(
+            {
+                "policy": name,
+                "proposals": len(scores),
+                "mean_reward": round(sum(s.reward for s in scores) / n, 4),
+                "accepted_rate": round(
+                    sum(s.consumer_outcome == "accepted" for s in scores) / n, 4
+                ),
+            }
+        )
+    return rows
+
+
+def string_list(doc: dict[str, Any], key: str, *, required: bool) -> list[str] | None:
+    """``doc[key]`` as a list of strings, or a refusal naming the shape.
+
+    The stored-field counterpart of ``triage_reward._detector_list``.
+    ``list(doc.get(key) or [])`` accepted anything iterable, so a string became
+    one entry per character: `"hip_launch_blocking"` as `candidates` offered
+    nineteen one-character names, and a valid proposal scored `tier5_available`
+    against them rather than the row being refused.
+
+    ``required`` is per field, because absence means different things. The
+    loop state's `candidates` and `tried` have been written on every row since
+    `build_corpus.py` first wrote one, so a missing or null value is a
+    corrupted row -- and reading `tried` as `[]` is not neutral: it says
+    nothing was tried, re-offers the mitigation the row says already ran, and
+    scores a proposal naming it as available. Optional fields return ``None``
+    when absent or null so the caller can supply its own default.
+    """
+    value = doc.get(key)
+    if value is None:
+        if required:
+            raise ValueError(
+                f"{key} is {'null' if key in doc else 'missing'}, and reading "
+                "it as an empty list would change which mitigations count as "
+                "offered"
+            )
+        return None
+    if not isinstance(value, list):
+        raise ValueError(
+            f"{key} is a JSON {type(value).__name__}, not a list; a bare "
+            "string would be read one character per entry"
+        )
+    bad = [repr(item) for item in value if not isinstance(item, str)]
+    if bad:
+        raise ValueError(f"{key} holds non-string entries: {bad}")
+    return list(value)
+
+
+def load_corpus(
+    path: Path, sidecar_files: tuple[Path, ...] = ()
+) -> list[tuple[Proposal, str]]:
+    """Load a `build_corpus.py` proposal JSONL, with each row's workload family.
+
+    The corpus stores the raw model output verbatim, so scoring a corpus row is
+    the same code path as scoring a fixture: nothing about the ladder is
+    corpus-specific, which is what makes the two comparable.
+
+    ``sidecar_files`` is the registry view the rows were produced against, and
+    a row may carry its own under ``proposal.sidecar_files`` -- a row wins,
+    because the row records what that loop actually ran with and the argument
+    is only the caller's best guess for rows that recorded nothing. An empty
+    list is a record, not nothing: that loop ran with no sidecars. Scored
+    without either, every ``--mitigations-file`` name in the corpus reads as
+    hallucinated; see :class:`Proposal`.
+    """
+    out: list[tuple[Proposal, str]] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        if row.get("kind") != "proposal":
+            continue
+        spec = row["proposal"]
+        # Refused rather than skipped, as `triage_reward.load_corpus` refuses a
+        # bad row: the `.jsonl` is generated, so the fix is a rebuild, and a
+        # dropped row would shrink the scored set with nothing to say so.
+        try:
+            candidates = string_list(spec, "candidates", required=True)
+            tried = string_list(spec, "tried", required=True)
+            recorded = string_list(spec, "sidecar_files", required=False)
+        except ValueError as exc:
+            raise ValueError(
+                f"{path}:{line_number}: proposal.{exc}; rebuild it with "
+                "build_corpus.py."
+            ) from exc
+        out.append((
+            Proposal(
+                name=spec["name"],
+                raw=spec["raw"],
+                candidates=candidates,
+                tried=tried,
+                # `is None`, not truthiness. An empty list is a record -- the
+                # loop ran with no sidecars -- and falling back on it scored the
+                # row against definitions that loop never had, so a name only
+                # the caller's sidecar defines passed as registered. Absent or
+                # null is a row that recorded nothing, which is what the
+                # argument is for.
+                sidecar_files=(
+                    sidecar_files if recorded is None
+                    else tuple(Path(p) for p in recorded)
+                ),
+            ),
+            row.get("workload_family", "unknown"),
+        ))
+    return out
+
+
+def run_demo(
+    as_json: bool,
+    corpus: Path | None = None,
+    sidecar_files: tuple[Path, ...] = (),
+) -> int:
+    families: dict[str, int] = {}
+    if corpus is not None:
+        rows = load_corpus(corpus, sidecar_files)
+        if not rows:
+            print(f"no proposal examples in {corpus}", file=sys.stderr)
+            return 2
+        proposals = [p for p, _ in rows]
+        for _, family in rows:
+            families[family] = families.get(family, 0) + 1
+    else:
+        # The built-in fixtures name registry mitigations only, so sidecars
+        # cannot change what they score -- but they are applied anyway, because
+        # the alternative is a flag that silently means nothing on the default
+        # invocation and something on `--corpus`.
+        proposals = [
+            replace(fixture, sidecar_files=sidecar_files) for fixture in FIXTURES
+        ]
+
+    scored = [(f, score_proposal(f)) for f in proposals]
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "proposals": [
+                        {"name": f.name, **s.as_dict()} for f, s in scored
+                    ],
+                    "workload_families": families,
+                    "baselines": baselines(),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print("=" * 72)
+    print("The proposal contract: what `aorta agent` demands of a model")
+    print("=" * 72)
+    print(
+        "Tiers 1-2 are form, 3 is the closed category set, 4-5 are registry\n"
+        f"membership and availability. Each tier is worth {TIER_STEP:.1f}, but "
+        "tier 3's step is\n"
+        f"scaled to {ABSTENTION_CREDIT:g} for `category: unknown` and the tier 4-5 block "
+        "is scaled by\n"
+        f"min(1, {FREE_MITIGATIONS}/names) -- so the tier no longer fixes the reward.\n"
+    )
+    if families:
+        print(f"corpus workload families: {families}\n")
+    for f, s in scored:
+        print(f"tier {s.tier}/{MAX_TIER}  reward {s.reward:.2f}  {f.name}")
+        if s.tier >= 3:
+            print(
+                f"       category credit {s.category_credit:.2f}"
+                f"   precision {s.precision:.2f} over {s.n_cells} cell(s)"
+                + (
+                    f" from {s.n_mitigations} name(s)"
+                    if s.n_cells != s.n_mitigations
+                    else ""
+                )
+            )
+        print(f"       consumer would: {s.consumer_outcome}")
+        if s.stopped_at:
+            print(f"       stopped at {s.stopped_at}: {s.detail}")
+        elif s.detail:
+            print(f"       {s.detail}")
+        print()
+
+    print("=" * 72)
+    print("Degenerate policies")
+    print("=" * 72)
+    for row in baselines():
+        print(
+            f"  {row['policy']:<34} mean reward {row['mean_reward']:.2f}  "
+            f"accepted {row['accepted_rate']:.2f}"
+        )
+    print(
+        "\nThe first baseline is still the point: a fixed on-contract proposal\n"
+        "scores 1.00 without diagnosing anything. Form is a gate, not a signal --\n"
+        "pair it with triage_reward.py, which scores whether the read is right.\n"
+        "The abstaining rows are what fixes 1 and 2 moved: they used to tie a\n"
+        "real model at 1.00, and the one-name abstention is still worth 0.90 for\n"
+        "reading nothing, because a cheap answer is most of what form can see."
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--corpus", type=Path, default=None,
+                        help="proposal.jsonl written by build_corpus.py")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    # Spelled as `aorta agent` spells it, because it means the same thing: the
+    # ad-hoc mitigations the loop's registry view included. A corpus produced
+    # by a run that used them must be scored with them, or every sidecar name
+    # in it is docked a tier for not existing.
+    parser.add_argument(
+        "--mitigations-file", type=Path, action="append", default=[], dest="sidecars",
+        metavar="PATH",
+        help="JSON sidecar of ad-hoc mitigations the scored run was given "
+             "(repeatable); names in it resolve exactly as they did for the loop",
+    )
+    args = parser.parse_args(argv)
+    return run_demo(args.json, args.corpus, tuple(args.sidecars))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

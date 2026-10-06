@@ -146,6 +146,15 @@ def redact_messages(messages: list[Any]) -> tuple[list[Any], RedactionSummary]:
 # ── first-send notice ─────────────────────────────────────────────────────
 
 
+#: How to turn the gate off, said in terms of the front door the user is
+#: actually standing at. Both honour the config file; only the CLI has the
+#: flag, and a browser session told to pass ``--no-redact`` has been handed
+#: advice it cannot take -- there is no command line to put it on.
+_CONFIG_OPT_OUT = "'redact = false' in ~/.config/aorta/chat.toml"
+CLI_OPT_OUT = f"Disable with --no-redact, or {_CONFIG_OPT_OUT}."
+UI_OPT_OUT = f"Disable with {_CONFIG_OPT_OUT}."
+
+
 @dataclass
 class NoticeState:
     """One session's record of the first-redaction disclosure.
@@ -163,6 +172,10 @@ class NoticeState:
     #: The notice text, held for a front door that shows it itself rather than
     #: reading the process's stderr. ``None`` once drained (or never set).
     pending: str | None = field(default=None)
+    #: The way out, in the terms of whichever front door made this state. The
+    #: CLI default is right for ``aorta chat`` and ``aorta chat ask``, which
+    #: are one session per process and never construct one of these.
+    opt_out: str = CLI_OPT_OUT
 
 
 #: Fallback for the single-session front doors. ``aorta chat`` and
@@ -213,17 +226,17 @@ def reset_session_notice(state: NoticeState | None = None) -> None:
     state.pending = None
 
 
-def notice_line(summary: RedactionSummary) -> str:
+def notice_line(summary: RedactionSummary, opt_out: str | None = None) -> str:
     """The one line the user gets, naming the removal and the way out.
 
     Both halves are obligatory per Decision 16: a silent gate trains people to
     distrust the tool when an answer looks wrong, and naming what was removed
     without naming the opt-out leaves them stuck.
     """
+    hint = opt_out if opt_out is not None else CLI_OPT_OUT
     return (
         f"aorta chat: redacted {summary.describe()} from the outbound request. "
-        "Disable with --no-redact, or 'redact = false' in "
-        "~/.config/aorta/chat.toml."
+        f"{hint}"
     )
 
 
@@ -242,7 +255,7 @@ def emit_notice_once(summary: RedactionSummary, stream: IO[str] | None = None) -
     if state.emitted or not summary:
         return False
     state.emitted = True
-    line = notice_line(summary)
+    line = notice_line(summary, state.opt_out)
     state.pending = line
     target = stream if stream is not None else _notice_stream()
     print(line, file=target, flush=True)

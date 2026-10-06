@@ -2260,8 +2260,10 @@ _NOT_PUBLISHED_ID = "artifacts-not-published"
 # out of a sentence. ``set_by`` says whether the operator must export it or
 # ``aorta`` derives it from the recipe's policy block.
 # ``consan_only`` keeps the manifest honest per case: the prose has always said
-# these four are what "ConSan additionally requires", so listing them for a
-# waitcheck reproduction would have the machine-readable field contradict it.
+# the ``consan_only`` entries are what "ConSan additionally requires", so listing
+# them for a waitcheck reproduction would have the machine-readable field
+# contradict it. Phrased by the flag rather than by a count, so adding a variable
+# does not silently make this comment wrong.
 _REQUIRED_ENV: tuple[dict[str, Any], ...] = (
     {
         "var": "ROCJITSU_PREBUILT",
@@ -2288,6 +2290,12 @@ _REQUIRED_ENV: tuple[dict[str, Any], ...] = (
         "consan_only": True,
     },
     {
+        "var": "RJ_CONSAN_PRESET",
+        "set_by": "aorta",
+        "purpose": "max default-detector preset for deterministic guardrail coverage",
+        "consan_only": True,
+    },
+    {
         "var": "RJ_CONSAN_POLICY",
         "set_by": "aorta",
         "purpose": "ConSan reporting policy",
@@ -2299,7 +2307,7 @@ _REQUIRED_ENV: tuple[dict[str, Any], ...] = (
 def required_env_for(*, case: str, report: dict[str, Any] | None) -> list[dict[str, Any]]:
     """The env a *this* case's reproduction needs (pure).
 
-    ConSan's four variables are dropped for a waitcheck-only case, so the
+    The ConSan-only variables are dropped for a waitcheck-only case, so the
     machine-readable list cannot claim more than the prose does. Whether ConSan
     ran is taken from the report's own check/finding sanitizers where possible,
     falling back to the case name -- the naming convention every guardrail and

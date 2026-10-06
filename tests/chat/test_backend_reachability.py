@@ -176,11 +176,32 @@ class TestPreflightStaysPermissive:
             await backend.preflight(timeout=1, interval=1)
         assert "starting anyway" in caplog.text
 
-    def test_preflights_default_budget_is_still_minutes(self):
-        """A quietly shortened warm-up window is the regression to watch for."""
+    def test_preflights_budget_is_a_minute_not_five(self):
+        """Shortened deliberately, which is why this says so rather than 300.
+
+        The original worry was a quietly shrunk warm-up window, and it was the
+        right worry: a large model on a cold page cache does take minutes. What
+        changed is the understanding of what the budget buys. ``preflight``
+        starts the session whichever way it ends, so the budget does not decide
+        whether a warming backend is tolerated -- it decides how long the user
+        stares at an empty chat before the welcome appears. A model that is
+        still loading is discovered by the first request at 60s exactly as it
+        would be at 300s.
+
+        The cost that made it worth changing was structural rather than the
+        number: the wait sat in ``on_chat_start``, so a down backend charged it
+        once per browser tab. The UI waits once per process now, and this is
+        the remaining courtesy delay.
+        """
         from aorta.chat.inference.providers import local_vllm
 
-        assert local_vllm.PREFLIGHT_TIMEOUT == 300
+        assert local_vllm.PREFLIGHT_TIMEOUT == 60
+
+    def test_the_budget_is_still_generous_enough_to_be_a_wait(self):
+        """Not a token one: a restarting proxy should still be caught by it."""
+        from aorta.chat.inference.providers import local_vllm
+
+        assert local_vllm.PREFLIGHT_TIMEOUT >= 30
 
     @pytest.mark.asyncio
     async def test_a_server_that_is_still_warming_up_is_waited_for(self, monkeypatch):

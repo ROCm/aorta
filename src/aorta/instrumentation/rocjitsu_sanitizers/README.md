@@ -5,7 +5,7 @@ RocJITsu guardrails without importing customer-derived artifacts.
 
 **Scope.** This module delivers the Phase-1 engine and the `mode: sanitizer`
 recipe UX (deterministic selection, exact-entry Waitcheck, fail-closed ConSan
-Record/Replay, versioned reports). The end goal of
+default-detector parsing, versioned reports). The end goal of
 [#316](https://github.com/ROCm/aorta/issues/316) -- fully automatic
 workload-driven top-kernel execution (profile an uninstrumented model, resolve
 the top-K kernels to exact identities, then run scoped ConSan) -- is **not** yet
@@ -24,7 +24,9 @@ Available now as a Python library:
 - report a Waitcheck scan that hit the backend's diagnostic cap as truncated,
   rather than quoting its capped count as the whole hazard count;
 - parse upstream `rj-waitcheck-diagnostic-v1` JSONL for corpus workflows;
-- parse Record/Replay output from the combined Waitcheck + ConSan hook;
+- parse output from the combined Waitcheck + ConSan hook: the current `default`
+  detector, plus legacy Sampled and Record/Replay logs retained for saved
+  bundles captured before RocJITsu simplified its modes;
 - preserve per-code-object ConSan coverage and fail closed on timeout, backend
   failure, missing verdicts, or incomplete coverage;
 - write and strictly reload experimental `aorta.sanitizer_report/0.1` JSON;
@@ -248,7 +250,7 @@ to lower, and any race finding — instead of discarding it behind a parse
 complaint. The run that motivated this is written up in
 [`docs/sanitizers/consan-405-unitemized-barrier-sites.md`](../../../../docs/sanitizers/consan-405-unitemized-barrier-sites.md).
 - `pass` only means a requested backend ran healthily and produced no finding;
-  Record/Replay's bounded snapshot is not proof that a program is race-free.
+  a bounded ConSan snapshot is not proof that a program is race-free.
 
 A Waitcheck finding count is not automatically the whole hazard count.
 `rj_waitcheck` stops collecting at `--max-diagnostics` (32 per code object by
@@ -261,6 +263,15 @@ its 45 hazards ([#480](https://github.com/ROCm/aorta/issues/480)). Set
 `sanitizer_plan.policy.waitcheck_max_diagnostics` to raise the cap for a lane
 that needs the complete count; a higher cap costs analysis time, so the flag,
 not a hard-coded larger default, is what makes the partial result visible.
+
+A ConSan conflict locates its two accesses by reader and text offset
+(`first_instruction` / `second_instruction`, kept in the finding's metadata) and
+never names a kernel. The parser joins those offsets to the itemized
+`coverage_site` records, which name the container at each offset, and sets
+`kernel_name` only when both accesses land in the same kernel. `entry_offset`
+stays the kernel's entry offset, as on `KernelIdentity`. A check's
+`kernel_results[].findings` repeat its `findings` per kernel, so count one list,
+never both ([#451](https://github.com/ROCm/aorta/issues/451)).
 
 The report keeps finding severity and execution completeness separate. For
 example, a Waitcheck warning plus scoped ConSan `not_checked` produces

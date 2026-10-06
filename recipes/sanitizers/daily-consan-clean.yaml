@@ -11,6 +11,7 @@ sanitizer_plan:
     variant: clean
     hip: fixtures/repro/consan_lds_race.hip
     command: fixtures/bin/consan_lds_race
+    consan_driver: dispatch
     consan_log: true
   scope:
     kind: kernel

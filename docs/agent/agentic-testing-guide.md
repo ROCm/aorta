@@ -48,6 +48,7 @@ external LLM is involved.
 |---------|-----------|-------------------------|
 | Default (`--llm-backend fake`) | **No** | Deterministic `FakeLLMProposer`: heuristics on detector IDs + round-robin through registered mitigations |
 | `--llm-backend litellm` | **Yes** | LiteLLM calls your configured model; requires `pip install 'amd-aorta[agent]'` and provider API keys |
+| `--llm-backend vllm` / `openai` | **Yes** | The model `aorta chat` is configured with (`~/.config/aorta/chat.toml` or `AORTA_CHAT_*`); requires `pip install 'amd-aorta[chat-cli]'` |
 
 The CLI default is **`fake`** so tests, CI, and local smoke runs work with
 **zero API calls** and fully reproducible behavior.
@@ -106,6 +107,20 @@ Then:
 aorta agent mitigate --llm-backend litellm --llm-model gpt-4o-mini ...
 ```
 
+To use a model you serve yourself on vLLM or TokenSpeed, point the chat
+settings at it and select the `vllm` backend:
+
+```bash
+pip install 'amd-aorta[chat-cli]'
+export AORTA_CHAT_LLM_PROVIDER=vllm
+export AORTA_CHAT_VLLM_BASE_URL=http://localhost:8000/v1
+export AORTA_CHAT_VLLM_MODEL=Qwen/Qwen3-8B
+aorta agent mitigate --llm-backend vllm ...
+```
+
+For a Qwen3-family model, start the engine with the flags in
+[serving a Qwen3-family model](../chat/providers.md#serving-a-qwen3-family-model).
+
 ---
 
 ## How is it agentic *without* an LLM?
@@ -149,6 +164,7 @@ Useful flags:
 | `--mitigation NAME` | Restrict search (repeatable) |
 | `--mitigations-file sidecar.json` | Extra registered mitigations |
 | `--llm-backend litellm` | Enable real LLM proposer |
+| `--prompt-profile rl-episode` | Send the prompt an RL-trained checkpoint learned on ([prompt profiles](#prompt-profiles)) |
 | `--dry-run` | Plan cells without executing |
 | `--bundle` | Run `aorta bundle` after loop (needs recipe redaction) |
 | `-v` / `-vv` | Progress logging |
@@ -306,6 +322,85 @@ PYTHONPATH=src aorta agent mitigate --output /tmp/agent_out --ticket smoke-fail 
 
 ---
 
+## Prompt profiles
+
+`--prompt-profile` chooses the messages a real backend is sent. The loop, the
+reply parser and `AgentPolicy` are the same under every profile.
+
+| Profile | What the model is sent | Use it with |
+|---------|------------------------|-------------|
+| `default` | The agent's own prompt: symptom, cell summaries, remaining candidates, already-tried list, and a gloss for each category | Any general-purpose model. Unchanged, and the default. |
+| `rl-episode` | The prompt the probe policy is post-trained on in the RL episode environment ([#525](https://github.com/ROCm/aorta/pull/525)), byte for byte, with thinking disabled | **Only** a checkpoint trained on that prompt |
+
+**Why it exists.** A post-trained checkpoint's gain is tied to the words it
+learned on. Measured through `aorta agent mitigate --llm-backend vllm` on seven
+archived failure scenarios (six fixable), 8 runs each at the agent's
+temperature, counting first replies that name a mitigation which fixes the
+failure:
+
+| Model | `default` | `rl-episode` |
+|-------|-----------|--------------|
+| Qwen3-8B, base | 18 of 48 | 17 of 48 |
+| Qwen3-8B, RL-trained (17 iterations) | 17 of 48 | **40 of 48** (5 of 6 scenarios) |
+
+The RL-trained checkpoint was trained on all seven of these scenarios, so this
+table shows that the product path reproduces what the checkpoint learned under
+its training prompt. It is not evidence that the checkpoint generalises to
+failures it was not trained on.
+
+**Do not use it with a general model.** It does not help the base model above,
+and in 6 of the base model's 48 runs the search ended early because it answered
+with a category the loop does not accept. In an earlier sampled measurement,
+Qwen3.8-27B named a fix on 49% of first replies under this prompt with thinking
+off, against 61% under `default` with thinking allowed.
+
+**Serving.** Serve the checkpoint with its Qwen3 reasoning parser, so the same
+engine also answers `default` correctly. On TokenSpeed, also choose a sampling
+backend that honours temperature (on AMD GPUs the default, `greedy`, ignores
+it). `rl-episode` never sends JSON mode on either backend. Only `default` on
+`--llm-backend litellm` does, so `xgrammar` matters only if the same engine
+also serves that combination:
+
+```bash
+vllm serve /path/to/checkpoint --served-model-name aorta-probe \
+  --dtype bfloat16 --reasoning-parser qwen3
+
+tokenspeed serve /path/to/checkpoint --served-model-name aorta-probe \
+  --dtype bfloat16 --reasoning-parser qwen3 \
+  --sampling-backend triton --grammar-backend xgrammar
+```
+
+Then point the agent at it through the chat provider settings:
+
+```bash
+export AORTA_CHAT_LLM_PROVIDER=vllm
+export AORTA_CHAT_VLLM_BASE_URL=http://localhost:8000/v1
+export AORTA_CHAT_VLLM_MODEL=aorta-probe
+aorta agent mitigate --llm-backend vllm --prompt-profile rl-episode \
+  --output ./agent_results --ticket T1 -- ./my_repro.sh
+```
+
+What `rl-episode` changes besides the text:
+
+- **Thinking is disabled per request** (`chat_template_kwargs:
+  {"enable_thinking": false}`), because the policy was trained without a
+  reasoning block. vLLM and TokenSpeed read this field; other servers may not.
+- **`--symptom` is not sent.** The policy never saw one. What was already
+  tried is visible to it as the cells that ran, and tried names drop out of the
+  candidate list.
+- **No JSON mode** on the `[agent]`-only LiteLLM path: training decoded
+  without a grammar.
+- **`--llm-backend fake` refuses it**, since the fake proposer sends no prompt.
+- The trained reply also carries `verdict` and `detectors`; the loop ignores
+  them.
+
+The `rl-episode` text lives in `aorta/agent/prompt_profiles.py` and is pinned
+by digest in `tests/agent/test_prompt_profiles.py`. Editing it detaches every
+checkpoint trained on it: replies still parse, but they get worse. Change it
+only together with a checkpoint trained on the new text.
+
+---
+
 ## Outcome reference
 
 | Outcome | Meaning | Typical next step |
@@ -314,6 +409,8 @@ PYTHONPATH=src aorta agent mitigate --output /tmp/agent_out --ticket smoke-fail 
 | `converged` | Some `{mitigation}-none` passed | Ship that mitigation to customer / gate |
 | `exhausted_candidates` | No mitigations left in allowlist/registry | Manual matrix or new sidecar mitigations |
 | `agent_stop` | Proposer set `stop` (LLM or fake) | Read `agent_report.md` hypothesis |
+| `proposal_unresolved` | The proposer named mitigations, the candidate filter dropped all of them (unregistered, already tried, outside the allowlist, or the `none` baseline), and it did not ask to stop | Check `unresolved_mitigations` in `agent_log.jsonl` against `aorta mitigations list` and `--mitigation`; do *not* read the hypothesis as the reason |
+| `proposal_redundant` | The proposer named only mitigations validation removes as redundant — in practice only the `none` baseline, which is always on the axis — and it did not ask to stop | Check `redundant_mitigations` in `agent_log.jsonl`; a custom proposer should not offer `none` as a next step |
 | `approval_required` | Mitigation needs ack (`--require-approval`) | Operator approves, re-run |
 | `walltime_exhausted` | `--max-walltime-sec` hit | Re-run same ticket to resume |
 | `policy_stop` | e.g. `--max-iterations` hit | Increase budget or narrow allowlist |
@@ -364,6 +461,27 @@ Append-only JSON lines, e.g.:
 {"ts": "...", "type": "llm_step", "category": "unknown", "hypothesis": "Baseline cell passed...", "stop": true, "stop_reason": "baseline_pass"}
 {"ts": "...", "type": "search_stopped", "outcome": "baseline_pass", "stop_reason": "baseline_pass"}
 ```
+
+`llm_step` and `search_stopped` carry an extra `unresolved_mitigations` key
+**only** when the proposer named mitigations the candidate filter dropped:
+
+```json
+{"ts": "...", "type": "llm_step", "next_mitigations": [], "stop": false, "stop_reason": null, "unresolved_mitigations": ["rccl_p2p_disable"]}
+{"ts": "...", "type": "search_stopped", "outcome": "proposal_unresolved", "stop_reason": "proposal_unresolved", "unresolved_mitigations": ["rccl_p2p_disable"]}
+```
+
+The key is absent, not empty, when nothing was dropped — a run with no
+rejections writes exactly the log it wrote before the key existed. It also
+appears on a `llm_step` whose `next_mitigations` is non-empty, which is a
+*partial* rejection: the search continued on the names that survived, and
+this is the only record of the half that was discarded.
+
+`redundant_mitigations` follows the same rule for the names validation
+removes after the filter: the `none` baseline and every repeat of a name
+already kept. Those names resolved and nothing declined them, which is why
+they are not folded into `unresolved_mitigations`. A proposal of only `none`
+empties the list and stops as `proposal_redundant`; a repeat never empties it,
+so the key records the repeat and the search continues.
 
 ### Report (`agent_report.md`)
 

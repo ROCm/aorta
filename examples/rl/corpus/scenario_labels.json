@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "description": [
+    "Ground-truth autopsy category per sanitizer scenario: the label a correct",
+    "triage should name given that scenario's evidence. Every value must be a",
+    "member of aorta.agent.llm.AUTOPSY_CATEGORIES; tests/agent/test_autopsy_categories.py",
+    "enforces that, and that each scenario names a recipe that exists.",
+    "",
+    "Kept as a file keyed by scenario rather than as a column inside the corpus",
+    "rows because the corpus is generated: examples/rl/build_corpus.py rebuilds",
+    "triage.jsonl and proposal.jsonl from a tree of sanitizer runs, so a label",
+    "written into a row is lost on the next rebuild. The scenario ids are the",
+    "ones build_corpus.py emits as scenario_id."
+  ],
+  "categories_source": "aorta.agent.llm.AUTOPSY_CATEGORY_GUIDANCE",
+  "evidence": [
+    "Nine sanitizer runs on a gfx950 compute node (Slurm job 32192, ROCm 7.0.2.2),",
+    "RocJITsu bundle f92da4cb. Verdicts and finding counts as recorded in the",
+    "corpus manifest. Fuller provenance is in examples/rl/corpus/README.md, which",
+    "is not in this branch -- it arrives with the stacked RL scaffolding PR."
+  ],
+  "coverage_note": [
+    "Of the nine rows, three are `gpu_race`, two are `tooling_gap` and four are",
+    "honestly `unknown`. This corpus is a sanitizer guardrail suite, so the four",
+    "`unknown` rows are all zero-finding controls: nothing failed, so there is no",
+    "failure to categorise, and `unknown` is the right answer rather than a gap",
+    "in the label set.",
+    "",
+    "The two `tooling_gap` rows are why that label earns its place. ConSan",
+    "rejected the Tensile object over the patched-image growth ceiling before",
+    "instrumenting anything (`consan-gemm`), and found no admissible sites at all",
+    "in tiny_vecadd (`consan-tiny`). Both previously read `unknown`, which",
+    "conflated `we looked and found nothing` with `we could not look` -- the two",
+    "readings a guardrail suite most needs to keep apart.",
+    "",
+    "It does mean the corpus exercises two of the three evidence-only labels:",
+    "there is no `numeric_silent` scenario in it. Sharing one closed vocabulary",
+    "with aorta.cia unblocks that at the contract level, but training signal for",
+    "it needs a new scenario; re-labelling alone cannot produce one."
+  ],
+  "scenarios": {
+    "consan-clean": {
+      "recipe": "recipes/sanitizers/daily-consan-clean.yaml",
+      "category": "unknown",
+      "why": "Race-free control on the single-wave LDS repro. ConSan passes with zero findings, so there is no failure to categorise and `unknown` is the correct label rather than a missing one."
+    },
+    "consan-racy": {
+      "recipe": "recipes/sanitizers/daily-consan-racy.yaml",
+      "category": "gpu_race",
+      "why": "Two-wave LDS data race: 64 ConSan findings collapsing to one site, one record per lane and LDS byte range. This is the scenario that previously drew `checkpoint_race` -- the nearest available name in the old set, and the wrong one."
+    },
+    "consan-lds-dispatch": {
+      "recipe": "recipes/sanitizers/daily-consan-lds-dispatch.yaml",
+      "category": "unknown",
+      "why": "Race-free LDS reduction, instrumented and actually dispatched. The end-to-end control for the dynamic record/replay path; it passes with zero findings, so no failure label applies."
+    },
+    "consan-tiny": {
+      "recipe": "recipes/sanitizers/daily-consan-tiny.yaml",
+      "category": "tooling_gap",
+      "why": "Deliberate negative control. tiny_vecadd has no admissible sites, so strict require-records fails closed (exit 86) rather than emitting a false pass. The instrument produced no records, so the absence of a finding says nothing about the workload -- which is what `tooling_gap` names. It read `unknown` before the vocabularies merged, for want of this label."
+    },
+    "consan-gemm": {
+      "recipe": "recipes/sanitizers/daily-consan-gemm.yaml",
+      "category": "tooling_gap",
+      "why": "Capacity rejection: on the pinned CI base the Tensile object exceeds the patched-image growth ceiling and ConSan rejects it before instrumenting anything, so the row is error with zero findings. A tooling limit, not a workload defect, and the clearest case of `tooling_gap` in the suite -- zero findings here means the sanitizer never ran, not that the kernel is clean."
+    },
+    "waitcheck": {
+      "recipe": "recipes/sanitizers/daily-waitcheck-gemm.yaml",
+      "category": "gpu_race",
+      "why": "Missing s_waitcnt hazards over the top-3 GEMM shapes: 64 findings across two distinct sites. A missing wait count is the absence of an ordering guarantee between a memory op and its consumer inside one kernel, and waitcheck names the sites -- the same diagnostic and the same fix surface as an LDS race."
+    },
+    "waitcheck-gemm": {
+      "recipe": "recipes/sanitizers/daily-waitcheck-gemm-object.yaml",
+      "category": "gpu_race",
+      "why": "Missing s_waitcnt hazards on the real f32 Tensile code object: 32 findings at one site. Same reasoning as `waitcheck`, against the object rather than the CSV shapes."
+    },
+    "waitcheck-lds-dispatch": {
+      "recipe": "recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml",
+      "category": "unknown",
+      "why": "Clean static scan over the LDS reduction kernel: pass, zero findings, nothing to categorise."
+    },
+    "waitcheck-tiny": {
+      "recipe": "recipes/sanitizers/daily-waitcheck-tiny.yaml",
+      "category": "unknown",
+      "why": "Clean static scan over tiny_vecadd: pass, zero findings, nothing to categorise."
+    }
+  }
+}

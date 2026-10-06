@@ -39,6 +39,68 @@ uv pip install -e ".[chat-cli]"
 `pip install 'amd-aorta[chat]'` is an alias for `chat-cli`, because that is what
 most people type first.
 
+## Add CIA-backed cluster diagnostics
+
+The Cluster Intelligence Agents are a separate `cia` extra. Install it beside
+the chat interface you use; installing a chat extra alone deliberately leaves
+all five cluster tools out.
+
+```bash
+# Published package: choose one chat interface.
+pip install 'amd-aorta[chat-cli,cia]'
+pip install 'amd-aorta[chat-ui,cia]'
+pip install 'amd-aorta[chat-all,cia]'
+
+# Editable source checkout: the same combinations.
+uv pip install -e ".[chat-cli,cia]"
+uv pip install -e ".[chat-ui,cia]"
+uv pip install -e ".[chat-all,cia]"
+```
+
+The headless `cia` extra supports Python 3.10–3.14, but combining it with chat
+keeps the chosen chat interface's range: `chat-cli` supports 3.11–3.14, while
+`chat-ui` and `chat-all` support 3.11–3.13.
+
+Installing `cia` does **not** grant permission to submit work. With the default
+`allow_cluster_jobs = false`, these read-only, jobs-root-contained tools are
+available:
+
+- `list_cluster_jobs`
+- `read_autopsy_report`
+
+The three tools that write staged inputs and submit scheduler work remain
+absent until an operator sets `allow_cluster_jobs = true`:
+
+- `triage_kernel_source`
+- `triage_assembly_source`
+- `triage_workload`
+
+Set it persistently in `~/.config/aorta/chat.toml`, or for one process:
+
+```bash
+export AORTA_CHAT_ALLOW_CLUSTER_JOBS=true
+```
+
+Before enabling it, configure the shared jobs path, GPU architecture, scheduler,
+and sanitizer backend in
+[the cluster diagnostic settings](configuration.md#the-cluster-diagnostic-tools),
+and read [why submitting tools are a separate security capability](extending.md#the-exception-and-why-it-is-one)
+plus the [redaction boundary](redaction.md).
+
+Verify the effective registry rather than inferring it from what pip installed:
+
+```bash
+aorta chat tools
+aorta chat tools --json
+```
+
+At the safe default, the first command includes `list_cluster_jobs` and
+`read_autopsy_report`, but no `triage_*` tools. After enabling cluster jobs it
+includes all five. Without `cia`, chat still starts and its ordinary code/run
+tools still work; startup prints that the five cluster diagnostic tools were
+not offered and names the remedy:
+`pip install 'amd-aorta[cia]'`.
+
 **No GPU.** Retrieval runs a small embedding model on CPU and generation happens
 wherever your provider lives; no extra pulls a torch build at all, which matters
 on a ROCm node for the reason in the callout above.

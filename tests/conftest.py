@@ -37,6 +37,30 @@ except Exception:
     for _mod in [m for m in sys.modules if m == "triton" or m.startswith("triton.")]:
         del sys.modules[_mod]
 
+# Pre-import NumPy for the same reason, against a different lazy importer.
+#
+# DSPy proxies its optional heavy dependencies: ``dspy.utils.lazy_import.require``
+# puts a ``_LazyModule`` in ``sys.modules`` and executes the real module on first
+# attribute access. It checks ``sys.modules`` first, so an already-imported NumPy
+# is handed back untouched -- but if NumPy is absent at that moment the proxy is
+# installed, and the later execution is a *second* initialization of a C
+# extension that can only initialize once. NumPy says so itself ("The NumPy
+# module was reloaded"), and what follows is a module whose dtypes no longer
+# resolve: ``mu.dtype("bool")`` raising ``TypeError: data type 'bool' not
+# understood`` part-way through its own bootstrap.
+#
+# That lands on whichever test file touches NumPy next on that xdist worker,
+# which is why it surfaced as an index build failing on a dtype, a fastembed
+# cache probe quietly answering False because its import raised, and a doctor
+# check reporting "warn" for a cache that was there -- three unrelated-looking
+# failures, one cause. Importing it here means DSPy always takes the branch that
+# returns the real module. Best-effort like Triton above: NumPy is not a
+# dependency of the base install.
+try:
+    import numpy  # noqa: F401
+except Exception:
+    pass
+
 
 class BlockedTooLong(BaseException):
     """A call guarded by :func:`no_hang` did not return in time.

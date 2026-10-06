@@ -42,6 +42,12 @@ def capabilities() -> str:
             "- command execution is **disabled** on this server "
             "(`enable_shell_tool = false`, the default)"
         )
+    if settings.allow_cluster_jobs:
+        lines.append(
+            "- submit GPU jobs to the cluster from a paste. **One message can "
+            "occupy a node for minutes**, run the code you paste on it, and "
+            "write outside the roots above."
+        )
     return "\n".join(lines)
 
 

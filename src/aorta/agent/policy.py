@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from aorta.agent.llm import AUTOPSY_CATEGORIES, AgentStep
+from aorta.agent.llm import PROBE_CATEGORIES, AgentStep
 from aorta.registry import get_mitigation
 from aorta.registry.errors import UnknownMitigationError
 
@@ -29,10 +29,13 @@ _CELL_SAFE_MITIGATION_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 
 
 # Mitigations that may require explicit operator approval before run.
+# nccl_launch_order_implicit is here because it has been seen to SIGSEGV every
+# rank rather than resolve the hang it is registered for (aorta#512).
 _APPROVAL_REQUIRED: frozenset[str] = frozenset(
     {
         "hip_launch_blocking",
         "hsa_disable_cache",
+        "nccl_launch_order_implicit",
     }
 )
 
@@ -62,12 +65,23 @@ class AgentPolicy:
 
     def validate_step(self, step: AgentStep) -> AgentStep:
         """Normalize and enforce registry + category constraints."""
-        if step.category not in AUTOPSY_CATEGORIES:
+        # The probe's own subset, not the shared vocabulary: gpu_race,
+        # numeric_silent and tooling_gap are established by an instrument, and
+        # accepting one here would let a mitigation sweep assert a race it never
+        # observed.
+        if step.category not in PROBE_CATEGORIES:
             raise PolicyViolation(
                 f"invalid category {step.category!r}; "
-                f"allowed: {sorted(AUTOPSY_CATEGORIES)}"
+                f"allowed: {sorted(PROBE_CATEGORIES)}"
             )
         cleaned: list[str] = []
+        # Dropping the baseline and repeats is right -- neither adds a cell --
+        # but dropping them unrecorded is how a proposal of only "none" came
+        # to read as the proposer choosing to stop (aorta#501). Every removed
+        # occurrence is kept, so kept plus redundant is what was proposed.
+        # Started empty, never from the incoming step: the loop attributes a
+        # stop to validation on this record, so only this pass may write it.
+        redundant: list[str] = []
         for name in step.next_mitigations:
             if not isinstance(name, str) or not name.strip():
                 raise PolicyViolation(f"invalid mitigation name: {name!r}")
@@ -89,9 +103,9 @@ class AgentPolicy:
                 )
             except UnknownMitigationError as exc:
                 raise PolicyViolation(str(exc)) from exc
-            if name == "none":
-                continue
-            if name not in cleaned:
+            if name == "none" or name in cleaned:
+                redundant.append(name)
+            else:
                 cleaned.append(name)
         return AgentStep(
             category=step.category,
@@ -100,6 +114,12 @@ class AgentPolicy:
             confidence=max(0.0, min(1.0, step.confidence)),
             stop=step.stop,
             stop_reason=step.stop_reason,
+            # Carried through untouched. These names never reach the registry
+            # checks above -- the proposer dropped them precisely because they
+            # do not resolve -- but the loop needs them to attribute the stop,
+            # so validation must not be the thing that loses them.
+            unresolved_mitigations=list(step.unresolved_mitigations),
+            redundant_mitigations=redundant,
         )
 
     def needs_approval(self, mitigation: str) -> bool:

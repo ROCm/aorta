@@ -46,6 +46,11 @@ def cache_home() -> Path:
     return _xdg_dir("XDG_CACHE_HOME", ".cache")
 
 
+def state_home() -> Path:
+    """``$XDG_STATE_HOME`` or ``~/.local/state``."""
+    return _xdg_dir("XDG_STATE_HOME", ".local/state")
+
+
 def chat_config_path() -> Path:
     """The ``aorta chat`` profile file: ``$XDG_CONFIG_HOME/aorta/chat.toml``."""
     return config_home() / "aorta" / CHAT_CONFIG_FILENAME
@@ -62,4 +67,5 @@ __all__ = [
     "chat_cache_dir",
     "chat_config_path",
     "config_home",
+    "state_home",
 ]

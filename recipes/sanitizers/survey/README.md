@@ -55,11 +55,11 @@ Regenerating needs a gfx950 host (see "Regenerating" below); until then:
   the patched-image growth ceiling, because the extracted object grew from
   15.5 MB to ~183 MiB with ROCm 7.2.4. See
   [`docs/sanitizers/consan-gemm-patched-image-growth-cap.md`](../../../docs/sanitizers/consan-gemm-patched-image-growth-cap.md).
-* **`tiny_vecadd_consan` is still accurate.** `tiny_vecadd` has no MOI-admissible
+* **`tiny_vecadd_consan` is still accurate.** `tiny_vecadd` has no ConSan-admissible
   sites (`access=0/0`, `applicable=false`, "no MOI report sites"), so strict
   require-records fails closed at exit 86 by design. Measured 2026-08-27: giving
   it a *dispatching* driver does not change this — the only difference is the
-  message ("1 auto MOI report buffer(s)" instead of "0"), never the verdict.
+  message ("1 auto report buffer(s)" instead of "0"), never the verdict.
 
 ## Layout
 

@@ -26,7 +26,12 @@ nightly evaluation, dashboard, alerting, baselines, and automated bumps.
 
 ## Flow (nightly-eval.yml)
 
-Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatch`):
+Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatch`).
+That fires when the whole wheel workflow completes, so `nightly.yml` holds only
+the wheel job; the chat index is published by its own `chat-index-nightly.yml`,
+which follows the same wheel run in parallel with this one rather than ahead of
+it (#486).
+
 
 1. Build/start the pinned ROCm container (`rocm-ci-setup`).
 2. Install the **released nightly wheel** `amd-aorta[hw-queue]` (constrained by
@@ -46,6 +51,11 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    failure; comments + closes it when green.
 5. **Publish** (`publish` job on `ubuntu-latest`): appends
    `results/<date>.json` to the **`ci-results`** data branch (history only).
+   Only a run triggered by *Nightly wheels* writes that date key. A
+   `workflow_dispatch` has no upstream wheel run (`build.upstream_run_id` is
+   empty) and publishes to `results/dispatch/<date>-<run_id>.json` instead, so
+   it can never replace that night's scheduled record, and the dashboard's
+   per-day series does not see it.
 6. **Deploy** (`pages.yml`): a repo has a single Pages site, shared with the
    project docs, so one workflow owns the deploy. On main pushes, after each
    Nightly Evaluation completes, and on demand, `pages.yml` builds the Jekyll
@@ -183,7 +193,11 @@ controls stay hidden unless it runs.
   perf gating. Baselines honor the expected `passed` outcome (an expected-failure
   baseline is supported).
 - **Performance** is **trend-only by default**: step-time/throughput/latency are
-  captured + charted but not gated.
+  captured + charted but not gated. "By default" is now load-bearing rather than
+  descriptive — one entry has live bounds. `tokenspeed_serve_smoke` gates
+  `median_tpot_ms` and `p99_itl_ms` on both its cells and nothing else; see
+  [tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md). Every other
+  entry is still correctness-only.
   To turn on perf gating (Phase 5), regenerate baselines with
   `refresh_baselines.py --perf-gate` (adds `step_time_ms.max` plus per-metric
   `policy`/`value` bounds -- min for throughput, max for latency/step-time, equal
@@ -254,6 +268,8 @@ The publish step keeps only the **most recent 180** `results/<date>.json` files 
 the `ci-results` data branch (older ones are pruned), and the dashboard renders at
 most the last 180 builds (`gen_dashboard.py --max-builds`). Files are tiny; adjust
 the cap in `nightly-eval.yml` / the flag if a longer window is wanted.
+Dispatched records under `results/dispatch/` have their own 180-file window and
+do not count against the scheduled one.
 
 The **sanitizer** nightly keeps its own rolling window on the `sanitizer-results`
 data branch, and it has **two** bounds rather than one:

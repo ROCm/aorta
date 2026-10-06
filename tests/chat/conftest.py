@@ -9,6 +9,16 @@ from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# LiteLLM downloads its model-price table from GitHub the first time it is
+# asked about a model it does not recognise, and the test models here are all
+# made up. That download is once per process, so under xdist it lands in
+# whichever test happens to be first on each worker -- and if that test holds
+# the no_network fixture, it fails while the identical test on another worker
+# passes. This is the documented way to tell LiteLLM to use the copy it ships
+# with. It has to be set before litellm is imported, which is why it is here
+# and not in a fixture.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 # These tests exercise real langchain/langgraph objects, so they need the
 # chat-cli extra. A base install (pyyaml + click) is a supported and common
 # configuration -- it is what `pip install amd-aorta` gives a customer -- so the
@@ -277,3 +287,38 @@ def fake_retriever():
     mock.invoke.return_value = docs
     mock.ainvoke = AsyncMock(return_value=docs)
     return mock
+
+
+@pytest.fixture()
+def cluster_jobs_enabled(monkeypatch):
+    """Register the tools that submit work, for a test that needs them present.
+
+    They are off by default -- see ``allow_cluster_jobs`` -- so a test about the
+    full tool surface has to say it wants them, the same way one about the shell
+    tool does. The registries in ``graph.nodes`` are built at import, so the
+    setting alone is not enough for anything reading those.
+    """
+    from aorta.chat.config import settings
+    from aorta.chat.graph import nodes
+    from aorta.chat.plugins import ChatTool, diagnostic_tools
+
+    # The tools themselves need the agents, which are in [cia]. The chat lane
+    # installs [chat-cli] without it, so a test about the full tool surface has
+    # nothing to be about there -- skip rather than fail on an empty registry.
+    pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
+
+    monkeypatch.setattr(settings, "allow_cluster_jobs", True)
+    for name, tool in diagnostic_tools().items():
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, name, tool)
+        monkeypatch.setitem(
+            nodes.CHAT_TOOLS, name, ChatTool(name=name, tool=tool, source_package="aorta")
+        )
+    # The prompts list the registry, so they were rendered from it at import too.
+    monkeypatch.setattr(
+        nodes,
+        "TOOL_DESCRIPTIONS",
+        nodes._tool_help(
+            nodes._BUILTIN_TOOL_DESCRIPTIONS + nodes._shell_tool_help(nodes._SHELL_TOOL_ACT_HELP)
+        ),
+    )
+    return nodes.TOOL_REGISTRY

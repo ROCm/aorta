@@ -271,8 +271,11 @@ matter most:
 | `request_rate` | `inf` | The quoted string `"inf"` submits everything at once; an unquoted infinite float is rejected. See below. |
 | `warmup_steps` | `1` | Discarded bench steps. See below. |
 | `num_warmups` | `1` | Warmup requests *within* a bench step. |
-| `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. `false` is only accepted for `sharegpt`; on `random` the bench CLI pins it regardless, so the combination is rejected. See below. |
+| `ignore_eos` | `true` (`false` under `rollout`) | Holds OSL fixed so cells do equal work. `false` is accepted for `sharegpt`, and on `random` only under `rollout`, which reaches it through the request payload. On plain `random` the bench CLI pins it regardless, so the combination is rejected. See below and [Rollout mode](#rollout-mode). |
+| `rollout` | `false` | Shape the load like an RL rollout. See [Rollout mode](#rollout-mode). |
+| `save_detailed` | `false` | Keep the export's per-request arrays — `true` by default under `rollout`, which is measured through them. Those arrays describe a run over your own prompts, and exactly what `--save-detailed` records per request is the bench's decision rather than this workload's, so treat the export as sensitive whenever the prompts are: it is written under `work_dir` and stays there unless `keep_work_dir: false`. |
 | `work_dir` | `/tmp/ts-work-serve` | Must be node-local. Scratch and the HF cache are per-uid beneath it, at `<work_dir>/u<uid>`. See below. |
+| `keep_work_dir` | `true` | Keep this trial's exports after cleanup. `false` removes them, which is the control to reach for when a run's artifacts must not outlive it. |
 | `hf_home` | `<work_dir>/u<uid>/hf` | Set it to share one pre-populated cache between users; see below for why that has to be deliberate. |
 | `hip_visible_devices` | unset | Which GPUs the container sees. A visibility filter, not an allocation. |
 | `exclusive_gpus` | `false` | Assert that no other job shares this node's GPUs. Only then does unreleased VRAM fail the trial. |
@@ -280,6 +283,242 @@ matter most:
 | `network` | `host` | See below. |
 | `port` / `control_port` | `auto` | Free ports, picked per trial. Explicit values must be in 1024..65535 and must differ. |
 | `gates` | none | Optional per-trial perf gates. |
+
+### Rollout mode
+
+`rollout: true` changes what the engine is asked to do per request rather than
+how hard it is pushed: `rollout_samples` sampled completions per prompt, at a
+temperature above zero, stopping on EOS. That is the load an RL post-training
+loop puts on an inference engine during its generation phase, and the difference
+that matters is that the number of tokens generated becomes a property of the
+policy instead of a number the recipe chose.
+
+The design, the cost model it supports, and where the RL loop itself would live
+are in `docs/tokenspeed-rl-post-training.md`, which arrives with the stacked
+follow-up rather than with this change — named without a link for that reason.
+What follows is the configuration.
+
+| Key | Default | Notes |
+|---|---|---|
+| `rollout` | `false` | Enables the mode. The keys below are rejected without it. |
+| `rollout_samples` | `4` | Completions per prompt — the `n` of the sampling API. Max 1024. |
+| `temperature` | `1.0` | In `(0, 2]`. Zero is rejected: it would draw the same greedy completion `n` times. |
+| `top_p` | unset | In `(0, 1]`. Left unset means the server's own. |
+| `min_mean_output_tokens` | `8` | Per-step floor on mean tokens per **completion**, checked in the container and again on the host. It must be no larger than `output_len` on `random`, which caps each completion, and which reading of the export can support it depends on the shape the gateway returned — both are below rather than restated here. `0` disables it. |
+| `sampling_backend` | `triton` | The server's `--sampling-backend`; `triton` or `triton_full`. Defaulted away from the engine's own default, which is `greedy` on non-NVIDIA hardware and silently discards `temperature`, `top_p` and `seed`. `greedy` is **rejected** under `rollout` for the same reason `temperature: 0` is, and `flashinfer` / `flashinfer_full` are rejected as CUDA-only — unregistered on the ROCm images this workload serves from, so accepting them would move the failure to server startup. Reserved in `serve_args` under this mode. |
+
+The sampling keys are **rejected outside the mode** rather than ignored. Outside
+it no sampling parameters are sent at all, so a `temperature` in an ordinary
+serving recipe would have changed nothing while the trial published it as that
+cell's configuration. `ts_bench_serve.sh` refuses their `TS_*` variables without
+`TS_ROLLOUT=1` for the same reason (exit 64), so a direct run keeps the recipe's
+contract — and the floor and sample count would otherwise still reach its audit.
+
+`ignore_eos` defaults to `false` under `rollout`, and an explicit `true` is
+refused. The two cannot both mean what they say: ignoring EOS pins every
+completion to `output_len`, so the run has no length distribution and its token
+volume is a function of the recipe. On `dataset: random`, `output_len` remains
+meaningful as the `max_tokens` **allowance** — a `generated_tokens_max` sitting
+exactly on it means the cap truncated the rollout rather than the model
+stopping, which on this dataset is the ordinary reading rather than a fault.
+
+Because it is a cap, it is also validated as one: an `output_lens` entry
+*above* `output_len` describes generation the server was not permitted to do,
+so both audits treat that export as unusable instead of publishing percentiles
+from it.
+
+That reading is dataset-specific, and rollout mode accepts `sharegpt` too. There
+the config table above applies: `output_len` is not sent at all, the lengths come
+from the conversations, and there is no recipe-set cap for
+`generated_tokens_max` to sit on — so a `sharegpt` rollout has no truncation
+signal of that kind, and `min_mean_output_tokens` is the only length guard it
+gets.
+
+Metrics EOS-respecting generation adds — that is, `rollout: true`, or a
+`sharegpt` cell with `ignore_eos: false`. A cell that ignores EOS publishes none
+of them, and that condition is the point rather than a detail: under `ignore_eos`
+every completion is `output_len` long, so the whole table below would be the
+recipe read back with a standard deviation of zero beside it. It also means every
+existing `tokenspeed-serve-*` recipe, all of which hold OSL fixed, reports exactly
+the metric set it reported before this mode existed.
+
+| Metric | Meaning |
+|---|---|
+| `mean_output_tokens_per_request` | `total_output_tokens / completed`, meaned across steps. The reading to trust — computed from fields every export carries. |
+| `generated_tokens_p50` / `_p90` / `_p99` | Percentiles of generated length over the entries of the export's `output_lens`, pooled across measured steps. Needs `save_detailed`. One entry per recorded completion; whether a gateway records one per request or one per choice under `rollout_samples > 1` is its decision rather than this workload's — see the note below, which says how to read it off `generated_tokens_count`. Entries must be whole, non-negative, and on `random` no larger than `output_len`, which is each completion's `max_tokens`; an export breaching any of those is `result_json_unusable` rather than a distribution. |
+| `generated_tokens_mean` / `_min` / `_max` / `_std` / `_count` | The rest of the distribution. |
+
+`generated_tokens_*` comes from the export's `output_lens` array, which the bench
+strips unless `--save-detailed` is passed — hence `save_detailed` defaulting on
+inside the mode. It is published only when *every* measured step carried the
+array, for the same reason the scalar aggregate requires that: a distribution
+pooled over whichever steps happened to have it would describe a subset while
+reading as the trial's.
+
+What follows are traps rather than settings, and all of them are explained at
+length in `docs/tokenspeed-rl-post-training.md`, section 2 ("what a rollout loop
+needs from the engine, and what TokenSpeed has"), which lands with the stacked
+follow-up:
+
+- **`ignore_eos` is forced on for `dataset: random` by the bench CLI itself**,
+  after argument parsing, regardless of the flags. EOS-respecting generation is
+  reachable only through the request body, which is why rollout mode sends
+  `ignore_eos: false` inside `--extra-body` and why that flag becomes owned in
+  this mode. It also means an existing `ignore_eos: false` cell on the random
+  dataset never respected EOS.
+- **`mean_output_tokens_per_request` is per request, not per sample.** Measured
+  on gfx950, the gateway's `usage.completion_tokens` sums across all `n` choices,
+  so the throughput figures cover the whole rollout — but that is one gateway
+  version's behaviour, and the name is true either way. Both rollout recipes keep
+  an `n=1` control cell so the ratio stays observable.
+- **`generated_tokens_*` and `mean_output_tokens_per_request` do not have the
+  same denominator under `n > 1`, and the difference is not a rounding
+  argument.** The former is one entry per `output_lens` element and the latter
+  is per request. The smoke recipe reads `mean_output_tokens_per_request` at
+  1024 for `n=4` against a 256-token allowance, which no single choice can
+  exceed, so `output_lens` holding per-choice lengths is what that measurement
+  implies. `generated_tokens_count` is the observable that settles it on any
+  given gateway: equal to `completed` means per request, `completed * n` means
+  per choice. Read the two metrics against each other rather than assuming they
+  share a unit.
+- **The engine decodes greedily unless told otherwise, and says nothing.** On
+  non-NVIDIA hardware `--sampling-backend` defaults to `greedy`, which accepts
+  `temperature`, `top_p`, `top_k` and `seed` and then ignores them, returning
+  the argmax with HTTP 200 — so `n` completions come back identical while the
+  export describes a sampled rollout. Rollout mode therefore defaults the flag
+  to `triton`, reserves it against `serve_args`, and reads `sampling_backend`
+  back off `/get_server_info` after bring-up, failing the step if the engine
+  disagrees — exit 57 `rollout_sampling_ignored` when it reports `greedy`, exit
+  58 `rollout_sampling_backend_mismatch` when it reports a different sampling
+  backend, and exit 60 `rollout_sampling_backend_unverified` when it will not
+  say at all. The third is a failure for the same reason as the first two: the
+  read-back is the only thing that can tell them apart, so an engine that does
+  not answer leaves the cell's backend label resting on nothing. Benchmark
+  cells are left on the engine default, where argmax is what is wanted.
+- **`rollout_samples > 1` does not give you independent samples, and this is
+  the biggest caveat on the page.** TokenSpeed returns *identical* choices for
+  `n > 1` within a single request. So `rollout_samples: 8` produces one
+  distinct completion repeated eight times, and the `samples-4` / `samples-8`
+  cells in `tokenspeed-serve-rollout.yaml` compare **batching overhead**, not
+  sample counts. Throughput, concurrency behaviour, prefill sharing and
+  per-completion scheduler cost are all still measured; sampling diversity,
+  group variance and anything a GRPO advantage would be computed over are not.
+
+  ⚠ **This is not the greedy-default defect described in the bullet above, and
+  the two must not be conflated.** That one is fixed here — the backend is
+  pinned to `triton` and read back, failing the step if the engine disagrees. The
+  `n > 1` collapse is a separate upstream defect that *survives* that fix: it
+  reproduces at every temperature with sampling working. Do not read the
+  sampling-backend fix as having resolved it. Separate requests are unaffected,
+  which is why the RL driver issues one request per sample rather than one
+  batched request per group — there it costs throughput rather than
+  correctness. Filed upstream as
+  [lightseekorg/tokenspeed#1613](https://github.com/lightseekorg/tokenspeed/issues/1613).
+- **On `dataset: random` the length distribution is an artifact of the cap.**
+  Random-token prompts give a model no reason to emit EOS, so every completion
+  runs to `output_len` and `generated_tokens_*` reads as a constant. Throughput
+  is unaffected; the distribution needs prompts a model would answer.
+- **TPOT and ITL are not per-token latencies under `n > 1`.** The bench client
+  concatenates all choices and treats every chunk gap as an inter-token interval.
+  TTFT and the throughputs stay meaningful.
+
+The served-request audit is unchanged — `completed` counts requests, not
+completions — but it stops being *sufficient*, which is what
+`min_mean_output_tokens` exists for: a policy that answers every request with an
+immediate EOS passes every other guard in the workload while generating about one
+token per prompt. Exit 56 / `rollout_output_too_short` is that verdict, checked in
+the container and again on the host, on the same rule in both.
+
+That rule is the mean of `output_lens` — but only of the per-choice shape, whose
+entries are completion lengths. Which shape arrived is read off the cardinality
+rather than assumed, and the cardinality is part of whether the array can be
+read at all: `completed * rollout_samples` entries is per choice, `completed`
+entries at `rollout_samples > 1` holds request totals, and a length that is
+neither of those two is a broken export rather than a gateway choice — it
+describes a subset of the run, and averaging it published one completion's
+length as thirty-two completions' mean. At `rollout_samples: 1` the two shapes
+are the same number, so there is no second legitimate cardinality there at all
+and every other length is `result_json_unusable`. The per-request shape carries
+exactly the ambiguity `total_output_tokens / completed` does. Both layers refuse
+that case as exit 59 / `rollout_length_basis_unusable` instead of dividing,
+because
+either reading of it is a guess about the gateway's usage accounting and the
+per-completion one is the guess a collapsed policy clears — at
+`rollout_samples: 8`, one token per choice reports 8 per request and meets a
+floor of 8 exactly. Set `min_mean_output_tokens: 0` if a cell on such a gateway
+is not guarding length.
+
+A floor above `output_len` on `random` is refused before the model loads rather
+than discovered afterwards: `output_len` is each completion's `max_tokens`, so
+no run could satisfy it and the trial would otherwise come back as a collapsed
+policy.
+
+With no array at all — what `save_detailed: false` produces — the check falls
+back to `total_output_tokens / completed`, per *request*, naming that basis in
+the failure detail. Both layers reject that fallback outright when
+`rollout_samples > 1`, for the same reason. A *present* array that fails the rule
+is neither case: without `--save-detailed` the bench writes no key, so a present
+value that is not a usable array is a broken export, and both layers call it
+`result_json_unusable` whatever `save_detailed` asked for — and whatever
+`min_mean_output_tokens` is set to. Whether an export can be read is not a
+question about the floor, so setting the floor to `0` switches off the length
+comparison and nothing else. It used to switch off the container's whole
+`output_lens` audit, which made a `min_mean_output_tokens: 0` cell — the
+configuration both refusals above tell you to reach for — the one place where a
+direct script run enforced a weaker contract than a recipe-driven one.
+
+The per-completion cap the array is checked against is `output_len` on
+`random`, since that is each completion's `max_tokens`. It is a bound on an
+*entry*, so it scales with what an entry is: a per-request entry is allowed
+`output_len * rollout_samples`, because under summed usage accounting it holds
+that many completions' worth. Unscaled, the two rules contradicted each other —
+`[800] * 32` at `n=8` scored `rollout_length_basis_unusable` and `[1600] * 32`,
+the same gateway on longer completions, became `result_json_unusable`.
+
+Exit 57 / `rollout_sampling_ignored` is the other rollout-specific verdict, and
+it is the one no audit of the export could reach: a greedy engine's output is
+well-formed, correctly counted and the right length, and differs from a sampled
+run only in being identical across choices.
+
+It detects a greedy *engine*, by asking the engine, and that is the limit of
+what it claims. It does **not** detect identical choices, so it does not and
+cannot catch the `n > 1` collapse above — there the engine is sampling
+correctly and reports so, and the choices come back identical anyway. Catching
+that from this side would need the per-choice text, which the export does not
+carry.
+
+Exit 58 / `rollout_sampling_backend_mismatch` is its sibling, from the same
+read-back, and kept separate on purpose. It fires when the engine reports a
+*different sampling* backend than was asked for — `triton` requested,
+`triton_full` reported. There the measurement is real and what is wrong is the
+name it would be filed under, which is a different verdict from "the sampling
+parameters did nothing" and routes differently for whoever reads the failure.
+The comparison is an exact match rather than a family: the engine echoes the
+requested name verbatim and refuses names it does not know rather than falling
+back, so there is no legitimate substitution to tolerate.
+
+Exit 60 / `rollout_sampling_backend_unverified` is the third from that
+read-back, and it fires when `/get_server_info` is unreachable, answers
+without the key, or answers with something unparseable. This warned and
+continued until #496 review; the argument for warning was that the endpoint is
+an engine convenience rather than a contract, so a build without it is not
+evidence that sampling is broken. That is true and it is the wrong test. It is
+not evidence that sampling *works* either, and since the read-back is the only
+check that separates 57 from 58 from a correct run — the audits count requests
+and tokens, which are identical under sampled and argmax decoding — warning
+published a cell labelled with the requested backend on no evidence that any
+sampling happened, in exactly the case where the evidence was unavailable.
+
+An unverifiable claim is a stronger reason to stop than a refuted one, not a
+weaker one: 57 and 58 at least tell the reader what ran. The operator's move
+on a 60 is to make the endpoint answer, not to read the numbers. There is no
+opt-out flag, deliberately — a switch meaning "publish the label without
+checking it" is the state this guard exists to end.
+
+Recipes: `tokenspeed-serve-rollout-smoke.yaml` (the shape check to run first)
+and `tokenspeed-serve-rollout.yaml` (batching-comparison and long-form cells —
+named `samples-*`, which per the caveat above is not what they vary; that file
+opens with the same warning).
 
 ### Perf gates
 
@@ -354,6 +593,9 @@ for `duration` (greater than zero), `mean_ttft_ms`, `median_ttft_ms`,
 `mean_tpot_ms` / `median_tpot_ms` whenever a second output token can exist —
 TPOT averages inter-token gaps, of which a single-token response has none. A step
 missing any of them is reported as `result_json_unusable` rather than as a pass.
+This audit, `output_lens` validity included, runs only once the request counts are
+sound: a shortfall step is reported as `served_request_shortfall` alone, in both
+layers, because its export is shaped by the requests that failed.
 
 "Whenever a second output token can exist" is decided from `output_len > 1` only
 for `random` with `ignore_eos: true`, the one configuration that actually pins
@@ -556,13 +798,23 @@ argv that turns EOS back on: omitting `--ignore-eos` does not, and neither does
 `--disable-ignore-eos`. Every request goes out with `ignore_eos` in its payload
 and runs to `output_len`.
 
+**`rollout: true` is the one exception, and it is the exception because it takes
+the payload route below rather than the argv route.** Rollout builds its own
+`--extra-body` always carrying `"ignore_eos": false`, and it reserves that flag
+so nothing can shadow the value, so EOS genuinely is respected on
+`dataset: random` there. Everything in this section describes a cell that is not
+in rollout mode; under rollout, `ignore_eos` defaults to `false` and an explicit
+`true` is what gets rejected. See [Rollout mode](#rollout-mode).
+
 The config table used to present `ignore_eos` as a plain boolean, so a recipe
 setting it to `false` on the random dataset ran at a pinned length while the
 trial reported `ignore_eos: false` — the reported configuration is not the one
 that ran, and nothing in the export contradicts it. That is the same shape as a
 `bench_args` override of `--max-concurrency`, and it is treated the same way:
 the combination is **rejected** during validation, on the host and again in
-`ts_bench_serve.sh`, rather than warned about.
+`ts_bench_serve.sh`, rather than warned about — with `rollout: true` exempt in
+both layers, since there the payload carries the value and the trial's reported
+configuration is the one that ran.
 
 The route that does work is the request payload:
 
@@ -577,7 +829,8 @@ this — output lengths become whatever the model chooses, so `perf.md` is
 comparing runs of different sizes. That is why the default is `true`.
 
 `dataset: sharegpt` is unaffected. The rule is keyed on the dataset name, so
-`ignore_eos: false` is honoured there and stays accepted.
+`ignore_eos: false` is honoured there and stays accepted. `rollout: true` is
+likewise unaffected on either dataset, for the reason above.
 
 ### Extra arguments cannot shadow the flags the workload owns
 
@@ -990,24 +1243,55 @@ label the result with a shape the run did not have, and a matrix mixing the two
 datasets would compare those labels as though they meant the same thing.
 
 The TPOT audit follows from the same question — does the configuration actually
-determine the output length? Only `random` does, and it always does, since EOS
-is ignored there whatever the recipe says (see [`ignore_eos: false` has never
-reached the random dataset](#ignore_eos-false-has-never-reached-the-random-dataset)),
+determine the output length? Only `random` does, and outside rollout mode it
+always does, since EOS is ignored there whatever the recipe says (see
+[`ignore_eos: false` has never reached the random dataset](#ignore_eos-false-has-never-reached-the-random-dataset)),
 so the audit asks whether `output_len` exceeds 1. For `sharegpt` it asks the
 export instead, whether more output tokens were produced than requests
 completed: the lengths come from the conversations rather than from the recipe,
-and with `ignore_eos: false` — which only `sharegpt` can express — the model
-stops at its first EOS token, which for a short prompt can be immediately, so
-every request may emit exactly one token and TPOT is genuinely undefined. Keying
-off `output_len` there rejected a correct export.
+and with `ignore_eos: false` the model stops at its first EOS token, which for a
+short prompt can be immediately, so every request may emit exactly one token and
+TPOT is genuinely undefined. Keying off `output_len` there rejected a correct
+export.
+
+`rollout: true` takes the export-based branch too, on either dataset, and that
+is load-bearing rather than incidental: rollout runs on `random` with
+`ignore_eos` false — reaching the forced flag through the request body — so its
+lengths come from the policy and not from `output_len`, and deciding from
+`output_len` there would demand TPOT of a rollout whose completions may each be
+a single token. So `ignore_eos: false` is **not** something only `sharegpt` can
+express; rollout expresses it on `random`, which is exactly why the condition is
+keyed on the pair rather than on the dataset alone.
+
+## Gated in the nightly
+
+`tokenspeed_serve_smoke` is live in `config/ci/nightly_eval_matrix.yaml` — in
+this repository, not `aorta-internal` — and **two of its metrics are now gated
+on both cells** (`baseline` and `no-scratch-reclaim`):
+
+| metric | policy | why this one |
+|---|---|---|
+| `median_tpot_ms` | `max` | steady-state decode cost, no queueing term, and its definition excludes the step-0 compile excursion |
+| `p99_itl_ms` | `max` | the tail half of the same pair; also excursion-immune |
+
+Ceilings are `window maximum × 1.25`, from the ten-night window
+2026-09-08..09-17. A run over either is a nightly **failure**, and the breaching
+observation is still written to that night's results and charted in the
+metric's history like any other, so the trend reads straight through it.
+
+Everything else this workload reports is still **record-only** — captured,
+charted, and not gated. That is nine auto-gateable metrics (`median_ttft_ms`,
+`p99_ttft_ms`, `p99_tpot_ms`, `median_e2el_ms`, `p99_e2el_ms`,
+`output_throughput`, `request_throughput`, `total_token_throughput`,
+`tokens_per_sec`), plus `step_time_ms.max`, which was pruned from the bless on
+purpose because it is synthesised at bless time rather than recorded per night.
+`median_itl_ms` is never auto-gated at all: it measures ~0 here, so a
+multiplicative margin on it blesses a ceiling of ~0.
+
+[tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md) has the per-metric
+reasoning and the sequence for promoting the rest, which is its step 7.
 
 ## Not done yet
-
-- **Blessed nightly baselines.** `tokenspeed_serve_smoke` is now live in
-  `config/ci/nightly_eval_matrix.yaml` — in this repository, not `aorta-internal`
-  — but it is **record-only**: no serving baseline has been blessed, so nothing
-  is gated yet. The bless waits on a ten-night window;
-  [tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md) is the sequence.
 - **`sharegpt` measured on hardware.** The plumbing is tested; no run has been
   made against a real ShareGPT file, so there are no numbers from it yet.
 - **TP=4 and above.** TP 1 and 2 work; 4 fails to come up, diagnosed as far as

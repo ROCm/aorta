@@ -12,6 +12,7 @@ import yaml
 
 from aorta.agent.llm import _BASELINE_CELL, AgentStep, LLMProposer, StopReason, make_proposer
 from aorta.agent.policy import AgentPolicy, PolicyViolation
+from aorta.agent.prompt_profiles import DEFAULT_PROMPT_PROFILE
 from aorta.agent.report import write_agent_report
 from aorta.agent.state import (
     AgentState,
@@ -51,6 +52,9 @@ class AgentConfig:
     recipe_path: Path | None = None
     dry_run: bool = False
     run_bundle: bool = False
+    # Which messages a real backend is sent; see aorta.agent.prompt_profiles.
+    # Last, so positional callers of this exported dataclass keep their mapping.
+    prompt_profile: str = DEFAULT_PROMPT_PROFILE
 
 
 @dataclass
@@ -124,6 +128,11 @@ def _recipe_template_dict(config: AgentConfig) -> dict[str, Any]:
         if key in raw:
             template[key] = raw[key]
     template["_mitigation_axis_order"] = list(recipe.probe_extras.mitigation_axis)
+    template["_detector_categories"] = {
+        p.detector_id: p.category
+        for p in recipe.probe_extras.custom_patterns
+        if p.category is not None
+    }
     if recipe.ticket:
         template["ticket"] = recipe.ticket
     return template
@@ -195,6 +204,7 @@ def _read_cell_summaries(run_dir: Path) -> list[dict[str, Any]]:
         # passing cell is not hidden behind trial_0.
         failure_detectors: list[str] = []
         warn_detectors: list[str] = []
+        error_detectors: list[str] = []
         for data in trial_results:
             for det in data.get("failure_detectors_fired") or []:
                 if det not in failure_detectors:
@@ -202,20 +212,26 @@ def _read_cell_summaries(run_dir: Path) -> list[dict[str, Any]]:
             for det in data.get("warn_detectors_fired") or []:
                 if det not in warn_detectors:
                     warn_detectors.append(det)
+            for det in data.get("error_detectors_fired") or []:
+                if det not in error_detectors:
+                    error_detectors.append(det)
         evidence = next(
             (d for d in trial_results if d.get("verdict") not in (None, "pass")),
             trial_results[0],
         )
-        summaries.append(
-            {
-                "cell_name": trial_results[0].get("cell_name", cell_dir.name),
-                "verdict": aggregate_cell_verdict(trial_results),
-                "failure_detectors_fired": failure_detectors,
-                "warn_detectors_fired": warn_detectors,
-                "capture": evidence.get("capture") or {},
-                "exit_code": evidence.get("exit_code"),
-            }
-        )
+        row: dict[str, Any] = {
+            "cell_name": trial_results[0].get("cell_name", cell_dir.name),
+            "verdict": aggregate_cell_verdict(trial_results),
+            "failure_detectors_fired": failure_detectors,
+            "warn_detectors_fired": warn_detectors,
+            "capture": evidence.get("capture") or {},
+            "exit_code": evidence.get("exit_code"),
+        }
+        # Only when one fired: the default prompt sends this row verbatim, so
+        # every other cell keeps the bytes it rendered before the key existed.
+        if error_detectors:
+            row["error_detectors_fired"] = error_detectors
+        summaries.append(row)
     return summaries
 
 
@@ -237,10 +253,52 @@ def _resolve_stop_outcome(
     it so the audit log records the same reason that drove ``outcome``
     instead of a bare ``None``.
     """
-    reason: StopReason | None = step.stop_reason
+    # A reason explains a stop, so it counts only when the step stopped -- the
+    # rule `AgentStep.from_dict` applies to a model reply, held here for a
+    # protocol proposer that builds its `AgentStep` itself.
+    reason: StopReason | None = step.stop_reason if step.stop else None
+    if reason in ("proposal_unresolved", "proposal_redundant"):
+        # The loop owns these reasons, not the proposer. Each is a statement
+        # about what the candidate filter or validation did with the names, so
+        # it is derived below from the step's own fields and never taken as
+        # given. The model-reply path already refuses both
+        # (`AgentStep.from_dict`); this closes the same door for a proposer
+        # object that constructs an `AgentStep` directly, which could otherwise
+        # label a genuine stop as a filter or validation outcome.
+        reason = None
     if reason is None:
         if _baseline_passed(summaries):
             reason = "baseline_pass"
+        elif (
+            not step.stop
+            and not step.next_mitigations
+            and step.unresolved_mitigations
+        ):
+            # aorta#449: the proposer named mitigations and every one was
+            # dropped, so the empty list is a name-resolution failure rather
+            # than a decision. Ordered ahead of the "No remaining" heuristic
+            # because it reads the names instead of guessing from prose, and
+            # ahead of the agent_requested fallthrough because that credits
+            # the model with a decision it did not make.
+            #
+            # `not step.stop` is checked here rather than relied on upstream.
+            # `_step_from_content` fills in `agent_requested` for a stop, but
+            # a proposer written against the `LLMProposer` protocol can return
+            # `stop=True` with no reason and still carry dropped names; that
+            # stop is the agent's own request and must not be re-attributed.
+            # The dropped names are logged either way.
+            reason = "proposal_unresolved"
+        elif (
+            not step.stop
+            and not step.next_mitigations
+            and step.redundant_mitigations
+        ):
+            # aorta#501: validation removed every name as redundant, which
+            # only the `none` baseline can do -- a repeat leaves one copy
+            # behind -- so the empty list is normalisation, not a decision.
+            # After proposal_unresolved because a step carrying both has a
+            # name that failed to resolve, and that is the fault to report.
+            reason = "proposal_redundant"
         elif not step.next_mitigations and "No remaining" in step.hypothesis:
             reason = "exhausted_candidates"
         else:
@@ -267,6 +325,36 @@ def _resolve_stop_outcome(
             "No further registered mitigations to try (already attempted or "
             "not in the allowlist). Inspect failure detectors in "
             "agent_report.md or run a manual probe matrix.",
+            reason,
+        )
+    if reason == "proposal_unresolved":
+        # Deliberately does NOT lead with step.hypothesis. The hypothesis is a
+        # plausible-sounding rationale for a stop the model never asked for,
+        # so showing it here is what sends the operator after the prompt or
+        # the model when the fault is in name resolution.
+        return (
+            "proposal_unresolved",
+            "Search stopped because none of the mitigations the proposer "
+            f"named could be resolved: {sorted(set(step.unresolved_mitigations))}. "
+            "Each is unregistered, already tried, outside the candidate "
+            "allowlist, or the `none` baseline (which is always on the axis and "
+            "never a candidate), so the loop had nothing left to run -- this is NOT "
+            "the agent concluding the search. Check the names against "
+            "`aorta mitigations list` and the --mitigation allowlist; see "
+            "unresolved_mitigations in agent_log.jsonl.",
+            reason,
+        )
+    if reason == "proposal_redundant":
+        # Same rule as above: the hypothesis is not the reason the search
+        # stopped, so it is not what the operator is shown.
+        return (
+            "proposal_redundant",
+            "Search stopped because every mitigation the proposer named was "
+            f"redundant: {sorted(set(step.redundant_mitigations))}. The `none` "
+            "baseline is always on the axis and a repeated name adds no cell, "
+            "so the loop had nothing new to run -- this is NOT the agent "
+            "concluding the search. See redundant_mitigations in "
+            "agent_log.jsonl.",
             reason,
         )
     return (
@@ -327,7 +415,12 @@ def run_agent_loop(
     # ticket; fall back to the slug only for the no-ticket case.
     state = wake(run_dir, ticket=raw_ticket or ticket_slug)
     if proposer is None:
-        proposer = make_proposer(config.llm_backend, model=config.llm_model)
+        proposer = make_proposer(
+            config.llm_backend,
+            model=config.llm_model,
+            prompt_profile=config.prompt_profile,
+            detector_categories=recipe_template.get("_detector_categories"),
+        )
 
     candidates = _list_candidate_mitigations(config, recipe_template)
     mitigation_axis: list[str] = [_BASELINE_MITIGATION]
@@ -355,17 +448,18 @@ def run_agent_loop(
         )
 
     start_time = time.monotonic()
-    append_log_event(
-        run_dir,
-        "session_start",
-        {
-            "ticket": raw_ticket,
-            "ticket_slug": ticket_slug,
-            "argv": list(config.subprocess_argv),
-            "symptom": config.symptom,
-            "llm_backend": config.llm_backend,
-        },
-    )
+    session: dict[str, Any] = {
+        "ticket": raw_ticket,
+        "ticket_slug": ticket_slug,
+        "argv": list(config.subprocess_argv),
+        "symptom": config.symptom,
+        "llm_backend": config.llm_backend,
+    }
+    # Recorded only when it is not the default, so a default run's log is the
+    # one written before profiles existed.
+    if config.prompt_profile != DEFAULT_PROMPT_PROFILE:
+        session["prompt_profile"] = config.prompt_profile
+    append_log_event(run_dir, "session_start", session)
 
     outcome = "in_progress"
     recommended = "Review agent_report.md and probe cell artifacts."
@@ -435,28 +529,49 @@ def run_agent_loop(
             step = config.policy.validate_step(step)
             state.last_category = step.category
             state.last_hypothesis = step.hypothesis
-            append_log_event(
-                run_dir,
-                "llm_step",
-                {
-                    "category": step.category,
-                    "hypothesis": step.hypothesis,
-                    "next_mitigations": step.next_mitigations,
-                    "confidence": step.confidence,
-                    "stop": step.stop,
-                    "stop_reason": step.stop_reason,
-                },
-            )
+            llm_step_payload: dict[str, Any] = {
+                "category": step.category,
+                "hypothesis": step.hypothesis,
+                "next_mitigations": step.next_mitigations,
+                "confidence": step.confidence,
+                "stop": step.stop,
+                "stop_reason": step.stop_reason,
+            }
+            # Written only when something was actually dropped, so a run with
+            # no rejections emits the same bytes it did before this key
+            # existed and already-archived trajectories stay comparable. This
+            # is also the only record of a PARTIAL rejection: when some names
+            # survive, the loop carries on and no stop event is ever written.
+            if step.unresolved_mitigations:
+                llm_step_payload["unresolved_mitigations"] = list(
+                    step.unresolved_mitigations
+                )
+            if step.redundant_mitigations:
+                llm_step_payload["redundant_mitigations"] = list(
+                    step.redundant_mitigations
+                )
+            append_log_event(run_dir, "llm_step", llm_step_payload)
 
             if step.stop or not step.next_mitigations:
                 outcome, recommended, resolved_reason = _resolve_stop_outcome(
                     step, summaries
                 )
-                append_log_event(
-                    run_dir,
-                    "search_stopped",
-                    {"outcome": outcome, "stop_reason": resolved_reason},
-                )
+                stopped_payload: dict[str, Any] = {
+                    "outcome": outcome,
+                    "stop_reason": resolved_reason,
+                }
+                # Repeated on the terminal event so the reason and the names
+                # behind it are in one record, rather than needing a join back
+                # to the preceding llm_step. Same conditional rule as above.
+                if step.unresolved_mitigations:
+                    stopped_payload["unresolved_mitigations"] = list(
+                        step.unresolved_mitigations
+                    )
+                if step.redundant_mitigations:
+                    stopped_payload["redundant_mitigations"] = list(
+                        step.redundant_mitigations
+                    )
+                append_log_event(run_dir, "search_stopped", stopped_payload)
                 break
 
             # validate_step() only enforces registry membership + category. The

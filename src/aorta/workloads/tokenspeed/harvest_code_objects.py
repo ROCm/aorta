@@ -931,7 +931,7 @@ def _write_consan_recipe(
         lines.extend(
             [
                 "# lenient is the default here, and the reason is worth stating.",
-                "# strict sets RJ_CONSAN_MOI_REQUIRE_RECORDS, which demands visible",
+                "# strict sets RJ_CONSAN_REQUIRE_RECORDS, which demands visible",
                 "# dynamic records. The loader runs in `load` mode: it loads and",
                 "# instruments the object but never dispatches it, so there is no",
                 "# dispatch packet and no records, and strict fails closed with",

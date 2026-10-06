@@ -16,7 +16,7 @@ opinion, so any coverage claim derived from it is empty rather than positive.
 
 That sweep exists because of ROCm/aorta#450. ``daily-consan-tiny`` and
 ``daily-consan-gemm`` paired a load-only driver with ``consan_policy: strict``,
-which sets ``RJ_CONSAN_MOI_REQUIRE_RECORDS`` and so demands dynamic records a
+which sets ``RJ_CONSAN_REQUIRE_RECORDS`` and so demands dynamic records a
 non-dispatching driver can never produce. Both failed closed with
 ``combined_hook_exit_86`` and zero findings on every run for weeks, and nothing
 noticed: the baseline comparison above only covers the three *gated* cases, and

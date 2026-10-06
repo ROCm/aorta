@@ -1,6 +1,6 @@
 // Self-contained HIP program that DISPATCHES a race-free LDS reduction kernel from
 // an explicitly hipModuleLoad'ed code object, so the rocjitsu ConSan hook
-// instruments the very module we launch and record/replay captures real runtime
+// instruments the very module we launch and ConSan captures real runtime
 // LDS accesses (dynamic_complete=true). Using hipModuleLaunchKernel (not static
 // hipLaunchKernelGGL) is deliberate: the static fat-binary path did not route
 // through the instrumented module, so 0 records were captured -> strict exit 86.
@@ -49,7 +49,7 @@ int main() {
         HIP_LAUNCH_PARAM_END,
     };
 
-    // A few dispatches so record/replay has multiple generations to observe.
+    // A few dispatches so ConSan has multiple generations to observe.
     for (int iter = 0; iter < 4; ++iter) {
         if (!ck(hipModuleLaunchKernel(func, GRID, 1, 1, BLOCK, 1, 1, 0, 0, nullptr, config),
                 "hipModuleLaunchKernel")) {

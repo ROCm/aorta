@@ -30,6 +30,22 @@ If a third importer ever wants to join, that is the signal that the provider
 layer belongs in core rather than under ``aorta.chat``, and this list should be
 replaced by that move instead of being extended again.
 
+**A third importer joined, and the move has not happened yet.**
+``aorta/cia/llm.py`` reads the chat settings so that configuring chat
+configures Watch and Autopsy too. Before it did, the agents had their own
+LITELLM_* surface defaulting to ``http://localhost:4000``, so a user who had
+configured chat against a real provider had agents quietly addressing a proxy
+that was not running -- one configuration surface in the docs and two in the
+code.
+
+This entry is the debt, recorded rather than hidden. It buys the same terms as
+the second: the import is deferred inside ``chat_provider()``, ``import
+aorta.cia`` stays free of langchain, and only settings are read -- never the
+provider layer, so the agents still run on a base install. What it does not buy
+is the move this docstring asks for, which is now overdue and wants its own
+change: ``aorta/chat/config.py`` is the piece that belongs in core, and both
+front doors plus the agents should read it from there.
+
 These live under ``tests/cli/`` rather than ``tests/chat/`` on purpose: they are
 pure AST and stdlib, so they must run on a base install, where ``tests/chat/``
 is skipped for want of the chat extra.
@@ -46,14 +62,18 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src"
 _CHAT_PKG = _SRC / "aorta" / "chat"
+_CIA_PKG = _SRC / "aorta" / "cia"
 _CLI_CHAT = _SRC / "aorta" / "cli" / "chat.py"
 _AGENT_LLM = _SRC / "aorta" / "agent" / "llm.py"
 
 #: The only modules allowed to import ``aorta.chat``, and each one's reason.
 #: See the module docstring before adding a third.
+_CIA_LLM = _SRC / "aorta" / "cia" / "llm.py"
+
 _SANCTIONED_IMPORTERS = {
     _CLI_CHAT: "the Click entry for `aorta chat`",
     _AGENT_LLM: "Decision 7a: the agent proposer on the shared provider layer",
+    _CIA_LLM: "the agents read the same provider settings as chat, not their own",
 }
 
 #: Third-party packages ``aorta/cli/chat.py`` may import at module scope.
@@ -332,4 +352,69 @@ def test_importing_aorta_cli_does_not_pull_in_asyncio():
     assert out.stdout.strip() == "False", (
         "import aorta.cli now pulls in asyncio; move the import into the "
         "command callback that awaits the agent."
+    )
+
+
+# ── The same two rules, for aorta.cia ─────────────────────────────────────
+
+#: What only the chat extras provide. ``aorta.cia`` may pull its own extra --
+#: dspy and what dspy pulls -- but reaching any of these would mean the agents
+#: cannot be used without installing a chatbot, which is the property the
+#: package was placed outside ``aorta.chat`` to keep.
+_CHAT_ONLY_PREFIXES = (
+    "langchain",
+    "langchain_core",
+    "langchain_community",
+    "langchain_openai",
+    "langchain_text_splitters",
+    "langgraph",
+    "chainlit",
+    "chromadb",
+    "sentence_transformers",
+    "fastembed",
+    "torch",
+)
+
+
+def test_aorta_cia_contains_no_click():
+    """Same rule as ``aorta.chat``, same reason: Click lives in ``aorta.cli``.
+
+    The agents arrived from a repository where each was its own console script,
+    so the argparse entry points were dropped on the way in. This is what keeps
+    them from growing back.
+    """
+    offenders: list[str] = []
+    for path in _python_files(_CIA_PKG):
+        rel = path.relative_to(_REPO_ROOT)
+        for node in ast.walk(_parse(path)):
+            for name in _imported_names(node):
+                if name == "click" or name.startswith("click."):
+                    offenders.append(f"{rel}:{node.lineno}: imports {name!r}")
+    assert not offenders, "Click found under src/aorta/cia/:\n  " + "\n  ".join(offenders)
+
+
+def test_importing_the_agents_does_not_require_the_chat_extras():
+    """Launch, Watch and Autopsy are useful with no chatbot present.
+
+    From a script, from CI, from ``aorta`` itself. Core has two dependencies;
+    the chat extras add eleven plus Chainlit, and a cluster job submitter has no
+    business requiring them. Measured in a fresh interpreter, because
+    ``sys.modules`` is already dirty by the time pytest runs this.
+    """
+    import subprocess
+
+    probe = (
+        "import sys, json, aorta.cia, aorta.cia.launch, aorta.cia.autopsy.orchestrator;"
+        f"chat_only={_CHAT_ONLY_PREFIXES!r};"
+        "print(json.dumps(sorted(m for m in sys.modules "
+        "if m.split('.')[0] in chat_only)))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    leaked = __import__("json").loads(out.stdout)
+    assert leaked == [], (
+        f"importing the agents pulled in {leaked}, which only the chat extras "
+        "provide. The agents must stay usable on a base install plus their own "
+        "extra."
     )

@@ -659,15 +659,20 @@ class TestStructure:
 
 class TestEmbeddingModelCache:
     def _seed(self, tmp_path: Path) -> None:
-        weights = (
-            tmp_path
-            / "hf"
-            / "hub"
-            / "models--qdrant--bge-small-en-v1.5-onnx-q"
-            / "model_optimized.onnx"
-        )
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        directory = fastembed_bge._model_dir_slug(fastembed_bge._source_repo(MODEL))
+        snapshot = tmp_path / "hf" / "hub" / directory / "snapshots" / "abc"
+        weights = snapshot / "model_optimized.onnx"
         weights.parent.mkdir(parents=True)
         weights.write_bytes(b"\x00")
+        for name in (
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+        ):
+            (snapshot / name).write_text("{}", encoding="utf-8")
 
     def test_a_warm_cache_is_ok(self, tmp_path: Path):
         self._seed(tmp_path)

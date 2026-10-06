@@ -43,7 +43,7 @@ sanitizer_plan:
   policy:
     consan_policy: strict
     on_missing_backend: fail
-    # Large production code object: the ConSan MOI transform fails closed
+    # Large production code object: the ConSan transform fails closed
     # (consan_strict_load_rejection); keep the observed error as survey data
     # rather than a false pass.
     #

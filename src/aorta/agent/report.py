@@ -43,7 +43,10 @@ def write_agent_report(
         for row in cell_summaries:
             cell = row.get("cell_name", "?")
             verdict = row.get("verdict", "?")
-            detectors = row.get("failure_detectors_fired") or []
+            detectors = [
+                *(row.get("failure_detectors_fired") or []),
+                *(row.get("error_detectors_fired") or []),
+            ]
             det_str = ", ".join(detectors) if detectors else "—"
             lines.append(f"| `{cell}` | {verdict} | {det_str} |")
     lines.append("")

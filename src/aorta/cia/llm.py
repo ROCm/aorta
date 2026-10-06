@@ -1,0 +1,637 @@
+from __future__ import annotations
+
+import logging
+import os
+import ssl
+import sys
+import threading
+from collections.abc import Callable
+from typing import Any
+
+try:
+    import dspy
+except ImportError as exc:  # pragma: no cover - only without the extra
+    raise ImportError(
+        "The Cluster Intelligence Agents need DSPy, which comes with the [cia] "
+        "extra: pip install 'amd-aorta[cia]'. (The extra installs on every "
+        "Python this package supports; if it appeared to install and left "
+        "nothing behind, say so -- that is a packaging bug, not a missing step.)"
+    ) from exc
+
+#: Operator-chosen CA files. Read as client configuration, never written here.
+_CA_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+
+log = logging.getLogger(__name__)
+
+CIA_MODEL = "Qwen/Qwen3.8-27B"
+DEFAULT_MODEL = CIA_MODEL
+
+
+def _cia_lm_kwargs() -> dict[str, Any]:
+    """The model and request controls shared by Launch, Watch, and Autopsy."""
+    return {
+        "model": CIA_MODEL,
+        "extra_body": {
+            "chat_template_kwargs": {
+                "enable_thinking": False,
+            }
+        },
+    }
+
+
+DEFAULT_MAX_TOKENS = 4096
+"""Enough for tool trajectories and the final structured answer.
+
+At the 1024 this used to be, Autopsy could consume the whole budget before a
+single output field was emitted. CIA now disables Qwen's thinking trace, but
+the ReAct tool calls and final response still share this output budget.
+"""
+
+_configured: bool = False
+
+
+def _ssl_verify() -> str | bool:
+    """TLS verification for this LM client only.
+
+    LiteLLM can fail on a corporate TLS interception proxy whose CA the certifi
+    bundle knows and the system store does not. Certifi fixes that site and
+    breaks the opposite one, where the corporate CA is in the system store and
+    not in certifi.
+
+    The old answer was to write SSL_CERT_FILE and REQUESTS_CA_BUNDLE for the
+    whole process. Those variables are how OpenSSL and requests pick a CA file
+    for every later import -- chat, unrelated aorta code, and anything the
+    user imported alongside -- so a Watch that needed certifi quietly changed
+    HTTPS for everyone else.
+
+    So the choice is client configuration: a CA path, or True for the system
+    store. OpenAI-compatible routes receive concrete clients whose TLS context
+    carries that choice; other LiteLLM providers receive ``ssl_verify``.
+    SSL_CERT_FILE / REQUESTS_CA_BUNDLE are still read, because that is somebody
+    having decided, and CIA_SSL_USE_CERTIFI=0 still turns certifi off for the
+    site it would otherwise break. Nothing here writes them.
+    """
+    for var in _CA_ENV_VARS:
+        chosen = os.environ.get(var)
+        if chosen:
+            return chosen
+    if os.environ.get("CIA_SSL_USE_CERTIFI", "1") == "0":
+        return True
+    try:
+        import certifi
+    except ImportError:
+        log.debug("certifi is not installed; using system TLS trust")
+        return True
+    return certifi.where()
+
+
+def _ssl_context(verify: str | bool) -> ssl.SSLContext:
+    """Turn the selected trust source into an HTTP-client TLS context."""
+    if isinstance(verify, str):
+        return ssl.create_default_context(cafile=verify)
+    # No explicit CA file is deliberate: stdlib OpenSSL loads its configured
+    # default verify paths (including the OS trust directory). httpx's
+    # ``verify=True`` would instead create its own certifi-backed context.
+    return ssl.create_default_context()
+
+
+def _openai_clients(
+    *,
+    api_base: str | None,
+    api_key: str,
+    verify: str | bool,
+) -> tuple[Any, Callable[[], Any]]:
+    """A sync client and lazy async-client factory with per-LM TLS trust.
+
+    LiteLLM currently moves ``ssl_verify`` into ``extra_body`` on its
+    ``openai/*`` route instead of applying it to the transport. Supplying the
+    provider clients is its supported escape hatch: the CA context is attached
+    directly to each httpx pool and no TLS option enters the request JSON or
+    process-global state.
+    """
+    import httpx
+    from openai import AsyncOpenAI, OpenAI
+
+    context = _ssl_context(verify)
+    common: dict[str, Any] = {"api_key": api_key}
+    if api_base:
+        common["base_url"] = api_base
+    sync_client = OpenAI(
+        **common,
+        http_client=httpx.Client(
+            verify=context,
+            follow_redirects=True,
+        ),
+    )
+
+    def build_async_client() -> Any:
+        return AsyncOpenAI(
+            **common,
+            http_client=httpx.AsyncClient(
+                verify=context,
+                follow_redirects=True,
+            ),
+        )
+
+    return sync_client, build_async_client
+
+
+class ProviderNotConfigured(RuntimeError):
+    """No endpoint was configured, and guessing at one is worse than saying so."""
+
+
+#: The same names ``aorta.chat.config`` reads, for the fallback below. Kept
+#: literal rather than derived, because deriving them needs the module that is
+#: missing in the case this exists for.
+_ENV_PREFIX = "AORTA_CHAT_"
+_VLLM_FIELDS = ("vllm_base_url", "vllm_api_key", "vllm_model")
+_REMOTE_FIELDS = ("remote_llm_base_url", "remote_llm_api_key", "remote_llm_model")
+
+_warned_no_settings = False
+
+
+def _settings_from_env() -> tuple[str, str, str, str] | None:
+    """The chat settings as far as the environment gives them, or None.
+
+    This is the degraded path when ``aorta.chat.config`` cannot be imported
+    because part of ``[cia]`` is missing or broken. Python 3.10 is not such a
+    case: that extra supplies ``tomli`` where the stdlib has no ``tomllib``, so
+    the shared profile is available on every Python the package supports.
+
+    Same variables, same precedence, one thing missing: the profile file. That
+    is said out loud rather than left to be discovered.
+    """
+    provider = os.environ.get(f"{_ENV_PREFIX}LLM_PROVIDER", "vllm")
+    fields = _VLLM_FIELDS if provider == "vllm" else _REMOTE_FIELDS
+    values = tuple(os.environ.get(f"{_ENV_PREFIX}{f.upper()}", "") for f in fields)
+    # The provider travels with them: it decides how the model name is
+    # qualified, and rebuilding everything as openai/<model> was how a litellm
+    # profile ended up addressing the wrong backend.
+    return (*values, provider) if any(values) else None  # type: ignore[return-value]
+
+
+def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] | None:
+    """(base_url, api_key, model, provider) from the chat configuration, or None.
+
+    The provider travels with the rest because dropping it was a way to route a
+    model to the wrong backend: everything here used to be rebuilt as
+    ``openai/<model>``, so a litellm profile pointing at Anthropic became
+    ``openai/anthropic/claude-...``.
+
+    The rest of this package reaches a model through ``get_chat_llm()``,
+    selected by ``llm_provider`` and configured in ``~/.config/aorta/chat.toml``
+    or ``AORTA_CHAT_*`` (docs/chat/providers.md, docs/chat/configuration.md).
+    The agents read those same settings, so that configuring chat configures
+    their endpoint and credentials: a user who has run
+    ``aorta chat config init --profile openai`` should not then have a Watch
+    and an Autopsy quietly talking somewhere else. CIA pins its own model and
+    no-thinking request controls through :func:`_cia_lm_kwargs`.
+
+    Only the settings are read, not the provider layer, so this keeps the
+    agents runnable without the chat extras. What it does need is pydantic and
+    pydantic-settings, which ``[cia]`` declares: they were arriving two hops
+    out through dspy-ai to litellm, and a package that happens to install
+    something is not a package that promises to.
+
+    With *configured_only*, None also means "nothing here was actually set".
+    Every field has a default, so answering with one would silently outrank a
+    deployment that had configured the agents some other way.
+    """
+    global _warned_no_settings
+    try:
+        from aorta.chat.config import settings
+    except ImportError as exc:
+        if not _warned_no_settings:
+            _warned_no_settings = True
+            # The reason is reported, not guessed from the interpreter. The
+            # shared profile supports 3.10 through tomli, so every version gets
+            # the same diagnosis: an import failed that [cia] promises to make.
+            why = (
+                "This is Python %d.%d, which the [cia] extra supports; the "
+                "settings import failed for the reason above -- most likely a "
+                "package the extra should have installed. Reinstall with "
+                "`pip install 'amd-aorta[cia]'` and report it if it persists; "
+                "the agents are meant to read the same profile as the rest of "
+                "aorta chat." % (sys.version_info[0], sys.version_info[1])
+            )
+            log.warning(
+                "Reading the chat settings from the environment only: %s. %s "
+                "AORTA_CHAT_* is still honoured; the profile file is not.",
+                exc,
+                why,
+            )
+        return _settings_from_env()
+
+    if getattr(settings, "llm_provider", "") == "vllm":
+        fields = _VLLM_FIELDS
+    else:
+        # An empty remote base URL means "the provider's own endpoint", which
+        # is a decision rather than a gap.
+        fields = _REMOTE_FIELDS
+
+    if configured_only and not ({*fields, "llm_provider"} & settings.model_fields_set):
+        return None
+    return (
+        *(getattr(settings, f) for f in fields),
+        getattr(settings, "llm_provider", "") or "vllm",
+    )  # type: ignore[return-value]
+
+
+def _legacy_env() -> tuple[str, str, str, str] | None:
+    """The LITELLM_* variables, which predate reading the chat settings."""
+    base = os.environ.get("LITELLM_API_BASE")
+    if not base:
+        return None
+    log.warning(
+        "Reading LITELLM_API_BASE/KEY/MODEL. These predate the agents taking "
+        "their configuration from the same place as the rest of aorta chat; "
+        "set AORTA_CHAT_* or ~/.config/aorta/chat.toml and one setting will do "
+        "for both."
+    )
+    return (
+        base,
+        os.environ.get("LITELLM_API_KEY", ""),
+        os.environ.get("LITELLM_MODEL", DEFAULT_MODEL),
+        # These name a proxy endpoint, which speaks the OpenAI protocol
+        # whatever it routes to behind itself.
+        "openai",
+    )
+
+
+class RedactionUnavailable(RuntimeError):
+    """The gate cannot load, so nothing may be sent through it."""
+
+
+def _redaction_enabled() -> bool:
+    """Whether the operator has turned redaction off.
+
+    The switch lives in the chat settings, which need pydantic-settings and a
+    TOML reader (stdlib tomllib, or tomli on 3.10). When they cannot be read the
+    answer is yes: not knowing whether someone disabled redaction is not a
+    reason to skip it.
+    """
+    try:
+        from aorta.chat.config import settings
+    except ImportError:
+        return True
+    return bool(getattr(settings, "redact", True))
+
+
+def redact(text: str) -> str:
+    """*text* with filesystem paths and addresses rewritten, per Decision 16.
+
+    ``docs/chat/redaction.md`` exists because a remote provider receives
+    retrieved chunks and tool output. The agents send more of that than chat
+    does: Watch ships log tails, Launch discovery ships the heads of scripts
+    found under a home directory, and Autopsy ships bundle evidence.
+
+    The scrubber is ``aorta.probe.redaction``, which is core -- stdlib and
+    aorta's own bundle code, no pydantic and no TOML parser. This used to reach it
+    through ``aorta.chat.redaction``, a thin wrapper over the same function, and
+    caught the ImportError by returning the text unchanged. On a base install
+    with only the [cia] extra that import can fail -- so the advertised headless
+    path was the one that sent Watch and Autopsy evidence unredacted, and said
+    nothing.
+
+    Raises RedactionUnavailable if even the core scrubber cannot be imported.
+    Sending unredacted evidence is not a fallback.
+    """
+    if not text:
+        return text
+    try:
+        from aorta.probe.redaction import scrub_text
+    except ImportError as exc:  # pragma: no cover - core is always installed
+        raise RedactionUnavailable(
+            "aorta.probe.redaction could not be imported, so outbound text "
+            "cannot be scrubbed. Refusing to send it unredacted."
+        ) from exc
+
+    if not _redaction_enabled():
+        return text
+    scrubbed, _paths, _ipv4, _ipv6 = scrub_text(text, scrub_paths=True, scrub_ip_addresses=True)
+    return scrubbed
+
+
+def _redact_messages(messages: Any) -> Any:
+    """Redact the content of DSPy's dict-shaped messages.
+
+    ``redact_messages`` in the chat package reads ``message.content`` and calls
+    ``.copy(update=...)``, which is LangChain's shape; DSPy passes plain dicts,
+    so that function would hand them back untouched.
+    """
+    if not isinstance(messages, list):
+        return messages
+    out = []
+    for message in messages:
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            out.append({**message, "content": redact(message["content"])})
+        else:
+            out.append(message)
+    return out
+
+
+class RedactingLM(dspy.LM):
+    """A DSPy LM that redacts on the way out.
+
+    The gate is here, on the object every agent is given, for the reason
+    ``_send`` gives in ``chat/graph/nodes.py``: a module added later cannot
+    bypass what it does not have to remember to call. Watch, Autopsy, Launch
+    discovery and the log finder each build their own prompts and none of them
+    goes through the chat graph, so a gate at any one of them would be a
+    convention rather than a guarantee.
+
+    All four entry points are covered because DSPy has four, and which one a
+    module reaches is not this module's business to track.
+    """
+
+    def __init__(
+        self,
+        *args,
+        sync_client: Any = None,
+        async_client: Any = None,
+        async_client_factory: Callable[[], Any] | None = None,
+        **kwargs,
+    ):
+        self._sync_client = sync_client
+        self._async_client = async_client
+        self._async_client_factory = async_client_factory
+        self._async_client_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def _get_async_client(self) -> Any:
+        if self._async_client is None and self._async_client_factory is not None:
+            with self._async_client_lock:
+                if self._async_client is None and self._async_client_factory is not None:
+                    self._async_client = self._async_client_factory()
+        return self._async_client
+
+    def close(self) -> None:
+        """Close sync transport resources owned by this LM. Idempotent."""
+        client, self._sync_client = self._sync_client, None
+        with self._async_client_lock:
+            self._async_client_factory = None
+        if client is not None:
+            client.close()
+
+    async def aclose(self) -> None:
+        """Close both sync and already-created async transport resources."""
+        with self._async_client_lock:
+            client, self._async_client = self._async_client, None
+            self._async_client_factory = None
+        self.close()
+        if client is not None:
+            await client.close()
+
+    @staticmethod
+    def _clean(items: tuple, prompt: str | None, messages: Any) -> tuple:
+        return (
+            tuple(redact(i) if isinstance(i, str) else i for i in items),
+            redact(prompt) if isinstance(prompt, str) else prompt,
+            _redact_messages(messages),
+        )
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        _, prompt, messages = self._clean((), prompt, messages)
+        if self._sync_client is not None:
+            kwargs.setdefault("client", self._sync_client)
+        return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+    async def aforward(self, prompt=None, messages=None, **kwargs):
+        _, prompt, messages = self._clean((), prompt, messages)
+        async_client = self._get_async_client()
+        if async_client is not None:
+            kwargs.setdefault("client", async_client)
+        return await super().aforward(prompt=prompt, messages=messages, **kwargs)
+
+    def __call__(self, *items, prompt=None, messages=None, **kwargs):
+        items, prompt, messages = self._clean(items, prompt, messages)
+        return super().__call__(*items, prompt=prompt, messages=messages, **kwargs)
+
+    async def acall(self, *items, prompt=None, messages=None, **kwargs):
+        items, prompt, messages = self._clean(items, prompt, messages)
+        return await super().acall(*items, prompt=prompt, messages=messages, **kwargs)
+
+
+def build_lm(
+    model: str | None = None,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    *,
+    extra_body: dict[str, Any] | None = None,
+) -> dspy.LM:
+    """Build an LM for one module to bind to its own program.
+
+    A module whose settings matter builds its own here rather than racing the
+    others to configure a shared one; see ``ensure_configured`` for what the
+    race costs.
+
+    Where the endpoint comes from, in order: an explicit argument, then the
+    chat settings, then the LITELLM_* variables that predate them. An explicit
+    argument wins over all of it -- the reverse, which is what this did, let a
+    module name the model it needed, receive a different one, and have no way
+    to find out.
+
+    There is no default of this package's own. It used to fall back to
+    http://localhost:4000 with the key "dummy", so a user whose chat was
+    configured against a real provider had a Watch and an Autopsy silently
+    addressing a proxy that was not running, and read the resulting quiet as
+    nothing being wrong.
+    """
+    # Configured chat first, then a deployment still on the old variables, then
+    # chat's own defaults -- so an unconfigured agent fails exactly the way an
+    # unconfigured chat does, rather than in a second way at a second address.
+    resolved = chat_provider() or _legacy_env() or chat_provider(configured_only=False)
+    if resolved is None and not api_base:
+        raise ProviderNotConfigured(
+            "The agents reach a model through the same configuration as the "
+            "rest of aorta chat, and none is available. Run `aorta chat config "
+            "init`, or set AORTA_CHAT_VLLM_BASE_URL."
+        )
+    settings_base, settings_key, settings_model, provider = resolved or ("", "", "", "vllm")
+
+    resolved_base = (api_base or settings_base) or None
+    resolved_key = api_key or settings_key or "EMPTY"
+    qualified_model = _qualified_model(
+        model or settings_model or DEFAULT_MODEL,
+        provider,
+        bool(resolved_base),
+    )
+    verify = _ssl_verify()
+    transport: dict[str, Any]
+    if qualified_model.startswith("openai/"):
+        sync_client, async_client_factory = _openai_clients(
+            api_base=resolved_base,
+            api_key=resolved_key,
+            verify=verify,
+        )
+        transport = {
+            "sync_client": sync_client,
+            "async_client_factory": async_client_factory,
+        }
+    else:
+        # Non-OpenAI LiteLLM providers still consume this as provider
+        # configuration; the OpenAI-compatible route instead receives concrete
+        # clients above so the option cannot leak into its JSON request body.
+        transport = {"ssl_verify": verify}
+
+    request_options: dict[str, Any] = {}
+    if extra_body is not None:
+        request_options["extra_body"] = extra_body
+
+    return RedactingLM(
+        model=qualified_model,
+        api_base=resolved_base,
+        api_key=resolved_key,
+        max_tokens=max_tokens,
+        cache=False,
+        **request_options,
+        **transport,
+    )
+
+
+def build_cia_lm(
+    *,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> dspy.LM:
+    """Build the fixed, non-thinking LM used by every CIA stage."""
+    return build_lm(
+        api_base=api_base,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        **_cia_lm_kwargs(),
+    )
+
+
+def _qualified_model(model: str, provider: str, has_endpoint: bool) -> str:
+    """The model name in the form the LM layer routes on.
+
+    Everything used to be prefixed ``openai/``. That is right for vLLM and for
+    a proxy -- both speak the OpenAI protocol whatever is behind them -- and
+    wrong for a litellm profile addressing a vendor directly, whose model names
+    carry their own vendor: ``anthropic/claude-3-5-sonnet`` became
+    ``openai/anthropic/claude-3-5-sonnet`` and went to the wrong backend.
+
+    The configured route wins over the spelling of the model. Model
+    repositories commonly contain a slash -- for example the default
+    ``deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`` -- and that namespace is
+    not a LiteLLM provider. Returning it unchanged bypasses the ``openai/``
+    route required by the configured OpenAI-compatible vLLM endpoint.
+
+    A direct LiteLLM profile still gets to route its own names. Elsewhere an
+    existing prefix is preserved only when LiteLLM says it is a provider, and
+    ``openai/`` is the only prefix that already satisfies an OpenAI-compatible
+    route.
+    """
+    provider = provider.strip().lower()
+
+    # Decide endpoint routing before looking at the slash. ``deepseek-ai`` is
+    # an organization, not a provider, and vLLM still needs
+    # openai/deepseek-ai/<model> so DSPy sends it to api_base.
+    if provider in {"vllm", "openai"} or has_endpoint:
+        return model if model.startswith("openai/") else f"openai/{model}"
+
+    if provider == "litellm":
+        # No endpoint means LiteLLM itself owns routing, for both qualified and
+        # bare names. In particular, preserve anthropic/... and bedrock/....
+        return model
+
+    prefix = _litellm_provider_prefix(model)
+    if prefix is not None:
+        return model
+    return f"openai/{model}"
+
+
+def _litellm_provider_prefix(model: str) -> str | None:
+    """The leading component when it is a real LiteLLM provider.
+
+    A slash alone proves nothing: Hugging Face-style ``org/model`` names have
+    the same shape. Read LiteLLM's provider registry rather than maintaining a
+    second list that drifts as providers are added. ``openai`` is recognized
+    independently because it is the route this module emits and must never be
+    doubled if an older LiteLLM does not expose ``provider_list``.
+    """
+    prefix, separator, _ = model.partition("/")
+    if not separator:
+        return None
+    if prefix == "openai":
+        return prefix
+
+    try:
+        import litellm
+
+        providers = getattr(litellm, "provider_list", ())
+    except ImportError:
+        return None
+
+    for candidate in providers:
+        if prefix == getattr(candidate, "value", candidate):
+            return prefix
+    return None
+
+
+def configure_dspy(
+    model: str | None = None,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    *,
+    extra_body: dict[str, Any] | None = None,
+) -> None:
+    """Set the process-wide default LM.
+
+    Model selection follows :func:`build_lm`:
+      1. the explicit *model* argument;
+      2. the shared chat profile's model (or the legacy compatibility variables);
+      3. :data:`DEFAULT_MODEL` as the final fallback.
+
+    This function does not itself pin Qwen. :func:`ensure_configured` supplies
+    the Qwen non-thinking defaults for Launch and Watch, while
+    :func:`build_cia_lm` supplies them for Autopsy.
+    """
+    global _configured
+
+    dspy.configure(
+        lm=build_lm(
+            model,
+            api_base,
+            api_key,
+            max_tokens,
+            extra_body=extra_body,
+        )
+    )
+    _configured = True
+
+
+def ensure_configured(**kwargs) -> None:
+    """Set the process-wide default LM, if nothing has set one yet.
+
+    The first caller wins, so every later caller's arguments are discarded.
+    That is harmless for a caller passing none, and a silent downgrade for a
+    caller passing some: Autopsy asked here for a larger model and a larger
+    budget, Watch had already configured the default from its own poll loop,
+    and Autopsy reasoned at Watch's settings with neither of them able to tell.
+
+    With no arguments this installs CIA's Qwen3.8 non-thinking defaults, shared
+    by Launch and Watch. Explicit arguments are no longer accepted quietly
+    once configured. A module whose settings matter should build its own LM
+    with :func:`build_lm` and bind it to its own program, which no other module
+    can then take away.
+    """
+    global _configured
+
+    caller_supplied = bool(kwargs)
+    if not caller_supplied:
+        kwargs = _cia_lm_kwargs()
+
+    if _configured:
+        if caller_supplied:
+            log.warning(
+                "DSPy already has a default LM, so %s had no effect here. Build "
+                "an LM with build_lm() and bind it to your own module instead.",
+                ", ".join(sorted(kwargs)),
+            )
+        return
+    configure_dspy(**kwargs)
