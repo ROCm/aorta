@@ -65,6 +65,14 @@ class TestTheApiVersionIsSent:
         llm = _backend().get_chat_model(streaming=False)
         assert "api_version" not in (llm.model_kwargs or {})
 
+    def test_it_is_not_sent_to_a_model_that_is_not_azure(
+        self, azure_gateway, monkeypatch, no_network
+    ):
+        """A leftover setting must not follow a switch to another provider."""
+        monkeypatch.setattr(settings, "remote_llm_model", "anthropic/claude-example")
+        llm = _backend().get_chat_model(streaming=False)
+        assert "api_version" not in (llm.model_kwargs or {})
+
     def test_it_travels_beside_the_gateway_header(self, azure_gateway, monkeypatch, no_network):
         monkeypatch.setattr(settings, "remote_llm_auth_header", "Ocp-Apim-Subscription-Key")
         llm = _backend().get_chat_model(streaming=False)

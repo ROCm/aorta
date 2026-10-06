@@ -171,9 +171,10 @@ class RemoteLiteLLMBackend:
         if headers:
             model_kwargs["extra_headers"] = headers
         # ChatLiteLLM has no api_version field; model_kwargs reach
-        # litellm.completion unchanged, which is where Azure reads it.
+        # litellm.completion unchanged, which is where Azure reads it. Azure
+        # only, so a leftover setting does not follow a switch to Anthropic.
         api_version = settings.remote_llm_api_version.strip()
-        if api_version:
+        if api_version and kwargs["model"].startswith("azure/"):
             model_kwargs["api_version"] = api_version
         if model_kwargs:
             kwargs["model_kwargs"] = model_kwargs
