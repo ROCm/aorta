@@ -150,6 +150,10 @@ release_ui_lock() {
   ui_lock_held=false
 }
 
+process_group_alive() {
+  /bin/kill -0 -- "-$1" 2>/dev/null
+}
+
 stop_remote_ui() {
   local expected remote_script
   expected="${REPO_ROOT}/.venv-ui/bin/aorta chat ui --host 127.0.0.1 --port ${UI_PORT}"
@@ -157,6 +161,9 @@ stop_remote_ui() {
 set -u
 pid_file=$1
 expected=$2
+group_alive() {
+  /bin/kill -0 -- "-$1" 2>/dev/null
+}
 if [ ! -s "$pid_file" ]; then
   exit 0
 fi
@@ -176,14 +183,24 @@ if [ -n "$args" ]; then
       exit 2
       ;;
   esac
+fi
+if group_alive "$pid"; then
   /bin/kill -TERM -- "-$pid" 2>/dev/null || true
   for _ in $(seq 1 20); do
-    kill -0 "$pid" 2>/dev/null || break
+    group_alive "$pid" || break
     sleep 0.25
   done
-  if kill -0 "$pid" 2>/dev/null; then
+  if group_alive "$pid"; then
     /bin/kill -KILL -- "-$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      group_alive "$pid" || break
+      sleep 0.1
+    done
   fi
+fi
+if group_alive "$pid"; then
+  echo "managed AORTA UI process group $pid did not stop; preserving $pid_file" >&2
+  exit 2
 fi
 rm -f "$pid_file"
 '
@@ -237,17 +254,29 @@ run_remote_worker() {
     trap - EXIT HUP INT TERM
     set +e
     if [[ -n "$ui_pid" ]]; then
-      /bin/kill -TERM -- "-${ui_pid}" 2>/dev/null || true
-      for _ in $(seq 1 20); do
-        kill -0 "$ui_pid" 2>/dev/null || break
-        sleep 0.25
-      done
-      if kill -0 "$ui_pid" 2>/dev/null; then
-        /bin/kill -KILL -- "-${ui_pid}" 2>/dev/null || true
+      if process_group_alive "$ui_pid"; then
+        /bin/kill -TERM -- "-${ui_pid}" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+          process_group_alive "$ui_pid" || break
+          sleep 0.25
+        done
+        if process_group_alive "$ui_pid"; then
+          /bin/kill -KILL -- "-${ui_pid}" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            process_group_alive "$ui_pid" || break
+            sleep 0.1
+          done
+        fi
       fi
       wait "$ui_pid" 2>/dev/null || true
     fi
-    rm -f "$UI_PID_FILE"
+    if [[ -n "$ui_pid" ]] && process_group_alive "$ui_pid"; then
+      printf 'managed AORTA UI process group %s did not stop; preserving %s\n' \
+        "$ui_pid" "$UI_PID_FILE" >&2
+      exit_code=2
+    else
+      rm -f "$UI_PID_FILE"
+    fi
     exit "$exit_code"
   }
   trap cleanup_remote_worker EXIT HUP INT TERM
