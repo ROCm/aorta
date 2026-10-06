@@ -510,6 +510,10 @@ done
 source "$ENDPOINT_FILE"
 [[ "${QWEN_VLLM_JOB_ID:-}" == "$active_job" ]] ||
   die "endpoint file belongs to job ${QWEN_VLLM_JOB_ID:-unknown}, expected $active_job"
+recorded_model="${AORTA_CHAT_VLLM_MODEL:-}"
+[[ -n "$recorded_model" ]] ||
+  die "endpoint file has no served model: $ENDPOINT_FILE"
+MODEL="$recorded_model"
 [[ "$AORTA_CHAT_VLLM_BASE_URL" != *"localhost:8000"* ]] ||
   die "refusing forbidden fallback endpoint: $AORTA_CHAT_VLLM_BASE_URL"
 if [[ -f "$PENDING_FILE" ]] &&
