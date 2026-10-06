@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-06T15:06:38.554263+00:00",
+  "build": {
+    "lane": "canary",
+    "base_image": "rocm/pytorch:latest@sha256:099f59a3bee9c436f5cc57db6bc6076fdeda579c57e9e22ae40f856d5905b3e4",
+    "amd_aorta_version": null,
+    "torch": null,
+    "hip": null,
+    "rocm": null,
+    "upstream_run_id": null,
+    "head_sha": "65deac885890842df344ee8adc53e5f33c1af9c7",
+    "wheel_file": null
+  },
+  "summary": {
+    "total": 0,
+    "pass": 0,
+    "fail": 0,
+    "record": 0,
+    "skip": 0
+  },
+  "entries": [],
+  "error": "canary produced no usable results document (exit 1); it failed before the evaluator wrote one, or wrote one that does not parse"
+}
