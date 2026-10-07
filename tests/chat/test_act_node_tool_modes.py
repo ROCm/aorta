@@ -716,7 +716,8 @@ class TestAutoEscalationToNative:
         assert caplog.text.count("this process will use native from here") == 1
         assert "AORTA_CHAT_LLM_TOOL_MODE" in caplog.text
         # Names the protocol itself rather than sending the reader to the
-        # startup banner, which `aorta chat ui` never prints (#468). Not
+        # startup banner, which has scrolled away in a long-lived server log
+        # and which `aorta chat ui` writes per session, not at startup. Not
         # `aorta chat doctor` either: it reports extras, the backend, the index
         # and the model cache, but nothing about the tool protocol.
         assert "'text' protocol" in caplog.text

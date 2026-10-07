@@ -328,13 +328,13 @@ adds a hint to the tool-mode line naming the configured protocol and what it
 costs. The two startup signals above are what this change contributes and they
 do not depend on #463 having landed.
 
-One gap in them: the startup line comes from the CLI entry points, so
-`aorta chat` and `aorta chat ask` get it and `aorta chat ui` does not — its
-Chainlit welcome banner names the provider but not the protocol, which is the
-front door where the process-wide scope above matters most.
-[#468](https://github.com/ROCm/aorta/issues/468) tracks putting it there. Until
-it does, a UI operator reads the protocol from the escalation warning in the
-server log, or from `aorta chat doctor`.
+`aorta chat ui` names it too, on each session's welcome banner and in the same
+`LLM backend: ... (tool protocol: ...)` line in the server log
+([#468](https://github.com/ROCm/aorta/issues/468)). Both are written when a
+browser session opens rather than once when the server starts, because the
+escalation is process-wide: a session that opens after it is told `native`, with
+a note that the server switched from the configured `text`, instead of the
+protocol the server started on.
 
 ### Answering anyway when the act loop gives up
 
