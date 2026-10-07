@@ -296,7 +296,7 @@ PY
 
   cleanup_worker() {
     if [[ -f "$ENDPOINT_FILE" ]] &&
-       grep -Fq "QWEN_VLLM_JOB_ID=${SLURM_JOB_ID}" "$ENDPOINT_FILE"; then
+       grep -Fxq "export QWEN_VLLM_JOB_ID=${SLURM_JOB_ID}" "$ENDPOINT_FILE"; then
       rm -f "$ENDPOINT_FILE"
     fi
   }
