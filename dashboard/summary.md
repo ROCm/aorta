@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-10-06T141219-37463222089` · commit `1f59e2040535` · 2026-10-06 14:12:19 UTC
+Run `2026-10-07T142601-37621140131` · commit `cab08a1abc4c` · 2026-10-07 14:26:01 UTC
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -20,7 +20,7 @@ Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate)
 
 Observed sanitizer verdict `warn` · expected `warn`
 Observation: waitcheck warn; 64 finding(s) (wait_hazard)
-backend `rj_waitcheck` `04ea68628700` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
+backend `rj_waitcheck` `921330d92bb4` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
@@ -58,7 +58,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `sampled_conflict` | race | 1 | [rocjitsu-dbi-hooks] ConSan conflict reader=98070116550080 first_index=6 second_index=9 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 generat… |
+| consan | `sampled_conflict` | race | 1 | [rocjitsu-dbi-hooks] ConSan conflict reader=107553151024160 first_index=6 second_index=9 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 genera… |
 
 </details>
 
@@ -96,7 +96,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatc
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `ec03f51224` | — |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `530642105f` | — |
 
 </details>
 
@@ -110,7 +110,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `8d63c1e62d` | combined_hook_exit_86 |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `66184787a5` | combined_hook_exit_86 |
 
 </details>
 
@@ -136,7 +136,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `ec03f51224` | — |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `530642105f` | — |
 
 </details>
 
@@ -148,7 +148,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `8d63c1e62d` | — |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `66184787a5` | — |
 
 </details>
 
@@ -156,6 +156,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-10-07T142601-37621140131 | `cab08a1abc4c` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-06T141219-37463222089 | `1f59e2040535` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-05T163143-37309782694 | `b306c32cf2b8` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-10-05T161430-37207730800 | `77d4fbb48a5d` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | Incomplete |
@@ -185,4 +186,3 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 | 2026-09-13T124242-34756892631 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-12T124242-34693445702 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-11T124542-34598790075 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
-| 2026-09-10T124939-34476548600 | `6a8c70da0add` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
