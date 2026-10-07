@@ -97,6 +97,22 @@ def test_reused_endpoint_probes_the_model_recorded_by_its_worker() -> None:
     assert source.index(adoption) < source.index(first_probe)
 
 
+def test_submitted_job_is_cancelled_until_pending_state_is_durable() -> None:
+    source = SCRIPTS[0].read_text(encoding="utf-8")
+    start = source.index("remote_submit='")
+    submit = source[start : source.index("new_job=", start)]
+
+    assert "cleanup_untracked_job()" in submit
+    assert 'scancel "$job_id"' in submit
+    assert "trap cleanup_untracked_job EXIT" in submit
+    assert submit.index("trap cleanup_untracked_job EXIT") < submit.index(
+        'printf "%s\\n" "$job_id" >"$pending_tmp"'
+    )
+    assert submit.index('mv "$pending_tmp" "$pending_file"') < submit.rindex(
+        "trap - EXIT HUP INT TERM"
+    )
+
+
 def test_manual_cleanup_preserves_the_endpoint_when_slurm_is_unreachable() -> None:
     source = QUICKSTART.read_text(encoding="utf-8")
     cleanup = source[
