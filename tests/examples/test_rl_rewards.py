@@ -448,21 +448,32 @@ def test_unparseable_prose_is_still_a_silent_stop(proposal_reward):
     assert score.consumer_outcome == "silent_stop"
 
 
-def test_hrx_perf_cannot_reach_tier_5_on_a_partial_seam(recipe_reward):
-    """Its `_validated_config` is not the whole pure-config check.
+def test_hrx_perf_is_graded_on_its_whole_config(recipe_reward):
+    """`hrx_perf`'s `_validated_config` covers every hardware-free key.
 
-    The seam covers bench/size/iters/warmup; `setup()` also validates
-    `gpu_arch`, `timeout_sec > 0` and `keep_build` being a bool, none of which
-    touch hipcc or a GPU. Treating the seam as the whole validator let a recipe
-    with a nonsense `gpu_arch` read as fully valid, so it is reported
-    ungradeable instead -- distinct from `tier4_workload`, which would blame the
-    recipe.
+    It now validates `gpu_arch`, `timeout_sec > 0`, `keep_build` being a bool
+    and `hipcc`/`build_dir` being paths as well as bench/size/iters/warmup, so
+    passing it is evidence of full validity: a shipped recipe reaches tier 5
+    rather than `tier4_ungradeable`, and a bad value for any of those keys fails
+    at `tier4_workload`, as the recipe's fault.
     """
-    from aorta.workloads.hrx_perf import HrxPerfWorkload
+    for name in ("hrx-perf-gemm.yaml", "hrx-perf-triad.yaml"):
+        grade = recipe_reward.grade_recipe_text((_REPO / "recipes" / "hrx" / name).read_text())
+        assert (grade.tier, grade.failed_at) == (5, None), grade.reason
 
-    assert "HrxPerfWorkload" in recipe_reward._PARTIAL_CONFIG_SEAMS
-    with pytest.raises(recipe_reward.NoConfigOnlySeam):
-        recipe_reward._validate_config(HrxPerfWorkload, {"bench": "gemm"})
+    shipped = yaml.safe_load((_REPO / "recipes" / "hrx" / "hrx-perf-gemm.yaml").read_text())
+    for key, bad in (
+        ("gpu_arch", "../../etc"),
+        ("timeout_sec", 0),
+        ("keep_build", "yes"),
+        ("hipcc", 123),
+        ("build_dir", 123),
+        ("build_dir", "/tmp/a\0b"),
+    ):
+        doc = {**shipped, "workload_config": {**shipped["workload_config"], key: bad}}
+        grade = recipe_reward.grade_recipe_text(yaml.safe_dump(doc, sort_keys=False))
+        assert grade.failed_at == "tier4_workload", (key, grade.failed_at, grade.reason)
+        assert "ValueError" in grade.reason, (key, grade.reason)
 
 
 def test_an_inline_docker_environment_reaches_tier_3(recipe_reward):
