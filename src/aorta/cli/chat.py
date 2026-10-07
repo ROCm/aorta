@@ -60,7 +60,14 @@ _INSTALL_HINT = (
 _LLM_PROVIDERS = ("litellm", "openai", "vllm")
 
 #: Likewise hard-coded against ``aorta.chat.config.PROFILE_TEMPLATES``.
-_CONFIG_PROFILES = ("anthropic", "azure-apim", "local-vllm", "openai", "openai-compatible")
+_CONFIG_PROFILES = (
+    "anthropic",
+    "azure-apim",
+    "azure-openai",
+    "local-vllm",
+    "openai",
+    "openai-compatible",
+)
 
 #: How the two group-level flags that are not settings reach the Chainlit
 #: child. Hard-coded for the same reason as the lists above, and checked
