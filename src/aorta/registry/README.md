@@ -3,7 +3,8 @@
 Three small registries that ship with aorta:
 
 - **Mitigations** (`name → env vars`) — process-level flags applied just before
-  the workload subprocess launches. Examples: `tf32_off`, `xnack`.
+  the workload subprocess launches. Examples: `xnack`,
+  `pytorch_no_cuda_memory_caching`.
 - **Environments** (`name → launch hints + baseline env vars`) — baseline
   state of the process, container, or Buck-built binary the workload runs in.
   Launch hints include `docker`, `venv`, and `buck_target`; `env` is an
@@ -40,7 +41,7 @@ candidate — it's a plugin candidate (Path 2).
 
 | Qualifies as built-in | Does NOT qualify (use Path 2) |
 |---|---|
-| `DISABLE_TF32` (hipBLASLt reads it) | `AMP_DTYPE` (only the workload's Python reads it) |
+| `PYTORCH_NO_CUDA_MEMORY_CACHING` (PyTorch's allocator reads it) | `AMP_DTYPE` (only the workload's Python reads it) |
 | `HSA_XNACK` (ROCm runtime reads it) | `MY_MODEL_DTYPE` (only a plugin workload reads it) |
 | `CUDA_LAUNCH_BLOCKING` (PyTorch reads it) | Any custom flag your workload introspects |
 | `NCCL_DEBUG`, `OMP_NUM_THREADS`, `LD_PRELOAD` | Anything that's a silent no-op on workloads that don't read it |
@@ -51,7 +52,6 @@ add one entry to the dict:
 ```python
 BUILTIN_MITIGATIONS = {
     "none":     {},
-    "tf32_off": {"DISABLE_TF32": "1"},
     "xnack":    {"HSA_XNACK": "1"},
     "no_sdma":  {"HSA_ENABLE_SDMA": "0"},   # <-- your addition
 }
@@ -475,6 +475,39 @@ the built-in axis.
 
 Tracked in issue #195.
 
+### Built-ins that cannot act on some stacks
+
+A mitigation that cannot change anything on the stack under test is a second
+baseline under another name. Its cell records the env it was given, as a
+working mitigation's would, so the matrix cannot tell the two apart. Keep
+these entries out of an axis where the condition holds, or read their cells as
+baselines. The names stay registered, because recipes and archived cells
+refer to them. See aorta#511.
+
+| Entry | Why it cannot act | Where |
+|---|---|---|
+| `tf32_off` | `DISABLE_TF32` is read by no ROCm or PyTorch library | every ROCm and PyTorch stack, unless the workload reads `DISABLE_TF32` itself; aorta#500 |
+| `pytorch_alloc_expandable_segments` | PyTorch reads the option and refuses it: *expandable_segments not supported on this platform* | PyTorch builds without expandable-segment support |
+| `fa_prefer_ck` | PyTorch reads it, warns *Cannot set preferred SDPA backend to CK*, and stays on AOTriton | PyTorch builds without CK SDPA, or with any visible GPU outside CK's architecture list |
+| `fa_prefer_aotriton` | `TORCH_ROCM_FA_PREFER_CK=0` reads as unset, and unset already means AOTriton | unless the environment exports `1` on a stack where `fa_prefer_ck` can act |
+| `hsa_enable_cache` | `HSA_DISABLE_CACHE=0` is libhsakmt's default | unless the environment exports any value other than exactly `0`, even an empty one |
+| `hsa_no_scratch_reclaim` | the image already exports `HSA_NO_SCRATCH_RECLAIM=1` | `rocm/primus` images |
+| `rccl_gfx942_cheap_fence_off` | RCCL 10.0 turns the cheap fence off by default | RCCL 10.0; it acts on RCCL 7.1.0 through 7.2 |
+
+`rccl_gfx942_cheap_fence_off` keeps its original name and sets both
+`RCCL_GFX9_CHEAP_FENCE_OFF`, the variable RCCL reads in ROCm 7.1.1 through 7.2
+and in RCCL 10.0, and `RCCL_GFX942_CHEAP_FENCE_OFF`, the spelling only ROCm
+7.1.0 reads. ROCm 7.0.2 and earlier have neither. Upstream RCCL development
+renames the variable again, to `RCCL_CHEAP_POST_SEND_FENCE_OFF`; a release
+that ships that rename is outside what this entry covers.
+
+`nccl_launch_order_implicit` is a different case: it acts, and has been seen
+to crash every rank (aorta#512).
+
+`tests/registry/test_mitigation_variable_presence.py` checks the first kind —
+a variable no scanned library contains — on the GPU lane. The rest need a
+running workload or the image's environment, and nothing checks them yet.
+
 ## Verifying what's registered
 
 ```bash
@@ -490,7 +523,7 @@ debugging "did my plugin actually load?".
 ## Hard rule: no logic in registries
 
 These modules contain only **data + lookup**. No environment manipulation, no
-docker invocation, no validation of whether `DISABLE_TF32=1` is a "good"
+docker invocation, no validation of whether `HSA_XNACK=1` is a "good"
 value. Logic that consumes the registry data lives in the dispatchers (the
 mitigation harness, the workload runtime). Mixing the two would make the
 registry untestable in isolation and impossible to mock.

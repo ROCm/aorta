@@ -3,11 +3,11 @@
 # Opaque user launch command:
 #
 #   aorta sweep run \
-#       --recipe recipes/example-probe-smoke.yaml \
+#       --recipe recipes/probe/example-probe-smoke.yaml \
 #       --output ./probe_results \
 #       --ticket PROBE-188 \
 #       -- \
-#       bash -c 'echo hi'
+#       bash -c 'echo hi; echo PYTORCH_NO_CUDA_MEMORY_CACHING=${PYTORCH_NO_CUDA_MEMORY_CACHING:-unset}'
 #
 # Verdict comes from the Phase-2 five-tier classifier in
 # `aorta.probe.classifier`: a trial fails if any Tier 1-4 detector
@@ -28,9 +28,14 @@ ticket: PROBE-188-SMOKE
 
 trials: 2
 
+# This recipe tests the harness, not a mitigation: cell synthesis, env
+# stamping and per-cell output. The command above reads nothing, so both cells
+# pass; what differs is each cell's stdout, which shows the variable arrived
+# (=1) in the second cell and not in the baseline (=unset). Give a real
+# workload a built-in it reads.
 mitigation_axis:
   - none
-  - tf32_off
+  - pytorch_no_cuda_memory_caching
 
 diagnostic_axis:
   - none

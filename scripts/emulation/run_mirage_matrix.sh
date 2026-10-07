@@ -111,7 +111,7 @@ CASES=(
   'triage-inference-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/inference-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
   'triage-training-ddp-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/training-ddp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
   'triage-training-fsdp-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/training-fsdp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
-  'probe-smoke|["probe","--recipe","/tmp/aorta-build/src/recipes/probe/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE-MATRIX","--","bash","-c","echo hi from mirage probe"]'
+  'probe-smoke|["probe","--recipe","/tmp/aorta-build/src/recipes/probe/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE-MATRIX","--","bash","-c","echo hi from mirage probe; echo PYTORCH_NO_CUDA_MEMORY_CACHING=${PYTORCH_NO_CUDA_MEMORY_CACHING:-unset}"]'
   'probe-list-patterns|["probe","--list-patterns"]'
 )
 

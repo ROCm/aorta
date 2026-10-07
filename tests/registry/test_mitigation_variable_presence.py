@@ -6,10 +6,11 @@ consumes a trial, reports ``fail`` beside the real baseline, and looks exactly
 like a mitigation that was tried and did not help -- a second baseline under a
 different name, which is the failure the probe harness exists to prevent.
 
-Two entries are in that state on the stack probes run on today: ``tf32_off``
-(aorta#500) and ``rccl_gfx942_cheap_fence_off``. Both were found the expensive
-way, by building a scenario around the knob and watching it not invert. This
-check finds them in milliseconds.
+``tf32_off`` (aorta#500) is in that state on the stack probes run on today.
+``rccl_gfx942_cheap_fence_off`` was too, until it was also pointed at the name ROCm
+7.1.1 renamed its variable to (aorta#511). Both were found the expensive way, by
+building a scenario around the knob and watching it not invert. This check
+finds them in milliseconds.
 
 WHAT THIS CAN AND CANNOT DETECT
 ===============================
@@ -59,8 +60,9 @@ Not covered, and not detectable this way:
   0*) are in this state, and both variables are present in the binaries. Only
   running something and reading its warnings finds these.
 * **sets the value that is already the default** -- ``fa_prefer_aotriton``
-  sets ``TORCH_ROCM_FA_PREFER_CK=0``. The variable is present and is honoured;
-  the value is a no-op. Needs the runtime's documented default, not a grep.
+  sets ``TORCH_ROCM_FA_PREFER_CK=0`` and ``hsa_enable_cache`` sets
+  ``HSA_DISABLE_CACHE=0``. The variable is present and is honoured; the value
+  is a no-op. Needs the runtime's documented default, not a grep.
 * **already set in the image** -- ``rocm/primus:v26.3`` bakes
   ``HSA_NO_SCRATCH_RECLAIM=1`` into ``Config.Env``, so
   ``hsa_no_scratch_reclaim`` sets what is set. Needs the cell's intent compared
@@ -116,10 +118,15 @@ class Exemption(NamedTuple):
     one binary that could retire the entry was the one binary never opened,
     and :func:`test_known_absent_entries_are_still_absent` could only ever
     confirm what it already assumed.
+
+    ``read_by_nothing`` says whether the absence holds on every stack or only
+    on the ones scanned. It is required, so each entry states its scope:
+    a spelling an older release reads is absent here and still read there.
     """
 
     claimed_consumer: str
     reason: str
+    read_by_nothing: bool
 
 
 #: ``(mitigation, variable)`` pairs known to be absent from every scanned
@@ -144,18 +151,19 @@ KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
         claimed_consumer="libhipblaslt.so",
         reason=(
             "DISABLE_TF32 appears in no ROCm or torch binary; aorta#500. The "
-            "registry once attributed it to hipBLASLt and "
-            "instrumentation/env_knobs.py attributes it to pytorch, and "
-            "neither holds."
+            "registry once attributed it to hipBLASLt, the claim this entry "
+            "excuses; the entry is kept only so existing names resolve."
         ),
+        read_by_nothing=True,
     ),
     ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"): Exemption(
         claimed_consumer="librccl.so",
         reason=(
-            "RCCL_GFX942_CHEAP_FENCE_OFF appears in no binary including "
-            "librccl; the name is gfx942-scoped and the supported targets "
-            "have moved on. aorta#511."
+            "The spelling only ROCm 7.1.0's RCCL reads, kept so the entry still "
+            "acts there. ROCm 7.1.1 through 7.2 and RCCL 10.0 read "
+            "RCCL_GFX9_CHEAP_FENCE_OFF, which the same entry also sets."
         ),
+        read_by_nothing=False,
     ),
 }
 
@@ -164,8 +172,8 @@ def exemption_sonames() -> tuple[str, ...]:
     """Libraries only a :data:`KNOWN_ABSENT` claim puts in the scan set.
 
     Deduplicated and order-stable, and it skips anything
-    :data:`RUNTIME_SONAMES` already carries -- ``librccl`` is already scanned
-    for its own sake, so the RCCL exemption adds nothing.
+    :data:`RUNTIME_SONAMES` already carries -- an exemption claiming
+    ``librccl`` adds nothing, since it is already scanned for its own sake.
     """
     return tuple(
         dict.fromkeys(
@@ -887,7 +895,7 @@ def test_every_known_absent_claim_is_scanned():
 
 
 def test_exemption_sonames_does_not_restate_the_runtime_set():
-    """``librccl`` is scanned for its own sake; the RCCL entry must not re-add it.
+    """A runtime soname is scanned for its own sake; an exemption must not re-add it.
 
     Not cosmetic: :func:`sonames_to_scan` concatenates, so a duplicate would
     resolve the same library twice per directory. The dedup in
@@ -907,13 +915,14 @@ def test_known_absent_covers_only_the_mode_this_test_can_see():
 
     The other three inertness modes are invisible to a grep, so an entry parked
     here for one of them would be silenced by a check that never looked at it.
-    These four are the ones aorta#511 records as inert for reasons this test
+    These are the ones aorta#511 records as inert for reasons this test
     cannot see; none of them belongs in KNOWN_ABSENT.
     """
     not_greppable = {
         "pytorch_alloc_expandable_segments",  # read and refused
         "fa_prefer_ck",                       # read and refused
         "fa_prefer_aotriton",                 # sets the default value
+        "hsa_enable_cache",                   # sets the default value
         "hsa_no_scratch_reclaim",             # already set in the image
     }
     misfiled = sorted(not_greppable & {m for m, _ in KNOWN_ABSENT})
@@ -2738,6 +2747,7 @@ def _synthetic_exemption(monkeypatch) -> tuple[str, str]:
         Exemption(
             claimed_consumer="libamdhip64.so",
             reason="fixture for this test; never reaches the real backlog",
+            read_by_nothing=True,
         ),
     )
     return ("synthetic_mitigation", "SYNTHETIC_ABSENT")
@@ -2824,4 +2834,101 @@ def test_a_name_that_is_not_a_tail_does_not_flag_its_exemption(monkeypatch, tmp_
     assert find_possibly_read_known_absent(whole) == {}
     assert NameEvidence(frozenset({name}), frozenset()).hosts_of(name) == frozenset(), (
         "a name is not the tail of itself"
+    )
+
+
+def test_a_known_absent_variable_is_not_attributed_to_a_library_elsewhere():
+    """The repo must not contradict this list about who reads a variable.
+
+    ``DISABLE_TF32`` was excused here as read by nothing while
+    ``instrumentation/env_knobs.py`` attributed it to pytorch (aorta#500). A
+    captured knob may stay in that manifest, since a workload can read it, but
+    its ``library`` has to say so. Only entries marked ``read_by_nothing``
+    apply: a spelling an older release reads may be attributed to it.
+    """
+    from aorta.instrumentation.env_knobs import ENV_KNOB_REGISTRY
+
+    absent = {
+        variable
+        for (_, variable), exemption in KNOWN_ABSENT.items()
+        if exemption.read_by_nothing
+    }
+    attributed = sorted(
+        (knob.name, knob.library)
+        for knob in ENV_KNOB_REGISTRY
+        if knob.name in absent and knob.library != "workload"
+    )
+    assert not attributed, (
+        f"{attributed}: these variables are in KNOWN_ABSENT as read by nothing, "
+        "yet ENV_KNOB_REGISTRY names a library that "
+        "reads them. Correct the attribution or retire the exemption."
+    )
+
+
+#: ``(recipe, mitigation)`` pairs allowed to name a KNOWN_ABSENT mitigation,
+#: and why. Per pair, so a new dead name in an exempt recipe is still caught,
+#: and each pair must still match a hit, so a stale one cannot linger.
+_KNOWN_ABSENT_RECIPE_EXEMPTIONS = {
+    ("llm-determinism/example-llm-determinism.yaml", "tf32_off"): (
+        "keeps its tf32_off cell, commented as a second baseline, so earlier "
+        "runs keep their cell names (aorta#500)"
+    ),
+}
+
+
+def shipped_recipes_using_known_absent(recipes_root: Path) -> set[tuple[str, str]]:
+    """``(recipe, mitigation)`` pairs where a shipped recipe names a mitigation
+    whose every variable is in KNOWN_ABSENT, on a probe axis or in a cell.
+    Exemptions are not applied here."""
+    import yaml
+
+    absent: dict[str, set[str]] = {}
+    for name, variable in KNOWN_ABSENT:
+        absent.setdefault(name, set()).add(variable)
+    dead = {
+        name
+        for name, env in BUILTIN_MITIGATIONS.items()
+        if env and set(env) <= absent.get(name, set())
+    }
+    hits = set()
+    for path in sorted(recipes_root.rglob("*.yaml")):
+        rel = path.relative_to(recipes_root).as_posix()
+        doc = yaml.safe_load(path.read_text())
+        if not isinstance(doc, dict):
+            continue
+        names: list[str] = []
+        if doc.get("mode") == "probe":
+            for axis in ("mitigation_axis", "diagnostic_axis"):
+                names += doc.get(axis) or []
+        for cell in doc.get("cells") or []:
+            if isinstance(cell, dict):
+                names += cell.get("mitigations") or []
+        hits |= {(rel, name) for name in names if name in dead}
+    return hits
+
+
+def test_no_shipped_recipe_names_a_known_absent_mitigation():
+    """A handout that teaches a name nothing reads hands out a second baseline.
+
+    The probe templates, the probe smoke recipe and the FSDP quick-start recipe
+    all taught ``tf32_off`` (aorta#500).
+    """
+    hits = shipped_recipes_using_known_absent(_REPO_ROOT / "recipes")
+    unexempted = sorted(hits - _KNOWN_ABSENT_RECIPE_EXEMPTIONS.keys())
+    assert not unexempted, (
+        f"{unexempted}: every variable these mitigations set is in KNOWN_ABSENT, "
+        "so the cell is a second baseline. Use a built-in the stack reads, or "
+        "add the pair to _KNOWN_ABSENT_RECIPE_EXEMPTIONS with the reason."
+    )
+
+
+def test_every_recipe_exemption_still_matches_a_hit():
+    """An exemption that matches nothing guards nothing, and would silently
+    excuse the pair if its mitigation went dead again later. This also covers
+    an exempted recipe that moved or was deleted."""
+    hits = shipped_recipes_using_known_absent(_REPO_ROOT / "recipes")
+    stale = sorted(_KNOWN_ABSENT_RECIPE_EXEMPTIONS.keys() - hits)
+    assert not stale, (
+        f"{stale}: these exemptions no longer match a recipe that names a "
+        "KNOWN_ABSENT mitigation. Remove them."
     )
