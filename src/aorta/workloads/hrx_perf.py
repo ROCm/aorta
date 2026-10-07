@@ -183,13 +183,16 @@ class HrxPerfWorkload(Workload):
         self._keep_build = keep_build
 
         # setup() treats an empty value as unset, so only a non-empty one has
-        # to be a path; shutil.which and Path would raise TypeError on it.
+        # to be a path. Anything else fails there regardless of host: a
+        # non-path raises TypeError, a NUL byte makes Path raise for build_dir
+        # and makes _resolve_hipcc skip a configured hipcc for the default.
         for key in ("hipcc", "build_dir"):
             value = self.config.get(key)
-            if value and not isinstance(value, (str, os.PathLike)):
-                raise ValueError(
-                    f"hrx_perf: {key} must be a path, got {type(value).__name__}"
-                )
+            if not value:
+                continue
+            path = os.fspath(value) if isinstance(value, (str, os.PathLike)) else None
+            if not isinstance(path, str) or "\0" in path:
+                raise ValueError(f"hrx_perf: {key} must be a path, got {value!r}")
 
     def setup(self) -> None:
         self._validated_config()

@@ -370,7 +370,7 @@ def test_validated_config_rejects_non_bool_keep_build(bad):
 
 
 @pytest.mark.parametrize("key", ["hipcc", "build_dir"])
-@pytest.mark.parametrize("bad", [123, True, ["/usr/bin/hipcc"]])
+@pytest.mark.parametrize("bad", [123, True, ["/usr/bin/hipcc"], "/tmp/a\0b"])
 def test_validated_config_rejects_non_path_hipcc_and_build_dir(key, bad):
     wl = HrxPerfWorkload({"bench": "gemm", key: bad})
     with pytest.raises(ValueError, match=f"{key} must be a path"):

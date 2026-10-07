@@ -468,6 +468,7 @@ def test_hrx_perf_is_graded_on_its_whole_config(recipe_reward):
         ("keep_build", "yes"),
         ("hipcc", 123),
         ("build_dir", 123),
+        ("build_dir", "/tmp/a\0b"),
     ):
         doc = {**shipped, "workload_config": {**shipped["workload_config"], key: bad}}
         grade = recipe_reward.grade_recipe_text(yaml.safe_dump(doc, sort_keys=False))
