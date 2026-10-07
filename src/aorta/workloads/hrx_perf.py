@@ -133,12 +133,13 @@ class HrxPerfWorkload(Workload):
         """Validate and bind every knob that can be checked without a machine.
 
         This is the whole hardware-free half of :meth:`setup`, not a subset of
-        it: `setup()` calls this and then does nothing but acquire resources
-        (hipcc, a reachable GPU, a build directory). Keeping the two in one
-        place is deliberate -- a caller that validates a recipe without a GPU
-        (the recipe grader in ``examples/rl``) reads this method as "the config
-        is valid", so a check living only in `setup()` makes that answer wrong
-        for the keys it covers, and a check copied into both places drifts.
+        it: `setup()` calls this first, and after it only checks the host (the
+        ``LD_PRELOAD`` objects exist) and acquires resources (hipcc, a reachable
+        GPU, a build directory). Keeping the two in one place is deliberate --
+        a caller that validates a recipe without a GPU (the recipe grader in
+        ``examples/rl``) reads this method as "the config is valid", so a check
+        living only in `setup()` makes that answer wrong for the keys it
+        covers, and a check copied into both places drifts.
 
         ``hipcc`` and ``build_dir`` are the two knobs left to `setup()`: the
         only question either raises is whether a path exists on *this* host,
@@ -182,6 +183,12 @@ class HrxPerfWorkload(Workload):
         self._keep_build = keep_build
 
     def setup(self) -> None:
+        self._validated_config()
+
+        # Everything below this line needs the machine, which is why it stays
+        # out of _validated_config(), and runs after it so a bad config is
+        # reported as a config error even when the host is also wrong.
+        #
         # Same fail-fast guard as the hrx workload: a nonexistent LD_PRELOAD is
         # only a loader warning, so an hrx_on cell would otherwise benchmark the
         # DEFAULT HIP runtime and report a meaningless comparison.
@@ -195,10 +202,7 @@ class HrxPerfWorkload(Workload):
                 "so the cell would silently measure stock HIP. Fix the path(s) "
                 "in the cell's extra_env (absolute paths)."
             )
-        self._validated_config()
 
-        # Everything below this line needs the machine, which is why it stays
-        # out of _validated_config().
         hipcc = _resolve_hipcc(self.config.get("hipcc"))
         if hipcc is None:
             raise RuntimeError(

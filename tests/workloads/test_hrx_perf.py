@@ -443,3 +443,22 @@ def test_config_errors_precede_hardware_acquisition(monkeypatch):
     ):
         with pytest.raises(ValueError):
             HrxPerfWorkload({"bench": "gemm", **config}).setup()
+
+
+def test_config_errors_precede_the_preload_check(monkeypatch, tmp_path):
+    """A bad config is still a config error when the cell's LD_PRELOAD is wrong too.
+
+    The preload check asks whether a path exists on this host, the same kind of
+    question as hipcc, so it runs after the seam. Ahead of it, a missing
+    LD_PRELOAD object turned every config error into a RuntimeError about the
+    host, and setup() disagreed with what _validated_config() reports.
+    """
+    monkeypatch.setenv("LD_PRELOAD", str(tmp_path / "absent" / "libamdhip64.so"))
+    for config in (
+        {"gpu_arch": "../../etc"},
+        {"timeout_sec": 0},
+        {"keep_build": "yes"},
+        {"bench": "nope"},
+    ):
+        with pytest.raises(ValueError):
+            HrxPerfWorkload({"bench": "gemm", **config}).setup()
