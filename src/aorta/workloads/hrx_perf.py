@@ -141,10 +141,10 @@ class HrxPerfWorkload(Workload):
         living only in `setup()` makes that answer wrong for the keys it
         covers, and a check copied into both places drifts.
 
-        ``hipcc`` and ``build_dir`` are the two knobs left to `setup()`: the
-        only question either raises is whether a path exists on *this* host,
-        and answering it for ``build_dir`` means creating the directory. Those
-        are run-time preconditions rather than statements about the config.
+        ``hipcc`` and ``build_dir`` are only type-checked here. Whether either
+        path exists on *this* host is left to `setup()`, and answering it for
+        ``build_dir`` means creating the directory. Those are run-time
+        preconditions rather than statements about the config.
         """
         for key in self.config:
             if key in _KNOWN_KEYS or key in _RESERVED_KEYS or key.startswith("_aorta_"):
@@ -181,6 +181,15 @@ class HrxPerfWorkload(Workload):
                 f"hrx_perf: keep_build must be a bool, got {type(keep_build).__name__}"
             )
         self._keep_build = keep_build
+
+        # setup() treats an empty value as unset, so only a non-empty one has
+        # to be a path; shutil.which and Path would raise TypeError on it.
+        for key in ("hipcc", "build_dir"):
+            value = self.config.get(key)
+            if value and not isinstance(value, (str, os.PathLike)):
+                raise ValueError(
+                    f"hrx_perf: {key} must be a path, got {type(value).__name__}"
+                )
 
     def setup(self) -> None:
         self._validated_config()

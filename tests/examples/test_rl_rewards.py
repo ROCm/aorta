@@ -451,18 +451,24 @@ def test_unparseable_prose_is_still_a_silent_stop(proposal_reward):
 def test_hrx_perf_is_graded_on_its_whole_config(recipe_reward):
     """`hrx_perf`'s `_validated_config` covers every hardware-free key.
 
-    It now validates `gpu_arch`, `timeout_sec > 0` and `keep_build` being a bool
-    as well as bench/size/iters/warmup, so passing it is evidence of full
-    validity: a shipped recipe reaches tier 5 rather than `tier4_ungradeable`,
-    and a bad value for any of those keys fails at `tier4_workload`, as the
-    recipe's fault.
+    It now validates `gpu_arch`, `timeout_sec > 0`, `keep_build` being a bool
+    and `hipcc`/`build_dir` being paths as well as bench/size/iters/warmup, so
+    passing it is evidence of full validity: a shipped recipe reaches tier 5
+    rather than `tier4_ungradeable`, and a bad value for any of those keys fails
+    at `tier4_workload`, as the recipe's fault.
     """
     for name in ("hrx-perf-gemm.yaml", "hrx-perf-triad.yaml"):
         grade = recipe_reward.grade_recipe_text((_REPO / "recipes" / "hrx" / name).read_text())
         assert (grade.tier, grade.failed_at) == (5, None), grade.reason
 
     shipped = yaml.safe_load((_REPO / "recipes" / "hrx" / "hrx-perf-gemm.yaml").read_text())
-    for key, bad in (("gpu_arch", "../../etc"), ("timeout_sec", 0), ("keep_build", "yes")):
+    for key, bad in (
+        ("gpu_arch", "../../etc"),
+        ("timeout_sec", 0),
+        ("keep_build", "yes"),
+        ("hipcc", 123),
+        ("build_dir", 123),
+    ):
         doc = {**shipped, "workload_config": {**shipped["workload_config"], key: bad}}
         grade = recipe_reward.grade_recipe_text(yaml.safe_dump(doc, sort_keys=False))
         assert grade.failed_at == "tier4_workload", (key, grade.failed_at, grade.reason)

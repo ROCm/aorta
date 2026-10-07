@@ -369,6 +369,22 @@ def test_validated_config_rejects_non_bool_keep_build(bad):
         wl._validated_config()
 
 
+@pytest.mark.parametrize("key", ["hipcc", "build_dir"])
+@pytest.mark.parametrize("bad", [123, True, ["/usr/bin/hipcc"]])
+def test_validated_config_rejects_non_path_hipcc_and_build_dir(key, bad):
+    wl = HrxPerfWorkload({"bench": "gemm", key: bad})
+    with pytest.raises(ValueError, match=f"{key} must be a path"):
+        wl._validated_config()
+
+
+@pytest.mark.parametrize("key", ["hipcc", "build_dir"])
+@pytest.mark.parametrize("value", [None, "", False, "/nonexistent/path"])
+def test_validated_config_leaves_path_existence_to_setup(key, value):
+    """Only the type is the seam's business: a value setup() reads as unset, or
+    a path this host does not have, still gets through it."""
+    HrxPerfWorkload({"bench": "gemm", key: value})._validated_config()
+
+
 _VALID_CONFIG = {
     "bench": "triad",
     "gpu_arch": "gfx90a:xnack+",
