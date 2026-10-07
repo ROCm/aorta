@@ -123,6 +123,20 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     },
 }
 
+#: Built-ins that exist to produce evidence -- log volume, a trace -- rather
+#: than to change what the workload does. ``state.winning_mitigation`` credits
+#: a passing ``none-{name}`` cell to every other built-in and never to one of
+#: these: a pass under logging is not a fix. A knob that does both is classified
+#: by what a pass under it means -- ``hip_launch_blocking`` also makes errors
+#: synchronous, but a pass under it is a pass with every launch serialised.
+OBSERVABILITY_MITIGATIONS: frozenset[str] = frozenset({"amd_log_level_4"})
+
+#: Built-ins whose variable no ROCm or torch binary reads on any stack
+#: (``DISABLE_TF32``, aorta#500). ``state.winning_mitigation`` never credits a
+#: passing ``none-{name}`` cell to one: the knob cannot have caused the pass.
+#: Stack-dependent no-ops are not listed here; see aorta#511.
+INERT_MITIGATIONS: frozenset[str] = frozenset({"tf32_off"})
+
 
 def load_mitigations(
     extra_files: list[Path] | None = None,
