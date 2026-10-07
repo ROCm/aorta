@@ -5,12 +5,13 @@ which model turns text into vectors (`embedding_provider`). Mixing them is
 normal — remote generation with local embeddings is the cheap default, because
 retrieval then costs nothing.
 
-Everything on this page is about `llm_provider`. `embedding_provider` is
-`local` for every profile `aorta chat config init` writes, including the remote
-ones, and the published index is only readable that way. Choosing a remote
-chat model is not a reason to change it; the narrow case that is, and what it
-costs, are in
+Everything on this page is about `llm_provider`. A remote chat model is not a
+reason to change `embedding_provider`; the one case that is, and what it costs,
+are in
 [configuring a remote embedding provider by hand](configuration.md#configuring-a-remote-embedding-provider-by-hand).
+
+This page says which settings each backend needs. What each setting means, and
+its default, is in [configuration](configuration.md#settings).
 
 ## Chat backends
 
@@ -109,9 +110,6 @@ remote_llm_api_key = "sk-..."
 # remote_llm_base_url = "https://openrouter.ai/api/v1"
 ```
 
-Preflight validates that a key is present without making a network call, so a
-missing key fails at startup instead of mid-query.
-
 ### Azure OpenAI Service
 
 Azure OpenAI is **not** OpenAI-wire-compatible: it rewrites the URL path to
@@ -144,10 +142,9 @@ llm_provider = "litellm"
 remote_llm_model = "claude-sonnet-4-5"
 ```
 
-With `remote_llm_api_key` empty, LiteLLM reads `ANTHROPIC_API_KEY`,
-`GEMINI_API_KEY` and friends itself and AORTA does not touch them. Set
-`remote_llm_api_key` and it is passed to LiteLLM explicitly instead — which is
-what makes the gateway flow below work on this backend.
+Leave `remote_llm_api_key` empty and LiteLLM reads `ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY` and friends itself. Setting it is what makes the gateway flow
+below work on this backend.
 
 Current Claude Opus builds accept only `temperature=1` and LiteLLM raises rather
 than negotiating. The graph asks for 0.0 and 0.1, so this backend enables
@@ -207,6 +204,51 @@ same host, speaking Anthropic's protocol rather than OpenAI's — so finding one
 tells you nothing about the other. `curl` the path with `/v1/messages`: if it
 answers, use `llm_provider = "litellm"` with an `anthropic/`-prefixed model
 name, not `openai`.
+
+## What a question costs
+
+The agent is agentic, not a single completion, so one question fans out:
+
+| Path | Calls |
+| --- | --- |
+| Question (route → retrieve → answer) | 2 |
+| Action, first pass (route → plan → retrieve → act → critic) | 3 + up to `max_act_rounds`, plus one synthesis call if the loop is exhausted |
+| Each critic rejection | Replays act + critic; `max_retry_iterations` caps *act passes*, so the shipped 3 allows two replays |
+
+A search-shaped action query can therefore reach **12** calls in one pass, and
+all three passes reach **32** — or **34** when it is also the query that
+escalates to `native`, which pays two text rounds once (see [Automatic
+escalation to `native`](#automatic-escalation-to-native) for the per-case
+breakdown). Most action queries
+land in the 4–6 range in practice, because the act loop stops as soon as the
+model answers without a tool call and the critic usually accepts first time.
+With `embedding_provider = "remote"`, each retrieval and each `search_code` call
+adds one embedding call;
+[configuring a remote embedding provider by hand](configuration.md#configuring-a-remote-embedding-provider-by-hand)
+has the full cost.
+
+Against a metered endpoint that is real money, so the remote backends log the
+per-query call count at INFO, visible without `--verbose`:
+
+```
+aorta.chat.inference.callcount INFO Remote LLM calls for this query: 7
+```
+
+It is a process-wide total read as a before/after delta, so concurrent UI
+sessions inflate each other's numbers — a spend indicator, not an accounting
+record. The local backend does not attach the counter.
+
+Knobs that lower the bill, roughly in order of effect:
+
+| Setting | Effect |
+| --- | --- |
+| `max_act_rounds_search` / `max_act_rounds` | Hard cap on the most expensive loop. Lowering the search budget to 3–4 is the single biggest saving. |
+| `max_retry_iterations` | `0` removes the critic's multiplier on everything above. |
+| `llm_max_tokens` | Caps output tokens per call. |
+| `retriever_k` / `search_tool_k` | Fewer chunks means a smaller prompt, and prompt tokens dominate a long act loop. |
+| `llm_max_retries` | Lower it on an unreliable endpoint, so failures do not silently triple. |
+| `embedding_provider = "local"` | Keeps all retrieval free even when generation is remote. Already the case unless you set it by hand. |
+| `remote_llm_model` | A smaller model in the same family is usually the cheapest change of all. |
 
 ## Tool calling and reasoning models
 
@@ -316,17 +358,12 @@ Five things follow from that:
 
 ### Reading the protocol that is actually in force
 
-Two places name it, and both come from this change. The `LLM backend:` line
-logged at startup names the protocol alongside the provider. The escalation logs
-a line of its own when it fires, and that one names the protocol itself rather
-than pointing at the startup banner, so it stands on its own wherever it is
-read — including in a server log where the startup line has scrolled away.
-
-`aorta chat doctor` is the third place, and what it says there is owned by
-[#463](https://github.com/ROCm/aorta/pull/463) rather than by this change: it
-adds a hint to the tool-mode line naming the configured protocol and what it
-costs. The two startup signals above are what this change contributes and they
-do not depend on #463 having landed.
+Three places name it. The `LLM backend:` line logged at startup names the
+protocol alongside the provider. The escalation logs a line of its own when it
+fires, and that one names the protocol itself rather than pointing at the
+startup banner, so it stands on its own wherever it is read — including in a
+server log where the startup line has scrolled away. And `aorta chat doctor`'s
+tool-mode line carries a hint naming the configured protocol and what it costs.
 
 `aorta chat ui` names it too, on each session's welcome banner and in the same
 `LLM backend: ... (tool protocol: ...)` line in the server log
@@ -403,53 +440,6 @@ asked that" rather than re-run, an unknown or protocol-mangled tool name returns
 an error the model can read instead of aborting the request, and the final
 synthesis call runs with no tools bound (offered tools, a model that has not
 found what it wants keeps calling them and returns no prose).
-
-## What a question costs
-
-The agent is agentic, not a single completion, so one question fans out:
-
-| Path | Calls |
-| --- | --- |
-| Question (route → retrieve → answer) | 2 |
-| Action, first pass (route → plan → retrieve → act → critic) | 3 + up to `max_act_rounds`, plus one synthesis call if the loop is exhausted |
-| Each critic rejection | Replays act + critic; `max_retry_iterations` caps *act passes*, so the shipped 3 allows two replays |
-
-A search-shaped action query can therefore reach **12** calls in one pass, and
-all three passes reach **32** — or **34** when it is also the query that
-escalates to `native`, which pays two text rounds once (see [Automatic
-escalation to `native`](#automatic-escalation-to-native) for the per-case
-breakdown). Most action queries
-land in the 4–6 range in practice, because the act loop stops as soon as the
-model answers without a tool call and the critic usually accepts first time.
-With `embedding_provider = "remote"`, each retrieval and each `search_code` call
-adds one embedding call on top. That recurring bill is the second reason no
-profile selects it; the first is that the published index is built with the
-local model, so a remote embedder makes `index fetch` unusable.
-[The procedure for choosing it](configuration.md#configuring-a-remote-embedding-provider-by-hand)
-covers both.
-
-Against a metered endpoint that is real money, so the remote backends log the
-per-query call count at INFO, visible without `--verbose`:
-
-```
-aorta.chat.inference.callcount INFO Remote LLM calls for this query: 7
-```
-
-It is a process-wide total read as a before/after delta, so concurrent UI
-sessions inflate each other's numbers — a spend indicator, not an accounting
-record. The local backend does not attach the counter.
-
-Knobs that lower the bill, roughly in order of effect:
-
-| Setting | Effect |
-| --- | --- |
-| `max_act_rounds_search` / `max_act_rounds` | Hard cap on the most expensive loop. Lowering the search budget to 3–4 is the single biggest saving. |
-| `max_retry_iterations` | `0` removes the critic's multiplier on everything above. |
-| `llm_max_tokens` | Caps output tokens per call. |
-| `retriever_k` / `search_tool_k` | Fewer chunks means a smaller prompt, and prompt tokens dominate a long act loop. |
-| `llm_max_retries` | Lower it on an unreliable endpoint, so failures do not silently triple. |
-| `embedding_provider = "local"` | Keeps all retrieval free even when generation is remote. Already the case unless you set it by hand. |
-| `remote_llm_model` | A smaller model in the same family is usually the cheapest change of all. |
 
 ## Troubleshooting
 
