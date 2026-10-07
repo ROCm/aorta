@@ -237,6 +237,101 @@ def test_ui_stop_ignores_an_unrecorded_matching_tunnel(tmp_path: Path) -> None:
         manual.wait(timeout=5)
 
 
+def test_ui_stop_serializes_with_startup_and_aborts_waits() -> None:
+    source = SCRIPTS[1].read_text(encoding="utf-8")
+    stop = source[source.index('if [[ "$MODE" == "stop" ]]') :]
+
+    assert stop.index(': >"$STOP_REQUEST_FILE"') < stop.index(
+        "acquire_ui_lock true"
+    )
+    assert stop.index("acquire_ui_lock true") < stop.index("stop_local_tunnel")
+    assert source.count("abort_if_stop_requested") >= 7
+    assert 'if [[ -e "$STOP_REQUEST_FILE" ]]; then\n    exit 0' in source
+
+
+def test_ui_stop_cancels_a_startup_before_pid_publication(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    endpoint = runtime / "qwen38-endpoint.env"
+    endpoint.write_text(
+        "\n".join(
+            (
+                "export QWEN_VLLM_JOB_ID=12345",
+                "export AORTA_CHAT_VLLM_BASE_URL=http://compute:8001/v1",
+                "export AORTA_CHAT_VLLM_MODEL=Qwen/Qwen3.8-27B",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    aorta = repo / ".venv-ui" / "bin" / "aorta"
+    aorta.parent.mkdir(parents=True)
+    aorta.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    aorta.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "ssh").write_text(
+        """#!/bin/sh
+case " $* " in
+  *" -tt "*) sleep 30 ;;
+  *) exit 0 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    for name in ("ssh", "ss", "curl"):
+        fake = fake_bin / name
+        if not fake.exists():
+            fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+    }
+    command = [
+        str(SCRIPTS[1]),
+        "--repo",
+        str(repo),
+        "--startup-timeout",
+        "10",
+        "--no-cia",
+    ]
+
+    starting = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        lock = runtime / "aorta-chat-ui-8080.lock"
+        deadline = time.monotonic() + 3
+        while not lock.is_dir() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert lock.is_dir(), "startup never acquired its lock"
+
+        stopped = subprocess.run(
+            [str(SCRIPTS[1]), "--stop", "--repo", str(repo)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        _stdout, startup_stderr = starting.communicate(timeout=5)
+
+        assert stopped.returncode == 0, stopped.stderr
+        assert starting.returncode != 0
+        assert "cancelled by --stop" in startup_stderr
+        assert not (runtime / "aorta-chat-stop-8080.requested").exists()
+    finally:
+        if starting.poll() is None:
+            starting.terminate()
+            starting.wait(timeout=5)
+
+
 def test_slurm_query_failure_preserves_the_endpoint_record(tmp_path: Path) -> None:
     """A login-host outage is not evidence that the recorded job died."""
     runtime = tmp_path / "runtime"
