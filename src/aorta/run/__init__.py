@@ -18,7 +18,7 @@ Example:
         workload="fsdp",
         trials=3,
         environment="local",
-        mitigations=("tf32_off",),
+        mitigations=("pytorch_no_cuda_memory_caching",),
         steps=100,
     )
     results = run_trials(request)

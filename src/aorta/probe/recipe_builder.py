@@ -163,7 +163,7 @@ def _validate_axis_names(
     """Resolve every axis name through the mitigations registry.
 
     Probe-mode treats both axes as mitigation names: ``none`` is the
-    no-op baseline, ``tf32_off`` flips ``DISABLE_TF32`` etc. Unknown
+    no-op baseline, ``xnack`` sets ``HSA_XNACK=1`` etc. Unknown
     names bubble up as :class:`aorta.registry.errors.UnknownMitigationError`
     at load time rather than mid-run.
     """

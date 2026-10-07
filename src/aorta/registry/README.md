@@ -3,7 +3,8 @@
 Three small registries that ship with aorta:
 
 - **Mitigations** (`name → env vars`) — process-level flags applied just before
-  the workload subprocess launches. Examples: `tf32_off`, `xnack`.
+  the workload subprocess launches. Examples: `xnack`,
+  `pytorch_no_cuda_memory_caching`.
 - **Environments** (`name → launch hints + baseline env vars`) — baseline
   state of the process, container, or Buck-built binary the workload runs in.
   Launch hints include `docker`, `venv`, and `buck_target`; `env` is an
@@ -40,7 +41,7 @@ candidate — it's a plugin candidate (Path 2).
 
 | Qualifies as built-in | Does NOT qualify (use Path 2) |
 |---|---|
-| `DISABLE_TF32` (hipBLASLt reads it) | `AMP_DTYPE` (only the workload's Python reads it) |
+| `PYTORCH_NO_CUDA_MEMORY_CACHING` (PyTorch's allocator reads it) | `AMP_DTYPE` (only the workload's Python reads it) |
 | `HSA_XNACK` (ROCm runtime reads it) | `MY_MODEL_DTYPE` (only a plugin workload reads it) |
 | `CUDA_LAUNCH_BLOCKING` (PyTorch reads it) | Any custom flag your workload introspects |
 | `NCCL_DEBUG`, `OMP_NUM_THREADS`, `LD_PRELOAD` | Anything that's a silent no-op on workloads that don't read it |
@@ -51,7 +52,6 @@ add one entry to the dict:
 ```python
 BUILTIN_MITIGATIONS = {
     "none":     {},
-    "tf32_off": {"DISABLE_TF32": "1"},
     "xnack":    {"HSA_XNACK": "1"},
     "no_sdma":  {"HSA_ENABLE_SDMA": "0"},   # <-- your addition
 }
@@ -523,7 +523,7 @@ debugging "did my plugin actually load?".
 ## Hard rule: no logic in registries
 
 These modules contain only **data + lookup**. No environment manipulation, no
-docker invocation, no validation of whether `DISABLE_TF32=1` is a "good"
+docker invocation, no validation of whether `HSA_XNACK=1` is a "good"
 value. Logic that consumes the registry data lives in the dispatchers (the
 mitigation harness, the workload runtime). Mixing the two would make the
 registry untestable in isolation and impossible to mock.
