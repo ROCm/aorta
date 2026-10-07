@@ -162,8 +162,30 @@ stop_remote_ui() {
 set -u
 pid_file=$1
 expected=$2
+repo_root=$3
+ui_port=$4
 group_alive() {
   /bin/kill -0 -- "-$1" 2>/dev/null
+}
+group_members() {
+  ps -eo pgid=,args= | awk -v pgid="$1" \
+    '\''$1 == pgid {$1=""; sub(/^ +/, ""); print}'\''
+}
+group_owned() {
+  members=$(group_members "$1")
+  [ -n "$members" ] || return 1
+  while IFS= read -r member_args; do
+    case "$member_args" in
+      *"$expected"*) ;;
+      *"$repo_root"*"-m chainlit run"*"--host 127.0.0.1"*"--port $ui_port"*) ;;
+      *)
+        echo "refusing to stop unfamiliar process-group member: $member_args" >&2
+        return 1
+        ;;
+    esac
+  done <<EOF
+$members
+EOF
 }
 if [ ! -s "$pid_file" ]; then
   exit 0
@@ -175,17 +197,11 @@ case "$pid" in
     exit 2
     ;;
 esac
-args=$(ps -p "$pid" -o args= || true)
-if [ -n "$args" ]; then
-  case "$args" in
-    *"$expected"*) ;;
-    *)
-      echo "refusing to stop unfamiliar PID $pid: $args" >&2
-      exit 2
-      ;;
-  esac
-fi
 if group_alive "$pid"; then
+  if ! group_owned "$pid"; then
+    echo "could not verify ownership of process group $pid; preserving $pid_file" >&2
+    exit 2
+  fi
   /bin/kill -TERM -- "-$pid" 2>/dev/null || true
   for _ in $(seq 1 20); do
     group_alive "$pid" || break
@@ -206,7 +222,8 @@ fi
 rm -f "$pid_file"
 '
   ssh -o BatchMode=yes "$LOGIN_HOST" \
-    "$(remote_command bash -c "$remote_script" _ "$UI_PID_FILE" "$expected")"
+    "$(remote_command bash -c "$remote_script" _ \
+      "$UI_PID_FILE" "$expected" "$REPO_ROOT" "$UI_PORT")"
 }
 
 stop_local_tunnel() {

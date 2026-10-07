@@ -172,6 +172,10 @@ def test_ui_cleanup_waits_for_the_entire_process_group() -> None:
 
     assert source.count('/bin/kill -0 -- "-$1"') >= 2
     assert 'group_alive "$pid"' in source
+    assert "ps -eo pgid=,args=" in source
+    assert 'group_owned "$pid"' in source
+    assert '"-m chainlit run"' in source
+    assert "could not verify ownership of process group" in source
     assert 'process_group_alive "$ui_pid"' in source
     assert 'kill -0 "$ui_pid"' not in source
     assert "did not stop; preserving" in source
