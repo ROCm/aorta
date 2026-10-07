@@ -243,7 +243,7 @@ audit. `wake()` replays tried mitigations and last category.
 | Outcome | Meaning |
 |---------|---------|
 | `baseline_pass` | `none-none` passed; repro OK without mitigations |
-| `converged` | A non-baseline mitigation cell passed |
+| `converged` | A cell with one non-baseline name passed: `{mitigation}-none`, or `none-{diagnostic}` when the diagnostic is a built-in that changes behaviour. A logging knob such as `amd_log_level_4` on the diagnostic axis is not a fix, so its pass does not converge; neither does a pass under a knob whose variable nothing reads, such as `tf32_off` (`INERT_MITIGATIONS`), or under a plugin or sidecar diagnostic, which the registry cannot classify |
 | `exhausted_candidates` | No more registered mitigations left to try |
 | `agent_stop` | Proposer ended search for another reason |
 | `proposal_unresolved` | Every mitigation the proposer named was dropped by the candidate filter (unregistered, already tried, outside the allowlist, or the `none` baseline, which is never a candidate), and the proposer did not ask to stop. An agent-side name-resolution failure, not a decision by the model — the names are in `unresolved_mitigations` in `agent_log.jsonl` |
