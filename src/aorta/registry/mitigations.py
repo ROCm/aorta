@@ -87,8 +87,8 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     },
     # ROCm 7.1.1 renamed RCCL_GFX942_CHEAP_FENCE_OFF (read only by 7.1.0) to
     # RCCL_GFX9_CHEAP_FENCE_OFF; both are set so the entry acts on either. It
-    # keeps its name so recipes and archived cells still resolve. RCCL 10.0
-    # defaults the new variable to 1, so there it re-asserts the default.
+    # keeps its name so recipes and archived cells still resolve. ROCm 10.0's
+    # RCCL defaults the new variable to 1, so there it re-asserts the default.
     "rccl_gfx942_cheap_fence_off": {
         "RCCL_GFX9_CHEAP_FENCE_OFF": "1",
         "RCCL_GFX942_CHEAP_FENCE_OFF": "1",
