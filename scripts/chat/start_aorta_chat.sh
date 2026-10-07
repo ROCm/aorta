@@ -109,6 +109,7 @@ ENDPOINT_FILE="${RUNTIME_DIR}/qwen38-endpoint.env"
 UI_PID_FILE="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.pid"
 UI_LOG="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.log"
 TUNNEL_LOG="${RUNTIME_DIR}/aorta-chat-tunnel-${UI_PORT}.log"
+TUNNEL_PID_FILE="${RUNTIME_DIR}/aorta-chat-tunnel-${UI_PORT}.pid"
 STOP_REQUEST_FILE="${RUNTIME_DIR}/aorta-chat-stop-${UI_PORT}.requested"
 UI_LOCK_DIR="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.lock"
 ROCJITSU_PREBUILT="${RUNTIME_DIR}/rocjitsu-prebuilt"
@@ -208,16 +209,40 @@ rm -f "$pid_file"
     "$(remote_command bash -c "$remote_script" _ "$UI_PID_FILE" "$expected")"
 }
 
-stop_local_tunnels() {
+stop_local_tunnel() {
   local pid args
-  while read -r pid args; do
-    [[ "$pid" =~ ^[0-9]+$ ]] || continue
-    if [[ "$args" == ssh\ -N* ]] &&
-       [[ "$args" == *"-L ${UI_PORT}:127.0.0.1:${UI_PORT}"* ]] &&
-       [[ "$args" == *"$LOGIN_HOST"* ]]; then
-      kill "$pid" 2>/dev/null || true
-    fi
-  done < <(ps -u "$(id -u)" -o pid=,args=)
+  [[ -s "$TUNNEL_PID_FILE" ]] || return 0
+  read -r pid <"$TUNNEL_PID_FILE" || pid=""
+  [[ "$pid" =~ ^[0-9]+$ ]] ||
+    die "invalid managed tunnel PID in $TUNNEL_PID_FILE: ${pid:-empty}"
+
+  args="$(ps -p "$pid" -o args= || true)"
+  if [[ -z "$args" ]]; then
+    rm -f "$TUNNEL_PID_FILE"
+    return 0
+  fi
+  if [[ "$args" != ssh\ -N* ]] ||
+     [[ "$args" != *"-L ${UI_PORT}:127.0.0.1:${UI_PORT}"* ]] ||
+     [[ "$args" != *"$LOGIN_HOST"* ]]; then
+    die "refusing to stop unfamiliar tunnel PID $pid: $args"
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    die "managed tunnel PID $pid did not stop; preserving $TUNNEL_PID_FILE"
+  fi
+  rm -f "$TUNNEL_PID_FILE"
 }
 
 run_remote_worker() {
@@ -303,7 +328,7 @@ require_command ss
 mkdir -p "$RUNTIME_DIR"
 if [[ "$MODE" == "stop" ]]; then
   : >"$STOP_REQUEST_FILE"
-  stop_local_tunnels
+  stop_local_tunnel
   stop_remote_ui
   printf 'AORTA Chat UI and tunnel are stopped.\n'
   exit 0
@@ -354,9 +379,8 @@ if [[ "$CIA_ENABLED" == true ]]; then
   [[ -x "$waitcheck" ]] || die "rj_waitcheck is missing after setup: $waitcheck"
 fi
 
-# Recover a tunnel left by an ungraceful death of an older launcher. The match
-# is exact enough to avoid touching an unrelated SSH session.
-stop_local_tunnels
+# Recover only the tunnel PID persisted by an older launcher.
+stop_local_tunnel
 if [[ -n "$(ss -H -ltn "sport = :${UI_PORT}")" ]]; then
   ss -ltnp "sport = :${UI_PORT}" >&2 || true
   die "local port $UI_PORT is already in use; stop the existing UI or tunnel"
@@ -401,9 +425,10 @@ fi
 
 remote_ssh_pid=""
 tunnel_pid=""
+tunnel_pid_file_tmp=""
 cleaned=false
 cleanup() {
-  local exit_code=$?
+  local exit_code=$? recorded_tunnel_pid=""
   [[ "$cleaned" == false ]] || return "$exit_code"
   cleaned=true
   set +e
@@ -411,7 +436,14 @@ cleanup() {
   if [[ -n "$tunnel_pid" ]]; then
     kill "$tunnel_pid" 2>/dev/null || true
     wait "$tunnel_pid" 2>/dev/null || true
+    if [[ -r "$TUNNEL_PID_FILE" ]]; then
+      read -r recorded_tunnel_pid <"$TUNNEL_PID_FILE" || true
+    fi
+    if [[ "$recorded_tunnel_pid" == "$tunnel_pid" ]]; then
+      rm -f "$TUNNEL_PID_FILE"
+    fi
   fi
+  [[ -z "$tunnel_pid_file_tmp" ]] || rm -f "$tunnel_pid_file_tmp"
 
   stop_remote_ui >/dev/null 2>&1 || true
 
@@ -460,6 +492,10 @@ ssh -N \
   -L "${UI_PORT}:127.0.0.1:${UI_PORT}" \
   "$LOGIN_HOST" >"$TUNNEL_LOG" 2>&1 &
 tunnel_pid=$!
+tunnel_pid_file_tmp="${TUNNEL_PID_FILE}.$$"
+printf '%s\n' "$tunnel_pid" >"$tunnel_pid_file_tmp"
+mv "$tunnel_pid_file_tmp" "$TUNNEL_PID_FILE"
+tunnel_pid_file_tmp=""
 
 deadline=$((SECONDS + 30))
 until curl --fail --silent --show-error --max-time 3 \

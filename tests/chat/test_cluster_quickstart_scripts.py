@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,10 @@ def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
     assert "acquire_launch_lock" in source
     assert "release_launch_lock" in source
     assert 'job_status "$active_job" || true' not in source
+    assert (
+        'grep -Fxq "export QWEN_VLLM_JOB_ID=${SLURM_JOB_ID}"'
+        in source
+    )
     assert source.count('--max-time "$request_timeout"') == 3
     assert 'message.get("reasoning_content")' in source
 
@@ -147,6 +152,10 @@ def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
     assert "trap cleanup_remote_worker EXIT HUP INT TERM" in source
     assert 'MODE="stop"' in source
     assert 'aorta-chat-ui-${UI_PORT}.pid' in source
+    assert 'TUNNEL_PID_FILE="${RUNTIME_DIR}/aorta-chat-tunnel-${UI_PORT}.pid"' in source
+    assert 'mv "$tunnel_pid_file_tmp" "$TUNNEL_PID_FILE"' in source
+    assert "stop_local_tunnel" in source
+    assert 'ps -u "$(id -u)"' not in source
     assert 'aorta-chat-stop-${UI_PORT}.requested' in source
     assert 'UI_LOCK_DIR="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.lock"' in source
     assert "acquire_ui_lock" in source
@@ -164,9 +173,48 @@ def test_ui_cleanup_waits_for_the_entire_process_group() -> None:
     assert source.count('/bin/kill -0 -- "-$1"') >= 2
     assert 'group_alive "$pid"' in source
     assert 'process_group_alive "$ui_pid"' in source
-    assert 'kill -0 "$pid"' not in source
     assert 'kill -0 "$ui_pid"' not in source
     assert "did not stop; preserving" in source
+
+
+def test_ui_stop_ignores_an_unrecorded_matching_tunnel(tmp_path: Path) -> None:
+    """The command shape is not ownership; only the PID file grants it."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("ssh", "ss"):
+        fake = fake_bin / name
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+
+    manual = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            (
+                'exec -a "ssh -N -L 8080:127.0.0.1:8080 '
+                'ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com" sleep 30'
+            ),
+        ]
+    )
+    try:
+        time.sleep(0.1)
+        stopped = subprocess.run(
+            [str(SCRIPTS[1]), "--stop"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "AORTA_CHAT_RUNTIME_DIR": str(tmp_path / "runtime"),
+            },
+        )
+
+        assert stopped.returncode == 0, stopped.stderr
+        assert manual.poll() is None, "an unrecorded user tunnel was killed"
+    finally:
+        manual.terminate()
+        manual.wait(timeout=5)
 
 
 def test_slurm_query_failure_preserves_the_endpoint_record(tmp_path: Path) -> None:
