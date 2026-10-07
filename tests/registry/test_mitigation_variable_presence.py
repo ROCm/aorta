@@ -62,7 +62,10 @@ Not covered, and not detectable this way:
 * **sets the value that is already the default** -- ``fa_prefer_aotriton``
   sets ``TORCH_ROCM_FA_PREFER_CK=0`` and ``hsa_enable_cache`` sets
   ``HSA_DISABLE_CACHE=0``. The variable is present and is honoured; the value
-  is a no-op. Needs the runtime's documented default, not a grep.
+  is a no-op unless the environment already exports another one --
+  ``TORCH_ROCM_FA_PREFER_CK=1`` on a stack where ``fa_prefer_ck`` can act, or
+  any ``HSA_DISABLE_CACHE`` other than exactly ``0``, even an empty one. Needs
+  the runtime's documented default, not a grep.
 * **already set in the image** -- ``rocm/primus:v26.3`` bakes
   ``HSA_NO_SCRATCH_RECLAIM=1`` into ``Config.Env``, so
   ``hsa_no_scratch_reclaim`` sets what is set. Needs the cell's intent compared
