@@ -716,7 +716,8 @@ class TestAutoEscalationToNative:
         assert caplog.text.count("this process will use native from here") == 1
         assert "AORTA_CHAT_LLM_TOOL_MODE" in caplog.text
         # Names the protocol itself rather than sending the reader to the
-        # startup banner, which `aorta chat ui` never prints (#468). Not
+        # startup banner, which has scrolled away in a long-lived server log
+        # and which `aorta chat ui` writes per session, not at startup. Not
         # `aorta chat doctor` either: it reports extras, the backend, the index
         # and the model cache, but nothing about the tool protocol.
         assert "'text' protocol" in caplog.text
@@ -1225,6 +1226,222 @@ class TestTheDegradedRetrievalFallback:
         ):
             await act_node(_state())
         assert "Answered from retrieved context" in caplog.text
+
+
+class TestAGiveUpThatGatheredResultsAnswersFromThem:
+    """#475: classify the trace instead of testing it for emptiness.
+
+    A loop that ran a tool and then went quiet used to return the give-up
+    notice with the results it held recorded in ``tool_trace`` and never turned
+    into prose. Driven through the text loop under an explicit ``text`` mode,
+    where no escalation is allowed, so the abandon is the only thing under test.
+    """
+
+    @staticmethod
+    def _llm(*actions: str, answer: str = "Built from the results."):
+        """Runs *actions*, goes silent for the cap, then answers the fallback."""
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(
+            side_effect=[
+                *(AIMessage(content=f"ACTION: {action}") for action in actions),
+                AIMessage(content=""),
+                AIMessage(content=""),
+                AIMessage(content=answer),
+            ]
+        )
+        return fake
+
+    @staticmethod
+    def _last_request(fake) -> list:
+        return fake.ainvoke.call_args_list[-1][0][0]
+
+    @pytest.mark.asyncio
+    async def test_results_are_answered_from_and_labelled_partial(self, text_mode):
+        from aorta.chat.graph.nodes import _PARTIAL_ANSWER_PREFIX
+
+        fake = self._llm('list_files(path=".")')
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="found_a.py"),
+        ):
+            result = await act_node(_state())
+        reply = result["messages"][0].content
+        assert reply.startswith(_PARTIAL_ANSWER_PREFIX)
+        assert "Built from the results." in reply
+        assert any("found_a.py" in entry for entry in result["tool_trace"])
+
+    @pytest.mark.asyncio
+    async def test_the_results_reach_the_model_as_context(self, text_mode):
+        """Under the answer prompt, which only lets it state what the context shows."""
+        from aorta.chat.graph.nodes import (
+            _PARTIAL_RESULTS_HEADING,
+            _PARTIAL_SYNTHESIS_NUDGE,
+        )
+
+        fake = self._llm('list_files(path=".")')
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="found_a.py"),
+        ):
+            await act_node(_state())
+        sent = self._last_request(fake)
+        system = str(sent[0].content)
+        assert _PARTIAL_RESULTS_HEADING in system
+        assert "found_a.py" in system
+        # The retrieved context is kept, not replaced.
+        assert "src/x.py" in system
+        assert isinstance(sent[-1], HumanMessage)
+        assert sent[-1].content == _PARTIAL_SYNTHESIS_NUDGE
+
+    @pytest.mark.asyncio
+    async def test_it_costs_the_one_call_the_empty_trace_already_paid(self, text_mode):
+        """A path reached because something failed must not grow a second call."""
+        fake = self._llm('list_files(path=".")')
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="found_a.py"),
+        ):
+            await act_node(_state())
+        # One tool round, the two silent rounds that hit the cap, one fallback.
+        assert fake.ainvoke.await_count == 1 + _MAX_UNPRODUCTIVE_ROUNDS + 1
+
+    @pytest.mark.asyncio
+    async def test_only_errors_answer_from_retrieved_context(self, text_mode):
+        """Failures are not material, and "could not use my tools" would be false."""
+        from aorta.chat.graph.nodes import (
+            _DEGRADED_ANSWER_PREFIX,
+            _PARTIAL_RESULTS_HEADING,
+            _TOOLS_FAILED_PREFIX,
+        )
+        from aorta.chat.tools.outcome import tool_failure
+
+        fake = self._llm('list_files(path=".")', answer="From the docs.")
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch(
+                "aorta.chat.graph.nodes._execute_tool",
+                return_value=tool_failure("Tool error: disk on fire"),
+            ),
+        ):
+            result = await act_node(_state())
+        reply = result["messages"][0].content
+        assert reply.startswith(_TOOLS_FAILED_PREFIX)
+        assert _DEGRADED_ANSWER_PREFIX not in reply
+        assert _PARTIAL_RESULTS_HEADING not in str(self._last_request(fake)[0].content)
+        assert result["tool_trace"], "the failures are still recorded"
+
+    @pytest.mark.asyncio
+    async def test_a_mixed_trace_says_both_things(self, text_mode):
+        """Incomplete *and* partly failed; either label alone would be half true."""
+        from aorta.chat.graph.nodes import (
+            _PARTIAL_RESULTS_HEADING,
+            _PARTIAL_WITH_FAILURES_PREFIX,
+        )
+        from aorta.chat.tools.outcome import tool_failure
+
+        fake = self._llm('list_files(path=".")', 'read_file(file_path="gone.py")')
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch(
+                "aorta.chat.graph.nodes._execute_tool",
+                side_effect=["found_a.py", tool_failure("Error: file 'gone.py' does not exist.")],
+            ),
+        ):
+            result = await act_node(_state())
+        assert result["messages"][0].content.startswith(_PARTIAL_WITH_FAILURES_PREFIX)
+        system = str(self._last_request(fake)[0].content)
+        assert _PARTIAL_RESULTS_HEADING in system
+        # The failure goes in too, so the answer can say what could not be read.
+        assert "gone.py" in system
+
+    @pytest.mark.asyncio
+    async def test_an_empty_synthesis_still_reports_the_dead_end(self, text_mode):
+        fake = self._llm('list_files(path=".")', answer="")
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="found_a.py"),
+        ):
+            result = await act_node(_state())
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+        assert result["tool_trace"]
+
+    @pytest.mark.asyncio
+    async def test_a_synthesis_that_raises_still_reports_the_dead_end(
+        self, text_mode, caplog
+    ):
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(content='ACTION: list_files(path=".")'),
+                AIMessage(content=""),
+                AIMessage(content=""),
+                RuntimeError("connection reset by peer"),
+            ]
+        )
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="found_a.py"),
+        ):
+            result = await act_node(_state())
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+        assert "from the gathered tool results failed too" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_the_critic_still_cannot_send_it_back_into_the_loop(self, text_mode):
+        """Same as the empty-trace fallback: ``command_output`` stays empty."""
+        fake = self._llm('list_files(path=".")')
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="found_a.py"),
+        ):
+            result = await act_node(_state())
+        assert result["command_output"] == ""
+
+    @pytest.mark.asyncio
+    async def test_the_outcome_is_logged(self, text_mode, caplog):
+        fake = self._llm('list_files(path=".")')
+        with (
+            caplog.at_level(logging.INFO),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="found_a.py"),
+        ):
+            await act_node(_state())
+        assert "Answered from the 1 tool result(s) gathered" in caplog.text
+        assert "labelled as partial" in caplog.text
+
+    def test_the_labels_name_no_internals(self):
+        """They land in the answer slot, under the same rule as the others."""
+        from aorta.chat.graph.nodes import (
+            _PARTIAL_ANSWER_PREFIX,
+            _PARTIAL_WITH_FAILURES_PREFIX,
+            _TOOLS_FAILED_PREFIX,
+        )
+
+        for label in (
+            _PARTIAL_ANSWER_PREFIX,
+            _PARTIAL_WITH_FAILURES_PREFIX,
+            _TOOLS_FAILED_PREFIX,
+        ):
+            for leak in ("AORTA_CHAT", "ACTION:", "act loop", "retrieval", "native"):
+                assert leak.lower() not in label.lower()
+
+    def test_the_partial_labels_do_not_claim_tools_were_unavailable(self):
+        from aorta.chat.graph.nodes import (
+            _PARTIAL_ANSWER_PREFIX,
+            _PARTIAL_WITH_FAILURES_PREFIX,
+        )
+
+        for label in (_PARTIAL_ANSWER_PREFIX, _PARTIAL_WITH_FAILURES_PREFIX):
+            assert "could not use my tools" not in label
+            assert "incomplete" in label
+
+    def test_a_trace_entry_keeps_the_failure_its_result_carried(self):
+        from aorta.chat.graph.nodes import _trace_entry
+        from aorta.chat.tools.outcome import tool_failure, tool_result_failed
+
+        assert tool_result_failed(_trace_entry("[t] ->\nboom", tool_failure("boom")))
+        assert not tool_result_failed(_trace_entry("[t] ->\nok", "ok"))
 
 
 class TestWastedCallGuards:
@@ -2234,18 +2451,45 @@ class TestABackendThatFallsOverPartWayThroughNative:
         assert _DEGRADED_ANSWER_PREFIX not in result["messages"][0].content
 
     @pytest.mark.asyncio
+    async def test_the_gathered_results_are_answered_from(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """#475: the failed call was the synthesis, so one tool-free call replaces it.
+
+        This path used to end on the give-up notice with the results sitting
+        unused in ``tool_trace``, and the notice blamed the configuration of an
+        endpoint that had just done real work.
+        """
+        from aorta.chat.graph.nodes import _PARTIAL_ANSWER_PREFIX
+
+        plain, _bound = self._llm_that_breaks_after_one_tool_call()
+        plain.ainvoke = AsyncMock(
+            side_effect=[
+                _dead_end_reply(),
+                _dead_end_reply(),
+                AIMessage(content="The files are a.py and b.py."),
+            ]
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py\nb.py"),
+        ):
+            result = await act_node(_state())
+        reply = result["messages"][0].content
+        assert reply.startswith(_PARTIAL_ANSWER_PREFIX)
+        assert "a.py and b.py" in reply
+        assert result["tool_trace"], "the gathered results must still be recorded"
+
+    @pytest.mark.asyncio
     async def test_the_log_does_not_promise_an_answer_it_cannot_give(
         self, text_mode, tool_mode_not_chosen, caplog
     ):
-        """The results are kept, and this path still has no answer to give.
+        """The failure line names an attempt, not an outcome.
 
-        The failed call *is* the one that would have synthesised them, so the
-        turn ends on the give-up notice with the results recorded beside it.
-        An earlier version of this log line said "Answering from what was
-        gathered", which was not what the code did -- ``_abandoned_result``
-        returns the notice for any non-empty trace. Synthesising from partial
-        results is worth doing and is tracked in #475; the line must not claim
-        it in the meantime.
+        An earlier version said "Answering from what was gathered" when the
+        code returned the notice, and the next one said "no answer to give"
+        before the attempt below had run. Whether it answered is logged by
+        ``_abandoned_result`` once it knows.
         """
         plain, _bound = self._llm_that_breaks_after_one_tool_call()
         with (
@@ -2256,7 +2500,8 @@ class TestABackendThatFallsOverPartWayThroughNative:
             result = await act_node(_state())
         assert result["messages"][0].content == _NO_ANSWER_MSG
         assert result["tool_trace"], "the gathered results must still be recorded"
-        assert "no answer to give" in caplog.text
+        assert "one tool-free attempt to answer from them follows" in caplog.text
+        assert "no answer to give" not in caplog.text
         assert "Answering from what was gathered" not in caplog.text
 
     @pytest.mark.asyncio
@@ -2487,7 +2732,12 @@ class TestTheReportedTraceDescribesTheQueryNotTheProtocol:
         trace. If the merged trace were used there instead, a native round that
         gathered nothing would look productive because the text loop had run a
         tool, and would be billed for a synthesis call to summarise nothing.
+
+        The give-up still answers from the text protocol's results (#475), but
+        through the one labelled fallback call, not the loop's own synthesis.
         """
+        from aorta.chat.graph.nodes import _FINAL_ANSWER_MSG, _PARTIAL_ANSWER_PREFIX
+
         plain = self._text_ran_a_tool_then_dead_ended(
             {"return_value": _dead_end_reply()}
         )
@@ -2496,8 +2746,10 @@ class TestTheReportedTraceDescribesTheQueryNotTheProtocol:
             patch("aorta.chat.graph.nodes._execute_tool", return_value="from_text.py"),
         ):
             result = await act_node(_state())
-        # Gave up rather than synthesising: the plain notice, not "Synthesised."
-        assert result["messages"][0].content != "Synthesised."
+        # Gave up rather than synthesising: no request asked for a final answer.
+        sent = [str(m.content) for call in plain.ainvoke.call_args_list for m in call[0][0]]
+        assert _FINAL_ANSWER_MSG not in sent
+        assert result["messages"][0].content.startswith(_PARTIAL_ANSWER_PREFIX)
         # ...and the text protocol's work is still in the record.
         assert any("from_text.py" in entry for entry in result["tool_trace"])
 

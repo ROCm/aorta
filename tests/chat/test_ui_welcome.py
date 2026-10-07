@@ -131,6 +131,49 @@ class TestWelcomeMessage:
         assert not any(word in text for word in GUARANTEE_WORDS), text
 
 
+class TestTheToolProtocolIsNamed:
+    """#468: the UI is the front door, and it was the one that did not say.
+
+    ``aorta chat`` logs the protocol at startup; ``aorta chat ui`` greeted each
+    session with the provider alone. The protocol decides whether an
+    action-routed question can call a tool at all, and the escalation that
+    moves it is shared by every session the server holds -- so the banner has
+    to report what is in force when the session opens, not what was configured.
+    """
+
+    def test_the_configured_protocol_is_on_the_backend_line(self):
+        configure(llm_tool_mode="native")
+        assert "_LLM backend: some-backend (tool protocol: native)_" in (
+            welcome.welcome_message("some-backend")
+        )
+
+    def test_text_is_named_as_plainly(self):
+        configure(llm_tool_mode="text")
+        assert welcome.tool_protocol() == "text"
+
+    def test_a_session_opened_after_the_escalation_is_told_native(self, monkeypatch):
+        from aorta.chat.graph import nodes
+
+        configure(llm_tool_mode="text")
+        monkeypatch.setattr(nodes._escalation, "escalated", True)
+
+        line = welcome.tool_protocol()
+
+        assert line.startswith("native")
+        # The configured value is named as well, so an operator comparing the
+        # banner with chat.toml is not left to wonder which of the two is wrong.
+        assert "configured text" in line
+
+    def test_an_explicit_native_is_not_described_as_a_switch(self, monkeypatch):
+        """The escalation flag only moves ``text``; native was native all along."""
+        from aorta.chat.graph import nodes
+
+        configure(llm_tool_mode="native")
+        monkeypatch.setattr(nodes._escalation, "escalated", True)
+
+        assert welcome.tool_protocol() == "native"
+
+
 class TestChainlitLandingPage:
     """The landing page is read before anyone types, so it sets expectations."""
 
