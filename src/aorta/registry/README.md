@@ -491,7 +491,7 @@ refer to them. See aorta#511.
 | `fa_prefer_ck` | PyTorch reads it, warns *Cannot set preferred SDPA backend to CK*, and stays on AOTriton | PyTorch builds without CK SDPA, or with any visible GPU outside CK's architecture list |
 | `fa_prefer_aotriton` | `TORCH_ROCM_FA_PREFER_CK=0` reads as unset, and unset already means AOTriton | unless the environment exports `1` on a stack where `fa_prefer_ck` can act |
 | `hsa_enable_cache` | `HSA_DISABLE_CACHE=0` is libhsakmt's default | unless the environment exports any value other than exactly `0`, even an empty one |
-| `hsa_no_scratch_reclaim` | the image already exports `HSA_NO_SCRATCH_RECLAIM=1` | `rocm/primus` images |
+| `hsa_no_scratch_reclaim` | the image already exports `HSA_NO_SCRATCH_RECLAIM=1` | `rocm/primus` v26.2 through v26.7; v26.1 and earlier do not export it |
 | `rccl_gfx942_cheap_fence_off` | ROCm 10.0's RCCL turns the cheap fence off by default | ROCm 10.0; it acts on ROCm 7.1.0 through 7.2 |
 
 `rccl_gfx942_cheap_fence_off` keeps its original name and sets both
