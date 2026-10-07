@@ -456,8 +456,20 @@ case "$job_id" in
 esac
 umask 077
 pending_tmp="${pending_file}.${job_id}.tmp"
+cleanup_untracked_job() {
+  exit_code=$?
+  trap - EXIT HUP INT TERM
+  if ! scancel "$job_id"; then
+    echo "error: could not cancel untracked Slurm job $job_id" >&2
+  fi
+  rm -f "$pending_tmp" || true
+  exit "$exit_code"
+}
+trap cleanup_untracked_job EXIT
+trap "exit 130" HUP INT TERM
 printf "%s\n" "$job_id" >"$pending_tmp"
 mv "$pending_tmp" "$pending_file"
+trap - EXIT HUP INT TERM
 printf "%s\n" "$job_id"
 '
   new_job="$(
