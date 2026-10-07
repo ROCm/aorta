@@ -1,0 +1,585 @@
+#!/usr/bin/env bash
+#
+# Start the CIA-enabled AORTA Chat UI on the Slurm-capable Ruby login host and
+# tunnel it back to the current host. Ctrl-C tears down both UI and tunnel.
+
+set -euo pipefail
+
+LOGIN_HOST="${AORTA_CHAT_LOGIN_HOST:-ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com}"
+RUNTIME_DIR="${AORTA_CHAT_RUNTIME_DIR:-/apps/avsharma/aorta-chat-runtime}"
+UI_PORT="${AORTA_CHAT_UI_PORT:-8080}"
+UI_STARTUP_TIMEOUT="${AORTA_CHAT_UI_STARTUP_TIMEOUT:-360}"
+REPO_ROOT="$(
+  cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1
+  pwd
+)"
+CIA_ENABLED=true
+REMOTE_WORKER=false
+MODE="start"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/chat/start_aorta_chat.sh [options]
+  scripts/chat/start_aorta_chat.sh --stop
+
+Starts AORTA Chat on the Slurm-capable login host, forwards it to
+http://127.0.0.1:8080, and removes the remote UI and tunnel on Ctrl-C.
+Run scripts/chat/start_qwen_vllm.sh first.
+
+Options:
+  --stop              Stop a UI and tunnel managed by this launcher.
+  --login-host HOST   Remote login host.
+  --runtime-dir PATH  Shared endpoint, PID, and log directory.
+  --port PORT         Local and remote UI port (default: 8080).
+  --startup-timeout SEC
+                      Maximum remote UI startup wait (default: 360).
+  --repo PATH         Shared AORTA checkout.
+  --no-cia            Start ordinary chat without cluster-submitting tools.
+  -h, --help          Show this help.
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+remote_command() {
+  local rendered
+  printf -v rendered '%q ' "$@"
+  printf '%s\n' "${rendered% }"
+}
+
+while (($#)); do
+  case "$1" in
+    --login-host)
+      LOGIN_HOST="${2:?--login-host requires a value}"
+      shift 2
+      ;;
+    --runtime-dir)
+      RUNTIME_DIR="${2:?--runtime-dir requires a value}"
+      shift 2
+      ;;
+    --port)
+      UI_PORT="${2:?--port requires a value}"
+      shift 2
+      ;;
+    --startup-timeout)
+      UI_STARTUP_TIMEOUT="${2:?--startup-timeout requires a value}"
+      shift 2
+      ;;
+    --repo)
+      REPO_ROOT="${2:?--repo requires a value}"
+      shift 2
+      ;;
+    --no-cia)
+      CIA_ENABLED=false
+      shift
+      ;;
+    --stop)
+      MODE="stop"
+      shift
+      ;;
+    --remote-worker)
+      REMOTE_WORKER=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ "$UI_PORT" =~ ^[0-9]+$ ]] || die "--port must be an integer"
+((UI_PORT >= 1 && UI_PORT <= 65535)) || die "--port is outside 1-65535"
+[[ "$UI_STARTUP_TIMEOUT" =~ ^[0-9]+$ ]] ||
+  die "--startup-timeout must be an integer"
+((UI_STARTUP_TIMEOUT >= 1)) || die "--startup-timeout must be positive"
+
+ENDPOINT_FILE="${RUNTIME_DIR}/qwen38-endpoint.env"
+UI_PID_FILE="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.pid"
+UI_LOG="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.log"
+TUNNEL_LOG="${RUNTIME_DIR}/aorta-chat-tunnel-${UI_PORT}.log"
+TUNNEL_PID_FILE="${RUNTIME_DIR}/aorta-chat-tunnel-${UI_PORT}.pid"
+STOP_REQUEST_FILE="${RUNTIME_DIR}/aorta-chat-stop-${UI_PORT}.requested"
+UI_LOCK_DIR="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.lock"
+ROCJITSU_PREBUILT="${RUNTIME_DIR}/rocjitsu-prebuilt"
+ROCJITSU_BUILD="${RUNTIME_DIR}/rocjitsu-build"
+
+ui_lock_held=false
+acquire_ui_lock() {
+  local wait_for_owner="${1:-false}"
+  local owner_host="" owner_pid="" this_host
+  local deadline=$((SECONDS + UI_STARTUP_TIMEOUT + 30))
+  this_host="$(hostname)"
+
+  while true; do
+    if mkdir "$UI_LOCK_DIR" 2>/dev/null; then
+      printf '%s %s\n' "$this_host" "$$" >"${UI_LOCK_DIR}/owner"
+      ui_lock_held=true
+      return
+    fi
+
+    owner_host=""
+    owner_pid=""
+    if [[ -r "${UI_LOCK_DIR}/owner" ]]; then
+      read -r owner_host owner_pid <"${UI_LOCK_DIR}/owner" || true
+    fi
+    if [[ "$owner_host" == "$this_host" &&
+          "$owner_pid" =~ ^[0-9]+$ ]] &&
+       ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -f "${UI_LOCK_DIR}/owner"
+      rmdir "$UI_LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+
+    if [[ "$wait_for_owner" == true ]]; then
+      ((SECONDS < deadline)) ||
+        die "timed out waiting for launcher lock $UI_LOCK_DIR"
+      sleep 0.1
+      continue
+    fi
+    die "AORTA Chat launcher is already running for port $UI_PORT (owner: ${owner_host:-unknown} ${owner_pid:-unknown})"
+  done
+}
+
+release_ui_lock() {
+  [[ "$ui_lock_held" == true ]] || return 0
+  rm -f "${UI_LOCK_DIR}/owner"
+  rmdir "$UI_LOCK_DIR" 2>/dev/null || true
+  ui_lock_held=false
+}
+
+abort_if_stop_requested() {
+  [[ ! -e "$STOP_REQUEST_FILE" ]] ||
+    die "AORTA Chat startup was cancelled by --stop"
+}
+
+process_group_alive() {
+  /bin/kill -0 -- "-$1" 2>/dev/null
+}
+
+stop_remote_ui() {
+  local expected remote_script
+  expected="${REPO_ROOT}/.venv-ui/bin/aorta chat ui --host 127.0.0.1 --port ${UI_PORT}"
+  remote_script='
+set -u
+pid_file=$1
+expected=$2
+repo_root=$3
+ui_port=$4
+group_alive() {
+  /bin/kill -0 -- "-$1" 2>/dev/null
+}
+group_members() {
+  ps -eo pgid=,args= | awk -v pgid="$1" \
+    '\''$1 == pgid {$1=""; sub(/^ +/, ""); print}'\''
+}
+group_owned() {
+  members=$(group_members "$1")
+  [ -n "$members" ] || return 1
+  while IFS= read -r member_args; do
+    case "$member_args" in
+      *"$expected"*) ;;
+      *"$repo_root"*"-m chainlit run"*"--host 127.0.0.1"*"--port $ui_port"*) ;;
+      *)
+        echo "refusing to stop unfamiliar process-group member: $member_args" >&2
+        return 1
+        ;;
+    esac
+  done <<EOF
+$members
+EOF
+}
+if [ ! -s "$pid_file" ]; then
+  exit 0
+fi
+pid=$(cat "$pid_file")
+case "$pid" in
+  *[!0-9]*|"")
+    echo "invalid managed AORTA UI PID: $pid" >&2
+    exit 2
+    ;;
+esac
+if group_alive "$pid"; then
+  if ! group_owned "$pid"; then
+    echo "could not verify ownership of process group $pid; preserving $pid_file" >&2
+    exit 2
+  fi
+  /bin/kill -TERM -- "-$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    group_alive "$pid" || break
+    sleep 0.25
+  done
+  if group_alive "$pid"; then
+    /bin/kill -KILL -- "-$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      group_alive "$pid" || break
+      sleep 0.1
+    done
+  fi
+fi
+if group_alive "$pid"; then
+  echo "managed AORTA UI process group $pid did not stop; preserving $pid_file" >&2
+  exit 2
+fi
+rm -f "$pid_file"
+'
+  ssh -o BatchMode=yes "$LOGIN_HOST" \
+    "$(remote_command bash -c "$remote_script" _ \
+      "$UI_PID_FILE" "$expected" "$REPO_ROOT" "$UI_PORT")"
+}
+
+stop_local_tunnel() {
+  local pid args
+  [[ -s "$TUNNEL_PID_FILE" ]] || return 0
+  read -r pid <"$TUNNEL_PID_FILE" || pid=""
+  [[ "$pid" =~ ^[0-9]+$ ]] ||
+    die "invalid managed tunnel PID in $TUNNEL_PID_FILE: ${pid:-empty}"
+
+  args="$(ps -p "$pid" -o args= || true)"
+  if [[ -z "$args" ]]; then
+    rm -f "$TUNNEL_PID_FILE"
+    return 0
+  fi
+  if [[ "$args" != ssh\ -N* ]] ||
+     [[ "$args" != *"-L ${UI_PORT}:127.0.0.1:${UI_PORT}"* ]] ||
+     [[ "$args" != *"$LOGIN_HOST"* ]]; then
+    die "refusing to stop unfamiliar tunnel PID $pid: $args"
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    die "managed tunnel PID $pid did not stop; preserving $TUNNEL_PID_FILE"
+  fi
+  rm -f "$TUNNEL_PID_FILE"
+}
+
+run_remote_worker() {
+  [[ -x "${REPO_ROOT}/.venv-ui/bin/aorta" ]] ||
+    die "AORTA UI environment is missing under $REPO_ROOT"
+  [[ -s "$ENDPOINT_FILE" ]] || die "Qwen endpoint file is missing: $ENDPOINT_FILE"
+
+  # Generated by start_qwen_vllm.sh with mode 0600 and shell-escaped values.
+  # shellcheck disable=SC1090
+  source "$ENDPOINT_FILE"
+  [[ "$AORTA_CHAT_VLLM_BASE_URL" != *"localhost:8000"* ]] ||
+    die "refusing forbidden fallback endpoint: $AORTA_CHAT_VLLM_BASE_URL"
+
+  export AORTA_CHAT_VLLM_BASE_URL
+  export AORTA_CHAT_VLLM_MODEL
+  export AORTA_CHAT_LLM_PROVIDER=vllm
+  export AORTA_CHAT_LLM_TOOL_MODE=native
+  export AORTA_CHAT_ALLOW_CLUSTER_JOBS="$CIA_ENABLED"
+
+  if [[ "$CIA_ENABLED" == true ]]; then
+    export AORTA_CHAT_JOBS_PATH="${AORTA_CHAT_JOBS_PATH:-/apps/avsharma/cia-chat-jobs}"
+    export AORTA_CHAT_GPU_ARCH="${AORTA_CHAT_GPU_ARCH:-gfx950}"
+    export AORTA_CHAT_ROCJITSU_BUILD="$ROCJITSU_BUILD"
+    export CIA_PARTITION="${CIA_PARTITION:-interactive}"
+    export CIA_TIME_LIMIT="${CIA_TIME_LIMIT:-00:12:00}"
+    export CIA_SEARCH_ROOTS="${CIA_SEARCH_ROOTS:-/apps/avsharma}"
+  fi
+
+  cd "$REPO_ROOT"
+  umask 077
+  ui_pid=""
+  cleanup_remote_worker() {
+    local exit_code=$?
+    trap - EXIT HUP INT TERM
+    set +e
+    if [[ -n "$ui_pid" ]]; then
+      if process_group_alive "$ui_pid"; then
+        /bin/kill -TERM -- "-${ui_pid}" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+          process_group_alive "$ui_pid" || break
+          sleep 0.25
+        done
+        if process_group_alive "$ui_pid"; then
+          /bin/kill -KILL -- "-${ui_pid}" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            process_group_alive "$ui_pid" || break
+            sleep 0.1
+          done
+        fi
+      fi
+      wait "$ui_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$ui_pid" ]] && process_group_alive "$ui_pid"; then
+      printf 'managed AORTA UI process group %s did not stop; preserving %s\n' \
+        "$ui_pid" "$UI_PID_FILE" >&2
+      exit_code=2
+    else
+      rm -f "$UI_PID_FILE"
+    fi
+    exit "$exit_code"
+  }
+  trap cleanup_remote_worker EXIT HUP INT TERM
+
+  abort_if_stop_requested
+  # Only the UI gets its own process group. The supervisor remains attached to
+  # SSH, so a dropped SSH channel sends HUP here and the trap removes the whole
+  # Chainlit tree.
+  setsid "${REPO_ROOT}/.venv-ui/bin/aorta" chat ui \
+    --host 127.0.0.1 \
+    --port "$UI_PORT" &
+  ui_pid=$!
+  printf '%s\n' "$ui_pid" >"$UI_PID_FILE"
+  wait "$ui_pid"
+}
+
+if [[ "$REMOTE_WORKER" == true ]]; then
+  run_remote_worker
+  exit $?
+fi
+
+require_command ssh
+require_command ss
+
+mkdir -p "$RUNTIME_DIR"
+if [[ "$MODE" == "stop" ]]; then
+  : >"$STOP_REQUEST_FILE"
+  acquire_ui_lock true
+  trap release_ui_lock EXIT
+  stop_local_tunnel
+  stop_remote_ui
+  rm -f "$STOP_REQUEST_FILE"
+  printf 'AORTA Chat UI and tunnel are stopped.\n'
+  exit 0
+fi
+acquire_ui_lock
+trap release_ui_lock EXIT
+abort_if_stop_requested
+printf 'Starting AORTA Chat on port %s (the first import can take a few minutes)...\n' \
+  "$UI_PORT"
+
+require_command curl
+[[ -s "$ENDPOINT_FILE" ]] ||
+  die "Qwen is not running. Start it with scripts/chat/start_qwen_vllm.sh"
+
+# shellcheck disable=SC1090
+source "$ENDPOINT_FILE"
+[[ "$AORTA_CHAT_VLLM_BASE_URL" != *"localhost:8000"* ]] ||
+  die "refusing forbidden fallback endpoint: $AORTA_CHAT_VLLM_BASE_URL"
+
+health_url="${AORTA_CHAT_VLLM_BASE_URL%/v1}/health"
+curl --fail --silent --show-error --max-time 5 "$health_url" >/dev/null ||
+  die "Qwen is not healthy at $health_url"
+
+if [[ ! -x "${REPO_ROOT}/.venv-ui/bin/aorta" ]]; then
+  python_bin="${AORTA_CHAT_PYTHON:-python3.13}"
+  require_command "$python_bin"
+  "$python_bin" -m venv "${REPO_ROOT}/.venv-ui"
+  "${REPO_ROOT}/.venv-ui/bin/python" -m pip install --upgrade pip
+  "${REPO_ROOT}/.venv-ui/bin/python" -m pip install -e "${REPO_ROOT}[chat-ui,cia]"
+fi
+
+abort_if_stop_requested
+if [[ "$CIA_ENABLED" == true ]]; then
+  hook="${ROCJITSU_BUILD}/lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so"
+  waitcheck="${ROCJITSU_BUILD}/tools/rj_waitcheck"
+  if [[ ! -f "$hook" || ! -x "$waitcheck" ]]; then
+    downloader="${REPO_ROOT}/scripts/sanitizers/download_sanitizer_artifacts.py"
+    "${REPO_ROOT}/.venv-ui/bin/python" "$downloader" \
+      --run latest \
+      --dest "$ROCJITSU_PREBUILT" \
+      --force
+    mkdir -p "$(dirname "$hook")" "$(dirname "$waitcheck")"
+    ln -sfn \
+      "${ROCJITSU_PREBUILT}/lib/librocjitsu_dbi_hooks.so" \
+      "$hook"
+    ln -sfn "${ROCJITSU_PREBUILT}/bin/rj_waitcheck" "$waitcheck"
+  fi
+  [[ -f "$hook" ]] || die "RocJITsu hook is missing after setup: $hook"
+  [[ -x "$waitcheck" ]] || die "rj_waitcheck is missing after setup: $waitcheck"
+fi
+
+abort_if_stop_requested
+# Recover only the tunnel PID persisted by an older launcher.
+stop_local_tunnel
+if [[ -n "$(ss -H -ltn "sport = :${UI_PORT}")" ]]; then
+  ss -ltnp "sport = :${UI_PORT}" >&2 || true
+  die "local port $UI_PORT is already in use; stop the existing UI or tunnel"
+fi
+
+remote_listener="$(
+  ssh -o BatchMode=yes "$LOGIN_HOST" \
+    "ss -H -ltn 'sport = :${UI_PORT}'"
+)"
+if [[ -n "$remote_listener" ]]; then
+  printf 'Stopping a stale UI managed by this launcher.\n'
+  stop_remote_ui
+  for _ in $(seq 1 20); do
+    abort_if_stop_requested
+    remote_listener="$(
+      ssh -o BatchMode=yes "$LOGIN_HOST" \
+        "ss -H -ltn 'sport = :${UI_PORT}'"
+    )"
+    [[ -z "$remote_listener" ]] && break
+    sleep 0.25
+  done
+  if [[ -n "$remote_listener" ]]; then
+    printf '%s\n' "$remote_listener" >&2
+    ssh -o BatchMode=yes "$LOGIN_HOST" \
+      "pgrep -af 'aorta chat ui|chainlit run' || true" >&2
+    die "port $UI_PORT is used by a process this launcher does not own on $LOGIN_HOST"
+  fi
+fi
+
+abort_if_stop_requested
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+remote=(
+  "$script_path"
+  --remote-worker
+  --login-host "$LOGIN_HOST"
+  --runtime-dir "$RUNTIME_DIR"
+  --port "$UI_PORT"
+  --startup-timeout "$UI_STARTUP_TIMEOUT"
+  --repo "$REPO_ROOT"
+)
+if [[ "$CIA_ENABLED" != true ]]; then
+  remote+=(--no-cia)
+fi
+
+remote_ssh_pid=""
+tunnel_pid=""
+tunnel_pid_file_tmp=""
+cleaned=false
+cleanup() {
+  local exit_code=$? recorded_tunnel_pid=""
+  [[ "$cleaned" == false ]] || return "$exit_code"
+  cleaned=true
+  set +e
+
+  if [[ -n "$tunnel_pid" ]]; then
+    kill "$tunnel_pid" 2>/dev/null || true
+    wait "$tunnel_pid" 2>/dev/null || true
+    if [[ -r "$TUNNEL_PID_FILE" ]]; then
+      read -r recorded_tunnel_pid <"$TUNNEL_PID_FILE" || true
+    fi
+    if [[ "$recorded_tunnel_pid" == "$tunnel_pid" ]]; then
+      rm -f "$TUNNEL_PID_FILE"
+    fi
+  fi
+  [[ -z "$tunnel_pid_file_tmp" ]] || rm -f "$tunnel_pid_file_tmp"
+
+  stop_remote_ui >/dev/null 2>&1 || true
+
+  if [[ -n "$remote_ssh_pid" ]]; then
+    kill "$remote_ssh_pid" 2>/dev/null || true
+    wait "$remote_ssh_pid" 2>/dev/null || true
+  fi
+
+  release_ui_lock
+  set -e
+  return "$exit_code"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+: >"$UI_LOG"
+ssh -tt -n \
+  -o BatchMode=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  "$LOGIN_HOST" "$(remote_command "${remote[@]}")" \
+  >"$UI_LOG" 2>&1 &
+remote_ssh_pid=$!
+
+deadline=$((SECONDS + UI_STARTUP_TIMEOUT))
+while [[ -z "$(
+  ssh -o BatchMode=yes "$LOGIN_HOST" \
+    "ss -H -ltn 'sport = :${UI_PORT}'" 2>/dev/null || true
+)" ]]; do
+  abort_if_stop_requested
+  kill -0 "$remote_ssh_pid" 2>/dev/null || {
+    cat "$UI_LOG" >&2
+    die "remote AORTA Chat UI exited during startup"
+  }
+  ((SECONDS < deadline)) || {
+    cat "$UI_LOG" >&2
+    die "timed out waiting for the remote UI port"
+  }
+  sleep 1
+done
+
+abort_if_stop_requested
+: >"$TUNNEL_LOG"
+ssh -N \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -L "${UI_PORT}:127.0.0.1:${UI_PORT}" \
+  "$LOGIN_HOST" >"$TUNNEL_LOG" 2>&1 &
+tunnel_pid=$!
+tunnel_pid_file_tmp="${TUNNEL_PID_FILE}.$$"
+printf '%s\n' "$tunnel_pid" >"$tunnel_pid_file_tmp"
+mv "$tunnel_pid_file_tmp" "$TUNNEL_PID_FILE"
+tunnel_pid_file_tmp=""
+
+deadline=$((SECONDS + 30))
+until curl --fail --silent --show-error --max-time 3 \
+  "http://127.0.0.1:${UI_PORT}/" >/dev/null 2>&1; do
+  abort_if_stop_requested
+  kill -0 "$tunnel_pid" 2>/dev/null || {
+    cat "$TUNNEL_LOG" >&2
+    die "SSH UI tunnel exited during startup"
+  }
+  ((SECONDS < deadline)) || {
+    cat "$TUNNEL_LOG" >&2
+    die "timed out waiting for the local UI tunnel"
+  }
+  sleep 1
+done
+
+abort_if_stop_requested
+printf '\nAORTA Chat is ready.\n'
+printf '  UI:       http://127.0.0.1:%s\n' "$UI_PORT"
+printf '  model:    %s\n' "$AORTA_CHAT_VLLM_BASE_URL"
+printf '  CIA jobs: %s\n' "$CIA_ENABLED"
+printf '  UI log:   %s\n' "$UI_LOG"
+printf '\nPress Ctrl-C to stop the UI and tunnel.\n'
+printf 'If the terminal is closed abruptly, run:\n'
+printf '  scripts/chat/start_aorta_chat.sh --stop\n'
+printf 'The Qwen job remains available; stop it separately with:\n'
+printf '  scripts/chat/start_qwen_vllm.sh --stop\n\n'
+
+while kill -0 "$remote_ssh_pid" 2>/dev/null &&
+      kill -0 "$tunnel_pid" 2>/dev/null; do
+  if [[ -e "$STOP_REQUEST_FILE" ]]; then
+    exit 0
+  fi
+  sleep 2
+done
+
+if [[ -e "$STOP_REQUEST_FILE" ]]; then
+  rm -f "$STOP_REQUEST_FILE"
+  exit 0
+fi
+
+if ! kill -0 "$remote_ssh_pid" 2>/dev/null; then
+  wait "$remote_ssh_pid"
+else
+  cat "$TUNNEL_LOG" >&2
+  die "SSH UI tunnel stopped unexpectedly"
+fi

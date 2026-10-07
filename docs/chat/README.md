@@ -60,6 +60,7 @@ The guides are in reading order.
 | Guide | Description |
 | --- | --- |
 | [Installation](installation.md) | Chat/CIA extra combinations, Python ranges, and the sqlite requirement |
+| [Qwen vLLM cluster quickstart](qwen-vllm-cluster-quickstart.md) | Two launcher commands for a dedicated Qwen server and UI, without touching `localhost:8000` |
 | [Configuration](configuration.md) | The profile file, precedence, secrets, and every setting |
 | [Providers](providers.md) | Local vLLM, OpenAI-compatible, LiteLLM; gateway auth; what a question costs |
 | [The RAG index](rag-index.md) | What is indexed, when to rebuild, and why a stale index is dangerous |
