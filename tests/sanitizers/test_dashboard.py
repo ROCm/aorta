@@ -573,7 +573,7 @@ def test_an_exact_entry_scan_never_covers_a_deduped_sibling():
 def _two_check_report(*, consan_reason: str | None, with_findings: bool = False) -> dict:
     """One kernel scanned by both sanitizers, as the shipped survey recipes do.
 
-    ``tiny-vecadd-survey.yaml`` and friends select ``top_n: 1`` and request
+    The survey recipes select ``top_n: 1`` and request
     ``[waitcheck, consan]``, so ``run_sanitizers`` emits one check per sanitizer over
     the same worklist and ConSan attributes its result to that same identity.
     """
@@ -4648,7 +4648,7 @@ def test_rebuild_hint_binary_flags_match_the_workflow():
 
     Optimisation/debug flags change the executable, so a hint that drops them
     cannot reproduce the recorded `command_sha256`. The nightly builds the two
-    guardrail repro binaries `-O1 -g` and the loader binaries without, and this
+    guardrail repro binaries `-O1 -g` and the GEMM loader without, and this
     asserts the map still agrees rather than trusting it to stay in step.
     """
     workflow = (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
@@ -4656,6 +4656,9 @@ def test_rebuild_hint_binary_flags_match_the_workflow():
     )
     # Join shell line continuations so one hipcc invocation is one line.
     joined = workflow.replace("\\\n", " ")
+    # Rebuild hints for the synthetic loaders stay, so an older published area
+    # can still be reproduced. The nightly no longer compiles them.
+    not_in_nightly = {"consan_tiny_load", "lds_dispatch"}
     for ref, (_source, _define, extra) in gen._BIN_SOURCES.items():
         name = ref.rsplit("/", 1)[-1]
         lines = [
@@ -4663,6 +4666,9 @@ def test_rebuild_hint_binary_flags_match_the_workflow():
             for line in joined.splitlines()
             if "hipcc" in line and f'/bin/{name}"' in line
         ]
+        if name in not_in_nightly:
+            assert lines == [], f"{ref} is no longer a nightly build: {lines}"
+            continue
         assert len(lines) == 1, f"{ref}: expected one build line, got {len(lines)}"
         built_with_o1g = "-O1 -g" in lines[0]
         assert built_with_o1g == ("-O1 -g" in extra), (
@@ -5527,8 +5533,8 @@ def test_a_malformed_artifact_list_does_not_abort_a_retained_area_refresh(tmp_pa
 
 def test_genco_rebuild_cleans_up_its_temporary_object():
     # The command runs in the reader's repo root, so without the trailing rm it
-    # drops an untracked tmp.o next to pyproject.toml. The workflow's own
-    # genco_object uses mktemp + rm -f.
+    # drops an untracked tmp.o next to pyproject.toml. The rebuild plan removes
+    # that temporary object with rm -f.
     entry = gen.rebuild_plan(["fixtures/isa/lds.hsaco"], target="gfx950")[0]
     conditional = [c for c in entry["commands"] if c.startswith("if ")][0]
     assert conditional.endswith("&& rm -f tmp.o")
