@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-10-07T142601-37621140131` · commit `cab08a1abc4c` · 2026-10-07 14:26:01 UTC
+Run `2026-10-08T141657-37776980403` · commit `224d19f4a371` · 2026-10-08 14:16:57 UTC
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -20,7 +20,7 @@ Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate)
 
 Observed sanitizer verdict `warn` · expected `warn`
 Observation: waitcheck warn; 64 finding(s) (wait_hazard)
-backend `rj_waitcheck` `921330d92bb4` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
+backend `rj_waitcheck` `cd631ed4907a` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
@@ -30,7 +30,7 @@ backend `rj_waitcheck` `921330d92bb4` · selection `top_dispatch_count` top-3 ·
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| waitcheck | `wait_hazard` | warning | 64 | sol_126578.hsaco:gfx950[0]:.text+0x1804: missing s_waitcnt lgkmcnt(14) before use of v42 |
+| waitcheck | `wait_hazard` | warning | 64 | sol_126578.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20 |
 
 </details>
 
@@ -58,7 +58,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `sampled_conflict` | race | 1 | [rocjitsu-dbi-hooks] ConSan conflict reader=107553151024160 first_index=6 second_index=9 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 genera… |
+| consan | `sampled_conflict` | race | 1 | [rocjitsu-dbi-hooks] ConSan conflict reader=95483621234400 first_index=3 second_index=8 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 generat… |
 
 </details>
 
@@ -96,7 +96,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatc
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `530642105f` | — |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `788ea62c1d` | — |
 
 </details>
 
@@ -110,7 +110,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `66184787a5` | combined_hook_exit_86 |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `6687b176f7` | combined_hook_exit_86 |
 
 </details>
 
@@ -118,7 +118,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 Observation: waitcheck warn; 32 finding(s) (wait_hazard)
 
-Finding: `consan_gemm_f32.hsaco:gfx950[0]:.text+0x1804: missing s_waitcnt lgkmcnt(14) before use of v42`
+Finding: `consan_gemm_f32.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml`
 
@@ -136,7 +136,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `530642105f` | — |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `788ea62c1d` | — |
 
 </details>
 
@@ -148,7 +148,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `66184787a5` | — |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `6687b176f7` | — |
 
 </details>
 
@@ -156,6 +156,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-10-08T141657-37776980403 | `224d19f4a371` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-07T142601-37621140131 | `cab08a1abc4c` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-06T141219-37463222089 | `1f59e2040535` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-05T163143-37309782694 | `b306c32cf2b8` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
@@ -185,4 +186,3 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 | 2026-09-14T124757-34843407133 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-13T124242-34756892631 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-12T124242-34693445702 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
-| 2026-09-11T124542-34598790075 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
