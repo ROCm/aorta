@@ -125,9 +125,9 @@ def _healthy_guardrail_run() -> dict:
 # --- spec + fixtures parse and render as survey cases ---
 
 
-def test_committed_spec_parses_into_six_present_survey_cases():
+def test_committed_spec_parses_into_two_present_survey_cases():
     entries = _survey_entries()
-    assert len(entries) == 6
+    assert len(entries) == 2
     assert all(e["cls"] == "survey" for e in entries)
     assert all(e["summary"]["present"] for e in entries)
     # observed-only: every survey case carries no baseline expectation
@@ -147,36 +147,29 @@ def test_gemm_and_control_verdicts_match_recorded_reports():
     assert by_name["hipblaslt-gemm-f32-nt-128x128-waitcheck"]["verdict"] == "warn"
     assert by_name["hipblaslt-gemm-f32-nt-128x128-waitcheck"]["findings"] >= 1
     assert by_name["hipblaslt-gemm-f32-nt-128x128-consan"]["verdict"] == "error"
-    # synthetic controls: waitcheck passes; consan fails closed (observed error)
-    assert by_name["tiny-vecadd-waitcheck"]["verdict"] == "pass"
-    assert by_name["tiny-vecadd-consan"]["verdict"] == "error"
-    assert by_name["lds-reduce-waitcheck"]["verdict"] == "pass"
-    assert by_name["lds-reduce-consan"]["verdict"] == "error"
 
 
 def test_kernel_identities_are_generic():
     names = {k["name"] for e in _survey_entries() for k in e["summary"]["kernels"]}
-    assert names == {"hipblaslt_gemm_f32_nt_128x128", "tiny_vecadd", "lds_reduce"}
+    assert names == {"hipblaslt_gemm_f32_nt_128x128"}
 
 
-def test_committed_spec_groups_into_three_kernels_with_both_sanitizers():
-    # Review (#374): the spec carries `group`/`sanitizer` so the six cases collapse
-    # into THREE kernel rows, each with a waitcheck AND a ConSan result -- not six
+def test_committed_spec_groups_into_one_kernel_with_both_sanitizers():
+    # Review (#374): the spec carries `group`/`sanitizer` so the two cases collapse
+    # into ONE kernel row, with a waitcheck AND a ConSan result -- not two
     # standalone rows with an em dash in every column. Guards the roll-up shape.
     entries = _survey_entries()
     groups = gen._group_survey_entries(entries)
-    assert [key for key, _ in groups] == [
-        "gemm-f32-nt-128x128", "tiny-vecadd", "lds-reduce"
-    ]
+    assert [key for key, _ in groups] == ["gemm-f32-nt-128x128"]
     assert all(len(members) == 2 for _key, members in groups)
     stats = gen._survey_summary_stats(groups)
-    assert stats["kernels"] == 3 and stats["runs"] == 6
+    assert stats.get("kernels") == 1 and stats.get("runs") == 2
     # each group exposes both sanitizer columns (no em-dash cell in the roll-up)
     for _key, members in groups:
         by_san = gen._survey_group_by_sanitizer(members)
         assert set(by_san) == {"waitcheck", "consan"}
     table = gen._survey_summary_table_html(groups)
-    assert "Surveyed <b>3 kernels</b> across <b>6 sanitizer runs</b>" in table
+    assert "Surveyed <b>1 kernel</b> across <b>2 sanitizer runs</b>" in table
     assert "&mdash;" not in table  # every cell has a real verdict badge
 
 
@@ -204,20 +197,17 @@ def test_build_html_renders_all_survey_kernels_with_drilldown():
     survey = _survey_entries()
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
     # Cases are grouped by kernel: each kernel is one panel holding a collapsed
-    # waitcheck card and a collapsed ConSan card (not six standalone headings).
-    for group_heading in (
-        '<span class="kname">hipBLASLt GEMM f32 nt 128x128</span>',
-        '<span class="kname">tiny_vecadd</span>',
-        '<span class="kname">lds_reduce</span>',
-    ):
-        assert group_heading in html
-    assert html.count('<span class="name">WaitCheck</span>') == 3
-    assert html.count('<span class="name">ConSan</span>') == 3
+    # waitcheck card and a collapsed ConSan card (not two standalone headings).
+    assert '<span class="kname">hipBLASLt GEMM f32 nt 128x128</span>' in html
+    assert '<span class="kname">tiny_vecadd</span>' not in html
+    assert '<span class="kname">lds_reduce</span>' not in html
+    assert html.count('<span class="name">WaitCheck</span>') == 1
+    assert html.count('<span class="name">ConSan</span>') == 1
     # Every card ships collapsed (its summary row carries the verdict instead).
     # Inspect each opening tag: a substring check for '<details class="kcard'
     # would still match '<details class="kcard wc" open>'.
     kcards = [tag for tag in re.findall(r"<details[^>]*>", html) if 'class="kcard' in tag]
-    assert len(kcards) == 6 + len(gen.CASES)
+    assert len(kcards) == 2 + len(gen.CASES)
     opened = [tag for tag in kcards if re.search(r"\bopen\b", tag)]
     assert not opened, f"kernel cards must ship collapsed, found: {opened}"
     # every case still drills down to its published raw report
@@ -240,7 +230,7 @@ def test_gen_survey_spec_reproduces_committed_spec():
 def test_committed_spec_and_fixtures_are_public_safe():
     _assert_no_forbidden(_SPEC.read_text(encoding="utf-8"), "generic_gemm_survey.json")
     fixtures = sorted(_REPORTS_DIR.glob("*/sanitizer_report.json"))
-    assert len(fixtures) == 6
+    assert len(fixtures) == 2
     for fixture in fixtures:
         text = fixture.read_text(encoding="utf-8")
         _assert_no_forbidden(text, str(fixture.relative_to(_REPO_ROOT)))
@@ -308,7 +298,7 @@ def test_rendered_dashboard_output_is_public_safe(tmp_path, monkeypatch):
     assert "hipblaslt_gemm_f32_nt_128x128" in html
     assert "Workload survey (observed-only)" in html
     parsed = json.loads(data)
-    assert len(parsed[0]["survey"]) == 6
+    assert len(parsed[0]["survey"]) == 2
     assert parsed[0]["gate"] is True
 
 

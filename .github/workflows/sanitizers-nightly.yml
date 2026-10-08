@@ -481,7 +481,7 @@ jobs:
             # verdict or any non-complete execution (cli/sweep.py), and the *healthy*
             # post-fix consan-gemm result is exit 86 -- an error execution. Under the
             # `set -euo pipefail` at the top of this payload, an unguarded first case
-            # would kill the job after ~69 min and the remaining five Tab 2 rows would
+            # would kill the job after ~69 min and the remaining waitcheck row would
             # never run. Each
             # survey case is independent and its report is the deliverable, so a
             # non-zero sweep is data, not a job failure.
@@ -494,8 +494,7 @@ jobs:
             # Same PATH fix the gate job needs: hipcc shells out to
             # clang-offload-bundler, which lives in the ROCm LLVM bindir and is not on
             # PATH in this image. prepare_gemm_isa.py also resolves it via PATH and
-            # exits if absent, so both the extraction and genco_object below depend on
-            # this line.
+            # exits if absent, so the GEMM extraction below depends on this line.
             #
             # Byte-identical to the gate job version above, and derived from the
             # resolver for the same reason (issue #381): the
@@ -511,12 +510,12 @@ jobs:
             # test_sanitizer_nightly_payloads_have_no_apostrophes.
             export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
             # Same LD_LIBRARY_PATH requirement as the gate job, and byte-identical
-            # to its line -- see the full rationale there. This job launches three
-            # more hipcc-built executables (lds_dispatch, consan_tiny_load,
-            # consan_gemm_load) through `aorta sweep run`, so without this every
-            # ConSan survey row is an exit-127 loader failure rather than an
-            # observation. The waitcheck rows are static scans of code objects and
-            # would survive; that asymmetry is exactly what makes it worth stating.
+            # to its line -- see the full rationale there. This job launches the
+            # hipcc-built consan_gemm_load executable through `aorta sweep run`, so
+            # without this the ConSan survey row is an exit-127 loader failure
+            # rather than an observation. The waitcheck row is a static scan of a
+            # code object and would survive; that asymmetry is exactly what makes
+            # it worth stating.
             export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
             echo "[$(date +%T)] setup: ROCm lib dirs on LD_LIBRARY_PATH -> ${LD_LIBRARY_PATH}"
             # This job builds its own fixtures from scratch -- the gate job removes
@@ -525,55 +524,32 @@ jobs:
             mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
 
             KROOT="${FIXTURES}/kernels"
-            # hipcc --genco emits either a raw gfx950 code object or a clang-offload
-            # bundle depending on the ROCm build; unbundle only when it is a bundle
-            # (a raw ELF fed back through --unbundle would fail).
-            genco_object() {  # <hip-source> <final .hsaco>
-              local tmp; tmp="$(mktemp --suffix=.o)" || return 1
-              hipcc --genco --offload-arch=gfx950 "$1" -o "$tmp" || return 1
-              if head -c 24 "$tmp" | grep -qF __CLANG_OFFLOAD_BUNDLE__; then
-                clang-offload-bundler --type=o --unbundle --input="$tmp" \
-                  --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="$2" || return 1
-              else
-                cp "$tmp" "$2" || return 1
-              fi
-              rm -f "$tmp"
-            }
             # --top-n 0 extracts only the ConSan object, leaving the gated waitcheck
             # fixtures (already built above) untouched.
+            # Synthetic controls (tiny_vecadd, lds_reduce) are not part of Tab 2.
             python scripts/sanitizers/prepare_gemm_isa.py \
               --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 0 \
               --consan-object "${FIXTURES}/isa/consan_gemm_f32.hsaco"
-            genco_object "${KROOT}/lds_reduce.hip" "${FIXTURES}/isa/lds.hsaco"
-            genco_object "${KROOT}/tiny_vecadd.hip" "${FIXTURES}/isa/tiny.hsaco"
-            hipcc --offload-arch=gfx950 -DLDS_HSACO="\"$(pwd)/${FIXTURES}/isa/lds.hsaco\"" \
-              "${KROOT}/lds_dispatch.hip" -o "${FIXTURES}/bin/lds_dispatch"
-            hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/tiny.hsaco\"" \
-              "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_tiny_load"
             hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/consan_gemm_f32.hsaco\"" \
               "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_gemm_load"
             # Named once, because the vacuity check at the end of this payload
             # has to know which cases were invoked in order to tell "produced
             # nothing" from "was never asked to". Two lists, one per sanitizer,
             # so each stays next to the invocations it describes.
-            CONSAN_CASES="consan-gemm consan-lds-dispatch consan-tiny"
+            CONSAN_CASES="consan-gemm"
             for c in ${CONSAN_CASES}; do
               mkdir -p "${SANITIZER_OUT}/informational/${c}"
             done
             aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml \
               --output-dir "${SANITIZER_OUT}/informational/consan-gemm" || true
-            aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/consan-lds-dispatch" || true
-            aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/consan-tiny" || true
 
-            # Observed-only waitcheck static scans over the SAME survey objects, so
-            # Tab 2 shows both sanitizers per kernel (#374 C). Case dirs are named
-            # <sanitizer>-<group> so the dashboard groups e.g. consan-gemm and
-            # waitcheck-gemm under one "gemm" kernel heading. Each survey waitcheck
+            # Observed-only waitcheck static scan over the SAME survey object, so
+            # Tab 2 shows both sanitizers for the GEMM kernel (#374 C). Case dirs
+            # are named <sanitizer>-<group> so the dashboard groups consan-gemm and
+            # waitcheck-gemm under one "gemm" kernel heading. The survey waitcheck
             # scan is a dedicated best-effort run publishing its OWN report -- the
             # gated Tab-1 waitcheck report is never reused here. Non-gating.
-            WAITCHECK_CASES="waitcheck-gemm waitcheck-lds-dispatch waitcheck-tiny"
+            WAITCHECK_CASES="waitcheck-gemm"
             for c in ${WAITCHECK_CASES}; do
               mkdir -p "${SANITIZER_OUT}/informational/${c}"
             done
@@ -582,10 +558,6 @@ jobs:
             # daily-waitcheck-gemm guardrail, which is left untouched).
             aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml \
               --output-dir "${SANITIZER_OUT}/informational/waitcheck-gemm" || true
-            aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/waitcheck-lds-dispatch" || true
-            aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/waitcheck-tiny" || true
 
             # Every survey recipe above runs under `|| true`, because a non-gating
             # row must not fail the job merely for reporting something. That is
@@ -596,16 +568,15 @@ jobs:
             #
             # So look at them. --vacuous-only asserts the one thing that is always
             # wrong regardless of what a row is expected to observe: a run that
-            # terminated without producing any signal. Cases where that is the
-            # intended outcome declare it in verdict_baselines.json (consan_tiny
-            # does). This CAN turn the survey job red, which is the point -- the
-            # artifact upload below is `if: always()`, so Tab 2 still publishes.
+            # terminated without producing any signal. This CAN turn the survey job
+            # red, which is the point -- the artifact upload below is
+            # `if: always()`, so Tab 2 still publishes.
             #
             # --require closes the same hole one level up. `|| true` also swallows
             # a recipe that dies BEFORE writing a report -- a bad input, a missing
             # fixture, a startup failure -- and a report that does not exist cannot
-            # be judged vacuous. Naming the six invoked cases makes their absence
-            # an error, so an entirely empty survey fails here instead of passing
+            # be judged vacuous. Naming the invoked cases makes their absence an
+            # error, so an entirely empty survey fails here instead of passing
             # silently. A job-level kill (cancellation, the runner cap in #370, the
             # timeout-minutes ceiling) does not need excusing: it takes this whole
             # payload down, so the line below never runs at all.
@@ -630,8 +601,8 @@ jobs:
             # not that they are acceptable. It is self-retiring -- the comparator
             # FAILS if a listed case starts producing signal, so a fixed row cannot
             # leave a stale suppression behind, and it fails if a listed case has no
-            # report at all. The other four rows are checked for real from tonight,
-            # which is the #450 regression path this whole change exists to close.
+            # report at all. Both remaining Tab 2 rows are the known-vacuous GEMM
+            # pair; synthetic tiny_vecadd and lds_reduce controls are not published.
             echo "[$(date +%T)] survey: rejecting vacuous outcomes …"
             REQUIRE=""
             for c in ${CONSAN_CASES} ${WAITCHECK_CASES}; do
