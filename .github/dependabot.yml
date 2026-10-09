@@ -1,47 +1,24 @@
-# Automated dependency bumps (Phase 4 of docs/ci-plan.md).
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 #
-# Dependabot opens PRs for newer versions; a human reviews (and, for stack-moving
-# bumps, runs the Refresh baselines workflow so the baseline diff shows the
-# numeric/perf impact). No auto-merge.
+# Dependabot version updates. See
+# https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+
 version: 2
 updates:
-  # Python deps (pyproject.toml extras + requirements*.txt).
-  - package-ecosystem: pip
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels: ["dependencies", "python"]
-
-  # ROCm base image + other pinned images (bumps the FROM ... @sha256 digests).
-  - package-ecosystem: docker
-    directory: "/docker"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels: ["dependencies", "docker", "rocm"]
-
-  # GitHub Actions used by the workflows.
-  - package-ecosystem: github-actions
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels: ["dependencies", "github-actions"]
-
-  # ── GitHub Actions: keep workflow action versions current ──────────────────
   - package-ecosystem: "github-actions"
     # "/" covers .github/workflows; composite actions keep their own `uses:`
     # pins, so .github/actions has to be listed separately to get bumped.
-    directories:
-      - "/"
-      - "/.github/actions/*"
+    directory: "/"
     schedule:
       interval: "daily"
-    commit-message:
-      prefix: "chore"
-      include: "scope"
+      # Wait a week before adopting newly released action versions.
+    cooldown:
+      default-days: 7
+      exclude:
+        - "ROCm/rocm-security-gh*"
     groups:
+      rocm-security-gh:
+        patterns: ["ROCm/rocm-security-gh*"]
       github-actions:
-        patterns:
-          - "*"
+        patterns: ["*"]
