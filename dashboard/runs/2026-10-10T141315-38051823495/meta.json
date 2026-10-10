@@ -1,0 +1,8 @@
+{
+  "commit": "224d19f4a3718f4a8ddcfd477cd80e7a66469d68",
+  "date": "2026-10-10T14:13:15+00:00",
+  "gate": true,
+  "gpu": "gfx950",
+  "run": "2026-10-10T141315-38051823495",
+  "run_url": "https://github.com/ROCm/aorta/actions/runs/38051823495"
+}
