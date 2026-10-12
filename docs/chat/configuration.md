@@ -71,6 +71,185 @@ If you would rather not store the key at all, leave it out of the file and
 export `AORTA_CHAT_REMOTE_LLM_API_KEY` instead; the environment outranks the
 file.
 
+## Settings
+
+Every name below is a TOML key in the profile, and `AORTA_CHAT_<NAME>` in the
+environment. Which of them lower the bill against a metered endpoint is in
+[what a question costs](providers.md#what-a-question-costs).
+
+### Selectors
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `llm_provider` | `vllm` | `vllm` (local server) / `openai` (any OpenAI-wire endpoint) / `litellm` (native Anthropic, Gemini, Bedrock). An unknown value raises, listing the accepted names. |
+| `embedding_provider` | `local` | `local` (a small model on CPU) / `remote` (an embeddings API). Independent of `llm_provider`. Every `config init` profile writes `local`, including the remote-chat ones. `remote` is a manual choice with consequences: see [configuring a remote embedding provider](#configuring-a-remote-embedding-provider-by-hand). |
+| `llm_tool_mode` | `text` | `text` parses `ACTION: tool(arg="v")` lines out of the reply; `native` uses the provider's function-calling API. Reasoning models need `native` — see [providers](providers.md#tool-calling-and-reasoning-models). |
+
+### Local vLLM (`llm_provider = "vllm"`)
+
+| Setting | Default |
+| --- | --- |
+| `vllm_base_url` | `http://localhost:8000/v1` |
+| `vllm_model` | `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct` |
+| `vllm_api_key` | `EMPTY` — vLLM ignores it, but the OpenAI client rejects an empty string |
+
+### Remote chat (`llm_provider = "openai"` or `"litellm"`)
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `remote_llm_model` | `gpt-4o-mini` | The model id as the provider names it. For `litellm`, LiteLLM's own id format. |
+| `remote_llm_api_key` | *(empty)* | Required for `openai`; a missing value fails preflight rather than mid-query. Used by `litellm` too **when set** — only when it is empty does LiteLLM fall back to its own standard variables (`ANTHROPIC_API_KEY`, ...). |
+| `remote_llm_base_url` | *(empty)* | Empty means the provider default. Set it for anything else. |
+| `remote_llm_auth_header` | *(empty)* | Header name for a gateway that does not take a bearer token. Honoured by both `openai` and `litellm`. |
+| `remote_llm_extra_headers` | *(empty)* | Extra headers a gateway wants, as `user=alice,x-tenant=acme` or a JSON object. Honoured by both `openai` and `litellm`. Values are masked by `config show` and count as a credential for the 0600 check, because a gateway key put here is as sensitive as `remote_llm_api_key`. |
+
+### Call limits
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `llm_max_tokens` | *(unset)* | Cap on generated tokens per call. Omit the key entirely rather than setting it empty. |
+| `llm_timeout` | `120` | Seconds before one request is abandoned. |
+| `llm_max_retries` | `2` | Transport-level retries per call. |
+
+### Embeddings
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `embedding_model` | `BAAI/bge-small-en-v1.5` | Local model. Cannot be blank: an empty or whitespace-only value selects no model, so it is refused when the settings load. Remove the setting to take the default. |
+| `model_cache_path` | `$XDG_CACHE_HOME/aorta/chat/models` | Where the local model's ONNX weights are cached. `HF_HOME` overrides it, which is what [air-gapped pre-seeding](rag-index.md#air-gapped-nodes) uses. Explicit rather than `fastembed`'s own `/tmp/fastembed_cache`, which a reboot wipes and other users on a shared node can write. |
+
+The five `remote_embedding_*` settings below are read by the embedding path only
+when `embedding_provider = "remote"`, which no profile selects. Setting them
+without also setting `embedding_provider` changes nothing about how the index is
+built or queried — though `remote_embedding_api_key` and
+`remote_embedding_extra_headers` count as credentials for `config validate`'s
+mode check either way. Setting them together with the selector is the procedure
+[below](#configuring-a-remote-embedding-provider-by-hand), and it obliges a
+local index rebuild.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `remote_embedding_model` | `text-embedding-3-small` | Also decides the collection name, since dimensions differ per model. Cannot be blank, on the same rule as `embedding_model`. |
+| `remote_embedding_api_key` | *(empty)* | Separate from the chat key, so the two can use different providers. Required: an empty value raises rather than falling back to the local model. |
+| `remote_embedding_base_url` | *(empty)* | Empty means the provider default, which for an OpenAI-compatible client is `api.openai.com`. Set it for anything else — a gateway header with an empty base URL sends your corpus to OpenAI. |
+| `remote_embedding_auth_header` / `remote_embedding_extra_headers` | *(empty)* | As on the chat side. Behind a gateway you normally set both or neither. |
+
+### Corpus and index
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `aorta_path` | the installed `aorta` package | The source tree retrieval and the file tools are scoped to. Only ever read. |
+| `runs_path` | the working directory | Where your own sweep output directories live, for the run-artifact tools. |
+| `index_path` | `$XDG_CACHE_HOME/aorta/chat/index.sqlite` | The vector index, one file. |
+| `repo_map_path` | `$XDG_CACHE_HOME/aorta/chat/repo_map.md` | The generated function/class index. |
+| `repo_map_prompt_max_chars` | `20000` | Cap on how much of the map is injected into the planner's prompt; `0` disables the cap. The `search_repo_map` tool still queries the whole file. |
+| `chunk_size` / `chunk_overlap` | `512` / `50` | Indexer text splitter. Changing either invalidates the index. |
+
+Nothing writable defaults inside `site-packages`. An installed wheel is
+read-only on a shared node, and a tool that writes into its own install
+directory cannot be pip-upgraded cleanly.
+
+### Retrieval and the agent loop
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `retriever_k` / `retriever_fetch_k` | `12` / `30` | Chunks returned, and candidates fetched to select from. |
+| `search_tool_k` | `10` | Results from the `search_code` tool. |
+| `max_act_rounds` / `max_act_rounds_search` | `5` / `8` | Tool-loop budget for ordinary and search-shaped questions. |
+| `max_retry_iterations` | `3` | Critic retry budget. `0` disables the retry loop. |
+
+### Command execution and egress
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `enable_shell_tool` | `false` | Register `run_terminal_command`. Off by default: it hands a model-authored string to a shell, so the agent is not given one unless you say so. While off, the tool is absent from the registry and from the prompts, not merely refused at call time. |
+| `allowed_commands` | `python,pytest,make,pip,grep,wc,head,tail,cat,ls,find` | Allowlist for `run_terminal_command`, applied per pipeline stage. Command chaining and redirection (`;`, `&`, backticks, `$(...)`, `>`, `<`) are refused, since the allowlist checks executables. Accepts `a,b,c` or a JSON list. |
+| `command_timeout` | `60` | Seconds before a `run_terminal_command` command is killed. |
+| `redact` | `true` | Rewrite filesystem paths and IP addresses out of outbound LLM requests. Does not cover the remote-embedding path. Read [redaction](redaction.md) before turning this off — and read it anyway for what it does **not** cover. |
+
+### The cluster diagnostic tools
+
+These only apply where the `cia` extra is installed and the chat server can
+reach a Slurm cluster. Without it the diagnostic tools are not registered and
+none of this is read.
+
+Each of these names something the chat tools and the agents both need to agree
+on, so a single setting answers to two environment variables: the chat prefix,
+and the name the agents use on their own. Setting either configures both halves
+— the chat name wins if you set both. This is the one place `AORTA_CHAT_*` is
+not the only spelling, and it is deliberate: `CIA_JOBS_ROOT` pointing one way
+while the profile pointed another is the failure the shared name prevents.
+
+| Setting | Also reads | Default | Meaning |
+| --- | --- | --- | --- |
+| `allow_cluster_jobs` | — | `false` | Register the three tools that submit work: `triage_kernel_source`, `triage_assembly_source`, `triage_workload`. Off by default because they are outside the bound every other tool keeps — see [extending](extending.md#the-exception-and-why-it-is-one). While off they are absent from the registry and the prompts, not refused at call time. Reading past jobs does not need it. |
+| `jobs_path` | `CIA_JOBS_ROOT` | *(the agents' own default, `~/cia-jobs`)* | Where job records and bundles are written. Must be readable from every node that runs work, which on most clusters means a shared filesystem rather than `/tmp`. |
+| `gpu_arch` | `CIA_GPU_ARCH` | `gfx950` | The GPU the submitted work is built for. Used for the assembler target and passed to the agents as `--arch`, so both name the same chip. |
+| `cia_demo_node` | `CIA_DEMO_NODE` | *(empty)* | Pin work to one node. Empty lets the scheduler choose, which is correct everywhere except a demo. |
+| `rocjitsu_build` | — | *(empty)* | The sanitizer backend. Unset means a sweep reports that it could not run, which is the honest outcome rather than reporting it found nothing. |
+| `rocjitsu_preload` | — | *(empty)* | Preloaded into the sanitized process. ConSan's hook is dlopened into one that has already loaded the host libstdc++, so without a newer one the tool library fails to load and the run reports a guardrail it never exercised. |
+| `triage_timeout` | — | `1800` | Seconds before one triage stops being waited for. The agents have their own internal timeouts; this is the backstop that keeps a wedged cluster job from hanging a chat turn. The abandoned run is asked to stop rather than left going. |
+| `waitcheck_timeout` | — | `300` | Seconds for one static assembly analysis, which needs no GPU and no queue. |
+
+CIA Launch, Watch, and Autopsy use `Qwen/Qwen3.8-27B`. They reuse the endpoint
+and API key selected by the chat provider, but not its model setting, so that
+endpoint must serve the Qwen model under that exact ID. CIA sends
+`chat_template_kwargs.enable_thinking = false` on every model request; Qwen
+answers directly instead of producing its default reasoning trace first.
+Ordinary `aorta chat` turns continue to use the configured `vllm_model` or
+`remote_llm_model`.
+
+The scheduler knobs the agents read directly — `CIA_PARTITION`, `CIA_TIME_LIMIT`,
+`CIA_SSH_USER`, `CIA_SSH_HOST`, `CIA_SEARCH_ROOTS`, `CIA_CONTAINER_IMAGE`,
+`CIA_SBATCH_EXTRA` — have no chat setting. They describe the cluster rather than
+the assistant, and are read from the environment the chat server runs in.
+
+
+## Example profile
+
+```toml
+# ~/.config/aorta/chat.toml
+llm_provider = "openai"
+remote_llm_model = "gpt-4o-mini"
+remote_llm_api_key = "sk-..."
+llm_tool_mode = "native"
+
+embedding_provider = "local"
+
+aorta_path = "/home/me/src/aorta"
+runs_path = "/home/me/sweeps"
+max_act_rounds_search = 4
+```
+
+## The web UI's own settings
+
+`aorta chat ui` is a Chainlit app, and Chainlit keeps its own configuration in
+`.chainlit/config.toml` beside the app rather than in your profile. It writes
+that file itself the first time it runs, with defaults chosen for a demo. Two
+of them matter here, and both are committed set rather than left to be
+regenerated.
+
+| Setting | Shipped as | Why |
+| --- | --- | --- |
+| `allow_origins` | `["http://localhost:8080", "http://127.0.0.1:8080"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
+| `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and a Slurm cluster. |
+
+**Serving anywhere other than `localhost:8080` means editing `allow_origins`.**
+Those two are `aorta chat ui`'s own defaults, and they have to stay in step with
+it: Chainlit reads `allow_origins` from the file and has no environment
+override, so a port listed here that the command never serves on refuses the
+browser of every default install.
+
+`aorta chat ui --host` and `--port`, and the `PORT` variable in a launcher, all
+move the socket without reaching into that file. The command compares the two at
+startup and prints what to add, because the failure otherwise is a page that
+loads and a websocket that never opens, with nothing on screen to say why.
+
+The rest of the file is Chainlit's own defaults. If you delete it, Chainlit
+regenerates it — with `allow_origins = ["*"]` and `mask_user_env = false` — so
+it is committed rather than ignored.
+
+
 ## Opt-in decision logs
 
 Chat does not persist a transcript by default. Set
@@ -128,168 +307,6 @@ scrub filesystem paths or IP addresses from the rationale. It emits one warning
 per session naming the file and can contain source, paths, addresses,
 credentials, and other model/tool output; protect and remove it accordingly.
 Set the variable to `0` or leave it unset to disable all decision logging.
-
-## Settings
-
-Every name below is a TOML key in the profile, and `AORTA_CHAT_<NAME>` in the
-environment.
-
-### Selectors
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `llm_provider` | `vllm` | `vllm` (local server) / `openai` (any OpenAI-wire endpoint) / `litellm` (native Anthropic, Gemini, Bedrock). An unknown value raises, listing the accepted names. |
-| `embedding_provider` | `local` | `local` (a small model on CPU) / `remote` (an embeddings API). Independent of `llm_provider`, and every `config init` profile writes `local` — including the remote-chat ones, because the published index is built with the local model and cannot be read by any other. `remote` is a manual choice with consequences: see [configuring a remote embedding provider](#configuring-a-remote-embedding-provider-by-hand). |
-| `llm_tool_mode` | `text` | `text` parses `ACTION: tool(arg="v")` lines out of the reply; `native` uses the provider's function-calling API. Reasoning models need `native` — see [providers](providers.md#tool-calling-and-reasoning-models). |
-
-### Local vLLM (`llm_provider = "vllm"`)
-
-| Setting | Default |
-| --- | --- |
-| `vllm_base_url` | `http://localhost:8000/v1` |
-| `vllm_model` | `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct` |
-| `vllm_api_key` | `EMPTY` — vLLM ignores it, but the OpenAI client rejects an empty string |
-
-### Remote chat (`llm_provider = "openai"` or `"litellm"`)
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `remote_llm_model` | `gpt-4o-mini` | The model id as the provider names it. For `litellm`, LiteLLM's own id format. |
-| `remote_llm_api_key` | *(empty)* | Required for `openai`; a missing value fails preflight rather than mid-query. Used by `litellm` too **when set** — only when it is empty does LiteLLM fall back to its own standard variables (`ANTHROPIC_API_KEY`, ...). |
-| `remote_llm_base_url` | *(empty)* | Empty means the provider default. Set it for anything else. |
-| `remote_llm_auth_header` | *(empty)* | Header name for a gateway that does not take a bearer token. Honoured by both `openai` and `litellm`. |
-| `remote_llm_extra_headers` | *(empty)* | Extra headers a gateway wants, as `user=alice,x-tenant=acme` or a JSON object. Honoured by both `openai` and `litellm`. Values are masked by `config show` and count as a credential for the 0600 check, because a gateway key put here is as sensitive as `remote_llm_api_key`. |
-
-### Call limits
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `llm_max_tokens` | *(unset)* | Cap on generated tokens per call. Omit the key entirely rather than setting it empty. |
-| `llm_timeout` | `120` | Seconds before one request is abandoned. |
-| `llm_max_retries` | `2` | Transport-level retries per call. Multiplies spend on a flaky endpoint. |
-
-### Embeddings
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `embedding_model` | `BAAI/bge-small-en-v1.5` | Local model. Cannot be blank: an empty or whitespace-only value selects no model, so it is refused when the settings load. Remove the setting to take the default. |
-| `model_cache_path` | `$XDG_CACHE_HOME/aorta/chat/models` | Where the local model's ONNX weights are cached. `HF_HOME` overrides it, which is what [air-gapped pre-seeding](rag-index.md#air-gapped-nodes) uses. Explicit rather than `fastembed`'s own `/tmp/fastembed_cache`, which a reboot wipes and other users on a shared node can write. |
-
-The five `remote_embedding_*` settings below are read by the embedding path only
-when `embedding_provider = "remote"`, which no profile selects. Setting them
-without also setting `embedding_provider` changes nothing about how the index is
-built or queried — though `remote_embedding_api_key` and
-`remote_embedding_extra_headers` count as credentials for `config validate`'s
-mode check either way. Setting them together with the selector is the procedure
-[below](#configuring-a-remote-embedding-provider-by-hand), and it obliges a
-local index rebuild.
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `remote_embedding_model` | `text-embedding-3-small` | Also decides the collection name, since dimensions differ per model. Cannot be blank, on the same rule as `embedding_model`. |
-| `remote_embedding_api_key` | *(empty)* | Separate from the chat key, so the two can use different providers. Required: an empty value raises rather than falling back to the local model. |
-| `remote_embedding_base_url` | *(empty)* | Empty means the provider default, which for an OpenAI-compatible client is `api.openai.com`. Set it for anything else — a gateway header with an empty base URL sends your corpus to OpenAI. |
-| `remote_embedding_auth_header` / `remote_embedding_extra_headers` | *(empty)* | As on the chat side. Behind a gateway you normally set both or neither. |
-
-### Corpus and index
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `aorta_path` | the installed `aorta` package | The source tree retrieval and the file tools are scoped to. Only ever read. |
-| `runs_path` | the working directory | Where your own sweep output directories live, for the run-artifact tools. |
-| `index_path` | `$XDG_CACHE_HOME/aorta/chat/index.sqlite` | The vector index, one file. |
-| `repo_map_path` | `$XDG_CACHE_HOME/aorta/chat/repo_map.md` | The generated function/class index. |
-| `repo_map_prompt_max_chars` | `20000` | Cap on how much of the map is injected into the planner's prompt; `0` disables the cap. The `search_repo_map` tool still queries the whole file. |
-| `chunk_size` / `chunk_overlap` | `512` / `50` | Indexer text splitter. Changing either invalidates the index. |
-
-Nothing writable defaults inside `site-packages`. An installed wheel is
-read-only on a shared node, and a tool that writes into its own install
-directory cannot be pip-upgraded cleanly.
-
-### Retrieval and the agent loop
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `retriever_k` / `retriever_fetch_k` | `12` / `30` | Chunks returned, and candidates fetched to select from. |
-| `search_tool_k` | `10` | Results from the `search_code` tool. |
-| `max_act_rounds` / `max_act_rounds_search` | `5` / `8` | Tool-loop budget for ordinary and search-shaped questions. The single biggest lever on cost. |
-| `max_retry_iterations` | `3` | Critic retry budget. `0` disables the retry loop. |
-
-### Command execution and egress
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `enable_shell_tool` | `false` | Register `run_terminal_command`. Off by default: it hands a model-authored string to a shell, so the agent is not given one unless you say so. While off, the tool is absent from the registry and from the prompts, not merely refused at call time. |
-| `allowed_commands` | `python,pytest,make,pip,grep,wc,head,tail,cat,ls,find` | Allowlist for `run_terminal_command`, applied per pipeline stage. Command chaining and redirection (`;`, `&`, backticks, `$(...)`, `>`, `<`) are refused, since the allowlist checks executables. Accepts `a,b,c` or a JSON list. |
-| `command_timeout` | `60` | Seconds before a `run_terminal_command` command is killed. |
-| `redact` | `true` | Rewrite filesystem paths and IP addresses out of outbound LLM requests. Does not cover the remote-embedding path. Read [redaction](redaction.md) before turning this off — and read it anyway for what it does **not** cover. |
-
-### The cluster diagnostic tools
-
-These only apply where the `cia` extra is installed and the chat server can
-reach a Slurm cluster. Without it the diagnostic tools are not registered and
-none of this is read.
-
-Each of these names something the chat tools and the agents both need to agree
-on, so a single setting answers to two environment variables: the chat prefix,
-and the name the agents use on their own. Setting either configures both halves
-— the chat name wins if you set both. This is the one place `AORTA_CHAT_*` is
-not the only spelling, and it is deliberate: `CIA_JOBS_ROOT` pointing one way
-while the profile pointed another is the failure the shared name prevents.
-
-| Setting | Also reads | Default | Meaning |
-| --- | --- | --- | --- |
-| `allow_cluster_jobs` | — | `false` | Register the three tools that submit work: `triage_kernel_source`, `triage_assembly_source`, `triage_workload`. Off by default because they are outside the bound every other tool keeps — see [extending](extending.md#the-exception-and-why-it-is-one). While off they are absent from the registry and the prompts, not refused at call time. Reading past jobs does not need it. |
-| `jobs_path` | `CIA_JOBS_ROOT` | *(the agents' own default, `~/cia-jobs`)* | Where job records and bundles are written. Must be readable from every node that runs work, which on most clusters means a shared filesystem rather than `/tmp`. |
-| `gpu_arch` | `CIA_GPU_ARCH` | `gfx950` | The GPU the submitted work is built for. Used for the assembler target and passed to the agents as `--arch`, so both name the same chip. |
-| `cia_demo_node` | `CIA_DEMO_NODE` | *(empty)* | Pin work to one node. Empty lets the scheduler choose, which is correct everywhere except a demo. |
-| `rocjitsu_build` | — | *(empty)* | The sanitizer backend. Unset means a sweep reports that it could not run, which is the honest outcome rather than reporting it found nothing. |
-| `rocjitsu_preload` | — | *(empty)* | Preloaded into the sanitized process. ConSan's hook is dlopened into one that has already loaded the host libstdc++, so without a newer one the tool library fails to load and the run reports a guardrail it never exercised. |
-| `triage_timeout` | — | `1800` | Seconds before one triage stops being waited for. The agents have their own internal timeouts; this is the backstop that keeps a wedged cluster job from hanging a chat turn. The abandoned run is asked to stop rather than left going. |
-| `waitcheck_timeout` | — | `300` | Seconds for one static assembly analysis, which needs no GPU and no queue. |
-
-CIA Launch, Watch, and Autopsy use `Qwen/Qwen3.8-27B`. They reuse the endpoint
-and API key selected by the chat provider, but not its model setting, so that
-endpoint must serve the Qwen model under that exact ID. CIA sends
-`chat_template_kwargs.enable_thinking = false` on every model request; Qwen
-answers directly instead of producing its default reasoning trace first.
-Ordinary `aorta chat` turns continue to use the configured `vllm_model` or
-`remote_llm_model`.
-
-The scheduler knobs the agents read directly — `CIA_PARTITION`, `CIA_TIME_LIMIT`,
-`CIA_SSH_USER`, `CIA_SSH_HOST`, `CIA_SEARCH_ROOTS`, `CIA_CONTAINER_IMAGE`,
-`CIA_SBATCH_EXTRA` — have no chat setting. They describe the cluster rather than
-the assistant, and are read from the environment the chat server runs in.
-
-
-## The web UI's own settings
-
-`aorta chat ui` is a Chainlit app, and Chainlit keeps its own configuration in
-`.chainlit/config.toml` beside the app rather than in your profile. It writes
-that file itself the first time it runs, with defaults chosen for a demo. Two
-of them matter here, and both are committed set rather than left to be
-regenerated.
-
-| Setting | Shipped as | Why |
-| --- | --- | --- |
-| `allow_origins` | `["http://localhost:8080", "http://127.0.0.1:8080"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
-| `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and a Slurm cluster. |
-
-**Serving anywhere other than `localhost:8080` means editing `allow_origins`.**
-Those two are `aorta chat ui`'s own defaults, and they have to stay in step with
-it: Chainlit reads `allow_origins` from the file and has no environment
-override, so a port listed here that the command never serves on refuses the
-browser of every default install.
-
-`aorta chat ui --host` and `--port`, and the `PORT` variable in a launcher, all
-move the socket without reaching into that file. The command compares the two at
-startup and prints what to add, because the failure otherwise is a page that
-loads and a websocket that never opens, with nothing on screen to say why.
-
-The rest of the file is Chainlit's own defaults. If you delete it, Chainlit
-regenerates it — with `allow_origins = ["*"]` and `mask_user_env = false` — so
-it is committed rather than ignored.
-
 
 ## Configuring a remote embedding provider by hand
 
@@ -517,19 +534,3 @@ place. When you built it yourself over a wider corpus — an `aorta_path` pointi
 at a source checkout, so `docs/` and `README.md` were indexed too — reach for
 `aorta chat index build` instead: it restores the manifest just as well and
 keeps your own corpus rather than replacing it with the package-only build.
-
-## Example profile
-
-```toml
-# ~/.config/aorta/chat.toml
-llm_provider = "openai"
-remote_llm_model = "gpt-4o-mini"
-remote_llm_api_key = "sk-..."
-llm_tool_mode = "native"
-
-embedding_provider = "local"
-
-aorta_path = "/home/me/src/aorta"
-runs_path = "/home/me/sweeps"
-max_act_rounds_search = 4
-```

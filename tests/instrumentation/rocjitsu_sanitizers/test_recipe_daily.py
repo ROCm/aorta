@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -215,13 +217,21 @@ def test_recipe_rejects_non_boolean_consan_log(tmp_path: Path) -> None:
 def _write_kernel_consan_recipe(
     tmp_path: Path,
     *,
-    consan_command: str = "loaders/consan_app",
+    consan_command: str | None = "loaders/consan_app",
     ticket: str = "TEST-CONSAN-CMD",
     timeout_seconds: str | None = None,
+    consan_driver: str | None = None,
+    consan_policy: str = "strict",
+    expected_error: str | None = None,
+    sanitizers: tuple[str, ...] = ("consan",),
 ) -> Path:
     timeout_line = (
         f"    timeout_seconds: {timeout_seconds}\n" if timeout_seconds is not None else ""
     )
+    command_line = f"    consan_command: {consan_command}\n" if consan_command is not None else ""
+    driver_line = f"    consan_driver: {consan_driver}\n" if consan_driver is not None else ""
+    expected_line = f"    expected_error: {expected_error}\n" if expected_error is not None else ""
+    sanitizer_lines = "".join(f"    - {name}\n" for name in sanitizers)
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text(
         "schema_version: 1\n"
@@ -235,16 +245,18 @@ def _write_kernel_consan_recipe(
         "      name: gemm_NT_M128_N128_K128\n"
         "      code_object: fixtures/isa/sol_0.hsaco\n"
         "      code_object_index: 0\n"
-        f"    consan_command: {consan_command}\n"
+        f"{command_line}"
+        f"{driver_line}"
         "  scope:\n"
         "    kind: kernel\n"
         "  selection:\n"
         "    requirement: top_dispatch_count\n"
         "    top_n: 1\n"
         "  sanitizers:\n"
-        "    - consan\n"
+        f"{sanitizer_lines}"
         "  policy:\n"
-        "    consan_policy: strict\n"
+        f"    consan_policy: {consan_policy}\n"
+        f"{expected_line}"
         "    on_missing_backend: fail\n"
         f"{timeout_line}"
         "  output:\n"
@@ -657,3 +669,208 @@ def test_verdict_baselines_fixture_present() -> None:
     assert baselines["waitcheck_gemm"]["overall_verdict"] == "warn"
     assert baselines["consan_clean"]["overall_verdict"] == "pass"
     assert baselines["consan_racy"]["overall_verdict"] == "fail"
+
+
+# ROCm/aorta#455. consan_policy: strict demands dynamic records, which a driver
+# that only loads its code object can never produce, so the pairing fails closed
+# on every run (#450) unless that outcome is what the recipe is for.
+
+
+def test_loader_rejects_strict_policy_with_load_only_driver(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, consan_driver="load")
+    with pytest.raises(RecipeSchemaError, match="ROCm/aorta#450"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_loader_accepts_lenient_policy_with_load_only_driver(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, consan_driver="load", consan_policy="lenient")
+    loaded = load_sanitizer_recipe(recipe)
+    assert (loaded.consan_driver, loaded.consan_policy) == ("load", "lenient")
+
+
+def test_loader_accepts_strict_policy_with_dispatching_driver(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, consan_driver="dispatch")
+    assert load_sanitizer_recipe(recipe).consan_driver == "dispatch"
+
+
+_COMMITTED_BASELINES = _FIXTURES / "expected" / "verdict_baselines.json"
+
+
+def _place_baselines(recipe_dir: Path, text: str | None = None) -> None:
+    """Put a verdict_baselines.json where a recipe in ``recipe_dir`` resolves it."""
+    target = recipe_dir / "fixtures" / "expected" / "verdict_baselines.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if text is None:
+        text = _COMMITTED_BASELINES.read_text(encoding="utf-8")
+    target.write_text(text, encoding="utf-8")
+
+
+def test_loader_accepts_strict_load_only_driver_with_declared_outcome(tmp_path: Path) -> None:
+    _place_baselines(tmp_path)
+    recipe = _write_kernel_consan_recipe(
+        tmp_path, consan_driver="load", expected_error="consan_tiny"
+    )
+    assert load_sanitizer_recipe(recipe).expected_error == "consan_tiny"
+
+
+# consan_clean is a real baseline key with no expected_error declaration, and
+# consan-tiny is the case directory's spelling rather than the key.
+@pytest.mark.parametrize("key", ["not-a-real-key", "consan_clean", "consan-tiny"])
+@pytest.mark.parametrize("consan_policy", ["strict", "lenient"])
+def test_loader_rejects_expected_error_naming_no_declaration(
+    tmp_path: Path, key: str, consan_policy: str
+) -> None:
+    _place_baselines(tmp_path)
+    recipe = _write_kernel_consan_recipe(
+        tmp_path, consan_driver="load", consan_policy=consan_policy, expected_error=key
+    )
+    with pytest.raises(RecipeSchemaError, match=f"expected_error='{key}' names no expected_error"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_loader_rejects_expected_error_whose_declaration_is_not_an_object(tmp_path: Path) -> None:
+    _place_baselines(tmp_path, json.dumps({"consan_tiny": {"expected_error": True}}))
+    recipe = _write_kernel_consan_recipe(
+        tmp_path, consan_driver="load", expected_error="consan_tiny"
+    )
+    with pytest.raises(RecipeSchemaError, match="names no expected_error declaration"):
+        load_sanitizer_recipe(recipe)
+
+
+@pytest.mark.parametrize("baselines", [None, "{not json"], ids=["missing", "malformed"])
+def test_loader_rejects_expected_error_it_cannot_check(
+    tmp_path: Path, baselines: str | None
+) -> None:
+    if baselines is not None:
+        _place_baselines(tmp_path, baselines)
+    recipe = _write_kernel_consan_recipe(
+        tmp_path, consan_driver="load", expected_error="consan_tiny"
+    )
+    with pytest.raises(RecipeSchemaError, match="cannot be checked against"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_loader_leaves_an_undeclared_driver_unchecked(tmp_path: Path) -> None:
+    loaded = load_sanitizer_recipe(_write_kernel_consan_recipe(tmp_path))
+    assert (loaded.consan_driver, loaded.consan_policy) == (None, "strict")
+
+
+def test_strict_load_only_rule_applies_only_when_consan_runs(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, consan_driver="load", sanitizers=("waitcheck",))
+    assert load_sanitizer_recipe(recipe).consan_driver == "load"
+
+
+def test_loader_rejects_unknown_consan_driver(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, consan_driver="launch")
+    with pytest.raises(RecipeSchemaError, match="consan_driver='launch'"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_loader_rejects_consan_driver_without_a_command(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(
+        tmp_path, consan_command=None, consan_driver="load", consan_policy="lenient"
+    )
+    with pytest.raises(RecipeSchemaError, match="names none"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_loader_rejects_empty_expected_error(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, consan_driver="load", expected_error='""')
+    with pytest.raises(RecipeSchemaError, match="expected_error"):
+        load_sanitizer_recipe(recipe)
+
+
+def _daily_recipes() -> list[Path]:
+    return sorted((_REPO / "recipes" / "sanitizers").glob("daily-*.yaml"))
+
+
+def test_every_daily_consan_recipe_declares_its_driver() -> None:
+    consan_recipes = {
+        path.name: recipe
+        for path in _daily_recipes()
+        if "consan" in (recipe := load_sanitizer_recipe(path)).sanitizers
+    }
+    assert len(consan_recipes) == 5
+    assert {name: recipe.consan_driver for name, recipe in consan_recipes.items()} == {
+        "daily-consan-clean.yaml": "dispatch",
+        "daily-consan-gemm.yaml": "load",
+        "daily-consan-lds-dispatch.yaml": "dispatch",
+        "daily-consan-racy.yaml": "dispatch",
+        "daily-consan-tiny.yaml": "load",
+    }
+
+
+def _load_comparator():
+    path = _REPO / "scripts" / "sanitizers" / "compare_verdict_baselines.py"
+    spec = importlib.util.spec_from_file_location("compare_verdict_baselines", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# How the nightly invokes a recipe, which fixes the directory its report lands
+# in and therefore the verdict-baselines key the vacuity sweep reads for it.
+_NIGHTLY_SWEEP = re.compile(
+    r"--recipe\s+recipes/sanitizers/(?P<recipe>[\w.-]+\.yaml)\s*\\\s*"
+    r'--output-dir\s+"\$\{SANITIZER_OUT\}/(?P<case_dir>[^"]+)"'
+)
+
+
+def test_daily_expected_error_names_the_declaration_the_nightly_reads() -> None:
+    comparator = _load_comparator()
+    baselines = comparator._load_baselines(_REPO / comparator._BASELINES)
+    workflow = (_REPO / ".github" / "workflows" / "sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+    case_dirs = {match["recipe"]: match["case_dir"] for match in _NIGHTLY_SWEEP.finditer(workflow)}
+    declared = {}
+    for path in _daily_recipes():
+        key = load_sanitizer_recipe(path).expected_error
+        if key is None:
+            continue
+        declared[path.name] = key
+        assert "expected_error" in baselines.get(key, {}), f"{path.name}: no declaration {key!r}"
+        assert path.name in case_dirs, f"{path.name}: the nightly does not run it"
+        assert comparator._case_key_for_dir(case_dirs[path.name]) == key
+    assert declared == {"daily-consan-tiny.yaml": "consan_tiny"}
+
+
+def _committed_recipe_variant(tmp_path: Path, name: str, old: str, new: str) -> Path:
+    text = (_REPO / "recipes" / "sanitizers" / name).read_text(encoding="utf-8")
+    assert text.count(old) == 1
+    variant = tmp_path / name
+    variant.write_text(text.replace(old, new), encoding="utf-8")
+    return variant
+
+
+def test_flipping_daily_consan_gemm_to_strict_is_rejected(tmp_path: Path) -> None:
+    # The flip that left this recipe returning no verdict for weeks (#450).
+    recipe = _committed_recipe_variant(
+        tmp_path,
+        "daily-consan-gemm.yaml",
+        "    consan_policy: lenient\n",
+        "    consan_policy: strict\n",
+    )
+    with pytest.raises(RecipeSchemaError, match="ROCm/aorta#450"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_daily_consan_tiny_loads_only_through_its_declared_outcome(tmp_path: Path) -> None:
+    recipe = _committed_recipe_variant(
+        tmp_path, "daily-consan-tiny.yaml", "    expected_error: consan_tiny\n", ""
+    )
+    with pytest.raises(RecipeSchemaError, match="ROCm/aorta#450"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_daily_consan_tiny_with_a_mistyped_key_is_rejected(tmp_path: Path) -> None:
+    _place_baselines(tmp_path)
+    recipe = _committed_recipe_variant(
+        tmp_path,
+        "daily-consan-tiny.yaml",
+        "    expected_error: consan_tiny\n",
+        "    expected_error: consan_tiyn\n",
+    )
+    with pytest.raises(RecipeSchemaError, match="'consan_tiyn' names no expected_error"):
+        load_sanitizer_recipe(recipe)

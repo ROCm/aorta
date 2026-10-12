@@ -60,19 +60,19 @@ cells:
     mitigations: [none]
     environment: local
 
-  - name: tf32_off-local
-    mitigations: [tf32_off]
+  - name: no-caching-local
+    mitigations: [pytorch_no_cuda_memory_caching]
     environment: local
     collect: []                      # optional per-cell override; disables collection here
 
-  - name: stack-tf32-xnack-local     # mitigation stacking (env vars unioned in list order)
-    mitigations: [tf32_off, xnack]
+  - name: stack-nocache-xnack-local  # mitigation stacking (env vars unioned in list order)
+    mitigations: [pytorch_no_cuda_memory_caching, xnack]
     environment: local
     trials: 16                       # optional per-cell override
     steps: 8000                      # optional per-cell override
 
   - name: custom-env-override        # one-off env var override for this cell only
-    mitigations: [tf32_off]
+    mitigations: [pytorch_no_cuda_memory_caching]
     environment: local
     extra_env:
       MY_DEBUG_FLAG: "1"
@@ -531,7 +531,7 @@ Example flag-mode CLI:
 ```
 aorta sweep run --mode matrix \
   --workload training \
-  --mitigation-axis none,tf32_off,xnack \
+  --mitigation-axis none,pytorch_no_cuda_memory_caching,xnack \
   --environment-axis local \
   --trials 2 --steps 100 \
   --ticket EXAMPLE-151

@@ -23,13 +23,11 @@ not touch it. Retrieved chunks from it are also the reason
 
 > **"Never published" is not the same as "never sent."** With
 > `embedding_provider = "remote"`, building this collection sends the rendered
-> `matrix.json` and `env.json` text to the embeddings API so it can be turned
-> into vectors, and each later query is sent the same way. That path is not
-> covered by chat-message redaction, which applies to the LLM request rather
-> than the embeddings one. Keep `embedding_provider = "local"` — the default,
-> and what every `config init` profile writes — if this data must not leave the
-> machine. Turning it off is a manual change with a
-> [documented procedure and a documented cost](configuration.md#configuring-a-remote-embedding-provider-by-hand).
+> `matrix.json` and `env.json` text to the embeddings API, unredacted, and each
+> later query is sent the same way. Keep `embedding_provider = "local"` — the
+> default — if this data must not leave the machine;
+> [configuring a remote embedding provider by hand](configuration.md#configuring-a-remote-embedding-provider-by-hand)
+> has the rest of the trade-off.
 
 Alongside the index, chat generates a **repo map** — a function and class index
 over the same tree, at `$XDG_CACHE_HOME/aorta/chat/repo_map.md`. The planner
@@ -75,12 +73,16 @@ aorta chat index fetch           # download the index matching your version
 aorta chat index fetch --from ./index.sqlite   # side-load, for an air-gapped node
 aorta chat index runs            # (re)build the run-artifact collection, locally
 aorta chat index status          # compare the local index against the published one
+aorta chat index digest          # print the corpus digest, without building
+aorta chat index eval            # score retrieval over a question set
 aorta chat doctor                # extras, backend reachability, index freshness
 ```
 
 `index runs` is the only one that touches the second collection, and the only
 one you need after a sweep. `build`, `fetch` and `--from` all replace the source
-collection and leave it alone.
+collection and leave it alone. `digest` and `eval` write nothing: CI compares
+`digest` against the published manifest to skip an unchanged nightly rebuild,
+and `eval` is the before-and-after check when you change `embedding_model`.
 
 `index status` writes nothing. It reads the local manifest, downloads the
 published one — about a kilobyte, not the index — and prints both sides plus a
@@ -97,114 +99,7 @@ installed one yet. When the local sidecar is unreadable *and* the published
 index is one this install could not use, the local failure is the verdict: it is
 the half the reader can act on, and the half that exits non-zero.
 
-### What replaces what
-
-Overwriting is guarded, and deliberately not symmetrically. A fetched index
-costs a download to replace; a locally built one may not be reproducible at all,
-because the tree it indexed may have moved and a node with no egress cannot
-re-download the embedding weights.
-
-| You run | Over an index that was | Result |
-|---|---|---|
-| `fetch` | downloaded, and identical | *already up to date*; no asset is transferred |
-| `fetch` | downloaded, and different | replaced, printing what changed |
-| `fetch` or `--from` | built locally | refused; pass `--force` |
-| `build` | built locally | rebuilt, as usual |
-| `build` (any corpus but the published one) | downloaded, and usable | refused; pass `--force` |
-| `build --public-only` | downloaded | rebuilt; it is the same corpus, so nothing is lost |
-| `build` | downloaded, but not usable by this install | rebuilt; it cannot answer anything, so nothing is lost |
-| `fetch` or `--from` | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
-| `build` | a manifest whose `corpus_roots` cannot be read | refused, unless a row above already exempts it; pass `--force` |
-| any of them, `--public-only` included | *not an index at all* — a path that exists with no manifest beside it | refused; pass `--force` |
-| any of them | a symlink whose target does not exist | refused; pass `--force`. It is occupied, even though `exists()` says otherwise |
-
-`fetch` also opens the store before deciding a refresh would change nothing.
-A matching `index_sha256` says the right index was installed, not that the file
-is still one, so a damaged store under an untouched sidecar is re-fetched rather
-than reported as *already up to date* — by the one command that would repair it.
-"Damaged" includes a store that opens cleanly but holds no chunks for the
-collection this install queries, which is what an index built by the other
-embedding provider and a build that stopped early both look like.
-
-When the published manifest itself is malformed, the refusal says so and does
-**not** offer a re-fetch: the same release yields the same bytes, so the remedies
-are another release (`--version`) or a local build. A malformed sidecar carried
-in with `--from` asks for the file to be re-staged, for the same reason. This is
-a rule rather than three messages — an error raised by `index fetch` may not
-advise an `index fetch` that would fail identically.
-
-**Do not run two builds against the same `--output` at once.** Nothing locks the
-index path, and both will report success. The install is a rename followed by
-two sidecar writes, and those are separate steps, so the two builds can
-interleave as *A renames, B renames, B writes sidecars, A writes sidecars* —
-leaving B's index under A's manifest. When the two builds disagree about chunk
-count, the contents check catches that pairing on the next read; when they
-happen to agree, as two builds of the same tree usually will, nothing detects
-it, and the index answers from a manifest describing a different build.
-
-A read concurrent with a single build is fine, and is the case that was designed
-for: it sees the old index or the new one, and the window after the rename and
-before the sidecars fails closed with a mismatch rather than answering from it.
-
-A refusal names what would be lost and the flag that proceeds anyway, following
-`config init --force` rather than prompting, so a script and a terminal behave
-identically. The command it prints carries any non-default `--path` and
-`--output` the refused invocation used, so pasting it acts on the index in
-question rather than on the cache; over the default paths it prints the short
-form, because there the two are the same index. An index the running
-configuration cannot *use* is never protected:
-rebuilding one you cannot query loses nothing, and `doctor` tells you to rebuild
-it. "Cannot use" is the same question the first query asks, store included — an
-embedding-model or identity mismatch, a manifest that disagrees with the
-contents, or a `.sqlite` that cannot be opened at all. A merely *stale* index is
-not in that set; it still answers, so a narrowing build over it is still refused.
-
-Which side built an index is read off its manifest's `corpus_roots`, so an index
-whose manifest records *no* roots — one built before the field existed — is not
-protected either way. One that records roots this build cannot read is a broken
-sidecar rather than an old one, and is refused rather than guessed at.
-
-No manifest *at all* is the last row, and it is about the destination rather
-than about provenance. Every write path here leaves its sidecars, so a path that
-exists without them is not an index this tool finished installing: it is a
-mistyped `--output`, a file something else owns, or an index whose sidecars were
-lost. Only the first two are unrecoverable, and nothing on disk tells them
-apart, so all three are refused. A path that does *not* exist is a first
-install and is always permitted — that distinction is the whole rule.
-
-This row is checked **before every exemption above it**, `--public-only`
-included. The exemptions answer "is this a narrowing, or an index that cannot
-be queried anyway" — questions that presume an index is what is there, which is
-the one thing this case does not establish. A typo is a typo on the CI path
-too. It costs the published build nothing: `chat-index-nightly.yml` and `release.yml` run
-on a fresh workspace and never restore `index-out/`, so their first write is to
-a path that does not exist and every later one is over complete sidecars.
-
-The exemptions come first, which is why the `build` row above is qualified. An
-unreadable `corpus_roots` means the index is either a published one or a local
-one, and both of the `build` exemptions give the same answer down both branches:
-a `--public-only` build records the published corpus whichever it replaced, and
-an index this install cannot use is unusable whoever built it — while a local
-index is never protected from `build` in the first place. So proceeding there is
-not a guess about which one is on disk; it is what both possibilities agree on.
-`fetch` and `--from` carry no such exemption, so for them the refusal is
-unconditional.
-
-**Interrupting any of them is safe.** `build`, `fetch` and `--from` write the
-new index beside the old one and move it into place in a single step, then write
-the manifest, so a `Ctrl-C` leaves the previous index and its manifest exactly as
-they were rather than a half-populated file under a manifest describing the
-complete one. If a run is interrupted in the window after the move, the manifest
-no longer matches the chunk count in the index and every query is refused until
-you rebuild or re-fetch — which is the point, because that state cannot produce a
-correct answer and would not otherwise announce itself.
-
-`index runs` cannot move a file, because its collection shares the `.sqlite`
-with the source one. It gets the same guarantee a different way: it embeds into
-a scratch database and swaps the finished collection in one transaction, so an
-interruption — or a remote embedding endpoint that stops answering part way
-through — leaves the collection you already had, rather than an empty or
-half-rebuilt one.
+### Fetch or build
 
 `fetch` is the normal path: the source collection is identical for every user of
 a given AORTA revision, so building it locally is work someone already did. It
@@ -322,6 +217,115 @@ minutes and runs on CPU.
 The log tells you what it indexed. Expect a few hundred files; tens of thousands
 means `aorta_path` is pointing at a tree that includes build output.
 
+### What replaces what
+
+Overwriting is guarded, and deliberately not symmetrically. A fetched index
+costs a download to replace; a locally built one may not be reproducible at all,
+because the tree it indexed may have moved and a node with no egress cannot
+re-download the embedding weights.
+
+| You run | Over an index that was | Result |
+|---|---|---|
+| `fetch` | downloaded, and identical | *already up to date*; no asset is transferred |
+| `fetch` | downloaded, and different | replaced, printing what changed |
+| `fetch` or `--from` | built locally | refused; pass `--force` |
+| `build` | built locally | rebuilt, as usual |
+| `build` (any corpus but the published one) | downloaded, and usable | refused; pass `--force` |
+| `build --public-only` | downloaded | rebuilt; it is the same corpus, so nothing is lost |
+| `build` | downloaded, but not usable by this install | rebuilt; it cannot answer anything, so nothing is lost |
+| `fetch` or `--from` | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
+| `build` | a manifest whose `corpus_roots` cannot be read | refused, unless a row above already exempts it; pass `--force` |
+| any of them, `--public-only` included | *not an index at all* — a path that exists with no manifest beside it | refused; pass `--force` |
+| any of them | a symlink whose target does not exist | refused; pass `--force`. It is occupied, even though `exists()` says otherwise |
+
+`fetch` also opens the store before deciding a refresh would change nothing.
+A matching `index_sha256` says the right index was installed, not that the file
+is still one, so a damaged store under an untouched sidecar is re-fetched rather
+than reported as *already up to date* — by the one command that would repair it.
+"Damaged" includes a store that opens cleanly but holds no chunks for the
+collection this install queries, which is what an index built by the other
+embedding provider and a build that stopped early both look like.
+
+When the published manifest itself is malformed, the refusal says so and does
+**not** offer a re-fetch: the same release yields the same bytes, so the remedies
+are another release (`--version`) or a local build. A malformed sidecar carried
+in with `--from` asks for the file to be re-staged, for the same reason. This is
+a rule rather than three messages — an error raised by `index fetch` may not
+advise an `index fetch` that would fail identically.
+
+**Do not run two builds against the same `--output` at once.** Nothing locks the
+index path, and both will report success. The install is a rename followed by
+two sidecar writes, and those are separate steps, so the two builds can
+interleave as *A renames, B renames, B writes sidecars, A writes sidecars* —
+leaving B's index under A's manifest. When the two builds disagree about chunk
+count, the contents check catches that pairing on the next read; when they
+happen to agree, as two builds of the same tree usually will, nothing detects
+it, and the index answers from a manifest describing a different build.
+
+A read concurrent with a single build is fine, and is the case that was designed
+for: it sees the old index or the new one, and the window after the rename and
+before the sidecars fails closed with a mismatch rather than answering from it.
+
+A refusal names what would be lost and the flag that proceeds anyway, following
+`config init --force` rather than prompting, so a script and a terminal behave
+identically. The command it prints carries any non-default `--path` and
+`--output` the refused invocation used, so pasting it acts on the index in
+question rather than on the cache; over the default paths it prints the short
+form, because there the two are the same index. An index the running
+configuration cannot *use* is never protected:
+rebuilding one you cannot query loses nothing, and `doctor` tells you to rebuild
+it. "Cannot use" is the same question the first query asks, store included — an
+embedding-model or identity mismatch, a manifest that disagrees with the
+contents, or a `.sqlite` that cannot be opened at all. A merely *stale* index is
+not in that set; it still answers, so a narrowing build over it is still refused.
+
+Which side built an index is read off its manifest's `corpus_roots`, so an index
+whose manifest records *no* roots — one built before the field existed — is not
+protected either way. One that records roots this build cannot read is a broken
+sidecar rather than an old one, and is refused rather than guessed at.
+
+No manifest *at all* is the last row, and it is about the destination rather
+than about provenance. Every write path here leaves its sidecars, so a path that
+exists without them is not an index this tool finished installing: it is a
+mistyped `--output`, a file something else owns, or an index whose sidecars were
+lost. Only the first two are unrecoverable, and nothing on disk tells them
+apart, so all three are refused. A path that does *not* exist is a first
+install and is always permitted — that distinction is the whole rule.
+
+This row is checked **before every exemption above it**, `--public-only`
+included. The exemptions answer "is this a narrowing, or an index that cannot
+be queried anyway" — questions that presume an index is what is there, which is
+the one thing this case does not establish. A typo is a typo on the CI path
+too. It costs the published build nothing: `chat-index-nightly.yml` and `release.yml` run
+on a fresh workspace and never restore `index-out/`, so their first write is to
+a path that does not exist and every later one is over complete sidecars.
+
+The exemptions come first, which is why the `build` row above is qualified. An
+unreadable `corpus_roots` means the index is either a published one or a local
+one, and both of the `build` exemptions give the same answer down both branches:
+a `--public-only` build records the published corpus whichever it replaced, and
+an index this install cannot use is unusable whoever built it — while a local
+index is never protected from `build` in the first place. So proceeding there is
+not a guess about which one is on disk; it is what both possibilities agree on.
+`fetch` and `--from` carry no such exemption, so for them the refusal is
+unconditional.
+
+**Interrupting any of them is safe.** `build`, `fetch` and `--from` write the
+new index beside the old one and move it into place in a single step, then write
+the manifest, so a `Ctrl-C` leaves the previous index and its manifest exactly as
+they were rather than a half-populated file under a manifest describing the
+complete one. If a run is interrupted in the window after the move, the manifest
+no longer matches the chunk count in the index and every query is refused until
+you rebuild or re-fetch — which is the point, because that state cannot produce a
+correct answer and would not otherwise announce itself.
+
+`index runs` cannot move a file, because its collection shares the `.sqlite`
+with the source one. It gets the same guarantee a different way: it embeds into
+a scratch database and swaps the finished collection in one transaction, so an
+interruption — or a remote embedding endpoint that stops answering part way
+through — leaves the collection you already had, rather than an empty or
+half-rebuilt one.
+
 ## Air-gapped nodes
 
 `index fetch --from <path>` side-loads an index someone copied in, which solves
@@ -358,14 +362,9 @@ the embedding library, which reads as a bug rather than as "you need to pre-seed
 a cache" — so if that is what you are looking at, this is the section you want.
 
 **A node that can reach an embeddings API but not Hugging Face** is the one
-case remote embeddings are genuinely for — but only where the pre-seeded cache
-above is out of reach, because that keeps embeddings local, free and unmetered
-on exactly the same node. Reach for it first. Remote is not a
-drop-in switch: it changes the collection name, makes the published asset
-unusable so `index build` becomes mandatory on every upgrade, bills you per
-query as well as per build, and sends the corpus — including the run-artifact
-collection's `env.json` and `matrix.json` — to that API on a path redaction does
-not cover. The full procedure and the rest of the trade-off is
+case remote embeddings are for, and only when the pre-seeded cache above is out
+of reach: the cache keeps embeddings local, free and unmetered on the same node,
+so try it first. What remote costs, and the procedure, are in
 [configuring a remote embedding provider by hand](configuration.md#configuring-a-remote-embedding-provider-by-hand).
 
 A genuinely air-gapped node cannot reach the embeddings API either, so for that

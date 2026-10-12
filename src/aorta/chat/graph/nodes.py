@@ -1287,6 +1287,19 @@ def _resolved_tool_mode() -> str:
     return mode
 
 
+def tool_protocol_in_force() -> tuple[str, bool]:
+    """The protocol a query arriving now would use, and whether escalation chose it.
+
+    For the surfaces that report the protocol rather than use it. The web UI
+    greets each browser session separately while the escalation is shared by
+    the process, so a session that opens after it has to be told ``native``:
+    ``settings.llm_tool_mode`` names the protocol the process started on, not
+    the one that session's questions will be sent on.
+    """
+    mode = _resolved_tool_mode()
+    return mode, mode != settings.llm_tool_mode.strip().lower()
+
+
 def _escalate_to_native(response: Any) -> bool:
     """Whether to retry this round in the native protocol.
 
@@ -1333,7 +1346,7 @@ def _escalate_to_native(response: Any) -> bool:
 _ANSWERED = "Native function calling answered it"
 _CALLED_TOOLS = (
     "Native function calling drove real tool calls before the backend failed, "
-    "so the protocol works even though this query got no answer"
+    "so the protocol works even though it did not answer this query itself"
 )
 #: Native drove tool calls, nothing failed, and the summarising call still came
 #: back empty. Distinct from :data:`_CALLED_TOOLS`, which says "before the
@@ -1352,7 +1365,8 @@ _CALLED_TOOLS_NO_SYNTHESIS = (
 _CALLED_TOOLS_QUIET = (
     "Native function calling emitted structured tool calls -- all of them "
     "repeats of calls the text protocol had already run -- and then returned "
-    "no text, so the protocol works even though this query got no answer"
+    "no text, so the protocol works even though it did not answer this query "
+    "itself"
 )
 
 
@@ -1548,8 +1562,67 @@ _DEGRADED_ANSWER_PREFIX = (
     "that needed me to go and look is missing from it."
 )
 
+#: The same fallback after every tool that ran had failed. Not
+#: :data:`_DEGRADED_ANSWER_PREFIX`: that one says the lookup was never
+#: attempted, and here it was attempted and failed -- the fact that sends an
+#: operator to the tool rather than to the model. Relabelling this case as
+#: tool-less would be a quieter version of #433.
+_TOOLS_FAILED_PREFIX = (
+    "The tools I tried for this question failed, so what follows comes only "
+    "from the documentation and run records I already have indexed. Anything "
+    "that needed me to go and look is missing from it."
+)
 
-async def _fallback_retrieval_answer(state: AgentState) -> str:
+#: Prefixed to an answer built from tool results the act loop gathered before
+#: it gave up. Tools ran, so it must not claim they were unavailable, and the
+#: run stopped early, so it must not read as a finished investigation.
+_PARTIAL_ANSWER_PREFIX = (
+    "I stopped before I finished looking into this, so what follows is built "
+    "from the partial results I had gathered by then and may be incomplete."
+)
+
+#: :data:`_PARTIAL_ANSWER_PREFIX` for a trace that also holds failures. Both
+#: halves are owed: the run was incomplete *and* part of what it tried failed.
+_PARTIAL_WITH_FAILURES_PREFIX = (
+    "I stopped before I finished looking into this, and some of the tools I "
+    "tried failed, so what follows is built from the partial results I had "
+    "gathered by then and may be incomplete."
+)
+
+#: Heads the gathered results where they are appended to the retrieved context.
+#: In the context rather than in a user turn because ``ANSWER_PROMPT`` requires
+#: everything stated to be visible in the RETRIEVED CONTEXT.
+_PARTIAL_RESULTS_HEADING = (
+    "TOOL RESULTS GATHERED FOR THIS QUESTION BEFORE THE INVESTIGATION STOPPED "
+    "(incomplete):"
+)
+
+#: The closing turn of the partial-results synthesis. Always appended, not
+#: only after an assistant turn, because it carries the instruction the label
+#: depends on: the answer must not present a stopped run as a finished one.
+_PARTIAL_SYNTHESIS_NUDGE = (
+    "The investigation of this question stopped before it finished, and no "
+    "tools are available for this attempt. Answer from the tool results and "
+    "the documentation and run records quoted above. Say plainly which parts "
+    "of the question they do not settle, and do not describe the investigation "
+    "as complete. Describe evidence-gathering in plain language and do not "
+    "expose internal tool-call names."
+)
+
+
+def _trace_entry(rendered: str, result: object) -> str:
+    """*rendered*, still marked failed when the tool *result* it renders was.
+
+    Formatting a result into its trace line drops :func:`tool_result_failed`,
+    and :func:`_abandoned_result` needs it: a trace holding only failures is
+    not material to answer from, and the label has to say which it was.
+    """
+    return tool_failure(rendered) if tool_result_failed(result) else rendered
+
+
+async def _fallback_retrieval_answer(
+    state: AgentState, gathered: list[str] | None = None
+) -> str:
     """One tool-free answer attempt after the act loop abandoned, or "".
 
     The reporter proved this works before it was written: the same information
@@ -1566,16 +1639,17 @@ async def _fallback_retrieval_answer(state: AgentState) -> str:
     covers a provider hiccup on one protocol, an endpoint that refuses the
     other, and any future model that can drive neither.
 
-    It does *not* cover a tool outage, which the surrounding docs used to claim.
-    A failing tool still appends its error to the trace, and
-    :func:`_abandoned_result` sends any non-empty trace to the plain notice --
-    because "I could not use my tools" is false once a tool has run, and an
-    untrue label is what this fallback exists to avoid.
+    *gathered* is the tool trace, when the loop ran something worth answering
+    from before it gave up (#475). It is appended to the retrieved context
+    under :data:`_PARTIAL_RESULTS_HEADING` and the request closes on
+    :data:`_PARTIAL_SYNTHESIS_NUDGE`, so the one call answers from the results
+    instead of discarding them. Which label the answer then carries is
+    :func:`_abandoned_result`'s decision, not this function's.
 
-    The trailing user turn this needs is :data:`_FALLBACK_RETRY_NUDGE`, not the
-    default: this request carries no tools, so the default's "ground every claim
-    in output you obtained from a tool in this turn" would be an instruction it
-    makes impossible to follow.
+    Without *gathered*, the trailing user turn this needs is
+    :data:`_FALLBACK_RETRY_NUDGE`, not the default: this request carries no
+    tools, so the default's "ground every claim in output you obtained from a
+    tool in this turn" would be an instruction it makes impossible to follow.
 
     Returns "" when the model produces nothing *or when the call fails*, so the
     caller still reports the dead end rather than an empty answer or an error.
@@ -1597,16 +1671,21 @@ async def _fallback_retrieval_answer(state: AgentState) -> str:
     # failures.
     try:
         llm = _get_llm(temperature=0.1, streaming=False)
-        messages = [
-            _build_answer_message(state.get("retrieved_context", "")),
-            *state["messages"],
-        ]
-        _ensure_ends_with_user(messages, _FALLBACK_RETRY_NUDGE)
+        context = state.get("retrieved_context", "")
+        if gathered:
+            results = "\n\n".join(gathered)
+            context = f"{context}\n\n{_PARTIAL_RESULTS_HEADING}\n{results}"
+        messages = [_build_answer_message(context), *state["messages"]]
+        if gathered:
+            messages.append(HumanMessage(content=_PARTIAL_SYNTHESIS_NUDGE))
+        else:
+            _ensure_ends_with_user(messages, _FALLBACK_RETRY_NUDGE)
         response = await _send(llm, messages)
     except Exception as exc:  # last-resort extra call; see the docstring
         logger.warning(
-            "The fallback answer from retrieved context failed too (%s: %s), so "
-            "this query has no answer to give.",
+            "The fallback answer %s failed too (%s: %s), so this query has no "
+            "answer to give.",
+            "from the gathered tool results" if gathered else "from retrieved context",
             type(exc).__name__,
             exc,
         )
@@ -1618,37 +1697,72 @@ async def _fallback_retrieval_answer(state: AgentState) -> str:
 
 
 async def _abandoned_result(state: AgentState, trace: list[str]) -> dict[str, Any]:
-    """What the act loop returns once it has given up: a fallback, or the notice.
+    """What the act loop returns once it has given up: a labelled fallback, or the notice.
+
+    The trace is classified rather than tested for emptiness, because the label
+    has to say what was actually tried, and three different things can have
+    been:
+
+    * **nothing ran** -- answer from retrieved context, labelled
+      :data:`_DEGRADED_ANSWER_PREFIX`;
+    * **every tool that ran failed** -- the same answer, labelled
+      :data:`_TOOLS_FAILED_PREFIX`. The failures are not material to answer
+      from, and "I could not use my tools" would claim no lookup was tried;
+    * **at least one tool returned a result** -- answer from those results
+      (#475), labelled :data:`_PARTIAL_ANSWER_PREFIX`, or
+      :data:`_PARTIAL_WITH_FAILURES_PREFIX` when some calls also failed.
+      Returning the notice here threw the query's only material away while it
+      sat in ``tool_trace``.
+
+    A failure is what :func:`tool_result_failed` says it is, which
+    :func:`_trace_entry` carries onto each trace line.
+
+    Every branch makes the same single call -- the budget the empty-trace
+    fallback already had. A trace with results used to make none, and now
+    makes that one because it is the call that can answer from them; nothing
+    here makes a second. If it fails or returns nothing, the query gets
+    :data:`_NO_ANSWER_MSG`.
 
     ``command_output`` is deliberately left empty even when the fallback
     answered. It is what ``critic_node`` judges, and an empty value makes the
     critic return no feedback, which sends the graph to ``END`` -- so the
     fallback cannot be rejected into a retry that re-enters the act loop, which
-    is what keeps :data:`_MAX_UNPRODUCTIVE_ROUNDS` meaningful. It is also
-    honest: no command was run and no tool output exists for a critic to check
-    the answer against.
+    is what keeps :data:`_MAX_UNPRODUCTIVE_ROUNDS` meaningful. On the two
+    retrieved-context branches it is also honest: no tool output exists for a
+    critic to check the answer against. On the partial-results branch some
+    does, and the answer goes unverified anyway -- a critic rejection there
+    would re-enter the loop that just gave up, so the label carries the caveat
+    instead.
 
     One attempt per entry to the act loop, and on the ordinary path the empty
     ``command_output`` means there is only ever one entry.
-
-    A loop that ran a tool before going quiet gets the plain notice instead. The
-    label would be false there -- tools *did* run -- and an inaccurate label is
-    the thing this fallback is careful about in the first place.
     """
-    if trace:
-        return {
-            "messages": [AIMessage(content=_NO_ANSWER_MSG)],
-            "command_output": "",
-            "tool_trace": trace,
-            "user_evidence": [],
-        }
-    answer = await _fallback_retrieval_answer(state)
+    failed = sum(1 for entry in trace if tool_result_failed(entry))
+    succeeded = len(trace) - failed
+    if succeeded:
+        answer = await _fallback_retrieval_answer(state, gathered=trace)
+        prefix = _PARTIAL_WITH_FAILURES_PREFIX if failed else _PARTIAL_ANSWER_PREFIX
+        source = f"the {succeeded} tool result(s) gathered"
+        label = "partial: the investigation did not finish"
+        if failed:
+            label += f", and {failed} tool call(s) failed"
+    else:
+        answer = await _fallback_retrieval_answer(state)
+        prefix = _TOOLS_FAILED_PREFIX if failed else _DEGRADED_ANSWER_PREFIX
+        source = "retrieved context"
+        label = (
+            f"degraded: all {failed} tool call(s) failed"
+            if failed
+            else "degraded: no tool ran for this query"
+        )
     if answer:
         logger.info(
-            "Answered from retrieved context after the act loop abandoned. The "
-            "answer is labelled as degraded: no tool ran for this query."
+            "Answered from %s after the act loop abandoned. The answer is "
+            "labelled as %s.",
+            source,
+            label,
         )
-        answer = f"{_DEGRADED_ANSWER_PREFIX}\n\n{answer}"
+        answer = f"{prefix}\n\n{answer}"
     return {
         "messages": [AIMessage(content=answer or _NO_ANSWER_MSG)],
         "command_output": "",
@@ -1769,8 +1883,8 @@ async def _escalated_native_attempt(
     except _NativeLoopError as failure:
         # Everything the native loop achieved before it broke, in front of what
         # the text loop had achieved before it gave up. Both belong to the same
-        # query, and `_abandoned_result` reads the pair to decide whether "I
-        # could not use my tools" is a true thing to tell this user.
+        # query, and `_abandoned_result` reads the pair to decide what to answer
+        # from and which label is a true thing to tell this user.
         whole_trace = [*trace, *failure.trace]
         if failure.tool_called:
             # Native drove structured `tool_calls` and *then* the backend fell
@@ -1787,8 +1901,9 @@ async def _escalated_native_attempt(
                 "works on this endpoint, so the protocol moves to native "
                 "anyway and this does not count against the %d-failure budget. "
                 "%s, but the call that would have turned them into an answer is "
-                "the one that failed, so this query still has no answer to "
-                "give. Retrying the question will now go straight to native.",
+                "the one that failed, so one tool-free attempt to answer from "
+                "them follows. Retrying the question will now go straight to "
+                "native.",
                 type(failure.cause).__name__,
                 failure.cause,
                 _MAX_NATIVE_FAILURES,
@@ -1805,7 +1920,7 @@ async def _escalated_native_attempt(
             return await _abandoned_result(state, whole_trace)
         logger.warning(
             "The escalated native tool-calling request failed (%s: %s) without "
-            "making a tool call. Answering from retrieved context instead. %s",
+            "making a tool call. Falling back to one tool-free answer attempt. %s",
             type(failure.cause).__name__,
             failure.cause,
             _record_escalation_failure(probe, endpoint_hint=True),
@@ -1819,8 +1934,8 @@ async def _escalated_native_attempt(
         # back on the query this whole path exists to keep an answer on.
         logger.warning(
             "The escalated native tool-calling request failed before it could "
-            "call anything (%s: %s). Answering from retrieved context "
-            "instead. %s",
+            "call anything (%s: %s). Falling back to one tool-free answer "
+            "attempt. %s",
             type(exc).__name__,
             exc,
             _record_escalation_failure(probe, endpoint_hint=True),
@@ -2319,7 +2434,9 @@ async def _run_native_loop(
                 continue
             seen.add(signature)
             result = await _execute_tool_async(call["name"], call["args"])
-            trace.append(f"{_TOOL_RESULT_PREFIX}{call['name']}:\n{result}")
+            trace.append(
+                _trace_entry(f"{_TOOL_RESULT_PREFIX}{call['name']}:\n{result}", result)
+            )
             messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
 
     # A loop that gathered results before going quiet still has material, so it
@@ -2345,7 +2462,8 @@ async def _run_native_loop(
         # `trace` is provably empty on this branch, so this is `prior_trace`.
         # Passing it matters: a text loop that ran a tool before dead-ending
         # must not have its query labelled "I could not use my tools", which is
-        # what an empty trace tells `_abandoned_result` to do.
+        # what an empty trace tells `_abandoned_result` to do, and its results
+        # are what the fallback answers from.
         return _NativeOutcome(
             result=await _abandoned_result(state, whole_trace()),
             # Not `False`: an empty `trace` stopped meaning "made no tool call"
@@ -2546,7 +2664,7 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
         # ``line.startswith(_EXIT_CODE_PREFIX)``, so putting the result after
         # the arrow hid every failed command in text tool mode and let the
         # critic approve an answer built on one.
-        tool_trace.append(f"[{tool_name}({kwargs})] →\n{result}")
+        tool_trace.append(_trace_entry(f"[{tool_name}({kwargs})] →\n{result}", result))
         # Structured alongside the rendered form, for the escalated retry's
         # duplicate guard. See `_EscalateToNative.calls`.
         tool_calls_made.append((tool_name, kwargs, result))

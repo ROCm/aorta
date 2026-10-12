@@ -17,7 +17,7 @@ from aorta.chat.inference.providers.factory import get_backend
 from aorta.chat.session import invoke_agent
 from aorta.chat.decision_log import new_session_id
 from aorta.chat.tools.cache import ToolCache, use_tool_cache
-from aorta.chat.ui.welcome import welcome_message
+from aorta.chat.ui.welcome import tool_protocol, welcome_message
 
 # Set by ``aorta chat ui`` from its group-level flags. This is a fresh
 # interpreter, so they cannot arrive any other way.
@@ -330,6 +330,9 @@ async def on_start():
         await cl.Message(content=_unavailable_message(str(exc))).send()
         return
 
+    # The line ``aorta chat`` logs at startup. Here it is per session, as the
+    # banner is: the protocol can move between one session and the next.
+    logger.info("LLM backend: %s (tool protocol: %s)", backend.describe(), tool_protocol())
     await cl.Message(content=welcome_message(backend.describe())).send()
 
 
