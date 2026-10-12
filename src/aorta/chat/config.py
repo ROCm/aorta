@@ -170,6 +170,10 @@ class Settings(BaseSettings):
     remote_llm_model: str = "gpt-4o-mini"
     remote_llm_api_key: str = ""
     remote_llm_base_url: str = ""
+    # The api-version query parameter Azure OpenAI requires, for an azure/
+    # model on "litellm". Empty leaves it to AZURE_API_VERSION, then LiteLLM's
+    # own default -- a preview version that a gateway may not accept.
+    remote_llm_api_version: str = ""
     # Gateways that want the key in a custom header rather than as a bearer
     # token: set the header name here (Ocp-Apim-Subscription-Key for Azure API
     # Management, api-key for Azure OpenAI, x-api-key for Anthropic's own API).
@@ -672,6 +676,19 @@ PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
         "remote_llm_auth_header": "Ocp-Apim-Subscription-Key",
         "embedding_provider": "local",
     },
+    "azure-openai": {
+        # Azure OpenAI, or a gateway that only exposes its deployment path:
+        # /openai/deployments/<name>/chat/completions?api-version=<version>.
+        # LiteLLM builds that path for an azure/ model and nothing else; a bare
+        # model name is posted to <base>/chat/completions and the gateway
+        # answers 404. The trailing slash is a prompt default the user
+        # completes with the deployment name, and preflight refuses it bare.
+        "llm_provider": "litellm",
+        "remote_llm_model": "azure/",
+        "remote_llm_base_url": "",
+        "remote_llm_api_version": "",
+        "embedding_provider": "local",
+    },
     "anthropic": {
         # Native Anthropic wire protocol, which the openai backend cannot
         # speak; litellm needs the chat-all extra.
@@ -698,6 +715,12 @@ PROFILE_PROMPTS: dict[str, tuple[str, ...]] = {
     "openai": ("remote_llm_model", "remote_llm_api_key"),
     "openai-compatible": ("remote_llm_base_url", "remote_llm_model", "remote_llm_api_key"),
     "azure-apim": ("remote_llm_base_url", "remote_llm_model", "remote_llm_api_key"),
+    "azure-openai": (
+        "remote_llm_base_url",
+        "remote_llm_model",
+        "remote_llm_api_version",
+        "remote_llm_api_key",
+    ),
     "anthropic": ("remote_llm_model", "remote_llm_api_key"),
     "local-vllm": ("vllm_base_url", "vllm_model"),
 }

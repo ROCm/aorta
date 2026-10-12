@@ -47,6 +47,75 @@ def _require_auth_config() -> tuple[str, str]:
     return api_key, auth_header
 
 
+def _require_model() -> str:
+    """Return the stripped model name, or raise if it names no Azure deployment.
+
+    ``azure/`` alone is what the ``azure-openai`` profile writes when its prompt
+    is accepted unchanged, and LiteLLM would build a deployment path with an
+    empty name from it.
+    """
+    model = settings.remote_llm_model.strip()
+    if model.partition("/")[0] == "azure" and not model.partition("/")[2].strip():
+        raise ValueError(
+            f"remote_llm_model is {model!r}, which names no Azure deployment.\n"
+            "Put the deployment name after the prefix, for example "
+            'remote_llm_model = "azure/gpt-4o-mini", or set '
+            "AORTA_CHAT_REMOTE_LLM_MODEL."
+        )
+    return model
+
+
+def _provider_prefix(model: str) -> str | None:
+    """The leading component of *model* when LiteLLM routes on it, else None.
+
+    Read from LiteLLM's own registry, not ``litellm.get_llm_provider``: that
+    prints a banner to stdout for a name it does not recognise, which would
+    land in ``--json`` output.
+    """
+    import litellm
+
+    prefix, separator, _ = model.partition("/")
+    if not separator:
+        return None
+    known = {getattr(p, "value", p) for p in getattr(litellm, "provider_list", ())}
+    return prefix if prefix in known else None
+
+
+def route_warning() -> str | None:
+    """Why the configured model will not reach the API behind the base URL, or None.
+
+    Only a base URL makes the model name decide the request path. Without a
+    provider prefix LiteLLM can only treat that URL as OpenAI-compatible and
+    post to ``<base>/chat/completions`` -- a 404 from a gateway that serves
+    Azure deployments only (#556). Legitimate for a gateway that does speak
+    the OpenAI protocol, hence a warning and not a refusal.
+    """
+    base = settings.remote_llm_base_url.strip().rstrip("/")
+    model = settings.remote_llm_model.strip()
+    if not base or not model:
+        return None
+    prefix = _provider_prefix(model)
+    if prefix is None:
+        return (
+            f"remote_llm_model {model!r} has no LiteLLM provider prefix, so LiteLLM "
+            f"treats {base} as an OpenAI-compatible endpoint and posts to\n"
+            f"{base}/chat/completions. A gateway that serves Azure OpenAI deployments "
+            "answers that with 404 'Resource not found'.\n"
+            'If yours does, set remote_llm_model = "azure/<deployment>" and '
+            "remote_llm_api_version, or run\n"
+            "'aorta chat config init --profile azure-openai --force'.\n"
+            "For an OpenAI-compatible gateway, prefix the model with openai/ to "
+            'silence this, or use llm_provider = "openai".'
+        )
+    if prefix == "azure" and base.endswith("/openai"):
+        return (
+            "remote_llm_base_url ends in /openai, and LiteLLM appends "
+            "/openai/deployments/<deployment>/... itself, so requests go to\n"
+            f"{base}/openai/deployments/... . Drop the trailing /openai from the base URL."
+        )
+    return None
+
+
 LITELLM_IMPORT_MESSAGE = (
     "llm_provider=litellm needs both litellm and langchain-litellm. "
     "Install them with either:\n"
@@ -77,7 +146,7 @@ class RemoteLiteLLMBackend:
     ) -> BaseChatModel:
         chat_litellm = _load_chat_litellm()
         kwargs: dict[str, Any] = {
-            "model": settings.remote_llm_model,
+            "model": _require_model(),
             "api_base": settings.remote_llm_base_url.strip() or None,
             "temperature": temperature,
             "streaming": streaming,
@@ -98,8 +167,17 @@ class RemoteLiteLLMBackend:
             auth_header=settings.remote_llm_auth_header,
             extra_headers=settings.remote_llm_extra_headers,
         )
+        model_kwargs: dict[str, Any] = {}
         if headers:
-            kwargs["model_kwargs"] = {"extra_headers": headers}
+            model_kwargs["extra_headers"] = headers
+        # ChatLiteLLM has no api_version field; model_kwargs reach
+        # litellm.completion unchanged, which is where Azure reads it. Azure
+        # only, so a leftover setting does not follow a switch to Anthropic.
+        api_version = settings.remote_llm_api_version.strip()
+        if api_version and kwargs["model"].startswith("azure/"):
+            model_kwargs["api_version"] = api_version
+        if model_kwargs:
+            kwargs["model_kwargs"] = model_kwargs
         # Not gated on ``headers``: with extra headers but no auth header, and
         # with no headers at all, ``build_auth`` hands back the configured key
         # itself, and dropping it left LiteLLM to find a credential in the
@@ -110,10 +188,18 @@ class RemoteLiteLLMBackend:
         return chat_litellm(**kwargs)
 
     async def preflight(self) -> None:
-        """Surface a missing litellm install, or unusable auth, before a query."""
+        """Surface a missing litellm install, unusable auth or model, before a query."""
         _load_chat_litellm()
         _require_auth_config()
+        _require_model()
         logger.info("Using %s", self.describe())
+        warning = self.route_warning()
+        if warning:
+            logger.warning("%s", warning)
+
+    def route_warning(self) -> str | None:
+        """See :func:`route_warning`; read by ``aorta chat doctor`` when present."""
+        return route_warning()
 
     async def probe(self, timeout: float | None = None) -> None:
         """Same as :meth:`preflight`, so *timeout* is unused.
