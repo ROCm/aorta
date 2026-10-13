@@ -26,6 +26,13 @@ import rocjitsu_env as rj  # noqa: E402
 #: The prototype's campaign directory; unset, it names a path that does not exist.
 PROTOTYPE = Path(os.environ.get("AORTA_RJ_TEST_PROTOTYPE") or Path(__file__).with_name("no-prototype"))
 
+
+@pytest.fixture(autouse=True)
+def _default_reward_and_prompt(monkeypatch):
+    """These tests assume reward v1 and the plain prompt; an exported choice must not change them."""
+    monkeypatch.delenv(rj.REWARD_ENV, raising=False)
+    monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
+
 # ---------------------------------------------------------------------------
 # a synthetic archive in the campaign's layout
 # ---------------------------------------------------------------------------
@@ -695,7 +702,7 @@ def full_corpus(tmp_path_factory):
     out = tmp_path_factory.mktemp("rj") / "all"
     prep.main(["--source", str(PROTOTYPE), "--out", str(out), "--test-kernels", "", "--allow-empty-test",
                "--ops", "waitcnt_weaken,waitcnt_late,barrier_late,waitcnt_drop,barrier_drop,barrier_early"])
-    return rj.load_corpus(out, split="train")
+    return rj.load_corpus(out, split="train", reward="v1")
 
 
 @needs_archive
