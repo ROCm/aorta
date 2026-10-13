@@ -818,6 +818,13 @@ _NIGHTLY_SWEEP = re.compile(
 
 
 def test_daily_expected_error_names_the_declaration_the_nightly_reads() -> None:
+    """An expected_error the nightly still runs must name that case's baseline.
+
+    daily-consan-tiny keeps ``expected_error: consan_tiny`` so a strict
+    load-only recipe can load. The survey job does not run it: tiny_vecadd is
+    a synthetic control and is not a Tab 2 row. Putting the invocation back
+    without updating this test is the regression.
+    """
     comparator = _load_comparator()
     baselines = comparator._load_baselines(_REPO / comparator._BASELINES)
     workflow = (_REPO / ".github" / "workflows" / "sanitizers-nightly.yml").read_text(
@@ -831,9 +838,11 @@ def test_daily_expected_error_names_the_declaration_the_nightly_reads() -> None:
             continue
         declared[path.name] = key
         assert "expected_error" in baselines.get(key, {}), f"{path.name}: no declaration {key!r}"
-        assert path.name in case_dirs, f"{path.name}: the nightly does not run it"
+        if path.name not in case_dirs:
+            continue
         assert comparator._case_key_for_dir(case_dirs[path.name]) == key
     assert declared == {"daily-consan-tiny.yaml": "consan_tiny"}
+    assert "daily-consan-tiny.yaml" not in case_dirs
 
 
 def _committed_recipe_variant(tmp_path: Path, name: str, old: str, new: str) -> Path:

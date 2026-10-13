@@ -2158,15 +2158,18 @@ def test_a_fixed_valid_proposal_scores_full_marks_without_diagnosing_anything(
 # --------------------------------------------------------------------------- #
 
 _SURVEY = Path(__file__).resolve().parents[2] / "recipes" / "sanitizers" / "survey"
+# Tab 2's committed evidence is the gfx950 GEMM pair. The synthetic
+# tiny_vecadd and lds_reduce controls are not survey rows.
+_SURVEY_SCENARIOS = 2
 
 
 def test_the_committed_sanitizer_reports_all_label(triage_reward):
     """Every committed report loads and yields a verdict from the tools' own set."""
     labelled = triage_reward.load_sanitizer_reports(_SURVEY)
-    assert len(labelled) == 6, "the committed survey reports moved or changed"
+    assert len(labelled) == _SURVEY_SCENARIOS, "the committed survey reports moved or changed"
     verdicts = {label.verdict for _, label in labelled}
     assert verdicts <= {"pass", "warn", "fail", "not_checked", "error"}
-    assert verdicts == {"pass", "warn", "error"}
+    assert verdicts == {"warn", "error"}
 
 
 def test_a_wait_hazard_is_cited_by_its_namespaced_code(triage_reward):
@@ -2457,8 +2460,8 @@ def _build(build_corpus, tmp_path, results):
 
 def test_the_committed_reports_build_into_a_corpus(build_corpus, tmp_path):
     _, manifest = _build(build_corpus, tmp_path, _SURVEY)
-    assert manifest["scenarios"] == 6
-    assert manifest["examples"]["triage"] == 6
+    assert manifest["scenarios"] == _SURVEY_SCENARIOS
+    assert manifest["examples"]["triage"] == _SURVEY_SCENARIOS
     assert manifest["rejected_reports"] == 0
 
 
@@ -2567,7 +2570,7 @@ def test_a_non_object_report_costs_one_scenario_not_the_whole_build(
     assert code == 0, err
     assert "not a report" in err and "consan-racy" in err, err
     manifest = json.loads((out / "manifest.json").read_text())
-    assert manifest["scenarios"] == 6, manifest
+    assert manifest["scenarios"] == _SURVEY_SCENARIOS, manifest
 
 
 def test_a_refused_rebuild_does_not_leave_the_previous_corpus_consumable(
@@ -2585,7 +2588,7 @@ def test_a_refused_rebuild_does_not_leave_the_previous_corpus_consumable(
     pipeline reports a failure nobody is looking at.
     """
     out, first = _build(build_corpus, tmp_path, _SURVEY)
-    assert first["scenarios"] == 6
+    assert first["scenarios"] == _SURVEY_SCENARIOS
     capsys.readouterr()
 
     code = _refuse(build_corpus, tmp_path, out)
@@ -2626,7 +2629,7 @@ def test_a_refused_build_leaves_a_directory_that_is_not_a_corpus_alone(
 def _seed_previous_corpus(build_corpus, tmp_path):
     """A published corpus plus the neighbours a real `--out` accumulates."""
     out, manifest = _build(build_corpus, tmp_path, _SURVEY)
-    assert manifest["scenarios"] == 6
+    assert manifest["scenarios"] == _SURVEY_SCENARIOS
     (out / "triage.v1.jsonl").write_text("older schema\n", encoding="utf-8")
     (out / "manifest.v0.json").write_text("{}\n", encoding="utf-8")
     (out / "README.md").write_text("provenance\n", encoding="utf-8")
@@ -2891,7 +2894,7 @@ def test_a_successful_rebuild_replaces_the_corpus_rather_than_merging_into_it(
 
     _, manifest = _build(build_corpus, tmp_path, _SURVEY)
 
-    assert manifest["scenarios"] == 6
+    assert manifest["scenarios"] == _SURVEY_SCENARIOS
     assert not (out / "triage.v1.jsonl").exists()
     assert (out / "triage.jsonl").is_file()
 
@@ -2925,7 +2928,7 @@ def test_a_rebuild_keeps_the_files_it_did_not_write(build_corpus, tmp_path):
 
     _, manifest = _build(build_corpus, tmp_path, _SURVEY)
 
-    assert manifest["scenarios"] == 6
+    assert manifest["scenarios"] == _SURVEY_SCENARIOS
     assert (out / "README.md").read_text(encoding="utf-8") == "provenance\n"
     assert (
         out / "scenario_labels.json"
@@ -3038,9 +3041,9 @@ def test_a_link_to_a_directory_is_followed_rather_than_replaced(
 
     _, manifest = _build(build_corpus, tmp_path, _SURVEY)
 
-    assert manifest["scenarios"] == 6
+    assert manifest["scenarios"] == _SURVEY_SCENARIOS
     assert os.readlink(tmp_path / "corpus") == "real"
-    assert json.loads((real / "manifest.json").read_text())["scenarios"] == 6
+    assert json.loads((real / "manifest.json").read_text())["scenarios"] == _SURVEY_SCENARIOS
     assert (real / "triage.jsonl").read_text(encoding="utf-8").startswith("{")
     assert (real / "README.md").read_text(encoding="utf-8") == "provenance\n"
     assert _entries(tmp_path) == [("corpus", "real"), ("real", True)], (
@@ -3293,7 +3296,7 @@ def test_the_corpus_scores_through_the_triage_scorer(
     """The corpus is consumable with no conversion pass, and the oracle is perfect."""
     out, _ = _build(build_corpus, tmp_path, _SURVEY)
     rows = triage_reward.load_corpus(out / "triage.jsonl")
-    assert len(rows) == 6
+    assert len(rows) == _SURVEY_SCENARIOS
     for _, label, family in rows:
         assert family != "unknown"
         oracle = triage_reward.Answer(label.verdict, sorted(label.cited_detectors))

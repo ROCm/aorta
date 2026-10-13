@@ -6,8 +6,9 @@ description: >
   (tiny_vecadd) with no LDS/atomic/barrier sites, driven via the source.consan_command
   path added in #347. Demonstrates the guardrail's fail-closed behavior when there is
   nothing analyzable: static analysis is complete but strict require-records fails
-  closed (exit 86) rather than emitting a false pass. Rendered on the dashboard's
-  Workload survey tab (Tab 2) as an observed-only case; it does NOT gate the nightly.
+  closed (exit 86) rather than emitting a false pass. It is not a Workload survey
+  (Tab 2) row: synthetic controls are not published there, and it does NOT gate
+  the nightly.
   DELIBERATE NEGATIVE CONTROL -- the exit 86 is the assertion, not a bug to fix.
   tiny_vecadd's only memory operations are ordinary global loads/stores, which ConSan
   reports as ordinary_memory_support=supported-synchronization-only and does not admit
