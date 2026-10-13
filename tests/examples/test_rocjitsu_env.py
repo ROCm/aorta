@@ -666,6 +666,64 @@ def test_train_and_test_id_lists_are_honoured_and_must_come_together(tmp_path):
         prep.main(["--source", src, "--out", str(tmp_path / "c7"), "--train-ids", str(tmp_path / "train.txt")])
 
 
+def _tree(root: Path) -> dict[str, tuple[bool, bytes]]:
+    """Every entry under ``root``: whether it is a link, and its bytes (or its link target)."""
+    return {str(p.relative_to(root)): (p.is_symlink(), os.readlink(p).encode() if p.is_symlink()
+                                       else p.read_bytes() if p.is_file() else b"<dir>")
+            for p in sorted(root.rglob("*"))}
+
+
+def _rearrange(src: Path, name: str, rel: str) -> None:
+    (src / rel).parent.mkdir(parents=True, exist_ok=True)
+    (src / name).rename(src / rel)
+
+
+@pytest.mark.parametrize("layout, out_rel", [
+    ({}, "."),                                                   # --out is the flat source itself
+    ({"analysis.json": "analysis/analysis.json"}, "analysis"),   # --out is the source's analysis/ subdirectory
+])
+def test_an_out_that_would_replace_a_source_file_is_refused_and_touches_nothing(tmp_path, layout, out_rel):
+    src = build_corpus(tmp_path).parent / "src"
+    for name, rel in layout.items():
+        _rearrange(src, name, rel)
+    before = _tree(src)
+    with pytest.raises(SystemExit, match="would overwrite input file"):
+        prep.main(["--source", str(src), "--out", str(src / out_rel), "--test-kernels", "k_b"])
+    assert _tree(src) == before
+
+
+def test_an_out_reached_through_a_link_to_the_source_is_refused(tmp_path):
+    src = build_corpus(tmp_path).parent / "src"
+    (tmp_path / "alias").symlink_to(src, target_is_directory=True)
+    before = _tree(src)
+    with pytest.raises(SystemExit, match="would overwrite input file"):
+        prep.main(["--source", str(src), "--out", str(tmp_path / "alias"), "--test-kernels", "k_b"])
+    assert _tree(src) == before
+
+
+def test_a_split_json_link_onto_the_given_split_file_is_refused(tmp_path):
+    root = build_corpus(tmp_path)
+    split = tmp_path / "given.json"
+    split.write_text(json.dumps({"train": ["k_b+0x4.barrier_late"], "test": ["k_a+0x8.waitcnt_weaken"]}))
+    out = tmp_path / "c8"
+    out.mkdir()
+    (out / "split.json").symlink_to(split)
+    before = split.read_bytes()
+    with pytest.raises(SystemExit, match="would overwrite input file"):
+        prep.main(["--source", str(root.parent / "src"), "--out", str(out), "--split-file", str(split)])
+    assert split.read_bytes() == before and sorted(p.name for p in out.iterdir()) == ["split.json"]
+
+
+def test_a_rerun_into_the_same_out_replaces_its_links_and_writes_the_same_split(tmp_path):
+    out = build_corpus(tmp_path)
+    src = tmp_path / "src"
+    first, sources = _tree(out), _tree(src)
+    prep.main(["--source", str(src), "--out", str(out), "--test-kernels", "k_b", "--clean-frac", "0.25"])
+    assert _tree(out) == first and _tree(src) == sources
+    assert {p.name: p.resolve() for p in out.iterdir() if p.is_symlink()} == {
+        n: (src / n).resolve() for n in ("sites.json", "results.jsonl", "suite.dis", "analysis.json")}
+
+
 def test_the_system_prompt_lists_the_corpus_kernels(corpus):
     text = rj.system_for(rj.load_corpus(corpus, split="train"))
     assert "2 HIP kernels: k_a, k_b" in text

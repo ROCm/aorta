@@ -68,6 +68,30 @@ def find_files(source: Path) -> dict[str, Path]:
     return found
 
 
+def check_destinations(out: Path, files: dict[str, Path], args: argparse.Namespace) -> dict[str, Path]:
+    """Each archive file's resolved target, once no output entry can clobber an input.
+
+    Runs before anything under ``out`` is removed or written. An archive link
+    is replaced in place, so its entry must not be a source's own entry or
+    real file (``--out`` equal to, or holding, the source's files); an
+    existing link to a source is fine and is what a rerun replaces.
+    ``split.json`` is written through any link, so its real path must not be
+    an input either.
+    """
+    targets = {name: path.resolve(strict=True) for name, path in files.items()}
+    entry = lambda p: p.parent.resolve() / p.name  # noqa: E731 -- the directory entry, final link not followed
+    inputs = {entry(p) for p in files.values()} | set(targets.values())
+    inputs |= {Path(p).resolve() for p in (args.split_file, args.train_ids, args.test_ids)
+               if p and Path(p).exists()}
+    clashes = [str(out / name) for name in files if entry(out / name) in inputs]
+    if (out / "split.json").resolve() in inputs:
+        clashes.append(str(out / "split.json"))
+    if clashes:
+        raise SystemExit(f"--out {out} would overwrite input file(s) {clashes}; choose an --out "
+                         f"outside --source {args.source}")
+    return targets
+
+
 def read_split_file(path: Path) -> dict[str, str]:
     """``{scenario_id: "train"|"test"}`` from any of the accepted shapes."""
     text = path.read_text()
@@ -199,12 +223,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     train, test = order(train), order(test)
     train_ids, test_ids = train + clean(len(train), "train"), test + clean(len(test), "test")
     out = Path(args.out)
+    targets = check_destinations(out, files, args)
     out.mkdir(parents=True, exist_ok=True)
-    for name, path in files.items():
+    for name, target in targets.items():
         link = out / name
         if link.is_symlink() or link.exists():
             link.unlink()
-        link.symlink_to(path.resolve())
+        link.symlink_to(target)
 
     def counts(ids: list[str]) -> dict[str, Any]:
         faulty = [s for s in ids if not s.startswith("CLEAN:")]

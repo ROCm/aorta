@@ -438,16 +438,29 @@ class CorpusV2:
                 if line.strip():
                     rec = json.loads(line)
                     self.recs[rec["sid"]] = rec
+        # A kernel with no instructions has an empty ``[]`` file; an absent file is a broken archive,
+        # which would otherwise load and serve ``disasm`` and near-location scoring nothing.
+        reachable = {k for w in self.workloads.values() for k in w.get("kernels", [])}
+        reachable |= {r["kid"] for r in self.recs.values() if r.get("kid")}
+        absent = [k for k in sorted(reachable) if not self._listing_path(k).is_file()]
+        if absent:
+            raise SystemExit(f"corpus {self.root}: {len(absent)} kernel(s) have no listing file: "
+                             + ", ".join(f"{k} ({self._listing_path(k)})" for k in absent[:10]))
         self._listings: dict[str, list[tuple[int, str]]] = {}
         parts = [_file_digest(self.root / n) for n in V2_FILES]
         parts += [_file_digest(p) for p in sorted((self.root / "listings").glob("*.json"))]
         self.digest = hashlib.sha256("".join(parts).encode()).hexdigest()
 
+    def _listing_path(self, kid: str) -> Path:
+        return self.root / "listings" / f"{kid}.json"
+
     def listing(self, kid: str) -> list[tuple[int, str]]:
         """The ORIGINAL listing of ``kid``; the faulty kernel is served mutated (:func:`mutate_listing_v2`)."""
         if kid not in self._listings:
-            path = self.root / "listings" / f"{kid}.json"
-            self._listings[kid] = [tuple(x) for x in json.loads(path.read_text())] if path.is_file() else []
+            path = self._listing_path(kid)
+            if not path.is_file():
+                raise SystemExit(f"corpus {self.root}: kernel {kid} has no listing file ({path})")
+            self._listings[kid] = [tuple(x) for x in json.loads(path.read_text())]
         return self._listings[kid]
 
     def split_ids(self, name: str) -> list[str]:

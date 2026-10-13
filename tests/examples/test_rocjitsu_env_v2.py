@@ -93,6 +93,29 @@ def test_run_native_on_a_scenario_with_no_native_run_is_not_run_and_free(tmp_pat
     assert episode.events == [] and episode.turns_used == 2
 
 
+def test_a_kernel_with_no_listing_file_is_refused_when_the_corpus_loads(tmp_path):
+    root = _toy_corpus(tmp_path)
+    (root / "listings" / "k001.json").unlink()
+    with pytest.raises(SystemExit, match=r"k001 \(.*listings/k001\.json\)"):
+        rj.load_corpus(root, split="test")
+
+
+def test_a_complete_corpus_loads_its_listings_and_an_empty_listing_stays_legal(tmp_path):
+    root = _toy_corpus(tmp_path)
+    scenario = {s.scenario_id: s for s in rj.load_corpus(root, split="test")}["ran@toy"]
+    assert scenario.insn_offsets == (0, 4)
+    episode = rj.Episode(scenario, seed=0)
+    episode.observe()
+    episode.act(json.dumps({"tool": "disasm", "kernel": "k001"}))
+    assert "0x0000: s_waitcnt vmcnt(0)" in episode.steps[-1].body and "0x0004: s_endpgm" in episode.steps[-1].body
+
+    (root / "listings" / "k001.json").write_text("[]")
+    scenario = {s.scenario_id: s for s in rj.load_corpus(root, split="test")}["ran@toy"]
+    assert scenario.corpus.listing("k001") == []
+    with pytest.raises(SystemExit, match="kernel k999 has no listing file"):
+        scenario.corpus.listing("k999")
+
+
 def test_run_native_is_unchanged_where_the_not_run_marker_is_absent(tmp_path):
     scenarios = {s.scenario_id: s for s in rj.load_corpus(_toy_corpus(tmp_path), split="test")}
     legacy = _run_native(scenarios["legacy@toy"])
