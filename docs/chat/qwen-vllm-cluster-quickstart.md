@@ -25,7 +25,6 @@ From `ruby-slurmlogin02`, start or reuse a healthy Qwen service:
 
 ```bash
 cd /apps/avsharma/aorta-cia-qwen38
-git switch cia_models
 scripts/chat/start_qwen_vllm.sh \
   --login-host ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
   --runtime-dir /apps/avsharma/aorta-chat-runtime \
@@ -81,7 +80,6 @@ Run these commands from `ruby-slurmlogin02`:
 
 ```bash
 cd /apps/avsharma/aorta-cia-qwen38
-git switch cia_models
 
 # Create the environment only once.
 if [ ! -x .venv-ui/bin/aorta ]; then
