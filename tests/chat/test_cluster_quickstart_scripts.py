@@ -111,6 +111,9 @@ def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
     assert "*\"localhost:8000\"*" in source
     assert "--enable-auto-tool-choice" in source
     assert "--tool-call-parser qwen3_xml" in source
+    assert "--reasoning-parser qwen3" in source
+    assert "--default-chat-template-kwargs" not in source
+    assert '"chat_template_kwargs": {"enable_thinking": False}' in source
     assert '"aorta_tool_protocol_probe"' in source
     assert "PROGRESS_INTERVAL=30" in source
     assert "--verbose" in source
@@ -212,6 +215,14 @@ def test_quickstart_documents_the_native_function_call_gate() -> None:
         'arguments.get("source") != "READY"',
     ):
         assert required in probe
+
+
+def test_quickstart_keeps_thinking_as_a_per_request_choice() -> None:
+    source = QUICKSTART.read_text(encoding="utf-8")
+
+    assert "--reasoning-parser qwen3" in source
+    assert "--default-chat-template-kwargs" not in source
+    assert '"chat_template_kwargs": {"enable_thinking": false}' in source
 
 
 def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:

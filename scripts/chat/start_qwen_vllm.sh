@@ -332,7 +332,7 @@ PY
       --trust-remote-code \
       --enable-auto-tool-choice \
       --tool-call-parser qwen3_xml \
-      --default-chat-template-kwargs '{"enable_thinking":false}'
+      --reasoning-parser qwen3
 }
 
 if [[ "$WORKER" == true ]]; then
@@ -597,6 +597,7 @@ import os
 print(json.dumps({
     "model": os.environ["AORTA_EXPECTED_MODEL"],
     "messages": [{"role": "user", "content": "Reply with READY only."}],
+    "chat_template_kwargs": {"enable_thinking": False},
     "temperature": 0,
     "max_tokens": 16,
 }))
