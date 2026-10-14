@@ -45,6 +45,61 @@ def test_launcher_help_needs_no_cluster_access(script: Path) -> None:
     assert "Usage:" in shown.stdout
 
 
+@pytest.mark.parametrize(
+    ("script", "login_variable"),
+    (
+        (SCRIPTS[0], "AORTA_QWEN_LOGIN_HOST"),
+        (SCRIPTS[1], "AORTA_CHAT_LOGIN_HOST"),
+    ),
+    ids=lambda value: value.name if isinstance(value, Path) else value,
+)
+def test_launcher_requires_site_specific_connection_settings(
+    script: Path, login_variable: str
+) -> None:
+    env = dict(os.environ)
+    env.pop(login_variable, None)
+    env.pop("AORTA_CHAT_RUNTIME_DIR", None)
+
+    started = subprocess.run(
+        [str(script)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+
+    assert started.returncode != 0
+    assert "--login-host is required" in started.stderr
+
+
+def test_launchers_ship_no_private_host_or_directory_defaults() -> None:
+    model_source = SCRIPTS[0].read_text(encoding="utf-8")
+    ui_source = SCRIPTS[1].read_text(encoding="utf-8")
+
+    assert 'LOGIN_HOST="${AORTA_QWEN_LOGIN_HOST:-}"' in model_source
+    assert 'LOGIN_HOST="${AORTA_CHAT_LOGIN_HOST:-}"' in ui_source
+    assert 'RUNTIME_DIR="${AORTA_CHAT_RUNTIME_DIR:-}"' in model_source
+    assert 'RUNTIME_DIR="${AORTA_CHAT_RUNTIME_DIR:-}"' in ui_source
+    assert 'HF_CACHE="${AORTA_QWEN_HF_CACHE:-}"' in model_source
+    assert 'HF_CACHE="${RUNTIME_DIR}/hf-cache"' in model_source
+    for source in (model_source, ui_source):
+        assert "ruby-slurmlogin" not in source
+        assert "/apps/avsharma" not in source
+
+
+def test_ruby_runbook_supplies_the_required_site_configuration() -> None:
+    source = QUICKSTART.read_text(encoding="utf-8")
+    quickstart = source[
+        source.index("## Two-command quickstart") :
+        source.index("## 1. Prepare the AORTA checkout")
+    ]
+
+    assert "ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com" in quickstart
+    assert "/apps/avsharma/aorta-chat-runtime" in quickstart
+    assert quickstart.count("--login-host") == 4
+    assert quickstart.count("--runtime-dir") == 4
+
+
 def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
     source = SCRIPTS[0].read_text(encoding="utf-8")
 
@@ -237,6 +292,7 @@ def test_ui_stop_ignores_an_unrecorded_matching_tunnel(tmp_path: Path) -> None:
             env={
                 **os.environ,
                 "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "AORTA_CHAT_LOGIN_HOST": "login.example.invalid",
                 "AORTA_CHAT_RUNTIME_DIR": str(tmp_path / "runtime"),
             },
         )
@@ -299,6 +355,7 @@ esac
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "AORTA_CHAT_LOGIN_HOST": "login.example.invalid",
         "AORTA_CHAT_RUNTIME_DIR": str(runtime),
     }
     command = [
@@ -367,6 +424,7 @@ def test_slurm_query_failure_preserves_the_endpoint_record(tmp_path: Path) -> No
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "AORTA_QWEN_LOGIN_HOST": "login.example.invalid",
         "AORTA_CHAT_RUNTIME_DIR": str(runtime),
         "AORTA_QWEN_HF_CACHE": str(tmp_path / "hf-cache"),
     }
@@ -425,6 +483,7 @@ esac
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "AORTA_QWEN_LOGIN_HOST": "login.example.invalid",
         "AORTA_CHAT_RUNTIME_DIR": str(runtime),
         "AORTA_QWEN_HF_CACHE": str(tmp_path / "hf-cache"),
     }

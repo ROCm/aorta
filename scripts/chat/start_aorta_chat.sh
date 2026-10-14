@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# Start the CIA-enabled AORTA Chat UI on the Slurm-capable Ruby login host and
+# Start the CIA-enabled AORTA Chat UI on a Slurm-capable login host and
 # tunnel it back to the current host. Ctrl-C tears down both UI and tunnel.
 
 set -euo pipefail
 
-LOGIN_HOST="${AORTA_CHAT_LOGIN_HOST:-ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com}"
-RUNTIME_DIR="${AORTA_CHAT_RUNTIME_DIR:-/apps/avsharma/aorta-chat-runtime}"
+LOGIN_HOST="${AORTA_CHAT_LOGIN_HOST:-}"
+RUNTIME_DIR="${AORTA_CHAT_RUNTIME_DIR:-}"
 UI_PORT="${AORTA_CHAT_UI_PORT:-8080}"
 UI_STARTUP_TIMEOUT="${AORTA_CHAT_UI_STARTUP_TIMEOUT:-360}"
 REPO_ROOT="$(
@@ -29,8 +29,8 @@ Run scripts/chat/start_qwen_vllm.sh first.
 
 Options:
   --stop              Stop a UI and tunnel managed by this launcher.
-  --login-host HOST   Remote login host.
-  --runtime-dir PATH  Shared endpoint, PID, and log directory.
+  --login-host HOST   Remote login host (required).
+  --runtime-dir PATH  Shared endpoint, PID, and log directory (required).
   --port PORT         Local and remote UI port (default: 8080).
   --startup-timeout SEC
                       Maximum remote UI startup wait (default: 360).
@@ -104,6 +104,10 @@ done
 [[ "$UI_STARTUP_TIMEOUT" =~ ^[0-9]+$ ]] ||
   die "--startup-timeout must be an integer"
 ((UI_STARTUP_TIMEOUT >= 1)) || die "--startup-timeout must be positive"
+[[ -n "$LOGIN_HOST" ]] ||
+  die "--login-host is required (or set AORTA_CHAT_LOGIN_HOST)"
+[[ -n "$RUNTIME_DIR" ]] ||
+  die "--runtime-dir is required (or set AORTA_CHAT_RUNTIME_DIR)"
 
 ENDPOINT_FILE="${RUNTIME_DIR}/qwen38-endpoint.env"
 UI_PID_FILE="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.pid"
@@ -293,12 +297,12 @@ run_remote_worker() {
   export AORTA_CHAT_ALLOW_CLUSTER_JOBS="$CIA_ENABLED"
 
   if [[ "$CIA_ENABLED" == true ]]; then
-    export AORTA_CHAT_JOBS_PATH="${AORTA_CHAT_JOBS_PATH:-/apps/avsharma/cia-chat-jobs}"
+    export AORTA_CHAT_JOBS_PATH="${AORTA_CHAT_JOBS_PATH:-${RUNTIME_DIR}/cia-chat-jobs}"
     export AORTA_CHAT_GPU_ARCH="${AORTA_CHAT_GPU_ARCH:-gfx950}"
     export AORTA_CHAT_ROCJITSU_BUILD="$ROCJITSU_BUILD"
     export CIA_PARTITION="${CIA_PARTITION:-interactive}"
     export CIA_TIME_LIMIT="${CIA_TIME_LIMIT:-00:12:00}"
-    export CIA_SEARCH_ROOTS="${CIA_SEARCH_ROOTS:-/apps/avsharma}"
+    export CIA_SEARCH_ROOTS="${CIA_SEARCH_ROOTS:-$REPO_ROOT}"
   fi
 
   cd "$REPO_ROOT"
