@@ -664,6 +664,13 @@ if arguments.get("source") != "READY":
     raise SystemExit(f"native tool-call smoke used the wrong arguments: {message!r}")
 ' <<<"$tool_completion"
 
+if ! status="$(job_status "$active_job")"; then
+  die "could not query Slurm job $active_job through $LOGIN_HOST"
+fi
+[[ -n "$status" ]] || die "vLLM job $active_job ended before it was marked ready"
+[[ -f "$ENDPOINT_FILE" ]] &&
+  grep -Fxq "export QWEN_VLLM_JOB_ID=${active_job}" "$ENDPOINT_FILE" ||
+  die "endpoint file no longer records job $active_job"
 keep_job=true
 trap - EXIT INT TERM
 
