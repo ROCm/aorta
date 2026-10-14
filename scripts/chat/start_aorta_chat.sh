@@ -49,6 +49,13 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+validate_cia_model() {
+  if [[ "$CIA_ENABLED" == true &&
+        "${AORTA_CHAT_VLLM_MODEL:-}" != "Qwen/Qwen3.8-27B" ]]; then
+    die "CIA requires the endpoint to serve Qwen/Qwen3.8-27B; got ${AORTA_CHAT_VLLM_MODEL:-missing} (use --no-cia)"
+  fi
+}
+
 remote_command() {
   local rendered
   printf -v rendered '%q ' "$@"
@@ -289,6 +296,7 @@ run_remote_worker() {
   source "$ENDPOINT_FILE"
   [[ "$AORTA_CHAT_VLLM_BASE_URL" != *"localhost:8000"* ]] ||
     die "refusing forbidden fallback endpoint: $AORTA_CHAT_VLLM_BASE_URL"
+  validate_cia_model
 
   export AORTA_CHAT_VLLM_BASE_URL
   export AORTA_CHAT_VLLM_MODEL
@@ -385,6 +393,7 @@ require_command curl
 source "$ENDPOINT_FILE"
 [[ "$AORTA_CHAT_VLLM_BASE_URL" != *"localhost:8000"* ]] ||
   die "refusing forbidden fallback endpoint: $AORTA_CHAT_VLLM_BASE_URL"
+validate_cia_model
 
 health_url="${AORTA_CHAT_VLLM_BASE_URL%/v1}/health"
 curl --fail --silent --show-error --max-time 5 "$health_url" >/dev/null ||

@@ -43,7 +43,7 @@ Options:
   --runtime-dir PATH     Shared state/log directory (required).
   --hf-cache PATH        Shared Hugging Face cache (default: RUNTIME_DIR/hf-cache).
   --image IMAGE          vLLM container image.
-  --model MODEL          Served model ID.
+  --model MODEL          Served model ID (CIA requires Qwen/Qwen3.8-27B).
   --port-start PORT      First candidate model port (minimum: 8001).
   --port-end PORT        Last candidate model port.
   --startup-timeout SEC  Maximum model startup wait.
