@@ -1,8 +1,8 @@
 # Model-kernel survey snapshot
 
 Rendered 2026-10-14 from the local waitcheck and ConSan reports for gpt-oss,
-Qwen3, DeepSeek-V4, and GLM-5.3. Open `summary.md` for the tables, or
-`index.html` for the dashboard page.
+Qwen3, DeepSeek-V4, and GLM-5.3. `summary.md` is the cross-check: the workload
+roll-up and one table per sanitizer with every kernel.
 
 This is a cross-check of Tab 2, not a nightly publish. The guardrail tab is
 empty because no gate reports were supplied. The reproduce lines name
