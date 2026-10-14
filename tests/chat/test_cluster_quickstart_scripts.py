@@ -197,6 +197,17 @@ def test_ui_cleanup_waits_for_the_entire_process_group() -> None:
     assert "did not stop; preserving" in source
 
 
+def test_ui_cleanup_reports_a_refused_remote_stop() -> None:
+    source = SCRIPTS[1].read_text(encoding="utf-8")
+    cleanup = source[source.index("cleanup() {") : source.index("trap cleanup EXIT")]
+
+    assert "stop_remote_ui >/dev/null" not in cleanup
+    assert "if ! stop_remote_ui; then" in cleanup
+    assert "remote AORTA Chat UI is still running" in cleanup
+    assert "trap - EXIT" in cleanup
+    assert 'exit "$exit_code"' in cleanup
+
+
 def test_ui_stop_ignores_an_unrecorded_matching_tunnel(tmp_path: Path) -> None:
     """The command shape is not ownership; only the PID file grants it."""
     fake_bin = tmp_path / "bin"
