@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = (
     ROOT / "scripts" / "chat" / "start_qwen_vllm.sh",
@@ -113,8 +112,9 @@ def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
     assert "--tool-call-parser qwen3_xml" in source
     assert "--reasoning-parser qwen3" in source
     assert "--default-chat-template-kwargs" not in source
-    assert '"chat_template_kwargs": {"enable_thinking": False}' in source
-    assert '"aorta_tool_protocol_probe"' in source
+    assert "/chat/completions" not in source
+    assert "/models" not in source
+    assert '"aorta_tool_protocol_probe"' not in source
     assert "PROGRESS_INTERVAL=30" in source
     assert "--verbose" in source
     assert "Still waiting for Qwen" in source
@@ -131,8 +131,7 @@ def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
         'grep -Fxq "export QWEN_VLLM_JOB_ID=${SLURM_JOB_ID}"'
         in source
     )
-    assert source.count('--max-time "$request_timeout"') == 3
-    assert 'message.get("reasoning_content")' in source
+    assert source.count("curl --fail --silent --max-time 5") == 1
 
 
 def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() -> None:
@@ -147,13 +146,12 @@ def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() ->
     assert "--port-end must be at most 65535" in started.stderr
 
 
-def test_reused_endpoint_probes_the_model_recorded_by_its_worker() -> None:
+def test_reused_endpoint_adopts_the_model_recorded_by_its_worker() -> None:
     source = SCRIPTS[0].read_text(encoding="utf-8")
     adoption = 'MODEL="$recorded_model"'
-    first_probe = 'AORTA_EXPECTED_MODEL="$MODEL"'
 
     assert 'recorded_model="${AORTA_CHAT_VLLM_MODEL:-}"' in source
-    assert source.index(adoption) < source.index(first_probe)
+    assert source.index(adoption) < source.index('health_url="')
 
 
 def test_submitted_job_is_cancelled_until_pending_state_is_durable() -> None:
@@ -201,7 +199,7 @@ def test_manual_shutdown_confirms_an_empty_queue_before_reporting_success() -> N
 def test_quickstart_documents_the_native_function_call_gate() -> None:
     source = QUICKSTART.read_text(encoding="utf-8")
     probe = source[
-        source.index("Reproduce the launcher's required native function-call check") :
+        source.index("Reproduce `aorta chat doctor`'s native function-call check") :
         source.index("## 5. Start the Chat UI")
     ]
 
@@ -248,6 +246,10 @@ def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
     assert 'AORTA_CHAT_UI_STARTUP_TIMEOUT:-360' in source
     assert "export AORTA_CHAT_LLM_PROVIDER=vllm" in source
     assert "export AORTA_CHAT_LLM_TOOL_MODE=native" in source
+    assert '"${REPO_ROOT}/.venv-ui/bin/aorta" chat doctor' in source
+    assert source.index('"${REPO_ROOT}/.venv-ui/bin/aorta" chat doctor') < source.index(
+        'setsid "${REPO_ROOT}/.venv-ui/bin/aorta" chat ui'
+    )
     assert source.count("validate_cia_model") >= 3
     assert "CIA requires the endpoint to serve Qwen/Qwen3.8-27B" in source
 

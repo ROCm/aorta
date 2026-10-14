@@ -2339,21 +2339,13 @@ class TestToolMode:
         assert "native" in check.detail
 
     def test_native_on_a_stock_vllm_says_what_the_endpoint_has_to_accept(self, monkeypatch):
-        """Found by sweeping this check for the shape review flagged elsewhere in it.
-
-        ``native`` had the report's other advice-free green line, and it is the
-        worse of the two: it is the mode with an endpoint requirement, nothing
-        in the report tests that requirement -- ``_check_backend`` asks for
-        ``/health``, which a server that rejects ``tools`` answers normally --
-        and ``native`` on a stock local vLLM is a configuration that cannot
-        answer a single action-routed question.
-        """
+        """The mode row points to the real tools probe later in the report."""
         monkeypatch.setattr(settings, "llm_tool_mode", "native")
         monkeypatch.setattr(settings, "llm_provider", "vllm")
         monkeypatch.setattr(settings, "vllm_model", "Qwen/Qwen2.5-Coder-7B-Instruct")
         check = _by_name(run_checks(backend=False), "llm tool mode")
         assert check.status == OK
-        assert "/health" in check.hint
+        assert "llm native tools" in check.hint
         assert "--enable-auto-tool-choice" in check.hint
 
     @pytest.mark.parametrize("provider", ["openai", "litellm"])
