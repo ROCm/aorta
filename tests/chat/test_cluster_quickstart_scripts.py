@@ -29,17 +29,24 @@ def _spawn_orphaned_ui_group(repo: Path, *, owned: bool) -> int:
         argv0 = "unrelated-user-service"
     code = (
         "import os\n"
+        "print(os.getpgrp(), flush=True)\n"
         "if os.fork() == 0:\n"
         f"    os.execl('/bin/sleep', {argv0!r}, '30')\n"
         "os._exit(0)\n"
     )
-    leader = subprocess.Popen(["setsid", sys.executable, "-c", code])
+    leader = subprocess.Popen(
+        ["setsid", sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert leader.stdout is not None
+    pgid = int(leader.stdout.readline())
     leader.wait(timeout=5)
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         try:
-            os.killpg(leader.pid, 0)
-            return leader.pid
+            os.killpg(pgid, 0)
+            return pgid
         except ProcessLookupError:
             time.sleep(0.02)
     raise AssertionError("orphaned process group never became visible")
