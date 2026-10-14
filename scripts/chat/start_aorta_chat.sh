@@ -469,6 +469,7 @@ cleanup() {
   local exit_code=$? recorded_tunnel_pid=""
   [[ "$cleaned" == false ]] || return "$exit_code"
   cleaned=true
+  trap - EXIT
   set +e
 
   if [[ -n "$tunnel_pid" ]]; then
@@ -483,7 +484,11 @@ cleanup() {
   fi
   [[ -z "$tunnel_pid_file_tmp" ]] || rm -f "$tunnel_pid_file_tmp"
 
-  stop_remote_ui >/dev/null 2>&1 || true
+  if ! stop_remote_ui; then
+    printf 'error: remote AORTA Chat UI is still running; rerun %s --stop\n' \
+      "${BASH_SOURCE[0]}" >&2
+    ((exit_code != 0)) || exit_code=2
+  fi
 
   if [[ -n "$remote_ssh_pid" ]]; then
     kill "$remote_ssh_pid" 2>/dev/null || true
@@ -492,7 +497,7 @@ cleanup() {
 
   release_ui_lock
   set -e
-  return "$exit_code"
+  exit "$exit_code"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
