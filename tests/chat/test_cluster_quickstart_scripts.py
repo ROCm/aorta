@@ -248,6 +248,51 @@ def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
     assert 'AORTA_CHAT_UI_STARTUP_TIMEOUT:-360' in source
     assert "export AORTA_CHAT_LLM_PROVIDER=vllm" in source
     assert "export AORTA_CHAT_LLM_TOOL_MODE=native" in source
+    assert source.count("validate_cia_model") >= 3
+    assert "CIA requires the endpoint to serve Qwen/Qwen3.8-27B" in source
+
+
+def test_cia_ui_refuses_an_endpoint_serving_a_different_model(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "qwen38-endpoint.env").write_text(
+        "\n".join(
+            (
+                "export QWEN_VLLM_JOB_ID=12345",
+                "export AORTA_CHAT_VLLM_BASE_URL=http://compute:8001/v1",
+                "export AORTA_CHAT_VLLM_MODEL=Other/Model",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("ssh", "ss", "curl"):
+        fake = fake_bin / name
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+
+    started = subprocess.run(
+        [str(SCRIPTS[1])],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "AORTA_CHAT_LOGIN_HOST": "login.example.invalid",
+            "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+        },
+    )
+
+    assert started.returncode != 0
+    assert (
+        "CIA requires the endpoint to serve Qwen/Qwen3.8-27B; "
+        "got Other/Model (use --no-cia)"
+    ) in started.stderr
 
 
 def test_ui_cleanup_waits_for_the_entire_process_group() -> None:
