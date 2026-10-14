@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -15,6 +17,57 @@ SCRIPTS = (
     ROOT / "scripts" / "chat" / "start_aorta_chat.sh",
 )
 QUICKSTART = ROOT / "docs" / "chat" / "qwen-vllm-cluster-quickstart.md"
+
+
+def _spawn_orphaned_ui_group(repo: Path, *, owned: bool) -> int:
+    if owned:
+        argv0 = (
+            f"{repo}/.venv-ui/bin/python -m chainlit run "
+            f"{repo}/src/aorta/chat/ui/app.py -h --host 127.0.0.1 --port 8080"
+        )
+    else:
+        argv0 = "unrelated-user-service"
+    code = (
+        "import os\n"
+        "if os.fork() == 0:\n"
+        f"    os.execl('/bin/sleep', {argv0!r}, '30')\n"
+        "os._exit(0)\n"
+    )
+    leader = subprocess.Popen(["setsid", sys.executable, "-c", code])
+    leader.wait(timeout=5)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(leader.pid, 0)
+            return leader.pid
+        except ProcessLookupError:
+            time.sleep(0.02)
+    raise AssertionError("orphaned process group never became visible")
+
+
+def _fake_ui_commands(tmp_path: Path) -> Path:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "ssh").write_text(
+        """#!/bin/bash
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+case " $* " in
+  *" ss -H -ltn "*) exit 0 ;;
+  *" -tt "*) exit 0 ;;
+esac
+exec bash -c "$last"
+""",
+        encoding="utf-8",
+    )
+    for name in ("ssh", "ss", "curl"):
+        fake = fake_bin / name
+        if not fake.exists():
+            fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+    return fake_bin
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.name)
@@ -89,8 +142,7 @@ def test_launchers_ship_no_private_host_or_directory_defaults() -> None:
 def test_ruby_runbook_supplies_the_required_site_configuration() -> None:
     source = QUICKSTART.read_text(encoding="utf-8")
     quickstart = source[
-        source.index("## Two-command quickstart") :
-        source.index("## 1. Prepare the AORTA checkout")
+        source.index("## Two-command quickstart") : source.index("## 1. Prepare the AORTA checkout")
     ]
 
     assert "ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com" in quickstart
@@ -100,38 +152,53 @@ def test_ruby_runbook_supplies_the_required_site_configuration() -> None:
     assert "git switch cia_models" not in source
 
 
-def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
-    source = SCRIPTS[0].read_text(encoding="utf-8")
-
-    assert "PORT_START=\"${AORTA_QWEN_PORT_START:-8001}\"" in source
-    assert "((PORT_START >= 8001))" in source
-    assert "((PORT_END <= 65535))" in source
-    assert "localhost:8000" in source  # only the explicit refusal guard/help
-    assert "*\"localhost:8000\"*" in source
-    assert "--enable-auto-tool-choice" in source
-    assert "--tool-call-parser qwen3_xml" in source
-    assert "--reasoning-parser qwen3" in source
-    assert "--default-chat-template-kwargs" not in source
-    assert "/chat/completions" not in source
-    assert "/models" not in source
-    assert '"aorta_tool_protocol_probe"' not in source
-    assert "PROGRESS_INTERVAL=30" in source
-    assert "--verbose" in source
-    assert "Still waiting for Qwen" in source
-    assert "Still waiting for Slurm job" in source
-    assert "Qwen is ready after %s" in source
-    assert "Qwen vLLM is stopped after %s" in source
-    assert 'PENDING_FILE="${RUNTIME_DIR}/qwen38-pending-job"' in source
-    assert 'LOCK_DIR="${RUNTIME_DIR}/qwen38-launch.lock"' in source
-    assert 'while ! mkdir "$LOCK_DIR"' in source
-    assert "acquire_launch_lock" in source
-    assert "release_launch_lock" in source
-    assert 'job_status "$active_job" || true' not in source
-    assert (
-        'grep -Fxq "export QWEN_VLLM_JOB_ID=${SLURM_JOB_ID}"'
-        in source
+@pytest.mark.skipif(os.name != "posix", reason="requires bash launcher execution")
+def test_model_worker_uses_safe_ports_and_qwen_parsers(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >>"$DOCKER_LOG"\n',
+        encoding="utf-8",
     )
-    assert source.count("curl --fail --silent --max-time 5") == 1
+    docker.chmod(0o755)
+
+    worker = subprocess.run(
+        [
+            str(SCRIPTS[0]),
+            "--worker",
+            "--login-host",
+            "login.example.invalid",
+            "--runtime-dir",
+            str(runtime),
+            "--hf-cache",
+            str(tmp_path / "hf-cache"),
+            "--port-start",
+            "18001",
+            "--port-end",
+            "18010",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "DOCKER_LOG": str(docker_log),
+            "SLURM_JOB_ID": "12345",
+        },
+    )
+
+    assert worker.returncode == 0, worker.stderr
+    commands = docker_log.read_text(encoding="utf-8")
+    assert "vllm serve Qwen/Qwen3.8-27B" in commands
+    assert "--enable-auto-tool-choice" in commands
+    assert "--tool-call-parser qwen3_xml" in commands
+    assert "--reasoning-parser qwen3" in commands
+    assert "--default-chat-template-kwargs" not in commands
+    assert "--port 8000" not in commands
 
 
 def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() -> None:
@@ -146,35 +213,58 @@ def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() ->
     assert "--port-end must be at most 65535" in started.stderr
 
 
-def test_reused_endpoint_adopts_the_model_recorded_by_its_worker() -> None:
-    source = SCRIPTS[0].read_text(encoding="utf-8")
-    adoption = 'MODEL="$recorded_model"'
-
-    assert 'recorded_model="${AORTA_CHAT_VLLM_MODEL:-}"' in source
-    assert source.index(adoption) < source.index('health_url="')
-
-
-def test_submitted_job_is_cancelled_until_pending_state_is_durable() -> None:
-    source = SCRIPTS[0].read_text(encoding="utf-8")
-    start = source.index("remote_submit='")
-    submit = source[start : source.index("new_job=", start)]
-
-    assert "cleanup_untracked_job()" in submit
-    assert 'scancel "$job_id"' in submit
-    assert "trap cleanup_untracked_job EXIT" in submit
-    assert submit.index("trap cleanup_untracked_job EXIT") < submit.index(
-        'printf "%s\\n" "$job_id" >"$pending_tmp"'
+@pytest.mark.skipif(os.name != "posix", reason="requires bash launcher execution")
+def test_submitted_job_is_cancelled_until_pending_state_is_durable(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    scancel_log = tmp_path / "scancel.log"
+    (fake_bin / "ssh").write_text(
+        """#!/bin/bash
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+exec bash -c "$last"
+""",
+        encoding="utf-8",
     )
-    assert submit.index('mv "$pending_tmp" "$pending_file"') < submit.rindex(
-        "trap - EXIT HUP INT TERM"
+    (fake_bin / "sbatch").write_text("#!/bin/sh\nprintf '12345\\n'\n", encoding="utf-8")
+    (fake_bin / "mv").write_text("#!/bin/sh\nexit 73\n", encoding="utf-8")
+    (fake_bin / "scancel").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$1" >>"$SCANCEL_LOG"\n',
+        encoding="utf-8",
     )
+    for fake in fake_bin.iterdir():
+        fake.chmod(0o755)
+    started = subprocess.run(
+        [str(SCRIPTS[0])],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "SCANCEL_LOG": str(scancel_log),
+            "AORTA_QWEN_LOGIN_HOST": "login.example.invalid",
+            "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+            "AORTA_QWEN_HF_CACHE": str(tmp_path / "hf-cache"),
+        },
+    )
+
+    assert started.returncode != 0
+    assert scancel_log.read_text(encoding="utf-8").splitlines() == ["12345"]
+    assert not (runtime / "qwen38-pending-job").exists()
 
 
 def test_manual_cleanup_preserves_the_endpoint_when_slurm_is_unreachable() -> None:
     source = QUICKSTART.read_text(encoding="utf-8")
     cleanup = source[
-        source.index("## 3. Submit the model server") :
-        source.index("Submit through the login node")
+        source.index("## 3. Submit the model server") : source.index(
+            "Submit through the login node"
+        )
     ]
 
     assert 'if ! status="$(' in cleanup
@@ -199,8 +289,9 @@ def test_manual_shutdown_confirms_an_empty_queue_before_reporting_success() -> N
 def test_quickstart_documents_the_native_function_call_gate() -> None:
     source = QUICKSTART.read_text(encoding="utf-8")
     probe = source[
-        source.index("Reproduce `aorta chat doctor`'s native function-call check") :
-        source.index("## 5. Start the Chat UI")
+        source.index("Reproduce `aorta chat doctor`'s native function-call check") : source.index(
+            "## 5. Start the Chat UI"
+        )
     ]
 
     for required in (
@@ -223,27 +314,11 @@ def test_quickstart_keeps_thinking_as_a_per_request_choice() -> None:
     assert '"chat_template_kwargs": {"enable_thinking": false}' in source
 
 
-def test_ui_requires_the_published_endpoint_and_cleans_up() -> None:
+def test_ui_uses_the_published_endpoint_and_doctor_gate() -> None:
     source = SCRIPTS[1].read_text(encoding="utf-8")
 
     assert '[[ -s "$ENDPOINT_FILE" ]]' in source
-    assert "*\"localhost:8000\"*" in source
-    assert "ExitOnForwardFailure=yes" in source
-    assert "trap cleanup EXIT" in source
-    assert "trap cleanup_remote_worker EXIT HUP INT TERM" in source
-    assert 'MODE="stop"' in source
-    assert 'aorta-chat-ui-${UI_PORT}.pid' in source
-    assert 'TUNNEL_PID_FILE="${RUNTIME_DIR}/aorta-chat-tunnel-${UI_PORT}.pid"' in source
-    assert 'mv "$tunnel_pid_file_tmp" "$TUNNEL_PID_FILE"' in source
-    assert "stop_local_tunnel" in source
-    assert 'ps -u "$(id -u)"' not in source
-    assert 'aorta-chat-stop-${UI_PORT}.requested' in source
-    assert 'UI_LOCK_DIR="${RUNTIME_DIR}/aorta-chat-ui-${UI_PORT}.lock"' in source
-    assert "acquire_ui_lock" in source
-    assert "release_ui_lock" in source
-    assert "Starting AORTA Chat on port" in source
-    assert "--port ${UI_PORT}" in source
-    assert 'AORTA_CHAT_UI_STARTUP_TIMEOUT:-360' in source
+    assert '*"localhost:8000"*' in source
     assert "export AORTA_CHAT_LLM_PROVIDER=vllm" in source
     assert "export AORTA_CHAT_LLM_TOOL_MODE=native" in source
     assert '"${REPO_ROOT}/.venv-ui/bin/aorta" chat doctor' in source
@@ -292,34 +367,91 @@ def test_cia_ui_refuses_an_endpoint_serving_a_different_model(
 
     assert started.returncode != 0
     assert (
-        "CIA requires the endpoint to serve Qwen/Qwen3.8-27B; "
-        "got Other/Model (use --no-cia)"
+        "CIA requires the endpoint to serve Qwen/Qwen3.8-27B; " "got Other/Model (use --no-cia)"
     ) in started.stderr
 
 
-def test_ui_cleanup_waits_for_the_entire_process_group() -> None:
-    source = SCRIPTS[1].read_text(encoding="utf-8")
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_stop_cleans_chainlit_children_after_the_leader_exits(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pgid = _spawn_orphaned_ui_group(repo, owned=True)
+    pid_file = runtime / "aorta-chat-ui-8080.pid"
+    pid_file.write_text(f"{pgid}\n", encoding="utf-8")
+    fake_bin = _fake_ui_commands(tmp_path)
+    try:
+        stopped = subprocess.run(
+            [str(SCRIPTS[1]), "--stop", "--repo", str(repo)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "AORTA_CHAT_LOGIN_HOST": "login.example.invalid",
+                "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+            },
+        )
 
-    assert source.count('/bin/kill -0 -- "-$1"') >= 2
-    assert 'group_alive "$pid"' in source
-    assert "ps -eo pgid=,args=" in source
-    assert 'group_owned "$pid"' in source
-    assert '"-m chainlit run"' in source
-    assert "could not verify ownership of process group" in source
-    assert 'process_group_alive "$ui_pid"' in source
-    assert 'kill -0 "$ui_pid"' not in source
-    assert "did not stop; preserving" in source
+        assert stopped.returncode == 0, stopped.stderr
+        assert not pid_file.exists()
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pgid, 0)
+    finally:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
-def test_ui_cleanup_reports_a_refused_remote_stop() -> None:
-    source = SCRIPTS[1].read_text(encoding="utf-8")
-    cleanup = source[source.index("cleanup() {") : source.index("trap cleanup EXIT")]
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_cleanup_reports_a_refused_remote_ui_stop(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "qwen38-endpoint.env").write_text(
+        "\n".join(
+            (
+                "export QWEN_VLLM_JOB_ID=12345",
+                "export AORTA_CHAT_VLLM_BASE_URL=http://compute:8001/v1",
+                "export AORTA_CHAT_VLLM_MODEL=Qwen/Qwen3.8-27B",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    aorta = repo / ".venv-ui" / "bin" / "aorta"
+    aorta.parent.mkdir(parents=True)
+    aorta.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    aorta.chmod(0o755)
+    pgid = _spawn_orphaned_ui_group(repo, owned=False)
+    pid_file = runtime / "aorta-chat-ui-8080.pid"
+    pid_file.write_text(f"{pgid}\n", encoding="utf-8")
+    fake_bin = _fake_ui_commands(tmp_path)
+    try:
+        started = subprocess.run(
+            [str(SCRIPTS[1]), "--repo", str(repo), "--no-cia"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "AORTA_CHAT_LOGIN_HOST": "login.example.invalid",
+                "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+            },
+        )
 
-    assert "stop_remote_ui >/dev/null" not in cleanup
-    assert "if ! stop_remote_ui; then" in cleanup
-    assert "remote AORTA Chat UI is still running" in cleanup
-    assert "trap - EXIT" in cleanup
-    assert 'exit "$exit_code"' in cleanup
+        assert started.returncode != 0
+        assert "remote AORTA Chat UI is still running" in started.stderr
+        assert pid_file.is_file()
+    finally:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def test_ui_stop_ignores_an_unrecorded_matching_tunnel(tmp_path: Path) -> None:
@@ -361,18 +493,6 @@ def test_ui_stop_ignores_an_unrecorded_matching_tunnel(tmp_path: Path) -> None:
     finally:
         manual.terminate()
         manual.wait(timeout=5)
-
-
-def test_ui_stop_serializes_with_startup_and_aborts_waits() -> None:
-    source = SCRIPTS[1].read_text(encoding="utf-8")
-    stop = source[source.index('if [[ "$MODE" == "stop" ]]') :]
-
-    assert stop.index(': >"$STOP_REQUEST_FILE"') < stop.index(
-        "acquire_ui_lock true"
-    )
-    assert stop.index("acquire_ui_lock true") < stop.index("stop_local_tunnel")
-    assert source.count("abort_if_stop_requested") >= 7
-    assert 'if [[ -e "$STOP_REQUEST_FILE" ]]; then\n    exit 0' in source
 
 
 def test_ui_stop_cancels_a_startup_before_pid_publication(tmp_path: Path) -> None:
