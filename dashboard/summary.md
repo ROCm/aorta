@@ -1,64 +1,44 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-10-12T142744-38250297996` · commit `bf117600ca07` · 2026-10-12 14:27:44 UTC
+> ⚠️ **Stale** — latest sanitizer nightly run `38397494175` (2026-10-14 19:41:55 UTC) did not complete successfully (cancelled); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/38397494175)
 
-✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
+Run `2026-10-14T194155-38397494175` · commit `bf117600ca07` · 2026-10-14 19:41:55 UTC
+
+❌ **INCOMPLETE** — 3/3 sanitizer report(s) are missing
 
 Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. Baseline status is the regression-health signal.
 
 | Recipe | Backend | Baseline status | Observed | Expected | Execution | Findings | Coverage |
 |---|---|---|---|---|---|--:|---|
-| daily-waitcheck-gemm | waitcheck (static) | ✅ **Expected outcome** | `warn` | `warn` | complete | 64 | — |
-| daily-consan-clean | consan (dynamic) | ✅ **Expected outcome** | `pass` | `pass` | complete | 0 | 0/0, 2/2 |
-| daily-consan-racy | consan (dynamic) | ✅ **Expected outcome** | `fail` | `fail` | complete | 1 | 0/0, 2/2 |
+| daily-waitcheck-gemm | waitcheck (static) | ❌ **Report missing** | `—` | `warn` | ❌ **missing** | 0 | — |
+| daily-consan-clean | consan (dynamic) | ❌ **Report missing** | `—` | `pass` | ❌ **missing** | 0 | — |
+| daily-consan-racy | consan (dynamic) | ❌ **Report missing** | `—` | `fail` | ❌ **missing** | 0 | — |
 
 Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate) and **Workload survey (observed-only)** (non-gating).
 
 ## Expected behavior (guardrails) · Kernel details
 
-<details><summary><b>daily-waitcheck-gemm</b> — ✅ **Expected outcome**</summary>
+<details><summary><b>daily-waitcheck-gemm</b> — ❌ **Report missing**</summary>
 
-Observed sanitizer verdict `warn` · expected `warn`
-Observation: waitcheck warn; 64 finding(s) (wait_hazard)
-backend `rj_waitcheck` `2c406bcc3be3` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
+Observed sanitizer verdict: `—`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
-|---|--:|---|--:|---|---|---|
-| `gemm_NT_M256_N4096_K1024` | 479 | `warn` | 32 | `sol_126578.hsaco` | `57c5d8efa4` | — |
-| `gemm_NT_M128_N4096_K1280` | 471 | `warn` | 0 | `sol_175415.hsaco` | `57c5d8efa4` | same code object as gemm_NT_M256_N4096_K1024; scanned once |
-| `gemm_TT_M64_N64_K1280` | 440 | `warn` | 32 | `sol_137678.hsaco` | `aeb46fded1` | — |
-
-| Sanitizer | Code | Severity | Count | Example |
-|---|---|---|--:|---|
-| waitcheck | `wait_hazard` | warning | 64 | sol_126578.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20 |
+Observation: report missing
 
 </details>
 
-<details><summary><b>daily-consan-clean</b> — ✅ **Expected outcome**</summary>
+<details><summary><b>daily-consan-clean</b> — ❌ **Report missing**</summary>
 
-Observed sanitizer verdict `pass` · expected `pass`
-Observation: consan pass; preflight pass
-backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
+Observed sanitizer verdict: `—`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
-|---|--:|---|--:|---|---|---|
-| `consan_lds_race` | 1 | `pass` | 0 | `—` | `—` | — |
+Observation: report missing
 
 </details>
 
-<details><summary><b>daily-consan-racy</b> — ✅ **Expected outcome**</summary>
+<details><summary><b>daily-consan-racy</b> — ❌ **Report missing**</summary>
 
-Observed sanitizer verdict `fail` · expected `fail`
-Observation: consan fail; 1 finding(s) (sampled_conflict); preflight pass
-backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
+Observed sanitizer verdict: `—`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
-|---|--:|---|--:|---|---|---|
-| `consan_lds_race_2wave` | 1 | `fail` | 1 | `—` | `—` | — |
-
-| Sanitizer | Code | Severity | Count | Example |
-|---|---|---|--:|---|
-| consan | `sampled_conflict` | race | 1 | [rocjitsu-dbi-hooks] ConSan conflict reader=107938137836912 first_index=4 second_index=15 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 gener… |
+Observation: report missing
 
 </details>
 
@@ -66,51 +46,53 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 How real GPU kernels behave under AMD's sanitizers — **waitcheck** (static `s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where both produced a report the kernel is shown under each, and a scan that was skipped or whose report is missing still appears, marked report missing with no verdict. **No expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here is an observation of how the kernel behaved, not a regression. Each case lists a copy-paste command to reproduce the run.
 
-Surveyed 3 kernels across 6 sanitizer runs — 3 pass · 1 warn · 2 error
+Surveyed 3 kernels across 6 sanitizer runs — 2 pass · 1 warn · 3 error
 
 | Kernel | waitcheck | ConSan | Findings | Note |
 |---|---|---|--:|---|
-| gemm | `warn` | `error` | 32 | combined_hook_timeout |
-| lds dispatch | `pass` | `pass` | 0 | — |
-| tiny | `pass` | `error` | 0 | combined_hook_exit_86 |
+| gemm | `warn` | `error` | 32 | combined_hook_exit_1 |
+| lds dispatch | `pass` | `error` | 0 | combined_hook_exit_1 |
+| tiny | `pass` | `error` | 0 | combined_hook_exit_1 |
 
 <details><summary><b>consan-gemm</b> — observed `error`</summary>
 
-Observation: consan error; reason combined_hook_timeout; gemm_f32_ss: combined_hook_timeout; preflight error
+Observation: consan error; reason combined_hook_exit_1; gemm_f32_ss: combined_hook_exit_1; preflight error
 
-Reason: `combined_hook_timeout — gemm_f32_ss: combined_hook_timeout`
+Reason: `combined_hook_exit_1 — gemm_f32_ss: combined_hook_exit_1`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `57c5d8efa4` | combined_hook_timeout |
+| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `57c5d8efa4` | combined_hook_exit_1 |
 
 </details>
 
-<details><summary><b>consan-lds-dispatch</b> — observed `pass`</summary>
+<details><summary><b>consan-lds-dispatch</b> — observed `error`</summary>
 
-Observation: consan pass; preflight pass
+Observation: consan error; reason combined_hook_exit_1; lds_reduce: combined_hook_exit_1; preflight error
+
+Reason: `combined_hook_exit_1 — lds_reduce: combined_hook_exit_1`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `17e70b6590` | — |
+| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `fced371e5b` | combined_hook_exit_1 |
 
 </details>
 
 <details><summary><b>consan-tiny</b> — observed `error`</summary>
 
-Observation: consan error; reason combined_hook_exit_86; tiny_vecadd: combined_hook_exit_86; preflight error
+Observation: consan error; reason combined_hook_exit_1; tiny_vecadd: combined_hook_exit_1; preflight error
 
-Reason: `combined_hook_exit_86 — tiny_vecadd: combined_hook_exit_86`
+Reason: `combined_hook_exit_1 — tiny_vecadd: combined_hook_exit_1`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `69c08176c4` | combined_hook_exit_86 |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `e959fc4b34` | combined_hook_exit_1 |
 
 </details>
 
@@ -136,7 +118,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `17e70b6590` | — |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `fced371e5b` | — |
 
 </details>
 
@@ -148,7 +130,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `69c08176c4` | — |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `e959fc4b34` | — |
 
 </details>
 
@@ -156,6 +138,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-10-14T194155-38397494175 | `bf117600ca07` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | Incomplete |
 | 2026-10-12T142744-38250297996 | `bf117600ca07` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-11T141417-38139192341 | `224d19f4a371` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-10T141315-38051823495 | `224d19f4a371` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
@@ -185,4 +168,3 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 | 2026-09-17T132440-35221004771 | `73409f79a56a` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-09-17T112050-35210422045 | `73409f79a56a` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-09-17T074922-35189763335 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
-| 2026-09-16T131107-35095734136 | `73409f79a56a` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | Incomplete |
