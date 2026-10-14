@@ -219,7 +219,7 @@ docker run --rm \
     --trust-remote-code \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
-    --default-chat-template-kwargs '{"enable_thinking":false}'
+    --reasoning-parser qwen3
 SBATCH
 
 chmod 700 /apps/avsharma/aorta-chat-runtime/qwen38-vllm.sbatch
@@ -345,6 +345,7 @@ curl --fail --silent --show-error \
   -d '{
     "model": "Qwen/Qwen3.8-27B",
     "messages": [{"role": "user", "content": "Reply with READY only."}],
+    "chat_template_kwargs": {"enable_thinking": false},
     "temperature": 0,
     "max_tokens": 16
   }' | python3 -m json.tool
