@@ -3662,7 +3662,7 @@ def test_a_group_note_cannot_corrupt_the_survey_rollup_row():
     lines = gen._survey_summary_md(groups)
     rows = [line for line in lines if line.startswith("| ") and "---" not in line]
     header, body = rows[0], rows[1:]
-    assert header == "| Kernel | waitcheck | ConSan | Findings | Note |"
+    assert header == "| Workload | Kernels | waitcheck | ConSan | Findings | Note |"
     assert len(body) == 1
     row = body[0]
 
@@ -3914,11 +3914,13 @@ def _survey_mixed_entries() -> list[dict]:
 
 
 def test_survey_summary_stats_counts_kernels_runs_and_verdicts():
-    # #374 summary roll-up: the aggregation counts kernel groups, sanitizer runs
-    # (present reports only), and a per-verdict breakdown that sums to the run count.
+    # #374 summary roll-up: the aggregation counts workloads (groups), the distinct
+    # kernels inside them, sanitizer runs (present reports only), and a per-verdict
+    # breakdown that sums to the run count.
     groups = gen._group_survey_entries(_survey_mixed_entries())
     stats = gen._survey_summary_stats(groups)
-    assert stats["kernels"] == 3
+    assert stats["workloads"] == 3
+    assert stats["kernels"] == 5
     assert stats["runs"] == 5
     assert stats["verdicts"] == {
         "pass": 2, "warn": 1, "fail": 1, "error": 1, "not_checked": 0
@@ -3928,10 +3930,38 @@ def test_survey_summary_stats_counts_kernels_runs_and_verdicts():
     # headline is readable and omits the zero bucket
     headline = gen._survey_headline(stats)
     assert headline == (
-        "Surveyed 3 kernels across 5 sanitizer runs "
+        "Surveyed 3 workloads (5 kernels) across 5 sanitizer runs "
         "\u2014 2 pass \u00b7 1 warn \u00b7 1 fail \u00b7 1 error"
     )
     assert "not_checked" not in headline
+
+
+def test_survey_kernel_count_unions_a_workloads_sanitizers():
+    # A model workload: waitcheck scanned three kernels, ConSan ran two of them.
+    # The row counts the three distinct kernels, not the two reports.
+    def with_kernels(report: dict, names: tuple[str, ...]) -> dict:
+        worklist = report["worklist"]
+        template = worklist["kernels"][0]
+        worklist["kernels"] = [
+            {**template, "identity": {**template["identity"], "name": name}} for name in names
+        ]
+        worklist["kernel_count"] = worklist["top_n"] = len(names)
+        return report
+
+    waitcheck = with_kernels(_waitcheck_pass_report(), ("attn", "rmsnorm", "rope"))
+    consan = with_kernels(_consan_clean_report(), ("attn", "rmsnorm"))
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "waitcheck-model", "group": "model", "sanitizer": "waitcheck",
+             "report": waitcheck},
+            {"name": "consan-model", "group": "model", "sanitizer": "consan",
+             "report": consan},
+        ]}
+    )
+    groups = gen._group_survey_entries(entries)
+    stats = gen._survey_summary_stats(groups)
+    assert (stats["workloads"], stats["kernels"], stats["runs"]) == (1, 3, 2)
+    assert "<td class=num>3</td>" in gen._survey_summary_table_html(groups)
 
 
 def test_survey_summary_stats_absent_sanitizer_is_not_a_run():
@@ -3946,7 +3976,7 @@ def test_survey_summary_stats_absent_sanitizer_is_not_a_run():
     )
     stats = gen._survey_summary_stats(gen._group_survey_entries(entries))
     assert stats == {
-        "kernels": 2, "runs": 1,
+        "workloads": 2, "kernels": 1, "runs": 1,
         "verdicts": {"pass": 1, "warn": 0, "fail": 0, "error": 0, "not_checked": 0},
     }
 
@@ -3961,11 +3991,11 @@ def test_survey_summary_table_renders_chips_emdash_and_gate_stays_healthy():
 
     # readable headline stat (not tiny muted text) with the accurate breakdown
     assert 'class="statline"' in table
-    assert "Surveyed <b>3 kernels</b> across <b>5 sanitizer runs</b>" in table
+    assert "Surveyed <b>3 workloads</b> (<b>5 kernels</b>) across <b>5 sanitizer runs</b>" in table
     for part in ("2 pass", "1 warn", "1 fail", "1 error"):
         assert part in table
-    # one row per kernel group with a stable header
-    assert "<th>Kernel</th><th>WaitCheck</th><th>ConSan</th>" in table
+    # one row per workload with a stable header
+    assert "<th>Workload</th><th class=num>Kernels</th><th>WaitCheck</th><th>ConSan</th>" in table
     # color-coded verdict badges (error/fail red, warn amber, pass green)
     assert '<span class="v warn">warn</span>' in table
     assert '<span class="v fail">fail</span>' in table
@@ -3996,12 +4026,12 @@ def test_survey_summary_empty_survey_renders_gracefully():
 def test_survey_summary_md_mirrors_headline_and_table():
     # #374: the GitHub job-summary markdown mirrors the roll-up (headline + table).
     md = gen.build_summary_md([_healthy_guardrail_run()], survey=_survey_mixed_entries())
-    assert "Surveyed 3 kernels across 5 sanitizer runs" in md
-    assert "| Kernel | waitcheck | ConSan | Findings | Note |" in md
-    # a kernel row with both sanitizer verdicts as markdown code spans
-    assert "| gemm | `warn` | `fail` |" in md
+    assert "Surveyed 3 workloads (5 kernels) across 5 sanitizer runs" in md
+    assert "| Workload | Kernels | waitcheck | ConSan | Findings | Note |" in md
+    # a workload row with its kernel count and both sanitizer verdicts
+    assert "| gemm | 2 | `warn` | `fail` |" in md
     # the obj group's absent waitcheck renders as an em dash, not a fake verdict
-    assert f"| obj | {gen._DASH} | `error` |" in md
+    assert f"| obj | 1 | {gen._DASH} | `error` |" in md
     # observed-only: no regression vocabulary in the mirror
     assert "REGRESSION" not in md and "Mismatch" not in md
 
