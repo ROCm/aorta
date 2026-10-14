@@ -31,9 +31,10 @@ scripts/chat/start_qwen_vllm.sh \
   --hf-cache /apps/avsharma/hf-cache
 ```
 
-The command returns after `/health`, `/v1/models`, a real chat completion, and
-a native function-call probe all pass. It enables Qwen's XML tool parser,
-prints the selected compute-node URL, and never inspects port 8000.
+The command returns after `/health` passes. It enables Qwen's reasoning and XML
+tool parsers, prints the selected compute-node URL, and never inspects port
+8000. The Chat launcher runs `aorta chat doctor`—including its native
+function-call probe—before starting the UI.
 Startup output is limited to Slurm state changes and one progress message every
 30 seconds; add `--verbose` to print every five-second poll.
 Shutdown follows the same policy instead of printing every `COMPLETING` poll.
@@ -353,7 +354,7 @@ curl --fail --silent --show-error \
 
 The response should contain `"content": "READY"` and no reasoning trace.
 
-Reproduce the launcher's required native function-call check. Build the request
+Reproduce `aorta chat doctor`'s native function-call check. Build the request
 with the model recorded by the running worker:
 
 ```bash
@@ -396,7 +397,7 @@ TOOL_RESPONSE="$(
 )"
 ```
 
-Validate the response exactly as the launcher does:
+Validate the response exactly as the vLLM backend does:
 
 ```bash
 python3 -c '
