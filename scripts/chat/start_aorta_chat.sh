@@ -314,6 +314,9 @@ run_remote_worker() {
   fi
 
   cd "$REPO_ROOT"
+  abort_if_stop_requested
+  "${REPO_ROOT}/.venv-ui/bin/aorta" chat doctor
+  abort_if_stop_requested
   umask 077
   ui_pid=""
   cleanup_remote_worker() {

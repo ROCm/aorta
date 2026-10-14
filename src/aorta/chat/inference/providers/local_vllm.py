@@ -7,6 +7,7 @@ this file and its one entry in ``factory.py``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 
@@ -44,6 +45,7 @@ PROBE_INTERVAL = 1.0
 #: host that drops packets rather than refusing them cannot make a five-second
 #: probe spend five seconds inside a single connect and then start another.
 _REQUEST_TIMEOUT = 5.0
+_NATIVE_TOOL_NAME = "aorta_tool_protocol_probe"
 
 
 class LocalVLLMBackend:
@@ -161,6 +163,73 @@ class LocalVLLMBackend:
                 f"nothing answered {self.health_url()} within {budget:g}s.\n"
                 f"{self.unreachable_hint()}"
             )
+
+    async def probe_tools(self, timeout: float | None = None) -> None:
+        """Raise unless vLLM returns one valid native function call."""
+        budget = PROBE_TIMEOUT if timeout is None else max(0.1, timeout)
+        url = settings.vllm_base_url.rstrip("/") + "/chat/completions"
+        request = {
+            "model": settings.vllm_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Call the provided tool with source set to READY. "
+                        "Do not answer in text."
+                    ),
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": _NATIVE_TOOL_NAME,
+                        "description": "Verify native function calling.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"source": {"type": "string"}},
+                            "required": ["source"],
+                        },
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": _NATIVE_TOOL_NAME},
+            },
+            "temperature": 0,
+            "max_tokens": 128,
+        }
+        try:
+            async with httpx.AsyncClient(headers=self._health_headers()) as client:
+                response = await client.post(url, json=request, timeout=budget)
+                response.raise_for_status()
+                message = response.json()["choices"][0]["message"]
+            calls = message.get("tool_calls") or []
+            if len(calls) != 1:
+                raise ValueError(f"expected one tool call, got {len(calls)}")
+            function = calls[0].get("function") or {}
+            if function.get("name") != _NATIVE_TOOL_NAME:
+                raise ValueError(
+                    f"expected {_NATIVE_TOOL_NAME!r}, got {function.get('name')!r}"
+                )
+            arguments = function.get("arguments") or {}
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            if not isinstance(arguments, dict) or arguments.get("source") != "READY":
+                raise ValueError(f"expected source='READY', got {arguments!r}")
+        except (
+            httpx.HTTPError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise RuntimeError(
+                "vLLM native tool-call probe failed: "
+                f"{exc}\n{self.native_requirement}"
+            ) from exc
 
     def unreachable_hint(self) -> str:
         return (

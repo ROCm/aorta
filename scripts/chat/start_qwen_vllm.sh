@@ -492,12 +492,6 @@ fi
 release_launch_lock
 
 deadline=$((SECONDS + STARTUP_TIMEOUT))
-remaining_startup_budget() {
-  local remaining=$((deadline - SECONDS))
-  ((remaining > 0)) || die "vLLM startup exceeded ${STARTUP_TIMEOUT}s"
-  printf '%s\n' "$remaining"
-}
-
 last_status=""
 last_progress_report=$SECONDS
 while [[ ! -s "$ENDPOINT_FILE" ]]; do
@@ -562,114 +556,6 @@ while ! curl --fail --silent --max-time 5 "$health_url" >/dev/null 2>&1; do
   fi
   sleep 5
 done
-
-request_timeout="$(remaining_startup_budget)"
-models="$(
-  curl --fail --silent --show-error \
-    --connect-timeout 5 \
-    --max-time "$request_timeout" \
-    "${AORTA_CHAT_VLLM_BASE_URL}/models"
-)"
-AORTA_EXPECTED_MODEL="$MODEL" python3 -c '
-import json
-import os
-import sys
-
-payload = json.load(sys.stdin)
-models = {item.get("id") for item in payload.get("data", [])}
-expected = os.environ["AORTA_EXPECTED_MODEL"]
-if expected not in models:
-    raise SystemExit(f"{expected!r} not served; got {sorted(models)!r}")
-' <<<"$models"
-
-request_timeout="$(remaining_startup_budget)"
-completion="$(
-  curl --fail --silent --show-error \
-    --connect-timeout 5 \
-    --max-time "$request_timeout" \
-    "${AORTA_CHAT_VLLM_BASE_URL}/chat/completions" \
-    -H 'Content-Type: application/json' \
-    -d "$(
-      AORTA_EXPECTED_MODEL="$MODEL" python3 -c '
-import json
-import os
-
-print(json.dumps({
-    "model": os.environ["AORTA_EXPECTED_MODEL"],
-    "messages": [{"role": "user", "content": "Reply with READY only."}],
-    "chat_template_kwargs": {"enable_thinking": False},
-    "temperature": 0,
-    "max_tokens": 16,
-}))
-'
-    )"
-)"
-python3 -c '
-import json
-import sys
-
-message = json.load(sys.stdin)["choices"][0]["message"]
-if message.get("content", "").strip() != "READY":
-    raise SystemExit(f"unexpected smoke response: {message!r}")
-if message.get("reasoning") or message.get("reasoning_content"):
-    raise SystemExit(f"thinking was not disabled: {message!r}")
-' <<<"$completion"
-
-request_timeout="$(remaining_startup_budget)"
-tool_completion="$(
-  curl --fail --silent --show-error \
-    --connect-timeout 5 \
-    --max-time "$request_timeout" \
-    "${AORTA_CHAT_VLLM_BASE_URL}/chat/completions" \
-    -H 'Content-Type: application/json' \
-    -d "$(
-      AORTA_EXPECTED_MODEL="$MODEL" python3 -c '
-import json
-import os
-
-name = "aorta_tool_protocol_probe"
-print(json.dumps({
-    "model": os.environ["AORTA_EXPECTED_MODEL"],
-    "messages": [{
-        "role": "user",
-        "content": "Call the provided tool with source set to READY. Do not answer in text.",
-    }],
-    "tools": [{
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": "Verify native function calling.",
-            "parameters": {
-                "type": "object",
-                "properties": {"source": {"type": "string"}},
-                "required": ["source"],
-            },
-        },
-    }],
-    "tool_choice": {"type": "function", "function": {"name": name}},
-    "temperature": 0,
-    "max_tokens": 128,
-}))
-'
-    )"
-)"
-python3 -c '
-import json
-import sys
-
-message = json.load(sys.stdin)["choices"][0]["message"]
-calls = message.get("tool_calls") or []
-if len(calls) != 1:
-    raise SystemExit(f"native tool-call smoke produced {len(calls)} calls: {message!r}")
-function = calls[0].get("function") or {}
-if function.get("name") != "aorta_tool_protocol_probe":
-    raise SystemExit(f"native tool-call smoke used the wrong function: {message!r}")
-arguments = function.get("arguments") or {}
-if isinstance(arguments, str):
-    arguments = json.loads(arguments)
-if arguments.get("source") != "READY":
-    raise SystemExit(f"native tool-call smoke used the wrong arguments: {message!r}")
-' <<<"$tool_completion"
 
 if ! status="$(job_status "$active_job")"; then
   die "could not query Slurm job $active_job through $LOGIN_HOST"
