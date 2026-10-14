@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Start or stop the Ruby-cluster Qwen vLLM service used by AORTA Chat.
+# Start or stop the Qwen vLLM service used by AORTA Chat.
 #
 # The driver runs on a login host. It submits this same file to Slurm in
 # --worker mode, waits for the model to answer, and leaves the allocation
@@ -8,11 +8,11 @@
 
 set -euo pipefail
 
-LOGIN_HOST="${AORTA_QWEN_LOGIN_HOST:-ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com}"
+LOGIN_HOST="${AORTA_QWEN_LOGIN_HOST:-}"
 PARTITION="${AORTA_QWEN_PARTITION:-interactive}"
 TIME_LIMIT="${AORTA_QWEN_TIME_LIMIT:-03:00:00}"
-RUNTIME_DIR="${AORTA_CHAT_RUNTIME_DIR:-/apps/avsharma/aorta-chat-runtime}"
-HF_CACHE="${AORTA_QWEN_HF_CACHE:-/apps/avsharma/hf-cache}"
+RUNTIME_DIR="${AORTA_CHAT_RUNTIME_DIR:-}"
+HF_CACHE="${AORTA_QWEN_HF_CACHE:-}"
 IMAGE="${AORTA_QWEN_IMAGE:-rocm/vllm-dev:nightly}"
 MODEL="${AORTA_QWEN_MODEL:-Qwen/Qwen3.8-27B}"
 PORT_START="${AORTA_QWEN_PORT_START:-8001}"
@@ -37,11 +37,11 @@ An already-running healthy service recorded by this script is reused.
 
 Options:
   --stop                 Cancel the recorded vLLM job and wait for cleanup.
-  --login-host HOST      Slurm login host.
+  --login-host HOST      Slurm login host (required).
   --partition NAME       Slurm partition.
   --time LIMIT           Slurm time limit (default: 03:00:00).
-  --runtime-dir PATH     Shared state/log directory.
-  --hf-cache PATH        Shared Hugging Face cache.
+  --runtime-dir PATH     Shared state/log directory (required).
+  --hf-cache PATH        Shared Hugging Face cache (default: RUNTIME_DIR/hf-cache).
   --image IMAGE          vLLM container image.
   --model MODEL          Served model ID.
   --port-start PORT      First candidate model port (minimum: 8001).
@@ -50,8 +50,9 @@ Options:
   --verbose              Print every five-second startup poll.
   -h, --help             Show this help.
 
-Environment variables with the AORTA_QWEN_* names shown by the defaults near
-the top of this script provide the same configuration non-interactively.
+AORTA_QWEN_LOGIN_HOST and AORTA_CHAT_RUNTIME_DIR provide the two required
+values non-interactively. Other AORTA_QWEN_* variables provide the optional
+configuration defaults shown above.
 EOF
 }
 
@@ -205,6 +206,11 @@ is_uint "$STARTUP_TIMEOUT" || die "--startup-timeout must be an integer"
 ((PORT_START >= 8001)) || die "--port-start must be at least 8001"
 ((PORT_END >= PORT_START)) || die "--port-end must be at least --port-start"
 ((PORT_END <= 65535)) || die "--port-end must be at most 65535"
+[[ -n "$LOGIN_HOST" ]] ||
+  die "--login-host is required (or set AORTA_QWEN_LOGIN_HOST)"
+[[ -n "$RUNTIME_DIR" ]] ||
+  die "--runtime-dir is required (or set AORTA_CHAT_RUNTIME_DIR)"
+[[ -n "$HF_CACHE" ]] || HF_CACHE="${RUNTIME_DIR}/hf-cache"
 
 ENDPOINT_FILE="${RUNTIME_DIR}/qwen38-endpoint.env"
 PENDING_FILE="${RUNTIME_DIR}/qwen38-pending-job"

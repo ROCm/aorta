@@ -26,7 +26,10 @@ From `ruby-slurmlogin02`, start or reuse a healthy Qwen service:
 ```bash
 cd /apps/avsharma/aorta-cia-qwen38
 git switch cia_models
-scripts/chat/start_qwen_vllm.sh
+scripts/chat/start_qwen_vllm.sh \
+  --login-host ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
+  --runtime-dir /apps/avsharma/aorta-chat-runtime \
+  --hf-cache /apps/avsharma/hf-cache
 ```
 
 The command returns after `/health`, `/v1/models`, a real chat completion, and
@@ -39,7 +42,9 @@ Shutdown follows the same policy instead of printing every `COMPLETING` poll.
 Start the CIA-enabled UI:
 
 ```bash
-scripts/chat/start_aorta_chat.sh
+scripts/chat/start_aorta_chat.sh \
+  --login-host ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
+  --runtime-dir /apps/avsharma/aorta-chat-runtime
 ```
 
 The launcher explicitly selects the `vllm` provider and native tool protocol,
@@ -52,13 +57,18 @@ the remote UI and SSH tunnel without leaving either process behind.
 If the terminal is closed or killed before its cleanup trap runs, recover with:
 
 ```bash
-scripts/chat/start_aorta_chat.sh --stop
+scripts/chat/start_aorta_chat.sh --stop \
+  --login-host ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
+  --runtime-dir /apps/avsharma/aorta-chat-runtime
 ```
 
 When finished, release the Qwen GPU node:
 
 ```bash
-scripts/chat/start_qwen_vllm.sh --stop
+scripts/chat/start_qwen_vllm.sh --stop \
+  --login-host ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
+  --runtime-dir /apps/avsharma/aorta-chat-runtime \
+  --hf-cache /apps/avsharma/hf-cache
 ```
 
 The remainder of this guide expands those two scripts into individual commands
@@ -523,7 +533,9 @@ If either process survives an interrupted terminal, stop only the UI and tunnel
 managed by the launcher:
 
 ```bash
-scripts/chat/start_aorta_chat.sh --stop
+scripts/chat/start_aorta_chat.sh --stop \
+  --login-host ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
+  --runtime-dir /apps/avsharma/aorta-chat-runtime
 ```
 
 Cancel the model server while the endpoint file still exists:
