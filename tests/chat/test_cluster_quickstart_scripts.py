@@ -98,6 +98,7 @@ def test_ruby_runbook_supplies_the_required_site_configuration() -> None:
     assert "/apps/avsharma/aorta-chat-runtime" in quickstart
     assert quickstart.count("--login-host") == 4
     assert quickstart.count("--runtime-dir") == 4
+    assert "git switch cia_models" not in source
 
 
 def test_model_launcher_never_uses_the_occupied_dashboard_port() -> None:
