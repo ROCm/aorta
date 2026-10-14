@@ -192,7 +192,7 @@ group_alive() {
   /bin/kill -0 -- "-$1" 2>/dev/null
 }
 group_members() {
-  ps -eo pgid=,args= | awk -v pgid="$1" \
+  ps -ww -eo pgid=,args= | awk -v pgid="$1" \
     '\''$1 == pgid {$1=""; sub(/^ +/, ""); print}'\''
 }
 group_owned() {
