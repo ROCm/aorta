@@ -3964,6 +3964,90 @@ def test_survey_kernel_count_unions_a_workloads_sanitizers():
     assert "<td class=num>3</td>" in gen._survey_summary_table_html(groups)
 
 
+def _with_kernel_objects(report: dict, objects: tuple[tuple[str, str, str], ...]) -> dict:
+    """Replace a report's worklist with ``(name, code_object, sha256)`` rows."""
+    worklist = report["worklist"]
+    template = worklist["kernels"][0]
+    worklist["kernels"] = [
+        {
+            **template,
+            "identity": {
+                **template["identity"],
+                "name": name,
+                "code_object": code_object,
+                "code_object_sha256": sha,
+            },
+        }
+        for name, code_object, sha in objects
+    ]
+    worklist["kernel_count"] = worklist["top_n"] = len(objects)
+    return report
+
+
+def test_same_name_from_two_code_objects_counts_twice():
+    # One symbol, two code objects -- the DeepSeek shape, where waitcheck selects
+    # kernel__C0.hsaco and kernel__C1.hsaco for the same kernel name. ConSan
+    # checking that name once must not collapse the pair, and must not add a third.
+    waitcheck = _with_kernel_objects(
+        _waitcheck_pass_report(),
+        (
+            ("ComputePrefillMetadataKernel", "/a/kernel__C0.hsaco", "aa"),
+            ("ComputePrefillMetadataKernel", "/a/kernel__C1.hsaco", "bb"),
+        ),
+    )
+    consan = _with_kernel_objects(
+        _consan_clean_report(),
+        (("ComputePrefillMetadataKernel", "/a/dispatched.hsaco", "cc"),),
+    )
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "waitcheck-model", "group": "model", "sanitizer": "waitcheck",
+             "report": waitcheck},
+            {"name": "consan-model", "group": "model", "sanitizer": "consan",
+             "report": consan},
+        ]}
+    )
+    stats = gen._survey_summary_stats(gen._group_survey_entries(entries))
+    assert (stats["workloads"], stats["kernels"], stats["runs"]) == (1, 2, 2)
+
+
+def test_declared_kernel_count_fills_a_report_that_lists_no_kernels():
+    # The fallback exists for a present report whose worklist names a count but
+    # lists no kernel rows. A declared count must not override kernels that are
+    # listed, and a non-int count must not abort the roll-up.
+    empty = _waitcheck_pass_report()
+    empty["worklist"]["kernels"] = []
+    empty["worklist"]["kernel_count"] = 4
+    listed = _with_kernel_objects(
+        _consan_clean_report(),
+        (("attn", "/a/attn.hsaco", "aa"),),
+    )
+    listed["worklist"]["kernel_count"] = 9
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "waitcheck-empty", "group": "empty", "sanitizer": "waitcheck",
+             "report": empty},
+            {"name": "consan-listed", "group": "listed", "sanitizer": "consan",
+             "report": listed},
+        ]}
+    )
+    stats = gen._survey_summary_stats(gen._group_survey_entries(entries))
+    assert stats["kernels"] == 5  # declared 4 on the empty report, plus the one listed
+
+    for raw in ("abc", [1, 2], {"n": 1}, True, 0, -3):
+        broken = _waitcheck_pass_report()
+        broken["worklist"]["kernels"] = []
+        broken["worklist"]["kernel_count"] = raw
+        broken_entries = gen.survey_cases_from_spec(
+            {"cases": [
+                {"name": "waitcheck-broken", "group": "broken", "sanitizer": "waitcheck",
+                 "report": broken},
+            ]}
+        )
+        broken_stats = gen._survey_summary_stats(gen._group_survey_entries(broken_entries))
+        assert broken_stats["kernels"] == 0
+
+
 def test_survey_summary_stats_absent_sanitizer_is_not_a_run():
     # A group whose sanitizer has no report (didn't run / non-GPU host) is not
     # counted as a sanitizer run and never fabricates a verdict bucket.

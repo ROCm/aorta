@@ -4087,24 +4087,52 @@ def _survey_present_runs(entries: list[dict[str, Any]]) -> int:
     return sum(1 for entry in entries if (entry.get("summary") or {}).get("present"))
 
 
+def _positive_kernel_count(raw: object) -> int:
+    """A declared ``kernel_count`` that is safe to add, else 0.
+
+    ``summarize_case`` forwards the field from untrusted ``--survey`` JSON without
+    coercing it. Only a positive ``int`` is a count. ``bool`` is an ``int``
+    subclass and is not one; a string, list, or object must not abort the render.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return 0
+    return raw
+
+
 def _survey_group_kernels(entries: list[dict[str, Any]]) -> int:
     """Distinct kernels a group's present reports selected (pure).
 
-    Kernel names are unioned across the group's sanitizers, so a kernel that both
+    A symbol compiled into two code objects is two kernels: multiplicity inside
+    one report is kept. Names are then matched across the group's sanitizers, and
+    each name contributes the larger of the two counts, so a kernel that both
     waitcheck and ConSan checked counts once. A report that lists no kernels
-    contributes its declared ``kernel_count`` instead.
+    contributes its declared ``kernel_count`` instead, when that field is a
+    positive int.
     """
-    names: set[str] = set()
+    multiplicity: dict[str, int] = {}
     declared = 0
     for entry in entries:
         row = entry.get("summary") or {}
         if not row.get("present"):
             continue
-        listed = {str(k.get("name")) for k in row.get("kernels") or [] if k.get("name")}
-        names |= listed
-        if not listed:
-            declared = max(declared, int((row.get("worklist") or {}).get("kernel_count") or 0))
-    return max(len(names), declared)
+        listed: dict[str, int] = {}
+        for kernel in row.get("kernels") or []:
+            if not isinstance(kernel, dict):
+                continue
+            name = kernel.get("name")
+            if not name:
+                continue
+            key = str(name)
+            listed[key] = listed.get(key, 0) + 1
+        if listed:
+            for name, count in listed.items():
+                multiplicity[name] = max(multiplicity.get(name, 0), count)
+        else:
+            declared = max(
+                declared,
+                _positive_kernel_count((row.get("worklist") or {}).get("kernel_count")),
+            )
+    return max(sum(multiplicity.values()), declared)
 
 
 def _survey_summary_stats(
