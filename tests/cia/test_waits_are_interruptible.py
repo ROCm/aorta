@@ -18,12 +18,23 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from aorta.cia import triage as triage_mod
 from aorta.cia.cancellation import pause
 from aorta.cia.launch.job import JobRecord
+
+
+def _backend(state, *, poll_interval: float = 5.0, subject: str = "slurm"):
+    state_fn = state if callable(state) else lambda *_args: state
+    return SimpleNamespace(
+        name="test",
+        wait_subject=subject,
+        poll_interval=poll_interval,
+        state=state_fn,
+    )
 
 
 @pytest.fixture()
@@ -36,46 +47,63 @@ def already_stopped() -> threading.Event:
 class TestWaitingForSlurm:
     """``wait_for_job``: up to fifteen minutes of five-second polls."""
 
-    def test_it_gives_up_when_the_caller_has(self, monkeypatch, already_stopped):
-        monkeypatch.setattr(triage_mod, "sacct_state", lambda _id: "RUNNING")
-
+    def test_it_gives_up_when_the_caller_has(self, already_stopped):
         started = time.monotonic()
-        state = triage_mod.wait_for_job("123", timeout=900, stop=already_stopped)
+        state = triage_mod.wait_for_job(
+            "123",
+            timeout=900,
+            stop=already_stopped,
+            backend=_backend("RUNNING"),
+        )
 
         assert state == "ABANDONED(RUNNING)"
         assert time.monotonic() - started < 5, "it waited out an interval first"
 
-    def test_it_says_which_state_it_walked_away_from(self, monkeypatch, already_stopped):
+    def test_it_says_which_state_it_walked_away_from(self, already_stopped):
         """The job is still out there; the record should say what it was doing."""
-        monkeypatch.setattr(triage_mod, "sacct_state", lambda _id: "PENDING")
-
-        state = triage_mod.wait_for_job("1", timeout=900, stop=already_stopped)
+        state = triage_mod.wait_for_job(
+            "1",
+            timeout=900,
+            stop=already_stopped,
+            backend=_backend("PENDING"),
+        )
 
         assert state == "ABANDONED(PENDING)"
 
-    def test_a_finished_job_is_still_reported_normally(self, monkeypatch, already_stopped):
+    def test_a_finished_job_is_still_reported_normally(self, already_stopped):
         """Stopping must not mask an answer that had already arrived."""
-        monkeypatch.setattr(triage_mod, "sacct_state", lambda _id: "COMPLETED")
-
-        state = triage_mod.wait_for_job("1", timeout=900, stop=already_stopped)
+        state = triage_mod.wait_for_job(
+            "1",
+            timeout=900,
+            stop=already_stopped,
+            backend=_backend("COMPLETED"),
+        )
 
         assert state == "COMPLETED"
 
-    def test_without_a_flag_it_times_out_as_before(self, monkeypatch):
-        monkeypatch.setattr(triage_mod, "sacct_state", lambda _id: "RUNNING")
-
-        state = triage_mod.wait_for_job("1", timeout=0.05, interval=0.01)
+    def test_without_a_flag_it_times_out_as_before(self):
+        state = triage_mod.wait_for_job(
+            "1",
+            timeout=0.05,
+            interval=0.01,
+            backend=_backend("RUNNING"),
+        )
 
         assert state == "TIMEOUT_WAITING(RUNNING)"
 
-    def test_it_wakes_mid_sleep_rather_than_at_the_interval(self, monkeypatch):
+    def test_it_wakes_mid_sleep_rather_than_at_the_interval(self):
         """The five-second poll is where the time goes."""
-        monkeypatch.setattr(triage_mod, "sacct_state", lambda _id: "RUNNING")
         stop = threading.Event()
         threading.Timer(0.1, stop.set).start()
 
         started = time.monotonic()
-        triage_mod.wait_for_job("1", timeout=900, interval=30, stop=stop)
+        triage_mod.wait_for_job(
+            "1",
+            timeout=900,
+            interval=30,
+            stop=stop,
+            backend=_backend("RUNNING"),
+        )
 
         assert time.monotonic() - started < 5
 
@@ -86,11 +114,6 @@ class TestWaitProgressLogging:
         intervals: list[float] = []
         monkeypatch.setattr(
             triage_mod,
-            "scheduler_state",
-            lambda *_args, **_kwargs: next(states),
-        )
-        monkeypatch.setattr(
-            triage_mod,
             "pause",
             lambda _stop, interval: intervals.append(interval) or False,
         )
@@ -99,7 +122,11 @@ class TestWaitProgressLogging:
             state = triage_mod.wait_for_job(
                 "local:123:456",
                 timeout=900,
-                backend="local",
+                backend=_backend(
+                    lambda *_args: next(states),
+                    poll_interval=0.2,
+                    subject="local process",
+                ),
             )
 
         messages = [record.getMessage() for record in caplog.records]

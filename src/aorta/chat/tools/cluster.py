@@ -43,7 +43,7 @@ from aorta.chat.tools.cache import current_tool_cache
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
 from aorta.chat.tools.outcome import tool_failure, tool_result_failed
-from aorta.cia.launch import resolve_backend
+from aorta.cia.launch import JobBackend, resolve_backend
 from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
 
 
@@ -141,15 +141,11 @@ def _fmt_sanitizer(san: dict) -> list[str]:
     return lines
 
 
-def _execution_identity(result: dict) -> tuple[str, str]:
+def _execution_identity(result: dict) -> tuple[JobBackend, str, str]:
     """Backend and concise native handle for a user-facing summary."""
-    backend = result.get("scheduler") or ("slurm" if result.get("slurm_job_id") else "unknown")
+    backend = resolve_backend(str(result.get("scheduler") or "slurm"))
     native_id = str(result.get("scheduler_job_id") or result.get("slurm_job_id", "?"))
-    if backend == "local" and native_id.startswith("local:"):
-        # The full handle carries Linux process start ticks to guard against PID
-        # reuse. That safety token is useful to cancellation, not to a reader.
-        native_id = native_id.split(":", 2)[1]
-    return backend, native_id
+    return backend, native_id, backend.display_job_id(native_id)
 
 
 def _fmt_tools_used(result: dict) -> list[str]:
@@ -167,13 +163,8 @@ def _fmt_tools_used(result: dict) -> list[str]:
     # The node named here used to be a constant, so every run claimed an MI355X
     # whatever executed it -- a hardware claim made without checking.
     node = result.get("node") or ""
-    backend, native_id = _execution_identity(result)
-    if backend == "local":
-        where = f" on {node}" if node else " on this workstation"
-        lines.append(f"  - CIA Launch agent — started local process {native_id}{where}")
-    else:
-        where = f" to {node}" if node else " to a node the scheduler chose"
-        lines.append(f"  - CIA Launch agent — submitted slurm job {native_id}{where}")
+    backend, native_id, _display_id = _execution_identity(result)
+    lines.append(f"  - CIA Launch agent — {backend.launch_summary(native_id, node)}")
     lines.append(
         f"  - CIA Watch agent — monitored the job log "
         f"({'raised an alert' if result.get('watch_alerted') else 'no alert raised'})"
@@ -207,10 +198,10 @@ _SWEEP_ARGS = ("--recipe", "--source")
 
 
 def _format_result(result: dict, label: str, *, expect_sanitizer: bool = False) -> str:
-    backend, native_id = _execution_identity(result)
+    backend, _native_id, display_id = _execution_identity(result)
     state = result.get("scheduler_state") or result.get("slurm_state")
     lines = [
-        f"Job {result['job_id']} ({backend} {native_id}) — {label}",
+        f"Job {result['job_id']} ({backend.name} {display_id}) — {label}",
         f"Recipe:   {result.get('recipe')}",
         f"State:    {state}",
         f"Bundle:   {result.get('bundle')}",
@@ -702,35 +693,10 @@ def _assemble(build: str) -> subprocess.CompletedProcess:
     round to us, ``OSError`` if even bash is missing. Those belong to the
     caller, which has a paste to answer for.
     """
-    local_argv = ["bash", "-c", build]
-    if resolve_backend(settings.cia_job_backend) == "local":
-        return subprocess.run(
-            local_argv,
-            capture_output=True,
-            text=True,
-            timeout=settings.waitcheck_timeout,
-            stdin=subprocess.DEVNULL,
-        )
-
-    argv = ["srun", "--nodes=1", "-t", "5", "bash", "-c", build]
-    try:
-        return subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=settings.waitcheck_timeout,
-            stdin=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        if settings.cia_job_backend == "slurm":
-            raise
-        return subprocess.run(
-            local_argv,
-            capture_output=True,
-            text=True,
-            timeout=settings.waitcheck_timeout,
-            stdin=subprocess.DEVNULL,
-        )
+    return resolve_backend(settings.cia_job_backend).run_quick(
+        ["bash", "-c", build],
+        settings.waitcheck_timeout,
+    )
 
 
 def _no_assembler_message() -> str:

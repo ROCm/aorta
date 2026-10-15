@@ -21,7 +21,7 @@ import pytest
 # scope fails collection for the file rather than skipping it.
 pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
 
-from aorta.cia.triage import sacct_nodelist
+from aorta.cia.launch import SLURM_BACKEND
 
 
 @pytest.fixture()
@@ -110,30 +110,30 @@ class TestAskingSlurmWhichNode:
     def test_the_node_is_read_from_the_accounting_record(self, monkeypatch):
         self._sacct(monkeypatch, "node07\n")
 
-        assert sacct_nodelist("12345") == "node07"
+        assert SLURM_BACKEND.node("12345") == "node07"
 
     def test_a_queued_job_has_no_node_yet(self, monkeypatch):
         """Slurm writes "None assigned" before it places the job."""
         self._sacct(monkeypatch, "None assigned\n")
 
-        assert sacct_nodelist("12345") == ""
+        assert SLURM_BACKEND.node("12345") == ""
 
     def test_no_slurm_is_not_an_error(self, monkeypatch):
         """The summary degrades to "the scheduler chose"; it does not fail."""
         self._sacct(monkeypatch, "", fail=True)
 
-        assert sacct_nodelist("12345") == ""
+        assert SLURM_BACKEND.node("12345") == ""
 
     def test_empty_output_yields_nothing(self, monkeypatch):
         self._sacct(monkeypatch, "\n\n")
 
-        assert sacct_nodelist("12345") == ""
+        assert SLURM_BACKEND.node("12345") == ""
 
     def test_a_node_range_is_passed_through_as_written(self, monkeypatch):
         """Slurm's own spelling for several nodes; inventing one would be worse."""
         self._sacct(monkeypatch, "node[07-09]\n")
 
-        assert sacct_nodelist("12345") == "node[07-09]"
+        assert SLURM_BACKEND.node("12345") == "node[07-09]"
 
     def test_it_asks_for_the_node_list(self, monkeypatch):
         seen: dict = {}
@@ -143,7 +143,7 @@ class TestAskingSlurmWhichNode:
             return subprocess.CompletedProcess(argv, 0, "node07\n", "")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        sacct_nodelist("12345")
+        SLURM_BACKEND.node("12345")
 
         assert "--format=NodeList" in seen["argv"]
         assert "12345" in seen["argv"]

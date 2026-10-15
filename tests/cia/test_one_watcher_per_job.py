@@ -21,7 +21,6 @@ who wrote last.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import threading
@@ -182,7 +181,10 @@ class TestTheTriageAsksForItsOwnJob:
 
         monkeypatch.setattr(triage_mod.threading, "Thread", FakeThread)
         monkeypatch.setattr(triage_mod, "launch", lambda **kw: ("99999", ""))
-        monkeypatch.setattr(triage_mod, "cancel", lambda job_id: (True, ""))
+        monkeypatch.setattr(
+            "aorta.cia.launch.backend.SlurmBackend.cancel",
+            lambda _self, _job_id: (True, ""),
+        )
         monkeypatch.setattr(triage_mod, "wait_for_job", lambda *a, **k: "ABANDONED(RUNNING)")
 
         source = tmp_path / "k.hip"
