@@ -55,12 +55,15 @@ Before filing a new issue, search through
 git clone https://github.com/ROCm/aorta.git
 cd aorta
 uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install -e ".[dev,hw-queue]" triton
 pre-commit install
 ```
 
-Optional features have their own extras (for example `chat-cli`, `cia`,
-`hw-queue`); see [Installation](README.md#installation).
+Several test modules import PyTorch at collection time, so the test suite
+needs it even on CPU. To run workloads on a GPU, install a ROCm build of
+PyTorch instead; see [Installation](README.md#installation). Other optional
+features have their own extras (for example `chat-cli` and `cia`).
 
 ### Code style
 
@@ -71,11 +74,15 @@ in CI on every pull request.
 ### Testing
 
 ```bash
-pytest tests/
+pytest -m "not gpu and not rocm" -n auto
 ```
 
-Most of the suite runs on CPU. CI runs it on Python 3.10 through 3.14, and runs
-the GPU tests on a self-hosted MI350 runner. Contributors are expected to:
+This is what the CPU lane in CI runs, on Python 3.10 through 3.14. Tests
+marked `gpu` or `rocm` need an AMD GPU with ROCm; CI runs those on a
+self-hosted MI350 runner. The CIA tests need their own extra: install
+`".[tests,cia]"` and run `pytest tests/cia -m "not gpu and not rocm"`.
+
+Contributors are expected to:
 
 - Run the tests relevant to the change and check the results.
 - Add tests for new functionality and for fixed bugs.
