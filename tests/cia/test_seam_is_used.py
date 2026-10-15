@@ -1,7 +1,8 @@
 """The one thing that starts jobs goes through the seam.
 
-``launch()`` is where Slurm and workstation execution branch. The triage
-driver must not reach past it to either backend.
+``launch()`` selects a backend, and that backend is the only implementation
+allowed to reach the Slurm submission primitive. The triage driver must not
+reach past this seam.
 """
 
 from __future__ import annotations
@@ -11,8 +12,8 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CIA = ROOT / "src" / "aorta" / "cia"
-#: Where submit_sbatch is defined, and the seam that is allowed to call it.
-_ALLOWED = {"launch/cluster.py", "launch/__init__.py"}
+#: Where submit_sbatch is defined, and the backend allowed to call it.
+_ALLOWED = {"launch/cluster.py", "launch/backend.py"}
 
 
 def _modules_calling(name: str) -> list[str]:
