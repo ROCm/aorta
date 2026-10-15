@@ -477,9 +477,10 @@ def test_local_reconciliation_never_queries_old_slurm_jobs(tmp_path, monkeypatch
         tmp_path,
     )
     monkeypatch.setattr(
-        triage_mod,
-        "sacct_state",
-        lambda _job_id: (_ for _ in ()).throw(AssertionError("Slurm was queried")),
+        "aorta.cia.launch.backend.SlurmBackend.state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Slurm was queried")
+        ),
     )
 
     assert triage_mod.reconcile_stale_jobs(tmp_path, "local") == 0

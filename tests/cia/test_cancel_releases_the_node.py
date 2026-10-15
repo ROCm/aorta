@@ -96,9 +96,11 @@ def _triage_stopping_at(tmp_path, monkeypatch, state: str, *, cancels: bool = Tr
 
     monkeypatch.setattr(triage_mod, "launch", lambda **kw: ("99999", ""))
     monkeypatch.setattr(
-        triage_mod,
-        "cancel",
-        lambda job_id: (cancelled.append(job_id) or (cancels, "" if cancels else "no scancel")),
+        "aorta.cia.launch.backend.SlurmBackend.cancel",
+        lambda _self, job_id: (
+            cancelled.append(job_id)
+            or (cancels, "" if cancels else "no scancel")
+        ),
     )
     monkeypatch.setattr(triage_mod, "wait_for_job", lambda *a, **k: state)
 
@@ -151,7 +153,10 @@ class TestAnAbandonedTriageReleasesItsNode:
 
         cancelled: list = []
         monkeypatch.setattr(triage_mod, "launch", lambda **kw: ("99999", ""))
-        monkeypatch.setattr(triage_mod, "cancel", lambda job_id: cancelled.append(job_id))
+        monkeypatch.setattr(
+            "aorta.cia.launch.backend.SlurmBackend.cancel",
+            lambda _self, job_id: cancelled.append(job_id),
+        )
         monkeypatch.setattr(triage_mod, "wait_for_job", lambda *a, **k: "COMPLETED")
 
         source = tmp_path / "k.hip"

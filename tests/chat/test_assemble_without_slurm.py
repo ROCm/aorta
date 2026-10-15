@@ -27,7 +27,10 @@ def cluster(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module.settings, "jobs_path", str(tmp_path), raising=False)
     monkeypatch.setattr(module.settings, "cia_job_backend", "auto", raising=False)
-    monkeypatch.setattr(module, "resolve_backend", lambda _requested: "slurm")
+    monkeypatch.setattr(
+        "aorta.cia.launch.cluster.sbatch_available",
+        lambda: True,
+    )
     return module
 
 
@@ -86,7 +89,6 @@ class TestAnExplicitLocalBackend:
     def test_it_never_attempts_srun(self, cluster, monkeypatch):
         seen: list[list[str]] = []
         monkeypatch.setattr(cluster.settings, "cia_job_backend", "local", raising=False)
-        monkeypatch.setattr(cluster, "resolve_backend", lambda _requested: "local")
 
         def run(argv, **kwargs):
             seen.append(argv)
