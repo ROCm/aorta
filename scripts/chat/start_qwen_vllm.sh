@@ -453,14 +453,12 @@ if [[ -z "$active_job" ]]; then
 set -euo pipefail
 pending_file=$1
 shift
-job_ref=$("$@")
-# Slurm federation appends the submitting cluster to --parsable output
-# (for example, 12345;meta). Only the numeric ID is accepted by squeue and
-# scancel, and it must be known before the cancellation trap is installed.
-job_id=${job_ref%%;*}
+job_id=$("$@")
+job_id=${job_id%%;*}
 case "$job_id" in
   *[!0-9]*|"")
-    echo "sbatch returned an invalid job ID: $job_ref" >&2
+    echo "sbatch returned an invalid job ID: $job_id" >&2
+    scancel "$job_id" 2>/dev/null || true
     exit 2
     ;;
 esac
