@@ -289,6 +289,36 @@ def test_manual_cleanup_preserves_the_endpoint_when_slurm_is_unreachable() -> No
     assert cleanup.index("exit 1") < cleanup.index('rm -f "${ENDPOINT_FILE}"')
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires bash snippet execution")
+def test_manual_submit_normalizes_a_federated_slurm_job_id(tmp_path: Path) -> None:
+    source = QUICKSTART.read_text(encoding="utf-8")
+    submit = source[
+        source.index("Submit through the login node") : source.index(
+            "Wait for Slurm to allocate a node"
+        )
+    ]
+    bash = submit.split("```bash", 1)[1].split("```", 1)[0]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text("#!/bin/sh\nprintf '12345;meta\\n'\n", encoding="utf-8")
+    fake_ssh.chmod(0o755)
+
+    submitted = subprocess.run(
+        ["bash", "-c", bash],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        },
+    )
+
+    assert submitted.returncode == 0, submitted.stderr
+    assert submitted.stdout.strip() == "Submitted vLLM job 12345"
+
+
 def test_manual_shutdown_confirms_an_empty_queue_before_reporting_success() -> None:
     source = QUICKSTART.read_text(encoding="utf-8")
     shutdown = source[source.index("## 7. Stop everything") :]
