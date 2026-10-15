@@ -127,6 +127,47 @@ def test_run_native_is_unchanged_where_the_not_run_marker_is_absent(tmp_path):
     assert [(e.name, e.points) for e in ran.events] == [("cost_run_native", -0.5)]
 
 
+@pytest.mark.parametrize("offset, cls, total, outcome", [
+    (0, "waitcnt", 5.5, "exact"),
+    (4, "waitcnt", 3.5, "near"),  # the kernel's last instruction, one from the target
+    (4, "barrier", 2.5, "near"),
+    (8, "waitcnt", 1.5, "kernel_only"),  # one past the kernel's end: class and kernel only
+    (8, "barrier", 0.0, "kernel_only"),  # ... and with the class wrong, v2 does not pay the kernel
+    (-4, "waitcnt", 1.5, "kernel_only"),  # one before its start
+    (2, "waitcnt", 1.5, "kernel_only"),  # inside an instruction
+])
+def test_v2_location_credit_needs_an_instruction_of_the_kernel(tmp_path, offset, cls, total, outcome):
+    scenario = {s.scenario_id: s for s in rj.load_corpus(_toy_corpus(tmp_path), split="test", reward="v2")}["ran@toy"]
+    episode = rj.Episode(scenario, seed=0)
+    episode.observe()
+    episode.act(json.dumps({"answer": {"class": cls, "kernel": "k000", "offset": offset}}))
+    assert episode.outcome == outcome and episode.score().total == total
+
+
+@pytest.mark.parametrize("offset, outcome", [
+    (12, "near"),  # only the listing as built has it (the edit replaced it); two from the target
+    (10, "near"),  # only the listing as served has it; placed at 8, one from the target
+    (14, "near"),  # likewise; placed at 12
+    (11, "kernel_only"),  # in neither listing
+    (28, "kernel_only"),
+])
+def test_v2_location_credit_takes_an_instruction_of_either_listing(tmp_path, offset, outcome):
+    root = _toy_corpus(tmp_path)
+    (root / "listings" / "k000.json").write_text(json.dumps([[o, "s_nop 0"] for o in range(0, 28, 4)]))
+    rec = {"workload": "toy", "kid": "k000", "op": "waitcnt_weaken_vm", "cls": "waitcnt", "offsets": [4],
+           "native": [], "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": {}, "waitcheck_view": [],
+           "sid": "edit@toy", "mutation": {"range_off": 8, "old": "00" * 8, "new": "11" * 8,
+                                           "window": [[8, "s_nop 1"], [10, "s_nop 2"], [14, "s_nop 3"]]}}
+    (root / "scenarios.jsonl").write_text(json.dumps(rec) + "\n")
+    (root / "splits" / "test.txt").write_text("edit@toy\n")
+    [scenario] = rj.load_corpus(root, split="test", reward="v2")
+    episode = rj.Episode(scenario, seed=0)
+    assert [o for o, _ in episode.tools.listing("k000")] == [0, 4, 8, 10, 14, 16, 20, 24]
+    episode.observe()
+    episode.act(json.dumps({"answer": {"class": "waitcnt", "kernel": "k000", "offset": offset}}))
+    assert episode.outcome == outcome
+
+
 def test_a_v2_corpus_still_takes_either_reward(tmp_path):
     root = _toy_corpus(tmp_path)
     v2 = rj.load_corpus(root, split="test", reward="v2")

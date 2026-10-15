@@ -1576,6 +1576,10 @@ class Episode:
         insns = self.scenario.insn_offsets
         if not insns:
             return False
+        # Only an instruction of the kernel, as served (mutated) or as built, can be near; the snap
+        # below would otherwise credit an offset past either end of the kernel or inside an instruction.
+        if off not in insns and off not in {o for o, _ in self.tools.listing(self.scenario.kernel)}:
+            return False
         index = {o: i for i, o in enumerate(insns)}
         nearest = min(range(len(insns)), key=lambda j: abs(insns[j] - off))
         return any(abs(nearest - index[t]) <= NEAR_INSTRUCTIONS for t in self.scenario.offsets if t in index)

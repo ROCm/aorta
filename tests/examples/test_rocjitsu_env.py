@@ -293,13 +293,26 @@ def test_a_moved_instruction_is_exact_where_it_was_and_where_it_is(corpus, offse
     (12, 5.0, "near"),  # one instruction away
     (0, 5.0, "near"),  # two away
     (24, 3.0, "kernel_only"),  # four away
-    (9, 5.0, "near"),  # not an instruction boundary: the nearest instruction counts
+    (9, 3.0, "kernel_only"),  # inside an instruction, not at one: no location credit
 ])
 def test_near_is_within_two_instructions_and_exclusive_with_exact(corpus, offset, total, outcome):
     ep = play(rj.Episode(scenario(corpus, "k_a+0x8.waitcnt_weaken")),
               {"answer": {"class": "waitcnt", "kernel": "k_a", "offset": offset}})
     assert ep.score().total == total and ep.outcome == outcome
     assert not ep.solved
+
+
+@pytest.mark.parametrize("sid, offset", [
+    ("k_a+0x10.waitcnt_late", 32),  # one instruction past k_a's last (0x1c), two from the target 0x14
+    ("k_a+0x8.waitcnt_weaken", -4),  # one before k_a's first (0x0), two from the target 0x8
+])
+def test_an_offset_outside_the_kernel_earns_no_location_credit(corpus, sid, offset):
+    ep = play(rj.Episode(scenario(corpus, sid)), {"answer": {"class": "waitcnt", "kernel": "k_a", "offset": offset}})
+    assert events(ep) == ["kernel_correct", "class_correct"]
+    assert ep.score().total == 3.0 and ep.outcome == "kernel_only"
+    inside = play(rj.Episode(scenario(corpus, sid)),
+                  {"answer": {"class": "waitcnt", "kernel": "k_a", "offset": 28 if offset > 0 else 0}})
+    assert inside.outcome == "near" and inside.score().total == 5.0
 
 
 def test_the_wrong_class_keeps_kernel_and_location(corpus):

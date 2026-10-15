@@ -63,7 +63,9 @@ def scripts(scenario: rj.Scenario) -> list[list[dict]]:
     k = scenario.kernel or scenario.kernels[0]
     other = next((x for x in scenario.kernels if x != k), k)
     true = {"class": scenario.family, "kernel": k, "offset": scenario.offsets[0] if scenario.offsets else 0}
-    near = dict(true, offset=true["offset"] + 4)
+    # The next instruction: unlike rjenv2, an offset inside an instruction earns no near credit here.
+    after = [o for o in scenario.insn_offsets if o > true["offset"]] or [true["offset"]]
+    near = dict(true, offset=after[0])
     return [
         [{"tool": "list_kernels"}, {"tool": "waitcheck"}, {"tool": "run_sim", "kernel": "all"},
          {"tool": "run_sim", "kernel": k, "seed": 2}, {"tool": "run_native", "kernel": "all"},
