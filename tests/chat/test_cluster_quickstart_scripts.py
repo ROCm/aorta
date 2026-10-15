@@ -222,13 +222,14 @@ def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() ->
 
 @pytest.mark.skipif(os.name != "posix", reason="requires bash launcher execution")
 @pytest.mark.parametrize(
-    "sbatch_output",
-    ("12345", "12345;meta"),
-    ids=("job-id", "job-id-with-cluster"),
+    ("sbatch_output", "cancelled_id"),
+    (("12345", "12345"), ("12345;meta", "12345"), ("invalid", "invalid")),
+    ids=("job-id", "job-id-with-cluster", "invalid-output"),
 )
 def test_submitted_job_is_cancelled_until_pending_state_is_durable(
     tmp_path: Path,
     sbatch_output: str,
+    cancelled_id: str,
 ) -> None:
     runtime = tmp_path / "runtime"
     fake_bin = tmp_path / "bin"
@@ -271,7 +272,7 @@ exec bash -c "$last"
     )
 
     assert started.returncode != 0
-    assert scancel_log.read_text(encoding="utf-8").splitlines() == ["12345"]
+    assert scancel_log.read_text(encoding="utf-8").splitlines() == [cancelled_id]
     assert not (runtime / "qwen38-pending-job").exists()
 
 
