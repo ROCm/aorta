@@ -30,7 +30,6 @@ import json
 import random
 import statistics
 import sys
-from collections import Counter
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -150,19 +149,59 @@ SCRIPTED: dict[str, Policy] = {
 }
 
 
+def _scored(ans: dict[str, Any], s: rj.Scenario) -> float:
+    ep = rj.Episode(s)
+    make_constant(ans)(ep, random.Random(0))
+    return ep.score().total
+
+
+def _location_offsets(s: rj.Scenario) -> set[int]:
+    """The offsets worth trying on ``s``: its accepted offsets, and each instruction of the kernel as built
+    within :data:`rocjitsu_env.NEAR_INSTRUCTIONS` of one of them.
+
+    An instruction only the served listing has can earn nothing more: :meth:`rocjitsu_env.Episode._near`
+    places it at the nearest built instruction, which earns the same near credit on every scenario and is
+    a candidate here, and it can be exact only by being an accepted offset."""
+    insns = s.insn_offsets
+    out = set(s.offsets)
+    for t in s.offsets:
+        if t in insns:
+            i = insns.index(t)
+            out |= set(insns[max(0, i - rj.NEAR_INSTRUCTIONS):i + rj.NEAR_INSTRUCTIONS + 1])
+    return out
+
+
 def best_constant(scenarios: Sequence[rj.Scenario]) -> tuple[dict[str, Any], float]:
-    """The single answer with the best mean over ``scenarios``: every truth, and "none"."""
-    cands = Counter((s.family, s.kernel, s.offsets[0]) for s in scenarios if not s.clean)
-    best, best_v = {"class": "none"}, float("-inf")
-    for cls, kernel, off in [*cands, ("none", None, None)]:
-        ans = {"class": cls, "kernel": kernel, "offset": off}
-        total = 0.0
-        for s in scenarios:
-            ep = rj.Episode(s)
-            make_constant(ans)(ep, random.Random(0))
-            total += ep.score().total
-        if total / len(scenarios) > best_v:
-            best, best_v = ans, total / len(scenarios)
+    """The single answer with the best mean over ``scenarios``, searched exhaustively.
+
+    Candidates: "none", and every (kernel, class, offset) for a kernel a faulty scenario uses, any answer
+    class, and an offset from :func:`_location_offsets` of a scenario on that kernel (no offset if there
+    is none). No other offset can do better: location credit is never negative, so any other offset, and
+    no offset, score no more than an accepted offset does. Every candidate is scored by playing it through
+    :class:`rocjitsu_env.Episode`. Ties keep the first: "none", then kernels, classes and offsets in order.
+    """
+    if not scenarios:
+        raise ValueError("no scenarios")
+    classes = [c for c in (rj.CLASSES_V2 if any(s.layout == "v2" for s in scenarios) else rj.CLASSES) if c != "none"]
+    best: dict[str, Any] = {"class": "none", "kernel": None, "offset": None}
+    best_v = sum(_scored(best, s) for s in scenarios) / len(scenarios)
+    by_kernel: dict[str, list[rj.Scenario]] = {}
+    for s in scenarios:
+        if not s.clean:
+            by_kernel.setdefault(s.kernel, []).append(s)
+    for kernel in sorted(by_kernel):
+        on = by_kernel[kernel]
+        # Off this kernel an answer naming it scores the same whatever its class and offset
+        # (kernel_wrong on a faulty scenario, false_alarm on a clean one).
+        off_kernel = sum(_scored({"class": classes[0], "kernel": kernel, "offset": None}, s)
+                         for s in scenarios if s.clean or s.kernel != kernel)
+        offsets = sorted(set().union(*(_location_offsets(s) for s in on)))
+        for cls in classes:
+            for off in offsets or [None]:
+                ans = {"class": cls, "kernel": kernel, "offset": off}
+                mean = (off_kernel + sum(_scored(ans, s) for s in on)) / len(scenarios)
+                if mean > best_v:
+                    best, best_v = ans, mean
     return best, best_v
 
 

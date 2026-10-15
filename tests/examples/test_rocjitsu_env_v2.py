@@ -187,6 +187,42 @@ def test_a_run_sim_seed_that_is_a_seed_is_accepted_as_before(tmp_path, field, se
     assert action.kind == "tool" and action.seed == seed
 
 
+def _constant_corpus(root: Path) -> Path:
+    """Six waitcnt faults on k000 (instructions 0, 4, 8, 12, 16) at 0, 0, 4, 12, 16 and 16. Each accepted
+    offset is exact on at most two and near on at most four; 8, accepted by none, is near on all six."""
+    _toy_corpus(root)
+    (root / "listings" / "k000.json").write_text(json.dumps([[o, "s_nop 0"] for o in range(0, 20, 4)]))
+    base = {"workload": "toy", "kid": "k000", "op": "waitcnt_weaken_vm", "cls": "waitcnt", "native": [],
+            "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": {}, "waitcheck_view": []}
+    recs = [dict(base, sid=f"s{i}@toy", offsets=[o]) for i, o in enumerate([0, 0, 4, 12, 16, 16])]
+    (root / "scenarios.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+    (root / "splits" / "test.txt").write_text("".join(r["sid"] + "\n" for r in recs))
+    return root
+
+
+@pytest.mark.parametrize("reward, best", [("v1", 5.0), ("v2", 3.5)])
+def test_the_best_constant_is_the_true_best_fixed_answer(tmp_path, reward, best):
+    import rocjitsu_baselines as rb
+
+    scenarios = rj.load_corpus(_constant_corpus(tmp_path), split="test", reward=reward)
+    const, value = rb.best_constant(scenarios)
+    assert const == {"class": "waitcnt", "kernel": "k000", "offset": 8} and value == pytest.approx(best)
+    brute = max(sum(rb._scored({"class": c, "kernel": k, "offset": o}, s) for s in scenarios) / len(scenarios)
+                for c in rj.CLASSES_V2 for k in ("k000", "k001") for o in [None, *range(-8, 24)])
+    assert value == pytest.approx(brute)
+
+
+def test_the_best_constant_names_a_kernel_with_no_accepted_offset_without_one(tmp_path):
+    import rocjitsu_baselines as rb
+
+    root = _constant_corpus(tmp_path)
+    rec = json.loads((root / "scenarios.jsonl").read_text().splitlines()[0])
+    (root / "scenarios.jsonl").write_text(json.dumps(dict(rec, offsets=[])) + "\n")
+    (root / "splits" / "test.txt").write_text(rec["sid"] + "\n")
+    const, value = rb.best_constant(rj.load_corpus(root, split="test", reward="v1"))
+    assert const == {"class": "waitcnt", "kernel": "k000", "offset": None} and value == 3.0
+
+
 def test_a_v2_corpus_still_takes_either_reward(tmp_path):
     root = _toy_corpus(tmp_path)
     v2 = rj.load_corpus(root, split="test", reward="v2")
