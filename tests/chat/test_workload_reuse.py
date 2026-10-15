@@ -62,7 +62,7 @@ class TestAFinishedRunIsReused:
             cluster.triage_workload.func(source=_SOURCE, label="train")
             again = cluster.triage_workload.func(source=_SOURCE, label="train")
 
-        assert "no second cluster job" in again
+        assert "no second diagnostic job" in again
         assert "numeric_silent" in again, "the verdict itself must still be there"
 
     def test_a_different_workload_still_runs(self, submissions):
