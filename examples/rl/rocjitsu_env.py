@@ -1414,6 +1414,8 @@ class Episode:
         total = sum(len(h) + len(b) + 2 for h, b in blocks)
         # Oldest first, listings before everything else: a listing is the
         # largest result and the cheapest to fetch again.
+        # A header is the call's JSON ('{"tool": "disasm", ...}'), so the listing test never matches;
+        # kept, as the models were trained on this history (README, "Known limitations").
         order = sorted(range(len(blocks)), key=lambda i: (not self.steps[i].header.startswith("disasm"), i))
         for i in order:
             if total <= MAX_HISTORY_CHARS:

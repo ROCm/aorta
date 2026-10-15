@@ -566,3 +566,11 @@ pointed at them: `AORTA_RJ_TEST_PROTOTYPE` (a v1 campaign directory) and
   per-kernel `run_sim` shows the status. It is kept because the released model
   was trained on exactly this observation, and changing the text would change
   what that model sees; it will be fixed in the next environment version.
+- **History pruning does not put `disasm` listings first.** When the history
+  outgrows its budget, older tool results are replaced by a placeholder, and
+  listings were meant to go first because they are the largest and the cheapest
+  to fetch again. The test looks for a header starting with `disasm`, but every
+  tool header is the JSON of the call (`{"tool": "disasm", ...}`), so it never
+  matches and pruning is oldest-first for every tool. It is kept because the
+  released model was trained on exactly this history; it will be fixed in the
+  next environment version.
