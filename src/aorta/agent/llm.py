@@ -19,15 +19,18 @@ from aorta.agent.prompt_profiles import DEFAULT_PROMPT_PROFILE, PromptProfile, g
 log = logging.getLogger(__name__)
 
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
-# ``proposal_unresolved`` is the one the proposer never sets itself: it means
-# the loop stopped because every name the model asked for was dropped by the
-# candidate filter below, so there was nothing left to run. It exists so that
-# stop is separable from a model that genuinely concluded the search.
+# ``proposal_unresolved`` and ``proposal_redundant`` are the two the proposer
+# never sets itself. The first means the loop stopped because every name the
+# model asked for was dropped by the candidate filter below; the second, that
+# validation removed every name as redundant, which only the ``none`` baseline
+# can be. Either way there was nothing left to run, and both exist so that stop
+# is separable from a model that genuinely concluded the search.
 StopReason = Literal[
     "baseline_pass",
     "exhausted_candidates",
     "agent_requested",
     "proposal_unresolved",
+    "proposal_redundant",
 ]
 
 #: Reachable only from instrument evidence: a sanitizer that watched two waves
@@ -175,6 +178,13 @@ class AgentStep:
     #: detected but not repaired; with it, ``next_mitigations`` plus this list
     #: reconstruct what the model actually asked for.
     unresolved_mitigations: list[str] = field(default_factory=list)
+    #: Names that resolved but that ``AgentPolicy.validate_step`` removed
+    #: because running them adds no cell: the ``none`` baseline, which is
+    #: always on the axis, and every repeat of a name already kept. Not
+    #: ``unresolved_mitigations``, which holds names that resolved to nothing;
+    #: these are valid, and nothing declined them. Set by validation, never by
+    #: the model, and a value the proposer supplies is discarded.
+    redundant_mitigations: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AgentStep:
@@ -185,13 +195,14 @@ class AgentStep:
         stop = stop_raw if isinstance(stop_raw, bool) else False
         reason_raw = raw.get("stop_reason")
         stop_reason: StopReason | None = None
-        # The model-claimable reasons only. "proposal_unresolved" is
-        # deliberately absent: it is a statement about what the agent did with
-        # the model's names, so a model that claimed it would be reporting on
-        # machinery it cannot see -- the same reason a claimed "baseline_pass"
-        # is downgraded in loop._resolve_stop_outcome unless the probe
-        # verdicts agree. unresolved_mitigations is likewise never read from
-        # raw: the proposer computes it.
+        # The model-claimable reasons only. "proposal_unresolved" and
+        # "proposal_redundant" are deliberately absent: each is a statement
+        # about what the agent did with the model's names, so a model that
+        # claimed one would be reporting on machinery it cannot see -- the same
+        # reason a claimed "baseline_pass" is downgraded in
+        # loop._resolve_stop_outcome unless the probe verdicts agree.
+        # unresolved_mitigations and redundant_mitigations are likewise never
+        # read from raw: the proposer and validation compute them.
         if stop and isinstance(reason_raw, str) and reason_raw in (
             "baseline_pass",
             "exhausted_candidates",
@@ -689,6 +700,54 @@ def _build_prompt(
     return system, user
 
 
+#: The most names one reply may carry in ``next_mitigations``, where the
+#: request can say so (:func:`_step_response_format`). The same model and
+#: prompt decoded without a grammar name at most this many nine times in ten,
+#: so the cap leaves those replies alone and removes the near-full-menu tail,
+#: in which one reply takes the whole axis in one charged iteration and the
+#: search stops there (aorta#510).
+MAX_PROPOSED_MITIGATIONS = 5
+
+
+def _step_response_format() -> dict[str, Any]:
+    """The ``response_format`` of a JSON-mode request: the reply ``_build_prompt`` asks for.
+
+    A schema rather than ``{"type": "json_object"}``, which puts no bound on
+    the array: under it, about 11% of replies named nearly every candidate.
+    The bound is the server's to enforce. A wider reply from a server that
+    ignores ``maxItems`` is read exactly as before.
+
+    Nothing else is constrained. No ``enum`` on the names or the category: an
+    unregistered name has to reach the candidate filter to be recorded as
+    unresolved, and a category outside the probe set has to reach
+    ``AgentPolicy.validate_step`` to be refused. A grammar that made them
+    unsayable would hide both.
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "agent_step",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string"},
+                    "hypothesis": {"type": "string"},
+                    "next_mitigations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": MAX_PROPOSED_MITIGATIONS,
+                    },
+                    "confidence": {"type": "number"},
+                    "stop": {"type": "boolean"},
+                },
+                "required": ["category", "hypothesis", "next_mitigations", "confidence", "stop"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _profile_prompt(
     profile: PromptProfile,
     symptom: str | None,
@@ -896,7 +955,7 @@ class LiteLLMProposer:
         system, user = _profile_prompt(self._profile, symptom, cell_summaries, remaining, tried)
         request: dict[str, Any] = {}
         if self._profile.json_mode:
-            request["response_format"] = {"type": "json_object"}
+            request["response_format"] = _step_response_format()
         extra_body = self._profile.extra_body()
         if extra_body:
             request["extra_body"] = extra_body

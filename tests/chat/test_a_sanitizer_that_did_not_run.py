@@ -20,6 +20,7 @@ import pytest
 pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
 
 from aorta.chat.tools.cluster import _format_result
+from aorta.chat.tools.outcome import tool_result_failed
 
 _BARE = {"job_id": "cia-1", "bundle": "/jobs/cia-1/bundle"}
 _AUTOPSY_ON_NOTHING = {
@@ -65,6 +66,20 @@ class TestARunThatProducedNoReport:
         sanitizer_section = rendered[rendered.index("Sanitizer verdict") :]
 
         assert "pass" not in sanitizer_section.split("\n")[0]
+
+    def test_the_tool_result_carries_failed_status(self, monkeypatch):
+        import aorta.chat.tools.cluster as cluster
+
+        monkeypatch.setattr(
+            cluster,
+            "run_triage",
+            lambda argv, *, stop=None: {**_AUTOPSY_ON_NOTHING, "ok": True},
+        )
+
+        rendered = cluster._run_triage(["--recipe", "/jobs/r.yaml"], "asm")
+
+        assert "DID NOT RUN" in rendered
+        assert tool_result_failed(rendered)
 
 
 class TestARunThatReallyWasClean:

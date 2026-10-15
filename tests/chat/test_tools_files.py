@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 from aorta.chat.tools.files import list_files, read_file
+from aorta.chat.tools.outcome import tool_result_failed
 
 
 class TestListFiles:
@@ -62,6 +64,7 @@ class TestReadFile:
         mock_settings.aorta_root = fake_aorta_dir
         result = read_file.invoke({"file_path": "config.yaml"})
         assert "key: value" in result
+        assert not tool_result_failed(result)
 
     @patch("aorta.chat.tools.files.settings")
     def test_reads_python_file(self, mock_settings, fake_aorta_dir):
@@ -75,6 +78,18 @@ class TestReadFile:
         result = read_file.invoke({"file_path": "no_such_file.txt"})
         assert "Error" in result
         assert "does not exist" in result
+        assert tool_result_failed(result)
+
+    @patch("aorta.chat.tools.files.settings")
+    def test_read_error_carries_structured_failure(
+        self, mock_settings, fake_aorta_dir
+    ):
+        mock_settings.aorta_root = fake_aorta_dir
+        with patch.object(Path, "read_text", side_effect=OSError("disk error")):
+            result = read_file.invoke({"file_path": "config.yaml"})
+
+        assert "Error reading file" in result
+        assert tool_result_failed(result)
 
     @patch("aorta.chat.tools.files.settings")
     def test_truncates_large_file(self, mock_settings, fake_aorta_dir):

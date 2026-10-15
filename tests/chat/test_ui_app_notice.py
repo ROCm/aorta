@@ -24,6 +24,7 @@ security guarantee untested on the configuration these tests actually run in.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -33,7 +34,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from aorta.chat import redaction
-from aorta.chat.config import reset_settings
+from aorta.chat.config import configure, reset_settings
 
 NOTICE = "aorta chat: redacted 3 filesystem paths from the outbound request."
 
@@ -213,6 +214,44 @@ class TestTheUiFlagsFromTheCli:
         import aorta.chat.ui.app as app_module
 
         assert app_module._VERBOSE is True
+
+
+class TestEachSessionIsToldTheProtocolInForce:
+    """#468, driven through ``on_start`` rather than the welcome helper alone.
+
+    The escalation is process-wide and the greeting is per session, so the
+    case that matters is two sessions either side of it: the helper being right
+    proves nothing if the handler built its line from something else.
+    """
+
+    async def test_a_session_opened_after_the_escalation_is_greeted_with_native(
+        self, app, monkeypatch, caplog
+    ):
+        from aorta.chat.graph import nodes
+
+        monkeypatch.setattr(app, "get_backend", lambda: _FakeBackend())
+        monkeypatch.setattr(app, "_SKIP_PREFLIGHT", True)
+        configure(llm_tool_mode="text")
+        try:
+            with caplog.at_level(logging.INFO, logger=app.logger.name):
+                await app.on_start()
+                monkeypatch.setattr(nodes._escalation, "escalated", True)
+                await app.on_start()
+        finally:
+            reset_settings()
+
+        banners = [shown for shown in _FakeMessage.sent if "_LLM backend:" in shown]
+        assert len(banners) == 2, banners
+        assert "(tool protocol: text)" in banners[0]
+        assert "(tool protocol: native, " in banners[1]
+
+        logged = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("LLM backend:")
+        ]
+        assert logged[0] == "LLM backend: fake backend (tool protocol: text)"
+        assert logged[1].startswith("LLM backend: fake backend (tool protocol: native, ")
 
 
 # ── two browser sessions in one process ───────────────────────────────────

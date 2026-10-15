@@ -22,6 +22,7 @@ runners; Phase 2 runs the GPU complement on a self-hosted MI350 runner
 | `gpu-tests.yml` | PR (GPU paths) + nightly + dispatch | GPU pytest gate + nightly workload regression on `[self-hosted, gpu]` |
 | `chat-tests.yml` | PR (chat paths) + push to `main` | Real-import `aorta chat` tests on 3.11-3.14 with the chat extras (not required) |
 | `nightly.yml` | cron + dispatch | Builds/publishes rolling dev wheels |
+| `chat-index-nightly.yml` | after each successful `nightly.yml` | Publishes the rolling `aorta chat` index |
 | `release.yml` / `cleanup_releases.yml` | tags / cron | Release packaging + asset pruning |
 | `gemm-sweep-analysis.yml`, `rccl-warp-speed-analysis.yml` | cron / dispatch | Scheduled analysis jobs |
 

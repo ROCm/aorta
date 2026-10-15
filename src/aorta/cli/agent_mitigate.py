@@ -40,6 +40,9 @@ _OUTCOME_HEADLINES: dict[str, str] = {
     "proposal_unresolved": (
         "Stopped — the proposer named no mitigation that could be resolved."
     ),
+    "proposal_redundant": (
+        "Stopped — the proposer named only mitigations that add no cell."
+    ),
     "approval_required": "Paused — operator approval required.",
     "walltime_exhausted": "Stopped — wall-time budget exhausted.",
     "policy_stop": "Stopped — policy limit hit.",

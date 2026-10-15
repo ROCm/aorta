@@ -39,6 +39,7 @@ from aorta.agent.llm import (
     _build_prompt,
     _profile_prompt,
     _step_from_content,
+    _step_response_format,
     make_proposer,
 )
 from aorta.agent.loop import AgentConfig, AgentLoopResult, run_agent_loop
@@ -215,7 +216,7 @@ class TestDefaultIsUnchanged:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "response_format": {"type": "json_object"},
+            "response_format": _step_response_format(),
         }
 
     def test_a_default_run_logs_no_profile(self, tmp_path, monkeypatch):

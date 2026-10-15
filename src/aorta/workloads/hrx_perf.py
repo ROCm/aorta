@@ -129,7 +129,23 @@ class HrxPerfWorkload(Workload):
 
     name: ClassVar[str] = "hrx_perf"
 
-    def _validated_config(self) -> tuple[str, int, int, int]:
+    def _validated_config(self) -> None:
+        """Validate and bind every knob that can be checked without a machine.
+
+        This is the whole hardware-free half of :meth:`setup`, not a subset of
+        it: `setup()` calls this first, and after it only checks the host (the
+        ``LD_PRELOAD`` objects exist) and acquires resources (hipcc, a reachable
+        GPU, a build directory). Keeping the two in one place is deliberate --
+        a caller that validates a recipe without a GPU (the recipe grader in
+        ``examples/rl``) reads this method as "the config is valid", so a check
+        living only in `setup()` makes that answer wrong for the keys it
+        covers, and a check copied into both places drifts.
+
+        ``hipcc`` and ``build_dir`` are only type-checked here. Whether either
+        path exists on *this* host is left to `setup()`, and answering it for
+        ``build_dir`` means creating the directory. Those are run-time
+        preconditions rather than statements about the config.
+        """
         for key in self.config:
             if key in _KNOWN_KEYS or key in _RESERVED_KEYS or key.startswith("_aorta_"):
                 continue
@@ -139,8 +155,9 @@ class HrxPerfWorkload(Workload):
             raise ValueError(
                 f"hrx_perf: unknown bench {bench!r}; choose one of {sorted(_BENCHES)}"
             )
-        spec = _BENCHES[bench]
-        size = int(self.config.get("size", spec.default_size))
+        self._bench = bench
+        self._spec = _BENCHES[bench]
+        size = int(self.config.get("size", self._spec.default_size))
         iters = int(self.config.get("iters", _DEFAULT_ITERS))
         warmup = int(self.config.get("warmup", _DEFAULT_WARMUP))
         if size <= 0 or iters <= 0 or warmup < 0:
@@ -148,9 +165,42 @@ class HrxPerfWorkload(Workload):
                 f"hrx_perf: size ({size}) and iters ({iters}) must be > 0 and "
                 f"warmup ({warmup}) must be >= 0"
             )
-        return bench, size, iters, warmup
+        self._size, self._iters, self._warmup = size, iters, warmup
+
+        self._arch = _validated_arch(self.config.get("gpu_arch", _DEFAULT_ARCH))
+        # Validate the timeout up front: subprocess.run(..., timeout=<=0) would
+        # raise at run() time and be misclassified as an infrastructure failure.
+        self._timeout = int(self.config.get("timeout_sec", _DEFAULT_TIMEOUT_SEC))
+        if self._timeout <= 0:
+            raise ValueError(
+                f"hrx_perf: timeout_sec ({self._timeout}) must be > 0"
+            )
+        keep_build = self.config.get("keep_build", False)
+        if not isinstance(keep_build, bool):
+            raise ValueError(
+                f"hrx_perf: keep_build must be a bool, got {type(keep_build).__name__}"
+            )
+        self._keep_build = keep_build
+
+        # setup() treats an empty value as unset, so only a non-empty one has
+        # to be a path. Anything else fails there regardless of host: a
+        # non-path raises TypeError, a NUL byte makes Path raise for build_dir
+        # and makes _resolve_hipcc skip a configured hipcc for the default.
+        for key in ("hipcc", "build_dir"):
+            value = self.config.get(key)
+            if not value:
+                continue
+            path = os.fspath(value) if isinstance(value, (str, os.PathLike)) else None
+            if not isinstance(path, str) or "\0" in path:
+                raise ValueError(f"hrx_perf: {key} must be a path, got {value!r}")
 
     def setup(self) -> None:
+        self._validated_config()
+
+        # Everything below this line needs the machine, which is why it stays
+        # out of _validated_config(), and runs after it so a bad config is
+        # reported as a config error even when the host is also wrong.
+        #
         # Same fail-fast guard as the hrx workload: a nonexistent LD_PRELOAD is
         # only a loader warning, so an hrx_on cell would otherwise benchmark the
         # DEFAULT HIP runtime and report a meaningless comparison.
@@ -164,23 +214,6 @@ class HrxPerfWorkload(Workload):
                 "so the cell would silently measure stock HIP. Fix the path(s) "
                 "in the cell's extra_env (absolute paths)."
             )
-        self._bench, self._size, self._iters, self._warmup = self._validated_config()
-        self._spec = _BENCHES[self._bench]
-        self._arch = _validated_arch(self.config.get("gpu_arch", _DEFAULT_ARCH))
-        # Validate here: subprocess.run(..., timeout=<=0) would raise at run()
-        # time and be misclassified as an infrastructure failure. Fail fast in
-        # setup() with a clear config error instead.
-        self._timeout = int(self.config.get("timeout_sec", _DEFAULT_TIMEOUT_SEC))
-        if self._timeout <= 0:
-            raise ValueError(
-                f"hrx_perf: timeout_sec ({self._timeout}) must be > 0"
-            )
-        keep_build = self.config.get("keep_build", False)
-        if not isinstance(keep_build, bool):
-            raise ValueError(
-                f"hrx_perf: keep_build must be a bool, got {type(keep_build).__name__}"
-            )
-        self._keep_build = keep_build
 
         hipcc = _resolve_hipcc(self.config.get("hipcc"))
         if hipcc is None:

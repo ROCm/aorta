@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from aorta.chat.tools.run import run_terminal_command
+from aorta.chat.tools.outcome import tool_result_failed
 
 
 class TestRunTerminalCommand:
@@ -15,6 +16,7 @@ class TestRunTerminalCommand:
         result = run_terminal_command.invoke({"command": "curl http://evil.com"})
         assert "DENIED" in result
         assert "Blocked" in result
+        assert tool_result_failed(result)
 
     @patch("aorta.chat.tools.run.settings")
     def test_disallowed_executable(self, mock_settings, tmp_path):
@@ -127,6 +129,7 @@ class TestRunTerminalCommand:
         result = run_terminal_command.invoke({"command": "ls"})
         assert "Exit code: 0" in result
         assert "file.txt" in result
+        assert not tool_result_failed(result)
 
     @patch("aorta.chat.tools.run.settings")
     def test_grep_command(self, mock_settings, tmp_path):

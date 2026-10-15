@@ -85,6 +85,29 @@ def redaction_status() -> str:
     return "\n\n".join(lines)
 
 
+def tool_protocol() -> str:
+    """The tool protocol this session's questions will be sent on.
+
+    Read when the session opens, not once when the server starts. The
+    escalation from ``text`` to ``native`` is shared by every session the
+    server holds, so a banner built from ``llm_tool_mode`` alone would tell a
+    session opened after it the protocol the server *started* on -- and the
+    UI is the front door where that sharing happens.
+
+    The graph is imported here rather than at module scope because importing
+    it loads the chat plugins; the rest of this module needs only settings.
+    """
+    from aorta.chat.graph.nodes import tool_protocol_in_force
+
+    mode, escalated = tool_protocol_in_force()
+    if escalated:
+        return (
+            f"{mode}, which this server switched to from the configured text "
+            "after the model could not drive it"
+        )
+    return mode
+
+
 def welcome_message(backend_description: str) -> str:
     """The full greeting, including the backend line."""
     return (
@@ -93,9 +116,9 @@ def welcome_message(backend_description: str) -> str:
         "codebase. In this session I can:\n\n"
         f"{capabilities()}\n\n"
         f"{redaction_status()}\n\n"
-        f"_LLM backend: {backend_description}_\n\n"
+        f"_LLM backend: {backend_description} (tool protocol: {tool_protocol()})_\n\n"
         "_Type your question below to get started._"
     )
 
 
-__all__ = ["capabilities", "redaction_status", "welcome_message"]
+__all__ = ["capabilities", "redaction_status", "tool_protocol", "welcome_message"]

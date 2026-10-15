@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -40,6 +41,14 @@ _SUPPORTED_REQUIREMENTS = frozenset({"top_time", "top_dispatch_count"})
 _SUPPORTED_SANITIZERS = frozenset({"waitcheck", "consan"})
 _SUPPORTED_SCOPES = frozenset({"kernel"})
 _SUPPORTED_CONSAN_POLICIES = frozenset({"strict", "lenient"})
+# Whether the ConSan command dispatches the kernel or only loads its code
+# object. The recipe has to say so: the command is a binary built elsewhere, so
+# nothing the loader can read would tell it.
+_SUPPORTED_CONSAN_DRIVERS = frozenset({"load", "dispatch"})
+# Where policy.expected_error keys are declared, resolved against the recipe like
+# its other fixture paths. For every recipe the sanitizer nightly runs, this is
+# the file scripts/sanitizers/compare_verdict_baselines.py reads.
+_VERDICT_BASELINES = "fixtures/expected/verdict_baselines.json"
 _SUPPORTED_MISSING_BACKEND = frozenset({"fail"})
 _KERNEL_SPEC_FIELDS = frozenset(
     {"name", "code_object", "code_object_sha256", "code_object_index", "entry_offset"}
@@ -176,6 +185,8 @@ class SanitizerRecipe:
     kernel_specs: tuple[KernelSourceSpec, ...] = ()
     timeout_seconds: float | None = None
     waitcheck_max_diagnostics: int | None = None
+    consan_driver: str | None = None
+    expected_error: str | None = None
 
     @property
     def recipe_dir(self) -> Path | None:
@@ -202,6 +213,30 @@ def _resolve_path(raw: str, *, recipe_path: Path) -> Path:
     if candidate.is_absolute():
         return candidate
     return (recipe_path.parent / candidate).resolve()
+
+
+def _require_expected_error_declaration(key: str, *, recipe_path: Path) -> None:
+    """Reject a ``policy.expected_error`` key that names no declaration.
+
+    Only that the declaration exists is checked here. Its fields are the
+    comparator's to judge, and it refuses the whole baselines file if any
+    declaration in it is malformed.
+    """
+
+    baselines = _resolve_path(_VERDICT_BASELINES, recipe_path=recipe_path)
+    try:
+        data = json.loads(baselines.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RecipeSchemaError(
+            f"sanitizer_plan.policy.expected_error={key!r} cannot be checked against "
+            f"{baselines}: {exc}"
+        ) from exc
+    entry = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(entry, dict) or not isinstance(entry.get("expected_error"), dict):
+        raise RecipeSchemaError(
+            f"sanitizer_plan.policy.expected_error={key!r} names no expected_error "
+            f"declaration in {baselines}"
+        )
 
 
 def _optional_timeout_seconds(block: Mapping[str, object]) -> float | None:
@@ -304,6 +339,11 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         )
     timeout_seconds = _optional_timeout_seconds(policy)
     waitcheck_max_diagnostics = _optional_waitcheck_max_diagnostics(policy)
+    # The key of this recipe's expected_error declaration in the committed
+    # verdict baselines, so the loader and the vacuity sweep read one sign-off.
+    expected_error = _require_str(policy, "expected_error") if "expected_error" in policy else None
+    if expected_error is not None:
+        _require_expected_error_declaration(expected_error, recipe_path=path)
     output = _require_mapping(plan.get("output"), name="sanitizer_plan.output")
     report_name = _require_str(output, "report")
 
@@ -351,10 +391,39 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
     if source_kind != "consan_repro" and "consan_command" in source:
         consan_command = _resolve_path(_require_str(source, "consan_command"), recipe_path=path)
 
+    consan_driver: str | None = None
+    if "consan_driver" in source:
+        if consan_command is None:
+            raise RecipeSchemaError(
+                "sanitizer_plan.source.consan_driver describes a ConSan command, "
+                "but the source names none"
+            )
+        consan_driver = _require_str(source, "consan_driver")
+        if consan_driver not in _SUPPORTED_CONSAN_DRIVERS:
+            raise RecipeSchemaError(
+                f"unsupported sanitizer_plan.source.consan_driver={consan_driver!r}"
+            )
+
     if "isa_dir" in source:
         isa_dir = _resolve_path(_require_str(source, "isa_dir"), recipe_path=path)
     if source_kind == "gemm_csv" and isa_dir is None:
         raise RecipeSchemaError("sanitizer_plan.source.isa_dir is required for gemm_csv")
+
+    if (
+        "consan" in sanitizers
+        and consan_policy == "strict"
+        and consan_driver == "load"
+        and expected_error is None
+    ):
+        raise RecipeSchemaError(
+            "consan_policy: strict cannot return a verdict with consan_driver: load. "
+            "strict requires dynamic records, and a driver that only loads its code "
+            "object never dispatches, so every run fails closed (ROCm/aorta#450). Use "
+            "consan_policy: lenient to check static instrumentation coverage, or, if "
+            "failing closed is the point of this recipe, declare that outcome as an "
+            "expected_error in recipes/sanitizers/fixtures/expected/verdict_baselines.json "
+            "and name its key in sanitizer_plan.policy.expected_error"
+        )
 
     ticket = _require_str(data, "ticket") if "ticket" in data else path.stem
     return SanitizerRecipe(
@@ -376,6 +445,8 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         kernel_specs=kernel_specs,
         timeout_seconds=timeout_seconds,
         waitcheck_max_diagnostics=waitcheck_max_diagnostics,
+        consan_driver=consan_driver,
+        expected_error=expected_error,
     )
 
 

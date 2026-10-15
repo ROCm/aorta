@@ -162,10 +162,12 @@ def _tried(*names):
     return [{"type": "mitigation_tried", "mitigation": name} for name in names]
 
 
-def _stopped(reason="agent_requested", unresolved=()):
+def _stopped(reason="agent_requested", unresolved=(), redundant=()):
     record = {"type": "search_stopped", "outcome": "agent_stop", "stop_reason": reason}
     if unresolved:
         record["unresolved_mitigations"] = list(unresolved)
+    if redundant:
+        record["redundant_mitigations"] = list(redundant)
     return record
 
 
@@ -194,6 +196,7 @@ def test_the_point_table_is_pinned():
         "terminal_unresolvable_unearned": 0.0,
         "terminal_gave_up": -3.0,
         "terminal_proposal_unresolved": -3.0,
+        "terminal_proposal_redundant": -3.0,
         "cell_spent": -0.2,
     }
 
@@ -202,6 +205,7 @@ def test_the_manufactured_stop_is_priced_exactly_like_giving_up():
     """Equality is the statement: the event buys attribution, not a number,
     and a cheaper value would make stalling on a tried name the best exit."""
     assert POINTS["terminal_proposal_unresolved"] == POINTS["terminal_gave_up"]
+    assert POINTS["terminal_proposal_redundant"] == POINTS["terminal_gave_up"]
     assert POINTS["terminal_unresolvable_correct"] == POINTS["resolver_named"]
 
 
@@ -210,7 +214,7 @@ def test_every_classifiable_terminal_has_a_price():
     would be silently withheld as 'unrecognised' on the rollout that first hit
     it. Enumerated from ``classify_stop`` itself rather than listed by hand."""
     seen = set()
-    for reason in ("proposal_unresolved", "agent_requested"):
+    for reason in ("proposal_unresolved", "proposal_redundant", "agent_requested"):
         for proposed_nothing in (True, False):
             for unresolvable in (True, False):
                 for named in (True, False):
@@ -228,8 +232,8 @@ def test_every_classifiable_terminal_has_a_price():
     priced = {t for t in seen if t != "other"}
     assert {f"terminal_{t}" for t in priced} <= set(POINTS), sorted(priced)
     assert seen == {
-        "proposal_unresolved", "unresolvable_correct", "unresolvable_unearned",
-        "gave_up", "other", "converged",
+        "proposal_unresolved", "proposal_redundant", "unresolvable_correct",
+        "unresolvable_unearned", "gave_up", "other", "converged",
     }
 
 
@@ -325,8 +329,8 @@ def test_a_refuted_name_and_an_unmeasured_name_are_different_events(grid):
 
 
 def test_a_pass_under_a_diagnostic_is_not_a_resolver(tmp_path):
-    """``winning_mitigation`` credits only ``{m}-none``: a pass with a
-    diagnostic on is not attributable to the mitigation alone."""
+    """A pass with a mitigation and a diagnostic both on is attributable to
+    neither name alone, so ``winning_mitigation`` credits nothing."""
     root = tmp_path / "DIAG"
     _write_cell(root, "none-none", "fail", NAN)
     _write_cell(root, f"{REFUTED}-none", "fail", NAN)
@@ -334,6 +338,33 @@ def test_a_pass_under_a_diagnostic_is_not_a_resolver(tmp_path):
     grid = grid_from_matrix(root)
     assert grid.resolution.resolvers == frozenset()
     assert grid.measured_mitigations == frozenset({REFUTED})
+
+
+def test_a_behavioural_diagnostic_passing_alone_resolves_it(tmp_path):
+    """``none-{d}`` is the experiment ``{d}-none`` would be, so it resolves the
+    failure as the loop converges on it -- but it is not a cell a proposal
+    buys, so it measures nothing. A pass under logging resolves nothing."""
+    root = tmp_path / "DIAGONLY"
+    _write_cell(root, "none-none", "fail", NAN)
+    _write_cell(root, f"{REFUTED}-none", "fail", NAN)
+    _write_cell(root, "none-hip_launch_blocking", "pass", [])
+    _write_cell(root, "none-amd_log_level_4", "pass", [])
+    grid = grid_from_matrix(root)
+    assert grid.resolution.resolvers == frozenset({"hip_launch_blocking"})
+    assert grid.measured_mitigations == frozenset({REFUTED})
+
+
+def test_a_converged_episode_names_the_cell_that_passed(tmp_path):
+    diagnostic = _write_log(
+        tmp_path / "DIAGWIN",
+        [{"type": "converged", "winning_mitigation": "hip_launch_blocking",
+          "winning_cell": "none-hip_launch_blocking"}],
+    )
+    mitigation = _write_log(
+        tmp_path / "MITWIN", [{"type": "converged", "winning_mitigation": RESOLVER}]
+    )
+    assert episode_from_log(diagnostic).terminal_why == "cell 'none-hip_launch_blocking' passed"
+    assert episode_from_log(mitigation).terminal_why == f"cell {RESOLVER!r}-none passed"
 
 
 def test_a_matrix_with_no_baseline_cell_has_no_failure_to_resolve(tmp_path):
@@ -558,6 +589,25 @@ def test_the_filter_emptying_a_list_is_not_the_unresolvability_claim(tmp_path, u
     episode = episode_from_log(run, unresolvable_grid, menu)
     assert episode.terminal == "proposal_unresolved"
     assert REFUTED in episode.terminal_why
+
+
+def test_validation_emptying_a_list_is_not_the_unresolvability_claim(tmp_path, unresolvable_grid):
+    """The same trap through policy validation (aorta#501): a custom proposer
+    names only the baseline after exhausting the menu, validation empties the
+    list, and the stop is validation's -- not an earned claim worth +4."""
+    menu = [REFUTED, RESOLVER]
+    run = _write_log(
+        tmp_path / "REDUNDANT",
+        [_llm_step(menu), *_tried(*menu),
+         _llm_step([]),
+         _stopped("proposal_redundant", redundant=["none"])],
+    )
+    episode = episode_from_log(run, unresolvable_grid, menu)
+    assert episode.terminal == "proposal_redundant"
+    assert "'none'" in episode.terminal_why
+    score = score_episode(episode, unresolvable_grid, _context())
+    assert score.count("terminal_proposal_redundant") == 1
+    assert score.count("terminal_unresolvable_correct") == 0
 
 
 def test_the_same_stop_is_giving_up_when_a_resolver_exists(tmp_path, grid):

@@ -81,12 +81,16 @@ is pinned by a test. Two preconditions matter most:
   tried first. Otherwise the event is `terminal_unresolvable_unearned` and
   scores 0.0.
 - It pays only when the stop was the policy's own. If the candidate filter
-  emptied the list, the ending is `terminal_proposal_unresolved`, valued the
-  same as giving up. Without this rule, the award would be paid for a terminal
-  the loop manufactured out of a name-resolution failure (aorta#449).
+  emptied the list, the ending is `terminal_proposal_unresolved`. If validation
+  removed every name as redundant, which only the `none` baseline can do, it is
+  `terminal_proposal_redundant`. Both are valued the same as giving up. Without
+  this rule, the award would be paid for a terminal the loop manufactured out
+  of a name-resolution failure (aorta#449) or out of validation (aorta#501).
 
-That second rule relies on the `proposal_unresolved` stop reason, which this
-change adds to `src/aorta/agent` as a separate commit.
+That second rule relies on the `proposal_unresolved` and `proposal_redundant`
+stop reasons that `src/aorta/agent` records. The in-flight environment never
+produces `proposal_redundant`, because its filter drops `none` first. The rule
+matters when `episode_from_log` replays a log from a custom proposer.
 
 Two further rules fix defects found after the evaluation below was recorded:
 

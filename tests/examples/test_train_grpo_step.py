@@ -207,7 +207,9 @@ def test_the_loss_is_taken_over_the_sampled_ids_not_a_re_tokenisation():
     _, stats = trainer.sample_loss(model, tok, sampled, 1, device="cpu")
     prompt_ids = tok(trainer.chat_prompt(tok, "p"))["input_ids"]
     ids = torch.cat([prompt_ids, torch.tensor([drawn])], dim=1)
-    logp = torch.log_softmax(model(ids).logits[:, :-1, :], dim=-1)
+    with trainer.policy_numerics("cpu"):
+        logits = model(ids).logits
+    logp = torch.log_softmax(logits[:, :-1, :].float(), dim=-1)
     want = -logp.gather(2, ids[:, 1:].unsqueeze(-1)).squeeze(-1)[:, prompt_ids.shape[1] - 1:].sum()
     assert stats["nll"] == pytest.approx(float(want), rel=1e-5)
     assert stats["nll"] != pytest.approx(retokenised["nll"])
@@ -718,6 +720,46 @@ def test_unseeded_generation_keeps_its_batches():
     model = _SeedRecorder()
     trainer.generate(model, _PadTokenizer(), ["ab", "abcd", "a", "b", "c"], _GenArgs())
     assert [size for size, _ in model.calls] == [4, 1]
+
+
+def _numerics():
+    return torch.is_autocast_enabled("cpu"), torch.get_autocast_dtype("cpu")
+
+
+class _NumericsGenerator(_SeedRecorder):
+    """``model.generate`` that records the autocast state sampling ran under."""
+
+    def generate(self, input_ids, **kw):
+        self.seen = _numerics()
+        return super().generate(input_ids, **kw)
+
+
+class _NumericsLM(TinyLM):
+    """Records the autocast state every forward ran under."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen = []
+
+    def forward(self, input_ids):
+        self.seen.append(_numerics())
+        return super().forward(input_ids)
+
+
+def test_sampling_and_the_loss_forward_evaluate_the_policy_under_one_numerics():
+    """The samples are on-policy only if the loss scores them with the function that drew them.
+
+    fp32 master weights read in fp32 by the loss and in bf16 by the sampler are
+    two functions once a step has moved the weights by less than bf16 resolution.
+    """
+    sampler = _NumericsGenerator()
+    trainer.generate(sampler, _PadTokenizer(), ["ab"], _GenArgs())
+    policy, reference = _NumericsLM(), _NumericsLM()
+    trainer.sample_loss(policy, CharTokenizer(), sample(1.0), 1, device="cpu",
+                        reference=reference, kl_beta=0.5)
+    assert sampler.seen == (True, torch.bfloat16)
+    assert policy.seen == [sampler.seen], "the loss forward runs under the sampler's numerics"
+    assert reference.seen == [sampler.seen], "and so does the reference it is compared with"
 
 
 def test_a_seed_count_that_does_not_match_the_prompts_is_an_error():

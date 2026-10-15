@@ -39,6 +39,50 @@ uv pip install -e ".[chat-cli]"
 `pip install 'amd-aorta[chat]'` is an alias for `chat-cli`, because that is what
 most people type first.
 
+**No GPU.** Retrieval runs a small embedding model on CPU and generation happens
+wherever your provider lives; no extra pulls a torch build at all, which matters
+on a ROCm node for the reason in the callout above.
+
+## Python range
+
+The rest of AORTA supports 3.10 through 3.14. Chat is narrower at both ends, and
+neither bound is arbitrary.
+
+- **Floor: 3.11.** The profile file is read with the standard library's
+  `tomllib`, which arrived in 3.11. On 3.10, `aorta chat` prints a one-line
+  explanation and exits; every other `aorta` command is unaffected.
+- **Ceiling for the UI: below 3.14.** Chainlit declares
+  `Requires-Python: >=3.10,<3.14`, so `chat-ui` and `chat-all` cannot install it
+  on 3.14. `chat-cli` itself is fine on 3.14.
+
+Python packaging has no way to give an *extra* its own `requires-python`, so the
+range is expressed as environment markers on each dependency. The consequence is
+worth knowing, because it is quiet: on an out-of-range interpreter the extra
+still installs **successfully** and simply contributes nothing. `aorta chat`
+therefore re-checks the interpreter itself, and `aorta chat ui` on 3.14 tells
+you Chainlit is the reason rather than suggesting you install an extra you
+already have.
+
+## sqlite
+
+The vector index is a single sqlite file using the
+[`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension, so your Python's
+sqlite3 must be **3.41 or newer** and must have been built with loadable
+extension support. Current distributions are fine. Enterprise Linux is often
+not: RHEL 9 and CentOS Stream 9 ship sqlite 3.34.1.
+
+Fixing it needs no root, because the wheel carries its own sqlite:
+
+```bash
+pip install 'amd-aorta[chat-sqlite]'     # or: pip install pysqlite3-binary
+```
+
+Nothing else changes. Chat checks the version before it opens the index and
+swaps in `pysqlite3` only when the built-in is too old, so a current distro
+installs nothing and behaves identically. When the build is too old *and* the
+wheel is absent, the error names the package to install rather than surfacing a
+message from inside the extension.
+
 ## Add CIA-backed cluster diagnostics
 
 The Cluster Intelligence Agents are a separate `cia` extra. Install it beside
@@ -100,50 +144,6 @@ includes all five. Without `cia`, chat still starts and its ordinary code/run
 tools still work; startup prints that the five cluster diagnostic tools were
 not offered and names the remedy:
 `pip install 'amd-aorta[cia]'`.
-
-**No GPU.** Retrieval runs a small embedding model on CPU and generation happens
-wherever your provider lives; no extra pulls a torch build at all, which matters
-on a ROCm node for the reason in the callout above.
-
-## Python range
-
-The rest of AORTA supports 3.10 through 3.14. Chat is narrower at both ends, and
-neither bound is arbitrary.
-
-- **Floor: 3.11.** The profile file is read with the standard library's
-  `tomllib`, which arrived in 3.11. On 3.10, `aorta chat` prints a one-line
-  explanation and exits; every other `aorta` command is unaffected.
-- **Ceiling for the UI: below 3.14.** Chainlit declares
-  `Requires-Python: >=3.10,<3.14`, so `chat-ui` and `chat-all` cannot install it
-  on 3.14. `chat-cli` itself is fine on 3.14.
-
-Python packaging has no way to give an *extra* its own `requires-python`, so the
-range is expressed as environment markers on each dependency. The consequence is
-worth knowing, because it is quiet: on an out-of-range interpreter the extra
-still installs **successfully** and simply contributes nothing. `aorta chat`
-therefore re-checks the interpreter itself, and `aorta chat ui` on 3.14 tells
-you Chainlit is the reason rather than suggesting you install an extra you
-already have.
-
-## sqlite
-
-The vector index is a single sqlite file using the
-[`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension, so your Python's
-sqlite3 must be **3.41 or newer** and must have been built with loadable
-extension support. Current distributions are fine. Enterprise Linux is often
-not: RHEL 9 and CentOS Stream 9 ship sqlite 3.34.1.
-
-Fixing it needs no root, because the wheel carries its own sqlite:
-
-```bash
-pip install 'amd-aorta[chat-sqlite]'     # or: pip install pysqlite3-binary
-```
-
-Nothing else changes. Chat checks the version before it opens the index and
-swaps in `pysqlite3` only when the built-in is too old, so a current distro
-installs nothing and behaves identically. When the build is too old *and* the
-wheel is absent, the error names the package to install rather than surfacing a
-message from inside the extension.
 
 ## Verify
 

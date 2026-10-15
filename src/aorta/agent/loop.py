@@ -20,7 +20,7 @@ from aorta.agent.state import (
     append_log_event,
     read_trial_results,
     wake,
-    winning_mitigation,
+    winning_cell,
 )
 from aorta.probe.recipe_builder import build_probe_recipe_from_dict
 from aorta.registry import load_mitigations
@@ -253,14 +253,18 @@ def _resolve_stop_outcome(
     it so the audit log records the same reason that drove ``outcome``
     instead of a bare ``None``.
     """
-    reason: StopReason | None = step.stop_reason
-    if reason == "proposal_unresolved":
-        # The loop owns this reason, not the proposer. It is a statement about
-        # what the candidate filter did with the names, so it is derived below
-        # from the step's own fields and never taken as given. The model-reply
-        # path already refuses it (`AgentStep.from_dict`); this closes the same
-        # door for a proposer object that constructs an `AgentStep` directly,
-        # which could otherwise label a genuine stop as a filter failure.
+    # A reason explains a stop, so it counts only when the step stopped -- the
+    # rule `AgentStep.from_dict` applies to a model reply, held here for a
+    # protocol proposer that builds its `AgentStep` itself.
+    reason: StopReason | None = step.stop_reason if step.stop else None
+    if reason in ("proposal_unresolved", "proposal_redundant"):
+        # The loop owns these reasons, not the proposer. Each is a statement
+        # about what the candidate filter or validation did with the names, so
+        # it is derived below from the step's own fields and never taken as
+        # given. The model-reply path already refuses both
+        # (`AgentStep.from_dict`); this closes the same door for a proposer
+        # object that constructs an `AgentStep` directly, which could otherwise
+        # label a genuine stop as a filter or validation outcome.
         reason = None
     if reason is None:
         if _baseline_passed(summaries):
@@ -284,6 +288,17 @@ def _resolve_stop_outcome(
             # stop is the agent's own request and must not be re-attributed.
             # The dropped names are logged either way.
             reason = "proposal_unresolved"
+        elif (
+            not step.stop
+            and not step.next_mitigations
+            and step.redundant_mitigations
+        ):
+            # aorta#501: validation removed every name as redundant, which
+            # only the `none` baseline can do -- a repeat leaves one copy
+            # behind -- so the empty list is normalisation, not a decision.
+            # After proposal_unresolved because a step carrying both has a
+            # name that failed to resolve, and that is the fault to report.
+            reason = "proposal_redundant"
         elif not step.next_mitigations and "No remaining" in step.hypothesis:
             reason = "exhausted_candidates"
         else:
@@ -329,6 +344,19 @@ def _resolve_stop_outcome(
             "unresolved_mitigations in agent_log.jsonl.",
             reason,
         )
+    if reason == "proposal_redundant":
+        # Same rule as above: the hypothesis is not the reason the search
+        # stopped, so it is not what the operator is shown.
+        return (
+            "proposal_redundant",
+            "Search stopped because every mitigation the proposer named was "
+            f"redundant: {sorted(set(step.redundant_mitigations))}. The `none` "
+            "baseline is always on the axis and a repeated name adds no cell, "
+            "so the loop had nothing new to run -- this is NOT the agent "
+            "concluding the search. See redundant_mitigations in "
+            "agent_log.jsonl.",
+            reason,
+        )
     return (
         "agent_stop",
         step.hypothesis
@@ -340,12 +368,13 @@ def _resolve_stop_outcome(
     )
 
 
+def _find_winning_cell(summaries: list[dict[str, Any]]) -> tuple[str, str] | None:
+    return winning_cell((row.get("cell_name") or "", row.get("verdict")) for row in summaries)
+
+
 def _find_winning_mitigation(summaries: list[dict[str, Any]]) -> str | None:
-    for row in summaries:
-        win = winning_mitigation(row.get("cell_name") or "", row.get("verdict"))
-        if win is not None:
-            return win
-    return None
+    win = _find_winning_cell(summaries)
+    return None if win is None else win[1]
 
 
 def _execute_probe_matrix(
@@ -470,20 +499,23 @@ def run_agent_loop(
                 append_log_event(run_dir, "baseline_pass", {})
                 break
 
-            winner = _find_winning_mitigation(summaries)
-            if winner:
+            win = _find_winning_cell(summaries)
+            if win:
+                cell, winner = win
                 state.winning_mitigation = winner
                 state.converged = True
                 outcome = "converged"
                 recommended = (
                     f"Re-run the repro with mitigation `{winner}` applied "
-                    f"(see cell `{winner}-{_BASELINE_DIAGNOSTIC}` probe.env or matrix)."
+                    f"(see cell `{cell}` probe.env or matrix)."
                 )
-                append_log_event(
-                    run_dir,
-                    "converged",
-                    {"winning_mitigation": winner},
-                )
+                converged_payload: dict[str, Any] = {"winning_mitigation": winner}
+                # Only a diagnostic-axis win names its cell: `{winner}-none` is
+                # implied by the name, and leaving the key off those events
+                # keeps already-archived trajectories comparable.
+                if cell != f"{winner}-{_BASELINE_DIAGNOSTIC}":
+                    converged_payload["winning_cell"] = cell
+                append_log_event(run_dir, "converged", converged_payload)
                 break
 
             # Budget bounds the number of PROPOSAL cycles. Checked here -- after
@@ -518,6 +550,10 @@ def run_agent_loop(
                 llm_step_payload["unresolved_mitigations"] = list(
                     step.unresolved_mitigations
                 )
+            if step.redundant_mitigations:
+                llm_step_payload["redundant_mitigations"] = list(
+                    step.redundant_mitigations
+                )
             append_log_event(run_dir, "llm_step", llm_step_payload)
 
             if step.stop or not step.next_mitigations:
@@ -534,6 +570,10 @@ def run_agent_loop(
                 if step.unresolved_mitigations:
                     stopped_payload["unresolved_mitigations"] = list(
                         step.unresolved_mitigations
+                    )
+                if step.redundant_mitigations:
+                    stopped_payload["redundant_mitigations"] = list(
+                        step.redundant_mitigations
                     )
                 append_log_event(run_dir, "search_stopped", stopped_payload)
                 break

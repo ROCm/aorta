@@ -102,7 +102,7 @@ case "$WORKLOAD" in
     OUT="${OUT:-/tmp/aorta-probe-out}"
     mkdir -p "$OUT"
     log "probe smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
-    run_in_container '["probe","--recipe","/tmp/aorta-build/src/recipes/probe/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE","--","bash","-c","echo hi from mirage probe"]'
+    run_in_container '["probe","--recipe","/tmp/aorta-build/src/recipes/probe/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE","--","bash","-c","echo hi from mirage probe; echo PYTORCH_NO_CUDA_MEMORY_CACHING=${PYTORCH_NO_CUDA_MEMORY_CACHING:-unset}"]'
     ;;
   inference-smoke)
     OUT="${OUT:-/tmp/aorta-inference-out}"

@@ -223,8 +223,8 @@ buck2 run aorta -- sweep run --recipe recipes/training/example-fsdp-smoke.yaml -
 # Dry run: race (mode=fsdp) / ticket=EXAMPLE-151
 # Cells (3):
 #   - baseline-local: mitigations=['none'] environment=local trials=2 steps=100
-#   - tf32_off-local: mitigations=['tf32_off'] environment=local trials=2 steps=100
-#   - xnack-local:    mitigations=['xnack']    environment=local trials=2 steps=100
+#   - no-caching-local: mitigations=['pytorch_no_cuda_memory_caching'] environment=local trials=2 steps=100
+#   - xnack-local: mitigations=['xnack'] environment=local trials=2 steps=100
 ```
 
 ### Running a recipe end-to-end (graceful degradation)

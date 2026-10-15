@@ -280,6 +280,17 @@ def _stop_ids(model: Any, tok: Any) -> set[int]:
     return {int(t) for t in stops if t is not None}
 
 
+def policy_numerics(device: str) -> Any:
+    """The autocast context the policy runs under, for sampling and for the loss alike.
+
+    Both must evaluate one function. A step of ``lr`` 1e-6 on fp32 master
+    weights that started on the bf16 grid leaves every bf16-rounded weight
+    unchanged, so a bf16 sampler keeps drawing from the pre-step model while an
+    fp32 loss forward scores the post-step one: the samples stop being on-policy.
+    """
+    return torch.autocast(device.split(":")[0], dtype=torch.bfloat16)
+
+
 def generate(model: Any, tok: Any, prompts: list[str], args: Any,
              seeds: list[int] | None = None) -> list[Completion]:
     """Sample one completion per prompt, in left-padded batches of ``gen_batch``.
@@ -306,7 +317,7 @@ def generate(model: Any, tok: Any, prompts: list[str], args: Any,
         if seeds is not None:
             torch.manual_seed(seeds[start])
         enc = tok(chunk, return_tensors="pt", padding=True).to(args.device)
-        with torch.no_grad(), torch.autocast(args.device.split(":")[0], dtype=torch.bfloat16):
+        with torch.no_grad(), policy_numerics(args.device):
             out = model.generate(
                 **enc,
                 do_sample=True,
@@ -419,7 +430,8 @@ def sample_loss(
     if comp_ids.shape[1] == 0:
         return None
     ids = torch.cat([prompt_ids, comp_ids], dim=1).to(device)
-    logits = model(input_ids=ids).logits[:, :-1, :].float()
+    with policy_numerics(device):
+        logits = model(input_ids=ids).logits[:, :-1, :].float()
     targets = ids[:, 1:]
     picked = torch.log_softmax(logits, dim=-1).gather(2, targets.unsqueeze(-1)).squeeze(-1)
     comp_lp = picked[:, prompt_ids.shape[1] - 1 :]
@@ -428,7 +440,7 @@ def sample_loss(
              "pg_abs": float(abs((sample.advantage / total) * comp_lp.sum().item()))}
     if with_kl:
         ref_device = reference_device or device
-        with torch.no_grad():
+        with torch.no_grad(), policy_numerics(ref_device):
             ref_logits = reference(input_ids=ids.to(ref_device)).logits[:, :-1, :].float()
             ref_lp = torch.log_softmax(ref_logits, dim=-1).gather(
                 2, targets.unsqueeze(-1).to(ref_device)

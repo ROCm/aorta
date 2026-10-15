@@ -57,7 +57,7 @@ probe_results/
         stderr.log
         result.json               # see §6 for the actual field set
         probe.env                 # only with --env-passthrough-mode file
-    tf32_off-none/
+    pytorch_no_cuda_memory_caching-none/
       trial_0/
         ...
 ```
@@ -78,7 +78,7 @@ ticket: ROCM-1234                 # optional; overridden by --ticket when that f
 trials: 3                         # >= 1
 mitigation_axis:
   - none
-  - tf32_off
+  - pytorch_no_cuda_memory_caching
 diagnostic_axis:
   - none
   - xnack                         # built-in (see note below on registered names)
@@ -191,7 +191,8 @@ the known logs are `log`, anything else is `heavy`).
 splits the cell's two recipe axes into their own columns -- `Mitigation`
 and `Diagnostic` -- instead of a fused `<mitigation>-<diagnostic>`
 identifier, and ends with a `Directory` column giving the per-cell
-artifact path relative to `matrix.md` (e.g. `tf32_off-none/`). The folder
+artifact path relative to `matrix.md` (e.g.
+`pytorch_no_cuda_memory_caching-none/`). The folder
 name on disk is still `<mitigation>-<diagnostic>` (it stays the stable
 join key for tooling and resume); only the table presentation changed, so
 an unused diagnostic axis reads as `Diagnostic = none` rather than a
@@ -201,15 +202,19 @@ original `Cell` / `Mitigations` columns.
 Phase 3 keys (`redaction`, top-level `condition`) are still **rejected
 at load time** with a "deferred to Phase 3" error message.
 
-**Registered mitigation / diagnostic names.** The built-in registry
-(see `src/aorta/registry/mitigations.py`) currently ships only `none`,
-`tf32_off`, and `xnack`. Any other name (e.g. `hsa_no_scratch_reclaim`,
-`fa_prefer_ck`, `hip_launch_blocking`) must come from an
-`aorta.mitigations` entry-point plugin or a `--mitigations-file`
-sidecar JSON, otherwise the recipe fails to load with
-`UnknownMitigationError`. Issue #195 tracks expanding the built-in
-set; until that lands, swap any unregistered name for `none` (or one
-of the three built-ins above) when copy-pasting this template.
+**Registered mitigation / diagnostic names.** Every axis name must be
+registered: a built-in from `src/aorta/registry/mitigations.py`, an
+`aorta.mitigations` entry-point plugin, or a `--mitigations-file` sidecar
+JSON. Otherwise the recipe fails to load with `UnknownMitigationError`.
+`aorta mitigations list` prints what is registered on your machine.
+
+The example uses `pytorch_no_cuda_memory_caching` because it is a built-in
+that has been measured to change a verdict (aorta#500). Some built-ins cannot act on common stacks,
+and a cell for one of them is a second baseline, not a test of the
+mitigation. See "Built-ins that cannot act on some stacks" in
+`src/aorta/registry/README.md` before putting one on an axis. `tf32_off`,
+the example this section used to show, sets a variable nothing reads
+(aorta#500).
 
 ## 3. Env-passthrough modes (`--env-passthrough-mode`)
 

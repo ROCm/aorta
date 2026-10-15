@@ -9,7 +9,7 @@ ticket: TICKET-1234
 trials: 3
 timeout_per_trial: 1800
 
-mitigation_axis: [none, tf32_off]
+mitigation_axis: [none, pytorch_no_cuda_memory_caching]
 diagnostic_axis: [none, xnack]
 
 collect_paths:

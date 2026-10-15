@@ -27,13 +27,14 @@ _needs_chat = pytest.mark.skipif(not _CHAT_AVAILABLE, reason="amd-aorta[chat-cli
 
 _WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+_NIGHTLY = "chat-index-nightly.yml"
 
 
 def _load(name: str) -> dict:
     return yaml.safe_load((_WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
-@pytest.fixture(params=["nightly.yml", "release.yml"])
+@pytest.fixture(params=[_NIGHTLY, "release.yml"])
 def index_job(request) -> tuple[str, dict]:
     """The index-build job from each workflow that publishes one."""
     workflow = _load(request.param)
@@ -106,7 +107,7 @@ class TestPublishTargets:
         """A .devN install resolves to this tag; every internal install is one."""
         from aorta.chat.rag.index_ops import ASSET_NAME, ROLLING_TAG
 
-        job = _load("nightly.yml")["jobs"]["chat-index"]
+        job = _load(_NIGHTLY)["jobs"]["chat-index"]
         publish = [s for s in job["steps"] if "action-gh-release" in str(s.get("uses", ""))]
         assert len(publish) == 1
         assert publish[0]["with"]["tag_name"] == ROLLING_TAG
@@ -140,14 +141,22 @@ class TestPublishTargets:
         assert CHECKSUM_SUFFIX in files, name
 
     def test_the_nightly_index_job_does_not_race_the_wheel_job(self):
-        """Both write to the same rolling release, and one force-moves its tag."""
-        assert _load("nightly.yml")["jobs"]["chat-index"]["needs"] == "nightly"
+        """Both write to the same rolling release, and one force-moves its tag.
+
+        The index runs only after a successful wheel run and shares its
+        concurrency group, so a failed wheel build publishes no index either.
+        """
+        workflow = _load(_NIGHTLY)
+        assert workflow[True]["workflow_run"]["workflows"] == ["Nightly wheels"]
+        assert workflow[True]["workflow_run"]["types"] == ["completed"]
+        assert "github.event.workflow_run.conclusion == 'success'" in workflow["jobs"]["chat-index"]["if"]
+        assert workflow["concurrency"] == _load("nightly.yml")["concurrency"]
 
 
 class TestDigestSkip:
     def test_the_nightly_skips_a_rebuild_when_the_corpus_is_unchanged(self):
         """Otherwise an identical 18 MB asset is re-uploaded every night."""
-        job = _load("nightly.yml")["jobs"]["chat-index"]
+        job = _load(_NIGHTLY)["jobs"]["chat-index"]
         text = _steps_text(job)
         assert "aorta chat index digest --public-only" in text
         build = next(s for s in job["steps"] if "index build" in str(s.get("run", "")))
@@ -155,7 +164,7 @@ class TestDigestSkip:
 
     def test_a_missing_baseline_rebuilds_rather_than_skips(self):
         """ "No published manifest" must not be read as "nothing changed"."""
-        job = _load("nightly.yml")["jobs"]["chat-index"]
+        job = _load(_NIGHTLY)["jobs"]["chat-index"]
         digest = next(s for s in job["steps"] if s.get("id") == "digest")
         assert "changed=true" in digest["run"]
         assert "No published manifest yet" in digest["run"]
@@ -169,7 +178,7 @@ class TestDigestSkip:
         emitting ``changed=false`` and fetch stayed broken indefinitely -- until
         unrelated corpus content happened to change.
         """
-        job = _load("nightly.yml")["jobs"]["chat-index"]
+        job = _load(_NIGHTLY)["jobs"]["chat-index"]
         digest = next(s for s in job["steps"] if s.get("id") == "digest")
         run = digest["run"]
 
@@ -184,7 +193,7 @@ class TestDigestSkip:
         from aorta.chat.rag import manifest as manifest_mod
         from aorta.chat.rag.index_ops import ASSET_NAME
 
-        job = _load("nightly.yml")["jobs"]["chat-index"]
+        job = _load(_NIGHTLY)["jobs"]["chat-index"]
         run = next(s for s in job["steps"] if s.get("id") == "digest")["run"]
 
         assert ASSET_NAME in run
@@ -263,10 +272,10 @@ class TestTheBuildCommandTheWorkflowsRunStillParses:
 class TestJobHygiene:
     def test_the_index_job_is_separate_from_the_publish_job(self):
         """It must not be able to delay or fail the wheel/PyPI publish."""
-        for name in ("nightly.yml", "release.yml"):
-            jobs = _load(name)["jobs"]
-            assert "chat-index" in jobs
-            wheel = jobs["nightly" if name == "nightly.yml" else "build-and-release"]
+        assert "chat-index" in _load(_NIGHTLY)["jobs"]
+        assert "chat-index" in _load("release.yml")["jobs"]
+        for name, wheel_job in (("nightly.yml", "nightly"), ("release.yml", "build-and-release")):
+            wheel = _load(name)["jobs"][wheel_job]
             assert not any("chat index" in str(s.get("run", "")) for s in wheel["steps"])
 
     def test_python_311_is_used_because_that_is_chats_floor(self, index_job):

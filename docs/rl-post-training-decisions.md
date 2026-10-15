@@ -349,7 +349,8 @@ aorta agent --llm-backend litellm ...
 
 The first was verified against a mock OpenAI-compatible endpoint rather than
 assumed: the request arrives at `POST /v1/chat/completions` on the self-hosted
-address with `response_format: {"type": "json_object"}` intact, and the reply
+address with `response_format` intact (then `{"type": "json_object"}`; a JSON
+schema since [#510](https://github.com/ROCm/aorta/issues/510)), and the reply
 parses back into an `AgentStep` unchanged. The shared path sends no
 `response_format` — it parses the reply fence-tolerantly instead — so the
 format-validity measurements in this document are claims about the agent-only
@@ -364,9 +365,9 @@ problem.
 Two smaller things, neither blocking. `OPENAI_API_BASE` is process-global, so a
 hosted judge model and a self-hosted policy cannot coexist in one process — an
 explicit `--llm-api-base` flag is about eight lines and would also put the
-endpoint in the audit log. And the serving engine must accept
-`response_format: {"type": "json_object"}`, which TokenSpeed's OpenAI route
-does; it is a dependency of the integration rather than an optional extra.
+endpoint in the audit log. And the serving engine must accept a
+`json_schema` `response_format`, which TokenSpeed's OpenAI route does with a
+grammar backend; it is a dependency of the integration rather than an optional extra.
 
 ## Corpus shape: the gap your description opens
 

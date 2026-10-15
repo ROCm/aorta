@@ -26,6 +26,7 @@ import time
 import pytest
 
 from aorta.cia.cancellation import pause, stopped
+from aorta.chat.tools.outcome import tool_result_failed
 
 
 @pytest.fixture()
@@ -56,8 +57,27 @@ class TestTheAbandonedWorkIsAskedToStop:
         answer = cluster._run_triage(["--source", "k.hip"], "label")
 
         assert "exceeded" in answer
+        assert tool_result_failed(answer)
         assert released.wait(timeout=10), "the run never noticed it had been abandoned"
         assert stopped(seen["stop"])
+
+    def test_a_failed_pipeline_stage_carries_structured_failure(
+        self, cluster, monkeypatch
+    ):
+        monkeypatch.setattr(
+            cluster,
+            "run_triage",
+            lambda argv, *, stop=None: {
+                "ok": False,
+                "stage": "launch",
+                "error": "scheduler unavailable",
+            },
+        )
+
+        answer = cluster._run_triage(["--source", "k.hip"], "label")
+
+        assert "Triage failed at stage launch" in answer
+        assert tool_result_failed(answer)
 
     def test_and_it_stops_promptly_rather_than_running_its_course(self, cluster, monkeypatch):
         """The whole point: the thread is free long before its own deadline."""

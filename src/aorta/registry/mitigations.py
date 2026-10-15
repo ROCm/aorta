@@ -34,7 +34,10 @@ _GROUP = "aorta.mitigations"
 BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     # --- core ---
     "none":     {},
-    "tf32_off": {"DISABLE_TF32": "1"},  # consumed by hipBLASLt itself
+    # DISABLE_TF32 is read by no ROCm or PyTorch library, so this acts only on a
+    # workload that reads it itself (aorta#500). Kept so recipes and archived
+    # cells that name it still resolve; do not use it as a TF32 axis.
+    "tf32_off": {"DISABLE_TF32": "1"},
     "xnack":    {"HSA_XNACK": "1"},     # consumed by ROCm runtime
     # --- hardware queue & ROCm runtime ---
     "gpu_max_hw_queues_2": {
@@ -52,12 +55,17 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "hsa_no_sdma": {
         "HSA_ENABLE_SDMA": "0",
     },
+    # A second baseline in any image that already exports this, which
+    # rocm/primus v26.2 through v26.7 do; v26.1 and earlier do not (aorta#511).
     "hsa_no_scratch_reclaim": {
         "HSA_NO_SCRATCH_RECLAIM": "1",
     },
     "hsa_disable_cache": {
         "HSA_DISABLE_CACHE": "1",
     },
+    # "0" is libhsakmt's default. Every other value, even an empty one,
+    # disables the cache (fmm.c compares against "0" with strcmp), so this
+    # acts unless HSA_DISABLE_CACHE is unset or exactly "0" (aorta#511).
     "hsa_enable_cache": {
         "HSA_DISABLE_CACHE": "0",
     },
@@ -77,13 +85,20 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "nccl_launch_order_implicit": {
         "NCCL_LAUNCH_ORDER_IMPLICIT": "1",
     },
+    # ROCm 7.1.1 renamed RCCL_GFX942_CHEAP_FENCE_OFF (read only by 7.1.0) to
+    # RCCL_GFX9_CHEAP_FENCE_OFF; both are set so the entry acts on either. It
+    # keeps its name so recipes and archived cells still resolve. ROCm 10.0's
+    # RCCL defaults the new variable to 1, so there it re-asserts the default.
     "rccl_gfx942_cheap_fence_off": {
+        "RCCL_GFX9_CHEAP_FENCE_OFF": "1",
         "RCCL_GFX942_CHEAP_FENCE_OFF": "1",
     },
     # --- PyTorch CCA ---
     "pytorch_no_cuda_memory_caching": {
         "PYTORCH_NO_CUDA_MEMORY_CACHING": "1",
     },
+    # Refused, with a warning, by PyTorch builds without expandable-segment
+    # support -- the ROCm builds probes run on today (aorta#511).
     "pytorch_alloc_expandable_segments": {
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     },
@@ -95,13 +110,32 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
         "AMD_LOG_LEVEL": "4",
     },
     # --- SDPA backend pin ---
+    # Refused, with a warning, by PyTorch builds without CK SDPA, and when any
+    # visible GPU is outside CK's architecture list (aorta#511).
     "fa_prefer_ck": {
         "TORCH_ROCM_FA_PREFER_CK": "1",
     },
+    # "0" reads as unset, and PyTorch's unset default is already AOTriton, so
+    # this only acts against an environment that exports "1", and only where
+    # PyTorch would accept CK at all (aorta#511).
     "fa_prefer_aotriton": {
         "TORCH_ROCM_FA_PREFER_CK": "0",
     },
 }
+
+#: Built-ins that exist to produce evidence -- log volume, a trace -- rather
+#: than to change what the workload does. ``state.winning_mitigation`` credits
+#: a passing ``none-{name}`` cell to every other built-in and never to one of
+#: these: a pass under logging is not a fix. A knob that does both is classified
+#: by what a pass under it means -- ``hip_launch_blocking`` also makes errors
+#: synchronous, but a pass under it is a pass with every launch serialised.
+OBSERVABILITY_MITIGATIONS: frozenset[str] = frozenset({"amd_log_level_4"})
+
+#: Built-ins whose variable no ROCm or torch binary reads on any stack
+#: (``DISABLE_TF32``, aorta#500). ``state.winning_mitigation`` never credits a
+#: passing ``none-{name}`` cell to one: the knob cannot have caused the pass.
+#: Stack-dependent no-ops are not listed here; see aorta#511.
+INERT_MITIGATIONS: frozenset[str] = frozenset({"tf32_off"})
 
 
 def load_mitigations(
