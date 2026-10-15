@@ -1,6 +1,14 @@
+> Snapshot cross-check, not a nightly publish. The **INCOMPLETE** banner is the
+> guardrail tab: no gate reports were supplied, and that is expected here. The
+> Kernels column counts selections — one symbol in two code objects counts as
+> two, and a symbol both sanitizers checked counts once (the larger report).
+> Adding up the per-sanitizer tables double-counts that overlap. A note such as
+> "8 of 11 kernels" is that one run's own line, not the Kernels column.
+> Regenerated from renderer `a7506a3e5640`; see README.md.
+
 # Sanitizers Nightly · gfx950
 
-Run `model-kernel-survey` · commit `local` · 2026-10-14 12:56:42 UTC
+Run `model-kernel-survey` · commit `a7506a3e5640` · 2026-10-15 17:09:05 UTC
 
 ❌ **INCOMPLETE** — 3/3 sanitizer report(s) are missing
 
@@ -44,13 +52,13 @@ Observation: report missing
 
 How real GPU kernels behave under AMD's sanitizers — **waitcheck** (static `s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where both produced a report the kernel is shown under each, and a scan that was skipped or whose report is missing still appears, marked report missing with no verdict. **No expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here is an observation of how the kernel behaved, not a regression. Each case lists a copy-paste command to reproduce the run.
 
-Surveyed 4 workloads (80 kernels) across 8 sanitizer runs — 4 pass · 1 warn · 1 fail · 2 error
+Surveyed 4 workloads (163 kernels) across 8 sanitizer runs — 4 pass · 1 warn · 1 fail · 2 error
 
 | Workload | Kernels | waitcheck | ConSan | Findings | Note |
 |---|--:|---|---|--:|---|
-| deepseek v4 | 32 | `pass` | `error` | 0 | 8 of 11 kernels did not complete (7x combined_hook_exit_86, 1x combined_hook_exit_-6) |
+| deepseek v4 | 73 | `pass` | `error` | 0 | 8 of 11 kernels did not complete (7x combined_hook_exit_86, 1x combined_hook_exit_-6) |
 | glm 5.3 | 2 | `pass` | `pass` | 0 | — |
-| gpt oss | 43 | `warn` | `fail` | 6 | sampled_conflict |
+| gpt oss | 85 | `warn` | `fail` | 6 | sampled_conflict |
 | qwen3 | 3 | `pass` | `error` | 0 | 1 of 1 kernels did not complete (1x combined_hook_exit_86) |
 
 <details><summary><b>consan-deepseek-v4</b> — observed `error`</summary>
@@ -364,4 +372,4 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-qwen3.ya
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
-| model-kernel-survey | `local` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | Incomplete |
+| model-kernel-survey | `a7506a3e5640` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | Incomplete |
