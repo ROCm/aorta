@@ -68,6 +68,48 @@ def _job_status_for_terminal_state(state: str) -> str:
     return "failed"
 
 
+def _stop_and_record(
+    jobs_root: Path,
+    job_id: str,
+    job_dir: Path,
+    scheduler_id: str,
+    backend: JobBackend,
+) -> tuple[bool, str]:
+    """Stop one job and persist exactly the terminal state that won the race."""
+    state_before_cancel = backend.state(scheduler_id, job_dir)
+    cancelled, why = backend.cancel(scheduler_id)
+    if not cancelled:
+        log.warning(
+            f"{backend.name} job {scheduler_id} could not be cancelled ({why}); "
+            "it may still be running"
+        )
+        return cancelled, why
+    if state_before_cancel in TERMINAL_STATES or backend.cancel_was_noop(why):
+        final_state = (
+            state_before_cancel
+            if state_before_cancel in TERMINAL_STATES
+            else backend.state(scheduler_id, job_dir)
+        )
+        update_job_status(
+            jobs_root,
+            job_id,
+            _job_status_for_terminal_state(final_state),
+        )
+        log.info(
+            f"{backend.name} job {scheduler_id} had already reached {final_state}"
+        )
+        return cancelled, why
+
+    log.info(f"cancelled {backend.name} job {scheduler_id}")
+    backend.record_cancellation(
+        scheduler_id,
+        job_dir,
+        preserve_terminal=False,
+    )
+    update_job_status(jobs_root, job_id, "cancelled")
+    return cancelled, why
+
+
 class _WatchStop:
     """Stop Watch independently while still observing the caller's token."""
 
@@ -598,40 +640,13 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # Cancellation can race with launch itself. The allocation/process now
     # exists, so stop it before Watch (or any later triage stage) can start.
     if stopped(work_stop):
-        state_before_cancel = selected_backend.state(scheduler_id, job_dir)
-        cancelled, why = selected_backend.cancel(scheduler_id)
-        if cancelled:
-            if (
-                state_before_cancel in TERMINAL_STATES
-                or selected_backend.cancel_was_noop(why)
-            ):
-                launch_terminal_state = (
-                    state_before_cancel
-                    if state_before_cancel in TERMINAL_STATES
-                    else selected_backend.state(scheduler_id, job_dir)
-                )
-                update_job_status(
-                    jobs_root,
-                    job_id,
-                    _job_status_for_terminal_state(launch_terminal_state),
-                )
-                log.info(
-                    f"{selected_backend.name} job {scheduler_id} had already reached "
-                    f"{launch_terminal_state}"
-                )
-            else:
-                log.info(f"cancelled {selected_backend.name} job {scheduler_id}")
-                selected_backend.record_cancellation(
-                    scheduler_id,
-                    job_dir,
-                    preserve_terminal=False,
-                )
-                update_job_status(jobs_root, job_id, "cancelled")
-        else:
-            log.warning(
-                f"{selected_backend.name} job {scheduler_id} could not be cancelled ({why}); "
-                "it may still be running"
-            )
+        cancelled, _why = _stop_and_record(
+            jobs_root,
+            job_id,
+            job_dir,
+            scheduler_id,
+            selected_backend,
+        )
         launch_cancel_result = {
             "ok": False,
             "stage": "launch",
@@ -691,40 +706,13 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # node longest.
     if state.startswith("ABANDONED") or state.startswith("TIMEOUT_WAITING"):
         work_stop.set()
-        state_before_cancel = selected_backend.state(scheduler_id, job_dir)
-        cancelled, why = selected_backend.cancel(scheduler_id)
-        if cancelled:
-            if (
-                state_before_cancel in TERMINAL_STATES
-                or selected_backend.cancel_was_noop(why)
-            ):
-                wait_terminal_state = (
-                    state_before_cancel
-                    if state_before_cancel in TERMINAL_STATES
-                    else selected_backend.state(scheduler_id, job_dir)
-                )
-                update_job_status(
-                    jobs_root,
-                    job_id,
-                    _job_status_for_terminal_state(wait_terminal_state),
-                )
-                log.info(
-                    f"{selected_backend.name} job {scheduler_id} had already reached "
-                    f"{wait_terminal_state}"
-                )
-            else:
-                log.info(f"cancelled {selected_backend.name} job {scheduler_id}")
-                selected_backend.record_cancellation(
-                    scheduler_id,
-                    job_dir,
-                    preserve_terminal=False,
-                )
-                update_job_status(jobs_root, job_id, "cancelled")
-        else:
-            log.warning(
-                f"{selected_backend.name} job {scheduler_id} could not be cancelled ({why}); "
-                "it may still be running"
-            )
+        cancelled, _why = _stop_and_record(
+            jobs_root,
+            job_id,
+            job_dir,
+            scheduler_id,
+            selected_backend,
+        )
         # A confirmed terminal state removes this from Watch's active scan.
         # A failed cancellation deliberately remains running so a later Watch
         # or stale-job reconciliation can still observe the live work.
