@@ -168,6 +168,25 @@ def test_v2_location_credit_takes_an_instruction_of_either_listing(tmp_path, off
     assert episode.outcome == outcome
 
 
+@pytest.mark.parametrize("seed", ["1e309", "-1e309", "NaN", "1.5", "true", "false", '"2"', '""', "4", "-1",
+                                  "1" + "0" * 400, "[1]"])
+def test_a_run_sim_seed_that_is_not_a_seed_is_a_malformed_reply_not_a_crash(tmp_path, seed):
+    scenario = {s.scenario_id: s for s in rj.load_corpus(_toy_corpus(tmp_path), split="test", reward="v2")}["ran@toy"]
+    episode = rj.Episode(scenario, seed=0)
+    episode.observe()
+    episode.act('{"tool": "run_sim", "kernel": "all", "seed": ' + seed + "}")
+    assert [(e.name, e.points) for e in episode.events] == [("malformed", -1.0)]
+    assert episode.steps[-1].header == "invalid reply" and "seed must be one of [0, 1, 2, 3]" in episode.steps[-1].body
+    assert not episode.done and episode.turns_used == 1
+
+
+@pytest.mark.parametrize("field, seed", [("", 0), (', "seed": null', 0), (', "seed": 0', 0), (', "seed": 3', 3),
+                                         (', "seed": 2.0', 2)])
+def test_a_run_sim_seed_that_is_a_seed_is_accepted_as_before(tmp_path, field, seed):
+    action = rj.parse_action_v2('{"tool": "run_sim", "kernel": "all"' + field + "}", lambda k: k)
+    assert action.kind == "tool" and action.seed == seed
+
+
 def test_a_v2_corpus_still_takes_either_reward(tmp_path):
     root = _toy_corpus(tmp_path)
     v2 = rj.load_corpus(root, split="test", reward="v2")

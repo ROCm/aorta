@@ -1121,6 +1121,20 @@ def _reply_object(raw: Any) -> tuple[dict[str, Any] | None, bool, str]:
     return obj, strict, ""
 
 
+def parse_seed(value: Any) -> int | None:
+    """A ``run_sim`` seed: absent or null is 0, else a whole number in :data:`SEEDS_V2`; anything else is None.
+
+    Unlike ``rjenv2``'s ``int(seed or 0)``, a bool, text, a fraction or a non-finite number is refused, not
+    truncated or raised on (``int(1e309)`` is an ``OverflowError``). Membership is tested before any
+    conversion, so nothing outside :data:`SEEDS_V2` is ever converted; a bool is refused explicitly
+    because ``True == 1``."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return None
+    return int(value) if value in SEEDS_V2 else None
+
+
 def parse_action_v2(raw: str, resolve: Callable[[Any], str | None]) -> Action:
     """A v2 reply -> :class:`Action`, with ``rjenv2.Episode.act``'s kernel and seed rules.
 
@@ -1158,11 +1172,8 @@ def parse_action_v2(raw: str, resolve: Callable[[Any], str | None]) -> Action:
         return Action("malformed", error=f"unknown kernel {kernel!r}; list_kernels names this workload's kernels",
                       **common)
     if tool == "run_sim":
-        try:
-            seed = int(obj.get("seed", 0) or 0)
-        except (TypeError, ValueError):
-            return Action("malformed", error=f"seed must be one of {list(SEEDS_V2)}", **common)
-        if seed not in SEEDS_V2:
+        seed = parse_seed(obj.get("seed"))
+        if seed is None:
             return Action("malformed", error=f"seed must be one of {list(SEEDS_V2)}", **common)
         return Action("tool", tool=tool, kernel=kid, seed=seed, **common)
     if tool in ("run_native", "consan"):
