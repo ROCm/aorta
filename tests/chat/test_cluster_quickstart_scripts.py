@@ -221,8 +221,14 @@ def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() ->
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires bash launcher execution")
+@pytest.mark.parametrize(
+    "sbatch_output",
+    ("12345", "12345;meta"),
+    ids=("job-id", "job-id-with-cluster"),
+)
 def test_submitted_job_is_cancelled_until_pending_state_is_durable(
     tmp_path: Path,
+    sbatch_output: str,
 ) -> None:
     runtime = tmp_path / "runtime"
     fake_bin = tmp_path / "bin"
@@ -238,7 +244,10 @@ exec bash -c "$last"
 """,
         encoding="utf-8",
     )
-    (fake_bin / "sbatch").write_text("#!/bin/sh\nprintf '12345\\n'\n", encoding="utf-8")
+    (fake_bin / "sbatch").write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{sbatch_output}'\n",
+        encoding="utf-8",
+    )
     (fake_bin / "mv").write_text("#!/bin/sh\nexit 73\n", encoding="utf-8")
     (fake_bin / "scancel").write_text(
         '#!/bin/sh\nprintf "%s\\n" "$1" >>"$SCANCEL_LOG"\n',
