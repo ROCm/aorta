@@ -260,18 +260,11 @@ Submit through the login node that can reach the Slurm controller:
 
 ```bash
 
-QWEN_JOB_REF="$(
+QWEN_JOB_ID="$(
   ssh -o BatchMode=yes ruby-slurmlogin01.rckg.g03.cpe.ice.amd.com \
     "sbatch --parsable /apps/avsharma/aorta-chat-runtime/qwen38-vllm.sbatch"
 )"
-QWEN_JOB_ID="${QWEN_JOB_REF%%;*}"
-
-case "${QWEN_JOB_ID}" in
-  *[!0-9]*|"")
-    echo "sbatch returned an invalid job ID: ${QWEN_JOB_REF}" >&2
-    exit 1
-    ;;
-esac
+QWEN_JOB_ID="${QWEN_JOB_ID%%;*}"
 
 echo "Submitted vLLM job ${QWEN_JOB_ID}"
 ```
