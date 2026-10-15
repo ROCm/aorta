@@ -208,12 +208,15 @@ def wait_for_job(
     # in under a second. Keeping Slurm's five-second accounting interval here
     # would add five seconds to every workstation diagnosis.
     poll_interval = min(interval, 0.2) if selected == "local" else interval
+    last_logged_state: str | None = None
     while time.time() < deadline:
         state = scheduler_state(job_id, job_dir, selected)
         if state in TERMINAL_STATES:
             log.info(f"{subject} {job_id} reached {state}")
             return state
-        log.info(f"{subject} {job_id} state={state} ...")
+        if state != last_logged_state:
+            log.info(f"{subject} {job_id} state={state} ...")
+            last_logged_state = state
         # This is where the wait actually spends its time: up to fifteen
         # minutes of five-second sleeps, and the caller may have given up
         # during any one of them.
