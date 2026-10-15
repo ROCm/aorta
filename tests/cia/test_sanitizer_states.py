@@ -117,7 +117,14 @@ class TestAStateThatIsRan:
 
 
 class TestTheReportsCommittedToThisRepo:
-    """The committed survey fixtures are the cases this finding was about."""
+    """The committed survey fixtures are the cases this finding was about.
+
+    Both committed GEMM reports are non-clean (ConSan ``error``, waitcheck
+    ``warn``). The clean polarity lives on the synthetic fixture in
+    ``TestAStateThatIsRan.test_a_genuine_pass_is_still_clean``; the ``pass``
+    survey fixtures that used to demonstrate it here were the synthetic
+    controls removed from this directory.
+    """
 
     def test_the_errored_gemm_survey_report_is_not_clean(self, tmp_path):
         source = SURVEY / "gemm_f32_consan" / "sanitizer_report.json"

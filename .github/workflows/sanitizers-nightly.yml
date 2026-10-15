@@ -603,6 +603,10 @@ jobs:
             # leave a stale suppression behind, and it fails if a listed case has no
             # report at all. Both remaining Tab 2 rows are the known-vacuous GEMM
             # pair; synthetic tiny_vecadd and lds_reduce controls are not published.
+            # Every row this sweep sees is on that list, so --vacuous-only cannot
+            # fail this lane for a run that produced no signal. What remains is
+            # --require (the report must exist) and the self-retiring property
+            # above.
             echo "[$(date +%T)] survey: rejecting vacuous outcomes …"
             REQUIRE=""
             for c in ${CONSAN_CASES} ${WAITCHECK_CASES}; do

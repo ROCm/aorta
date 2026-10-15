@@ -141,7 +141,7 @@ def test_both_sanitizers_are_represented():
     assert "consan (dynamic)" in backends
 
 
-def test_gemm_and_control_verdicts_match_recorded_reports():
+def test_gemm_verdicts_match_recorded_reports():
     by_name = {e["name"]: e["summary"] for e in _survey_entries()}
     # generic hipBLASLt GEMM: waitcheck observes warn w/ many hazards; consan errors
     assert by_name["hipblaslt-gemm-f32-nt-128x128-waitcheck"]["verdict"] == "warn"
@@ -163,7 +163,7 @@ def test_committed_spec_groups_into_one_kernel_with_both_sanitizers():
     assert [key for key, _ in groups] == ["gemm-f32-nt-128x128"]
     assert all(len(members) == 2 for _key, members in groups)
     stats = gen._survey_summary_stats(groups)
-    assert stats.get("kernels") == 1 and stats.get("runs") == 2
+    assert stats["kernels"] == 1 and stats["runs"] == 2
     # each group exposes both sanitizer columns (no em-dash cell in the roll-up)
     for _key, members in groups:
         by_san = gen._survey_group_by_sanitizer(members)

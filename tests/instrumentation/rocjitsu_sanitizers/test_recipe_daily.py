@@ -824,6 +824,11 @@ def test_daily_expected_error_names_the_declaration_the_nightly_reads() -> None:
     load-only recipe can load. The survey job does not run it: tiny_vecadd is
     a synthetic control and is not a Tab 2 row. Putting the invocation back
     without updating this test is the regression.
+
+    ``declared == {"daily-consan-tiny.yaml": "consan_tiny"}`` is load-bearing.
+    The loop skips the output-dir key check for any expected_error recipe the
+    nightly does not invoke, so a second such recipe is caught only by that
+    equality. Loosening it to a subset check would let the new recipe through.
     """
     comparator = _load_comparator()
     baselines = comparator._load_baselines(_REPO / comparator._BASELINES)

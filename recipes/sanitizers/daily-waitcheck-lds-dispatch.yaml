@@ -3,10 +3,9 @@ mode: sanitizer
 ticket: DAILY-WAITCHECK-LDS-DISPATCH
 description: >
   Observed-only (non-gating) gfx950 waitcheck static s_waitcnt wait-count hazard
-  scan over the same small LDS reduction code object the ConSan survey case
-  dispatches. Paired with daily-consan-lds-dispatch so the dashboard Workload
-  survey (Tab 2) shows both sanitizers for the one kernel; it does NOT gate the
-  nightly.
+  scan over a small LDS reduction code object. It is a local control, not a
+  Workload survey (Tab 2) row: synthetic controls are not published there, and
+  it does NOT gate the nightly.
 sanitizer_plan:
   target: gfx950
   source:
