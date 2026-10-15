@@ -76,7 +76,8 @@ user message, as ``rjenv2.Episode.observe`` states them.
 
 Rewards: ``v1`` (:data:`POINTS`, the prototype's) and ``v2`` (:data:`POINTS_V2`,
 pre-registered in ``docs/rl-rocjitsu-reward-v2.md``), chosen per corpus load (``reward=``,
-else ``$AORTA_RJ_REWARD``, else ``v1``) so every earlier result reproduces.
+else ``$AORTA_RJ_REWARD``, else ``v1``) so every earlier result reproduces. A v1-layout
+corpus takes ``v1`` only, the reward its system prompt states.
 """
 
 from __future__ import annotations
@@ -200,6 +201,18 @@ def resolve_reward(reward: str | None = None) -> str:
     if value not in REWARD_VERSIONS:
         raise SystemExit(f"reward must be one of {list(REWARD_VERSIONS)}, got {value!r}")
     return value
+
+
+def check_layout_reward(layout: str, reward: str) -> None:
+    """Refuse a reward the corpus layout's system prompt cannot state.
+
+    The v1-layout prompt prints v1's points and no kernel rule, so a v1 corpus
+    scored under v2 would be trained and evaluated against a reward other than
+    the one shown to the policy.
+    """
+    if layout == "v1" and reward != "v1":
+        raise SystemExit(f"reward {reward!r} is not supported on a v1-layout corpus: its system prompt states "
+                         f"reward v1 only (pass reward='v1', or unset ${REWARD_ENV})")
 
 
 def reward_points(reward: str) -> dict[str, float]:
@@ -376,6 +389,7 @@ class Scenario:
 
 
 def scenario_from_corpus(corpus: Corpus, scenario_id: str, reward: str = "v1") -> Scenario:
+    check_layout_reward("v1", reward)
     digest = hashlib.sha256(f"{corpus.digest}/{scenario_id}".encode()).hexdigest()
     if scenario_id.startswith("CLEAN:"):
         return Scenario(scenario_id, "", "none", (), (), None, corpus, digest, reward=reward)
@@ -565,6 +579,7 @@ def load_corpus(
     reward = resolve_reward(reward)
     if corpus_layout(base) == "v2":
         return load_corpus_v2(base, only, split, reward)
+    check_layout_reward("v1", reward)
     spec = read_split(base)
     if split is None:
         ids = list(spec["train"]) + list(spec["test"])
@@ -591,6 +606,8 @@ def describe(scenario: Scenario) -> str:
 def with_reward(scenarios: Sequence[Scenario], reward: str) -> list[Scenario]:
     """The same scenarios scored under another reward version."""
     reward = resolve_reward(reward)
+    for layout in {s.layout for s in scenarios}:
+        check_layout_reward(layout, reward)
     return [replace(s, reward=reward) for s in scenarios]
 
 
@@ -858,6 +875,7 @@ def render_result(tool: str, kernel: str, result: Any) -> str:
                              f"{hexoff(m['producer_offset'])} (x{m['count']})")
             if r["n_races"] > len(r["races"]) or r["n_memory_wait"] > len(r["memory_wait"]):
                 lines.append("    (further reports not shown)")
+        # Known limitation, kept as in render_result_v2: a quiet FAIL/CRASH kernel reads "no findings".
         if quiet and kernel == "all":
             lines.append(f"  no findings, simulated output PASS: {', '.join(quiet)}"
                          if all(r["status"] == "PASS" for r in result if r["kernel"] in quiet)
@@ -959,6 +977,7 @@ def render_result_v2(tool: str, kernel: str, result: Any, seed: int = 0) -> str:
                 lines.append(f"    ({r['n_races'] - len(r['races'])} further race report(s) not shown)")
             if len(r["memory_wait"]) >= 8:
                 lines.append("    (at most 8 memory-wait warnings are shown)")
+        # Known limitation, kept: the released model was trained on this text (a quiet FAIL reads "no findings").
         if quiet and kernel == "all":
             lines.append(f"  no findings, simulated output PASS: {', '.join(quiet)}"
                          if all(r["status"] == "PASS" for r in result if r["kernel"] in quiet)

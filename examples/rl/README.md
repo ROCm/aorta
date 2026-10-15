@@ -542,6 +542,8 @@ per directory:
 - **v1** (one workload): `sites.json`, `results.jsonl` (one record per mutant
   plus a `BASELINE:<kernel>` record per kernel), the workload's disassembly,
   `analysis.json`, and the `split.json` that `prepare_rocjitsu_corpus.py` writes.
+  Scored under reward v1 only: its system prompt states v1's points, so loading
+  it with reward v2 is refused.
 - **v2** (many workloads): `scenarios.jsonl` (one record per scenario: workload,
   kernel id, operator, class, accepted offsets, the byte edit, and every tool's
   recorded result), `kernels.json`, `workloads.json`, `listings/<kernel id>.json`
@@ -554,3 +556,13 @@ reference implementations the corpora were recorded with, and run only when
 pointed at them: `AORTA_RJ_TEST_PROTOTYPE` (a v1 campaign directory) and
 `AORTA_RJ_TEST_CORPUS_V2` (a corpus-v2 build directory with `archive/` and
 `scripts/rjenv2.py`).
+
+### Known limitations
+
+- **`run_sim all` folds quiet kernels into one line.** A kernel with no race or
+  memory-wait report is listed as "no findings" even when its simulated output
+  check is `FAIL` or `CRASH`; the line says "simulated output PASS" only when
+  every folded kernel passed, but it does not say which one did not. A
+  per-kernel `run_sim` shows the status. It is kept because the released model
+  was trained on exactly this observation, and changing the text would change
+  what that model sees; it will be fixed in the next environment version.

@@ -724,6 +724,31 @@ def test_a_rerun_into_the_same_out_replaces_its_links_and_writes_the_same_split(
         n: (src / n).resolve() for n in ("sites.json", "results.jsonl", "suite.dis", "analysis.json")}
 
 
+def test_a_v1_corpus_refuses_reward_v2_however_it_is_asked_for(corpus, monkeypatch):
+    with pytest.raises(SystemExit, match="not supported on a v1-layout corpus"):
+        rj.load_corpus(corpus, split=None, reward="v2")
+    monkeypatch.setenv(rj.REWARD_ENV, "v2")
+    with pytest.raises(SystemExit, match="not supported on a v1-layout corpus"):
+        rj.load_corpus(corpus, split=None)
+    v1 = rj.load_corpus(corpus, split=None, reward="v1")
+    with pytest.raises(SystemExit, match="not supported on a v1-layout corpus"):
+        rj.with_reward(v1, "v2")
+    with pytest.raises(SystemExit, match="not supported on a v1-layout corpus"):
+        rj.scenario_from_corpus(v1[0].corpus, v1[0].scenario_id, "v2")
+    spec = json.loads((corpus / "split.json").read_text())
+    (corpus / "split.json").write_text(json.dumps({**spec, "test": []}))
+    with pytest.raises(SystemExit, match="not supported on a v1-layout corpus"):
+        rj.load_corpus(corpus, split="test", reward="v2")
+
+
+def test_a_v1_corpus_under_reward_v1_loads_as_before(corpus):
+    default = rj.load_corpus(corpus, split=None)
+    assert default and {s.reward for s in default} == {"v1"}
+    assert [s.digest for s in rj.load_corpus(corpus, split=None, reward="v1")] == [s.digest for s in default]
+    assert rj.with_reward(default, "v1") == default
+    assert rj.system_for(default) == rj.system_prompt(tuple(default[0].corpus.kernels))
+
+
 def test_the_system_prompt_lists_the_corpus_kernels(corpus):
     text = rj.system_for(rj.load_corpus(corpus, split="train"))
     assert "2 HIP kernels: k_a, k_b" in text

@@ -127,6 +127,14 @@ def test_run_native_is_unchanged_where_the_not_run_marker_is_absent(tmp_path):
     assert [(e.name, e.points) for e in ran.events] == [("cost_run_native", -0.5)]
 
 
+def test_a_v2_corpus_still_takes_either_reward(tmp_path):
+    root = _toy_corpus(tmp_path)
+    v2 = rj.load_corpus(root, split="test", reward="v2")
+    assert {s.reward for s in v2} == {"v2"} and rj.system_for(v2) == rj.system_prompt_v2("v2")
+    v1 = rj.load_corpus(root, split="test", reward="v1")
+    assert rj.with_reward(v1, "v2") == v2 and rj.with_reward(v2, "v1") == v1
+
+
 def test_the_reward_version_is_chosen_by_argument_then_environment_then_v1(monkeypatch):
     monkeypatch.delenv(rj.REWARD_ENV, raising=False)
     assert rj.resolve_reward(None) == "v1"
