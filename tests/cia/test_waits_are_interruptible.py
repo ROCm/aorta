@@ -15,9 +15,9 @@ up to the process hanging around.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -78,6 +78,35 @@ class TestWaitingForSlurm:
         triage_mod.wait_for_job("1", timeout=900, interval=30, stop=stop)
 
         assert time.monotonic() - started < 5
+
+
+class TestWaitProgressLogging:
+    def test_local_poll_stays_fast_without_repeating_the_same_state(self, monkeypatch, caplog):
+        states = iter(("RUNNING", "RUNNING", "RUNNING", "COMPLETED"))
+        intervals: list[float] = []
+        monkeypatch.setattr(
+            triage_mod,
+            "scheduler_state",
+            lambda *_args, **_kwargs: next(states),
+        )
+        monkeypatch.setattr(
+            triage_mod,
+            "pause",
+            lambda _stop, interval: intervals.append(interval) or False,
+        )
+
+        with caplog.at_level(logging.INFO, logger=triage_mod.log.name):
+            state = triage_mod.wait_for_job(
+                "local:123:456",
+                timeout=900,
+                backend="local",
+            )
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert state == "COMPLETED"
+        assert intervals == [0.2, 0.2, 0.2]
+        assert messages.count("local process local:123:456 state=RUNNING ...") == 1
+        assert messages[-1] == "local process local:123:456 reached COMPLETED"
 
 
 class TestTheWatchLoop:
