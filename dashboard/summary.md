@@ -1,8 +1,8 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `38734461239` (2026-10-15 12:34:27 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/38734461239)
+> ⚠️ **Stale** — latest sanitizer nightly run `38900327093` (2026-10-16 12:34:32 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/38900327093)
 
-Run `2026-10-15T123427-38734461239` · commit `bf117600ca07` · 2026-10-15 12:34:27 UTC
+Run `2026-10-16T123432-38900327093` · commit `bf117600ca07` · 2026-10-16 12:34:32 UTC
 
 ❌ **REGRESSION** — investigate 2/3 sanitizer outcomes that do not match their baselines
 
@@ -96,7 +96,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatc
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `e24c3d6d05` | combined_hook_exit_1 |
+| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `3878166953` | combined_hook_exit_1 |
 
 </details>
 
@@ -110,7 +110,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `06e18d4dee` | combined_hook_exit_1 |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `343e68a980` | combined_hook_exit_1 |
 
 </details>
 
@@ -136,7 +136,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `e24c3d6d05` | — |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `3878166953` | — |
 
 </details>
 
@@ -148,7 +148,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `06e18d4dee` | — |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `343e68a980` | — |
 
 </details>
 
@@ -156,6 +156,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-10-16T123432-38900327093 | `bf117600ca07` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-10-15T123427-38734461239 | `bf117600ca07` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-10-14T195118-38563696959 | `bf117600ca07` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-10-14T194155-38397494175 | `bf117600ca07` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | Incomplete |
@@ -185,4 +186,3 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 | 2026-09-19T141910-35442659743 | `684b4600dbb5` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-09-18T142430-35344430257 | `684b4600dbb5` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-09-17T162056-35237696462 | `d2fa5f1645c2` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
-| 2026-09-17T132440-35221004771 | `73409f79a56a` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
