@@ -2407,6 +2407,98 @@ def test_the_perf_gate_entry_flag_is_passed_only_when_a_name_was_given():
     )
 
 
+def _input_references(run: str) -> list[str]:
+    """The `${{ }}` expressions in a shell body that read the `inputs` context.
+
+    Covers the spellings a workflow author would plausibly write -- dot,
+    bracket, object filter, a function over the whole context,
+    `github.event.inputs` -- not deliberate obfuscation: whoever can write that
+    can also delete this test.
+    """
+    found = []
+    start = run.find("${{")
+    while start != -1:
+        end, quoted = start + 3, False
+        while end < len(run) and (quoted or not run.startswith("}}", end)):
+            if run[end] == "'":
+                quoted = not quoted
+            end += 1
+        expression = run[start : end + 2]
+        body = re.sub(r"\[\s*'([^']*)'\s*\]", r".\1", expression[3:-2])
+        body = re.sub(r"'[^']*'", "''", body)
+        if re.search(
+            r"(?<![\w.-])inputs\b|\bgithub\s*\.\s*event\s*\.\s*inputs\b",
+            body,
+            re.IGNORECASE,
+        ):
+            found.append(expression)
+        start = run.find("${{", end + 2)
+    return found
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        "echo ${{ inputs.channels }}",
+        "echo ${{ github.event.inputs.channels }}",
+        "echo ${{ inputs['channels'] }}",
+        "echo ${{ github.event.inputs['channels'] }}",
+        "echo ${{ github['event']['inputs']['channels'] }}",
+        "echo ${{ inputs.top-k }}",
+        "echo ${{ inputs[ 'top-k' ] }}",
+        "echo '${{ toJSON(inputs) }}'",
+        "echo ${{ join(inputs.*, ' ') }}",
+        "echo ${{ format('{0}', inputs.channels) }}",
+        "echo ${{ format('{{0}}', inputs.channels) }}",
+        "echo ${{\n  inputs.channels\n}}",
+        "# was: ${{ inputs.channels }}",
+        "echo ${{ INPUTS.channels }}",
+    ],
+    ids=[
+        "dot",
+        "event-dot",
+        "bracket",
+        "event-bracket",
+        "all-bracket",
+        "hyphen",
+        "hyphen-bracket-spaced",
+        "to-json",
+        "object-filter",
+        "brace-in-format",
+        "escaped-braces-in-format",
+        "multi-line",
+        "shell-comment",
+        "case",
+    ],
+)
+def test_every_spelling_of_an_input_reference_is_caught(run):
+    """Each of these is substituted before bash runs, so each is injectable."""
+    assert _input_references(run), run
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        'echo "$SWEEP_CHANNELS"',
+        "echo ${{ env.CONTAINER_NAME }} ${{ steps.setup.outputs.sweep_dir }}",
+        "echo ${{ matrix.python-version }}",
+        "echo ${{ steps.inputs.outputs.path }}",
+        "echo ${{ contains(github.event_name, 'inputs') }}",
+        "echo ${{ github.event.pull_request.number }}",
+    ],
+    ids=[
+        "shell-variable",
+        "env-and-step-output",
+        "matrix",
+        "step-named-inputs",
+        "the-word-in-a-string",
+        "other-event-field",
+    ],
+)
+def test_other_contexts_are_not_input_references(run):
+    assert _input_references(run) == [], run
+
+
 def test_the_scoped_refresh_reaches_the_container_as_environment():
     """`perf_gate_entry` is free text from a dispatch form, and `${{ }}`
     substitution happens before bash sees the script -- so interpolating it into
@@ -2419,8 +2511,7 @@ def test_the_scoped_refresh_reaches_the_container_as_environment():
     for name, doc in _all_workflow_docs().items():
         for job_name, job in (doc.get("jobs") or {}).items():
             for step in job.get("steps") or []:
-                run = step.get("run") or ""
-                leaked = re.findall(r"\$\{\{[^}]*\binputs\.[A-Za-z0-9_]+[^}]*\}\}", run)
+                leaked = _input_references(step.get("run") or "")
                 assert not leaked, (
                     f"{name}:{job_name} step {step.get('name')!r} interpolates "
                     f"{leaked} into a shell body; pass it through `env:` instead"
