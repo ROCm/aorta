@@ -365,6 +365,11 @@ startup banner, so it stands on its own wherever it is read — including in a
 server log where the startup line has scrolled away. And `aorta chat doctor`'s
 tool-mode line carries a hint naming the configured protocol and what it costs.
 
+For local vLLM in `native` mode, doctor also adds an `llm native tools`
+check that sends a forced function call and validates its returned name and
+arguments. Remote providers remain configuration-only so a diagnostic does
+not spend a billable request.
+
 `aorta chat ui` names it too, on each session's welcome banner and in the same
 `LLM backend: ... (tool protocol: ...)` line in the server log
 ([#468](https://github.com/ROCm/aorta/issues/468)). Both are written when a
@@ -419,12 +424,11 @@ is the model's rather than the endpoint's. A deployment can be served under any
 name, so for a name the check does not recognise — or a provider with no model
 name to read — it still names `native`, and what turning it on costs here, in
 the hint under the line it prints. Under `native` the same line names what the
-endpoint has to accept, because nothing in that report tests it: no probe sends
-a request carrying `tools`. A local vLLM is asked for `/health`, which a server
-that rejects `tools` answers normally, and the remote backends are not called
-at all — their `probe()` is a configuration preflight, deliberately, so that a
-diagnostic cannot bill you for a round trip. The startup line names the
-resolved protocol alongside the provider.
+endpoint has to accept. A local vLLM first answers `/health`, then must pass the
+`llm native tools` request; the remote backends are not called at all — their
+`probe()` is a configuration preflight, deliberately, so that a diagnostic
+cannot bill you for a round trip. The startup line names the resolved protocol
+alongside the provider.
 
 A query still ends with no answer when that one call also fails or returns
 empty content — rarer than it sounds, since the reporter's transcript shows the
