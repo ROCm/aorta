@@ -163,13 +163,13 @@ def test_committed_spec_groups_into_one_kernel_with_both_sanitizers():
     assert [key for key, _ in groups] == ["gemm-f32-nt-128x128"]
     assert all(len(members) == 2 for _key, members in groups)
     stats = gen._survey_summary_stats(groups)
-    assert stats["kernels"] == 1 and stats["runs"] == 2
+    assert (stats["workloads"], stats["kernels"], stats["runs"]) == (1, 1, 2)
     # each group exposes both sanitizer columns (no em-dash cell in the roll-up)
     for _key, members in groups:
         by_san = gen._survey_group_by_sanitizer(members)
         assert set(by_san) == {"waitcheck", "consan"}
     table = gen._survey_summary_table_html(groups)
-    assert "Surveyed <b>1 kernel</b> across <b>2 sanitizer runs</b>" in table
+    assert "Surveyed <b>1 workload</b> (<b>1 kernel</b>) across <b>2 sanitizer runs</b>" in table
     assert "&mdash;" not in table  # every cell has a real verdict badge
 
 

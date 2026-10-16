@@ -4087,27 +4087,78 @@ def _survey_present_runs(entries: list[dict[str, Any]]) -> int:
     return sum(1 for entry in entries if (entry.get("summary") or {}).get("present"))
 
 
+def _positive_kernel_count(raw: object) -> int:
+    """A declared ``kernel_count`` that is safe to add, else 0.
+
+    ``summarize_case`` forwards the field from untrusted ``--survey`` JSON without
+    coercing it. Only a positive ``int`` is a count. ``bool`` is an ``int``
+    subclass and is not one; a string, list, or object must not abort the render.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return 0
+    return raw
+
+
+def _survey_group_kernels(entries: list[dict[str, Any]]) -> int:
+    """Distinct kernels a group's present reports selected (pure).
+
+    A symbol compiled into two code objects is two kernels: multiplicity inside
+    one report is kept. Names are then matched across the group's sanitizers, and
+    each name contributes the larger of the two counts, so a kernel that both
+    waitcheck and ConSan checked counts once. A report that lists no kernels
+    contributes its declared ``kernel_count`` instead, when that field is a
+    positive int.
+    """
+    multiplicity: dict[str, int] = {}
+    declared = 0
+    for entry in entries:
+        row = entry.get("summary") or {}
+        if not row.get("present"):
+            continue
+        listed: dict[str, int] = {}
+        for kernel in row.get("kernels") or []:
+            if not isinstance(kernel, dict):
+                continue
+            name = kernel.get("name")
+            if not name:
+                continue
+            key = str(name)
+            listed[key] = listed.get(key, 0) + 1
+        if listed:
+            for name, count in listed.items():
+                multiplicity[name] = max(multiplicity.get(name, 0), count)
+        else:
+            declared = max(
+                declared,
+                _positive_kernel_count((row.get("worklist") or {}).get("kernel_count")),
+            )
+    return max(sum(multiplicity.values()), declared)
+
+
 def _survey_summary_stats(
     groups: list[tuple[str, list[dict[str, Any]]]],
 ) -> dict[str, Any]:
     """Aggregate grouped survey entries into observed-only roll-up counts (pure).
 
-    Returns ``{"kernels": K, "runs": M, "verdicts": {bucket: n}}`` where ``kernels``
-    is the number of kernel groups, ``runs`` is the number of sanitizer runs that
-    actually produced a report (absent sanitizer cells are not runs), and
-    ``verdicts`` sums exactly to ``runs``. These are observations of what the
-    sanitizers saw -- they never gate and carry no regression semantics.
+    Returns ``{"workloads": W, "kernels": K, "runs": M, "verdicts": {bucket: n}}``
+    where ``workloads`` is the number of groups, ``kernels`` sums each group's
+    distinct kernels (a model workload holds dozens), ``runs`` is the number of
+    sanitizer runs that actually produced a report (absent sanitizer cells are not
+    runs), and ``verdicts`` sums exactly to ``runs``. These are observations of
+    what the sanitizers saw -- they never gate and carry no regression semantics.
     """
     verdicts = dict.fromkeys(_SURVEY_VERDICT_BUCKETS, 0)
     runs = 0
+    kernels = 0
     for _key, entries in groups:
         runs += _survey_present_runs(entries)
+        kernels += _survey_group_kernels(entries)
         for entry in entries:
             row = entry.get("summary") or {}
             if not row.get("present"):
                 continue
             verdicts[_survey_verdict_bucket(row)] += 1
-    return {"kernels": len(groups), "runs": runs, "verdicts": verdicts}
+    return {"workloads": len(groups), "kernels": kernels, "runs": runs, "verdicts": verdicts}
 
 
 def _survey_headline(stats: dict[str, Any]) -> str:
@@ -4119,10 +4170,12 @@ def _survey_headline(stats: dict[str, Any]) -> str:
     verdicts = stats.get("verdicts", {})
     parts = [f"{n} {bucket}" for bucket in _SURVEY_VERDICT_BUCKETS if (n := verdicts.get(bucket, 0))]
     breakdown = " \u00b7 ".join(parts) if parts else "no sanitizer runs"
+    workloads = int(stats.get("workloads", 0))
     kernels = int(stats.get("kernels", 0))
     runs = int(stats.get("runs", 0))
     return (
-        f"Surveyed {kernels} kernel{'' if kernels == 1 else 's'} across "
+        f"Surveyed {workloads} workload{'' if workloads == 1 else 's'} "
+        f"({kernels} kernel{'' if kernels == 1 else 's'}) across "
         f"{runs} sanitizer run{'' if runs == 1 else 's'} \u2014 {breakdown}"
     )
 
@@ -4134,11 +4187,13 @@ def _survey_headline_html(stats: dict[str, Any]) -> str:
     badges reuse the shared verdict colours so the strip matches the table.
     """
     verdicts = stats.get("verdicts", {})
+    workloads = int(stats.get("workloads", 0))
     kernels = int(stats.get("kernels", 0))
     runs = int(stats.get("runs", 0))
     lead = (
-        f'<span class="lead">Surveyed <b>{kernels} kernel'
-        f"{'' if kernels == 1 else 's'}</b> across <b>{runs} sanitizer run"
+        f'<span class="lead">Surveyed <b>{workloads} workload'
+        f"{'' if workloads == 1 else 's'}</b> (<b>{kernels} kernel"
+        f"{'' if kernels == 1 else 's'}</b>) across <b>{runs} sanitizer run"
         f"{'' if runs == 1 else 's'}</b></span>"
     )
     badges = "".join(
@@ -4206,12 +4261,13 @@ def _survey_summary_cell_html(entry: dict[str, Any] | None) -> str:
 def _survey_summary_table_html(
     groups: list[tuple[str, list[dict[str, Any]]]],
 ) -> str:
-    """The Tab 2 roll-up: a headline stat + one row per kernel (pure).
+    """The Tab 2 roll-up: a headline stat + one row per workload (pure).
 
-    Columns: Kernel | waitcheck | ConSan | Findings | Note. Verdict cells reuse the
-    tinted ``_verdict_html`` badges; a sanitizer not run for a kernel shows
-    an em dash rather than a fabricated verdict. Observed-only: nothing here gates.
-    Empty groups render nothing (the caller shows the empty-state note).
+    Columns: Workload | Kernels | waitcheck | ConSan | Findings | Note. Verdict
+    cells reuse the tinted ``_verdict_html`` badges; a sanitizer not run for a
+    workload shows an em dash rather than a fabricated verdict. Observed-only:
+    nothing here gates. Empty groups render nothing (the caller shows the
+    empty-state note).
     """
     if not groups:
         return ""
@@ -4223,6 +4279,7 @@ def _survey_summary_table_html(
         note_html = f"<td class=mono>{_esc(note)}</td>" if note else '<td class="dash">&mdash;</td>'
         rows.append(
             f"<tr><td class=mono>{_esc(_survey_group_label(key, entries))}</td>"
+            f"<td class=num>{_survey_group_kernels(entries)}</td>"
             f"<td>{_survey_summary_cell_html(by_san.get('waitcheck'))}</td>"
             f"<td>{_survey_summary_cell_html(by_san.get('consan'))}</td>"
             f"<td class=num>{_survey_group_findings(entries)}</td>"
@@ -4232,7 +4289,7 @@ def _survey_summary_table_html(
         '<section class="panel survey-summary"><h2>Survey summary</h2>'
         f'<div class="statline">{_survey_headline_html(stats)}</div>'
         '<div class="table-wrap"><table><thead>'
-        "<tr><th>Kernel</th><th>WaitCheck</th><th>ConSan</th>"
+        "<tr><th>Workload</th><th class=num>Kernels</th><th>WaitCheck</th><th>ConSan</th>"
         "<th class=num>Findings</th><th>Note</th></tr></thead>"
         f'<tbody>{"".join(rows)}</tbody></table></div></section>'
     )
@@ -4630,7 +4687,7 @@ def _survey_message_md(row: dict[str, Any]) -> str:
 
 
 def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[str]:
-    """Markdown mirror of the Tab 2 roll-up: headline stat + one row per kernel."""
+    """Markdown mirror of the Tab 2 roll-up: headline stat + one row per workload."""
     if not groups:
         return []
     stats = _survey_summary_stats(groups)
@@ -4644,8 +4701,8 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
     lines = [
         _survey_headline(stats),
         "",
-        "| Kernel | waitcheck | ConSan | Findings | Note |",
-        "|---|---|---|--:|---|",
+        "| Workload | Kernels | waitcheck | ConSan | Findings | Note |",
+        "|---|--:|---|---|--:|---|",
     ]
     for key, entries in groups:
         by_san = _survey_group_by_sanitizer(entries)
@@ -4655,7 +4712,8 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
         # after it. The HTML twin renders inside a ``<td>`` and needs neither.
         note = _clean_msg(_survey_group_note(entries), _MSG_LIMIT).replace("|", "\\|")
         lines.append(
-            f"| {_survey_group_label(key, entries)} | {cell(by_san.get('waitcheck'))} "
+            f"| {_survey_group_label(key, entries)} | {_survey_group_kernels(entries)} "
+            f"| {cell(by_san.get('waitcheck'))} "
             f"| {cell(by_san.get('consan'))} | {_survey_group_findings(entries)} "
             f"| {note or _DASH} |"
         )
