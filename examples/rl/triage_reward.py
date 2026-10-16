@@ -17,13 +17,14 @@ Two label sources
 ConSan runs. Both answer the same question -- what happened, and what evidence
 says so -- and ``--runs`` collects both from one tree.
 
-The sanitizer source is the one that works on real data today: the six reports
-under ``recipes/sanitizers/survey/reports/`` are the only archived labelled
-failure evidence in the repository, and ``--runs recipes/sanitizers/survey``
-scores them. The probe source has no corpus yet; what is missing there is *only*
-the corpus, since the labelling, scoring and degenerate-policy check are tested
-against synthetic ``result.json`` fixtures shaped like what
-``SubprocessWorkload`` writes.
+The sanitizer source is the one that works on real data today: the two reports
+under ``recipes/sanitizers/survey/reports/`` (a ``warn`` waitcheck GEMM and an
+``error`` ConSan GEMM) are the only archived labelled failure evidence in the
+repository, and ``--runs recipes/sanitizers/survey`` scores them. That set has
+no committed ``pass`` row and only one workload family. The probe source has no
+corpus yet; what is missing there is *only* the corpus, since the labelling,
+scoring and degenerate-policy check are tested against synthetic
+``result.json`` fixtures shaped like what ``SubprocessWorkload`` writes.
 
 Labels are recomputed, not read
 -------------------------------

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Emit the workload-survey ``--survey`` spec for the sanitizer dashboard (Tab 2).
 
-The survey tab (``gen_sanitizer_dashboard.py --survey``) renders observed-only
-kernels drawn from multiple workloads with *no* baseline/expected comparison: a
+The survey tab (``gen_sanitizer_dashboard.py --survey``) renders the observed-only
+hipBLASLt GEMM lane with *no* baseline/expected comparison: a
 ``warn``/``error``/``not_checked`` here is an observation, never a regression.
 
 This generator is a thin, deterministic adapter: it enumerates the committed,
@@ -13,8 +13,8 @@ recorded outputs; this only maps them into spec cases. Re-running reproduces the
 committed spec byte-for-byte (see ``tests/sanitizers/test_survey_generic_gemm.py``).
 
 Public-safe policy (CLAUDE.md rule #4): every case is generically named. The
-GEMM lane scans the *generic public* hipBLASLt gfx950 Tensile object; the
-synthetic ``tiny_vecadd`` / ``lds_reduce`` controls are ordinary repros. No
+GEMM lane scans the *generic public* hipBLASLt gfx950 Tensile object. Synthetic
+``tiny_vecadd`` / ``lds_reduce`` controls are not part of this spec. No
 customer, NDA, or ticket identifiers appear here or in the fixtures. The scrub
 guard that enforces this (a forbidden-token denylist over the committed spec,
 fixtures, and rendered output) lives in
@@ -35,12 +35,12 @@ from pathlib import Path
 
 # Ordered survey cases:
 # (report case dir, stable name, display label, workload, backend, group, group label, sanitizer).
-# Both sanitizers (waitcheck static + ConSan dynamic) are represented for every
-# kernel, so the survey shows each kernel under each tool it was observed with. The
+# Both sanitizers (waitcheck static + ConSan dynamic) are represented for the
+# kernel, so the survey shows it under each tool it was observed with. The
 # ``group`` key pairs the two sanitizer cases of one kernel under a single kernel
 # heading (and a single summary-table row) on Tab 2; ``sanitizer`` selects the
 # summary-table column. Without them the dashboard would render each case as its own
-# standalone kernel (a "6 kernels" roll-up with an em dash in every column).
+# standalone kernel. Synthetic tiny_vecadd and lds_reduce controls are omitted.
 CASES: tuple[tuple[str, str, str, str, str, str, str, str], ...] = (
     (
         "gemm_f32_waitcheck",
@@ -60,46 +60,6 @@ CASES: tuple[tuple[str, str, str, str, str, str, str, str], ...] = (
         "consan (dynamic)",
         "gemm-f32-nt-128x128",
         "hipBLASLt GEMM f32 nt 128x128",
-        "consan",
-    ),
-    (
-        "tiny_vecadd_waitcheck",
-        "tiny-vecadd-waitcheck",
-        "tiny_vecadd \u00b7 waitcheck (static)",
-        "synthetic:vecadd",
-        "waitcheck (static)",
-        "tiny-vecadd",
-        "tiny_vecadd",
-        "waitcheck",
-    ),
-    (
-        "tiny_vecadd_consan",
-        "tiny-vecadd-consan",
-        "tiny_vecadd \u00b7 ConSan (dynamic)",
-        "synthetic:vecadd",
-        "consan (dynamic)",
-        "tiny-vecadd",
-        "tiny_vecadd",
-        "consan",
-    ),
-    (
-        "lds_reduce_waitcheck",
-        "lds-reduce-waitcheck",
-        "lds_reduce \u00b7 waitcheck (static)",
-        "synthetic:lds_reduce",
-        "waitcheck (static)",
-        "lds-reduce",
-        "lds_reduce",
-        "waitcheck",
-    ),
-    (
-        "lds_reduce_consan",
-        "lds-reduce-consan",
-        "lds_reduce \u00b7 ConSan (dynamic)",
-        "synthetic:lds_reduce",
-        "consan (dynamic)",
-        "lds-reduce",
-        "lds_reduce",
         "consan",
     ),
 )

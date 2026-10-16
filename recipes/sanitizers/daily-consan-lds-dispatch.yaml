@@ -9,10 +9,9 @@ description: >
   ROCm/rocm-systems#9972 (record capture yielded zero events -> exit 86) is fixed in
   15275dad: on bundle 97c1640b this case observes a clean pass with access=5/5,
   barrier=2/2 and dynamic_complete=true. It is now the end-to-end control proving the
-  default detector works on a caller-supplied object. Rendered on the
-  dashboard's Workload survey tab (Tab 2) as an observed-only case; it does NOT gate
-  the nightly, so a future regression here shows up as an observation, not a gate
-  failure.
+  default detector works on a caller-supplied object. It is a local control,
+  not a Workload survey (Tab 2) row: synthetic controls are not published there,
+  and it does NOT gate the nightly.
 sanitizer_plan:
   target: gfx950
   source:

@@ -67,7 +67,7 @@ CORPUS_SCHEMA = "aorta.rl_corpus/0.1"
 _CORPUS_SCHEMA_FAMILY = CORPUS_SCHEMA.rsplit("/", 1)[0] + "/"
 
 # Which workload family a case directory belongs to. Recorded on every example
-# even though there are only three families today: the detector and finding
+# even though the map only has three families: the detector and finding
 # vocabulary is workload-independent, but which failures co-occur is not, so a
 # corpus that cannot be split by family cannot be checked for balance. Adding
 # the field now is free; backfilling it onto archived artifacts is not.
@@ -81,8 +81,10 @@ WORKLOAD_FAMILIES: dict[str, str] = {
     "consan-gemm": "tensile_gemm_object",
     "waitcheck-gemm": "tensile_gemm_object",
     "waitcheck": "tensile_gemm_object",
-    # The committed survey reports use their own directory names, and they are
-    # the same three families, so one map covers both trees.
+    # The committed survey reports use their own directory names. Only the GEMM
+    # pair is still committed, so that tree reaches tensile_gemm_object alone.
+    # The synthetic keys stay so a local control directory (lds_reduce_*,
+    # tiny_vecadd_*) still classifies.
     "gemm_f32_consan": "tensile_gemm_object",
     "gemm_f32_waitcheck": "tensile_gemm_object",
     "lds_reduce_consan": "synthetic_hip_lds",

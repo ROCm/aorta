@@ -451,7 +451,7 @@ def test_committed_baselines_declarations_are_well_formed() -> None:
 
 
 # ------------------------------------------------------------ required reports
-# ROCm/aorta#450 one level up: all six survey invocations run under `|| true`,
+# ROCm/aorta#450 one level up: each survey invocation runs under `|| true`,
 # so a recipe that dies before writing a report leaves nothing to judge.
 
 

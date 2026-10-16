@@ -391,15 +391,17 @@ def _sweep_vacuous(
     sweep cannot infer it from a directory listing: an empty tree and a tree from
     a run that was never asked to produce anything look identical here.
 
-    That distinction matters because the survey job runs all six of its recipes
+    That distinction matters because the survey job runs each of its recipes
     under ``|| true``, so a recipe that dies before writing a report leaves no
     trace at all -- the same fail-open shape this sweep exists to close, one level
-    up. Requiring the invoked cases closes it.
+    up. Requiring the invoked cases closes it. The set of recipes is whatever the
+    job lists; this function does not assume a fixed count.
 
     A *job-level* kill (the runner cap tracked in #370, a cancellation, a step
     timeout) needs no tolerance here and never did: it takes the whole payload
     down, so this comparator does not run and has no verdict to give. The only
-    way to reach this function is for all six invocations to have returned.
+    way to reach this function is for every invocation in that payload to have
+    returned.
 
     ``known_vacuous`` case directories are reported but do not fail the run, and
     a case listed there that turns out to carry signal *does* fail: the whole
