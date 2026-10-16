@@ -65,6 +65,10 @@ needs it even on CPU. To run workloads on a GPU, install a ROCm build of
 PyTorch instead; see [Installation](README.md#installation). Other optional
 features have their own extras (for example `chat-cli` and `cia`).
 
+The eBPF runner tests also need `bpftrace` at `/usr/bin/bpftrace`, where CI
+installs it (`sudo apt-get install bpftrace` on Ubuntu); without it they fail
+with `BpftraceUnavailableError`.
+
 ### Code style
 
 black, isort and ruff are configured in [pyproject.toml](pyproject.toml). The
