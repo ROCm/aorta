@@ -1,0 +1,25 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-WAITCHECK-GEMM
+description: >
+  Daily gfx950 waitcheck guardrail over the top-3 GEMM shapes from the
+  generic public fixture CSV and matching code objects built in CI.
+
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: gemm_csv
+    path: fixtures/gemm_shapes_unique.csv
+    isa_dir: fixtures/isa
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 3
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json
