@@ -12,7 +12,8 @@ measured to pass a run that checked nothing (gfx950, ROCm 7.0.2 and ROCm 10):
   warning, and produces a binary whose GPU code carries no instrumentation at
   all -- so an out-of-bounds store runs to exit 0. :func:`inspect_device_instrumentation`
   therefore reads the device code object out of the binary instead of trusting
-  how it was built.
+  how it was built. That proves the object was built with device ASan, not that
+  every access in it is checked: buffer-addressed stores get no shadow check.
 * The device half reports by calling back to the host, and only the
   ASan-instrumented ROCm runtime (``lib/asan``) handles that call. With the stock
   runtime a real detection aborts the process with ``Hostcall: no handler found

@@ -294,6 +294,13 @@ What a PASS does **not** cover, measured on gfx950: accesses that skip past the
 redzone (a store 1 MiB past a buffer was not caught), `hipMallocManaged`
 allocations (an overflow was not caught), and any code not compiled with ASan,
 including ROCm library kernels unless the `*-asan` library packages are loaded.
+Nor does it cover **buffer-addressed accesses inside an instrumented kernel**:
+ASan instruments `global_*`/`flat_*` accesses, and a `buffer_store` (Composable
+Kernel's addressing throughout, and Triton's AMD buffer-ops lowering by default)
+gets no shadow check, so an overflow through one is silently missed. Hand-written
+assembly kernels (Tensile) cannot be instrumented at all. The preflight therefore
+proves a code object was *built with* device ASan, not that every access in it is
+checked.
 LDS overflows, `hipMalloc` and `hipHostMalloc` overflows, out-of-bounds reads and
 device use-after-free were all caught. `recipes/sanitizers/asan-heap-overflow.yaml`
 (expect FAIL) and `asan-clean.yaml` (expect PASS) are the worked pair; the build

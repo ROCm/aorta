@@ -81,6 +81,43 @@ small workloads, not whole training runs.
    shell) fails with `ASan runtime does not come first in initial library list`. The host
    runtime is preloaded.
 
+## Buffer-addressed accesses are not checked
+
+Device ASan instruments `global_*`/`flat_*` accesses, not buffer instructions. Compiling one HIP
+kernel two ways under `-fsanitize=address` for `gfx950:xnack+` (ROCm 7.0.2.2, clang 20) shows
+it in the instructions:
+
+- **`out[i] = i`:** a `flat_load_sbyte` of the shadow byte, a compare and a branch to the report
+  path, before the `global_store_dword`.
+- **The same store via `__builtin_amdgcn_raw_buffer_store_b32`:** a bare `buffer_store_dword`
+  with no check.
+
+Composable Kernel builds its global-memory path on buffer intrinsics (its
+`amd_buffer_addressing` layer; not measured here), and Triton's AMD backend lowers `tl.store` to
+them by default (measured below), so an instrumented code object can still have unchecked
+accesses.
+
+## Python, PyTorch and Triton (measured, not yet supported by the backend)
+
+An off-by-one `tl.store` in a Triton kernel launched from PyTorch (torch 2.10.0+rocm7.0,
+triton-rocm 3.6.0, `rocm/dev-ubuntu-22.04:7.0.2` + the 7.0.2 `*-asan` packages; jobs 83210 and
+83218, two nodes) **is** caught, and the report names the kernel and line (`store_index_off_by_one
+at triton_oob.py:173:27`, global index 1000). It took more than the obvious settings
+(`TRITON_ENABLE_ASAN=1`, `HSA_XNACK=1`, the ASan runtime, the caching allocator off). Each of the
+items below has a control that removes it and fails:
+
+| needed | without it |
+|---|---|
+| `AMDGCN_USE_BUFFER_OPS=0` | **silently missed, exit 0**: the store becomes a `buffer_store_dword` with no check, in a kernel holding 949 `__asan_` references from the linked device runtime |
+| `PYTORCH_NO_HIP_MEMORY_CACHING=1` | missed: the 4000-byte tensor sits inside a 2 MiB cached segment, which is all ASan knows |
+| `LD_PRELOAD=<host asan rt>:libamdhip64.so:libhsa-runtime64.so`, the HIP and HSA runtimes by **bare name** | torch's libraries carry `DT_RPATH=$ORIGIN` to their bundled stock runtime, which `LD_LIBRARY_PATH` cannot override. A full-path preload loads both copies; Triton launches through torch's (it probes `dlopen("libamdhip64.so", RTLD_NOLOAD)`) and the detection aborts unreported. With only the host runtime preloaded, ASan's allocator interceptor aborts under the stock HSA runtime |
+| `torch/lib` on `LD_LIBRARY_PATH`, after `lib/asan` | `torch.cuda` init fails: the ASan runtime interposes `dlopen`, so torch's `$ORIGIN`-relative `dlopen("libcaffe2_nvrtc.so")` loses its RPATH |
+| defining `amdgpu.max_num_named_barrier` in the kernel assembly | triton-rocm 3.6.0 cannot assemble any ASan kernel on gfx950 (`expression could not be evaluated`). The ASan module constructor's `amdgcn.device.init` references the symbol and the backend never defines it. An upstream defect, worked around in-process for the measurement |
+
+Cost on that stack: process wall time ~3× cold / ~1.8× warm, a bandwidth-bound 256 MiB store
+1.4–1.7×, and ~3 ms per synchronized launch against ~22 µs. Device ASan's cost is
+kernel-dependent: compare the 70–185× of the LDS-heavy GEMM above.
+
 ## Where the runtime comes from
 
 - **ROCm 7.x**: `repo.radeon.com/rocm/apt/<ver>/pool/main/` carries `hip-runtime-amd-asan`,
