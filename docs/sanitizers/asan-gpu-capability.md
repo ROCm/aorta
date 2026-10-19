@@ -43,6 +43,23 @@ object against 0 without the suffix. `device_far` tripped the device check in on
 runs (the Ubuntu image with the stock runtime, so detected and unreported), and in none of the
 runs that could report. A far access is caught only if it happens to land on poisoned memory.
 
+## Cost
+
+`examples/profiling/rocprof/hip-gemm/gemm.hip` (tiled SGEMM, LDS-heavy, 20 iterations, three
+reps each, all verifying their output), job 83211:
+
+| build | n=1024 kernel | n=2048 kernel | process wall |
+|---|---|---|---|
+| plain `gfx950` | 0.143 ms | 0.996 ms | ~0.4 s |
+| plain, `HSA_XNACK=1` | 0.142 ms | 0.995 ms | ~0.45 s |
+| `gfx950:xnack+`, no ASan | 0.142 ms | 0.998 ms | ~0.45 s |
+| `gfx950:xnack+` ASan, ASan runtime | 24.9–27.4 ms | 66.9–75.2 ms | 1.4–2.9 s |
+
+XNACK costs nothing measurable here. Device ASan costs 70–185× on this kernel, more than
+host ASan's usual ~2×, plausibly because LDS is lowered to instrumented global memory. One
+kernel is not a model, but the order of magnitude says device ASan is for targeted repros and
+small workloads, not whole training runs.
+
 ## Five silent failures, and what the backend does about each
 
 1. **No `:xnack+`**: `clang++: warning: ignoring '-fsanitize=address' option for offload arch
