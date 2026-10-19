@@ -1,0 +1,49 @@
+=================================================================
+==313==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x7d37c9e260a0 at pc 0x0000002247d5 bp 0x7fff588e8ad0 sp 0x7fff588e8ac8
+WRITE of size 4 at 0x7d37c9e260a0 thread T0
+    #0 0x0000002247d4 in host_oob() /work/src/asan_probe.hip:78:9
+    #1 0x0000002247d4 in main /work/src/asan_probe.hip:89:41
+    #2 0x7f27d56bed8f  (/lib/x86_64-linux-gnu/libc.so.6+0x29d8f) (BuildId: 4f7b0c955c3d81d7cac1501a2498b69d1d82bfe7)
+    #3 0x7f27d56bee3f in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x29e3f) (BuildId: 4f7b0c955c3d81d7cac1501a2498b69d1d82bfe7)
+    #4 0x000000221a94 in _start (/work/bin-ubuntu/probe_asan_xnack+0x221a94)
+
+0x7d37c9e260a0 is located 0 bytes after 4000-byte region [0x7d37c9e25100,0x7d37c9e260a0)
+allocated by thread T0 here:
+    #0 0x7f27d7d01a14 in malloc /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x000000223aff in host_oob() /work/src/asan_probe.hip:76:30
+    #2 0x000000223aff in main /work/src/asan_probe.hip:89:41
+    #3 0x7f27d56bed8f  (/lib/x86_64-linux-gnu/libc.so.6+0x29d8f) (BuildId: 4f7b0c955c3d81d7cac1501a2498b69d1d82bfe7)
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow /work/src/asan_probe.hip:78:9 in host_oob()
+Shadow bytes around the buggy address:
+  0x7d37c9e25e00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7d37c9e25e80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7d37c9e25f00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7d37c9e25f80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7d37c9e26000: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7d37c9e26080: 00 00 00 00[fa]fa fa fa fa fa fa fa fa fa fa fa
+  0x7d37c9e26100: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d37c9e26180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d37c9e26200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d37c9e26280: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7d37c9e26300: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==313==ABORTING

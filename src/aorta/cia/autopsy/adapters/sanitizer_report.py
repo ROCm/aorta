@@ -10,6 +10,7 @@ from aorta.cia.autopsy.adapters.base import AdapterArtifact, BundleContext
 SCHEMA = "aorta.sanitizer_report/0.1"
 
 # Signals this adapter contributes to the evidence stream.
+SIGNAL_MEMORY_ERROR = "SAN_ASAN_MEMORY_ERROR"
 SIGNAL_RACE = "SAN_CONSAN_RACE"
 SIGNAL_HAZARD = "SAN_WAITCHECK_HAZARD"
 SIGNAL_CLEAN = "SAN_CLEAN"
@@ -22,9 +23,20 @@ MISSING_BACKEND_REASONS = frozenset(
         "rj_waitcheck_not_found",
         "consan_hook_not_found",
         "consan_command_not_provisioned",
+        "asan_command_not_provisioned",
+        "asan_runtime_not_found",
         "dry_run",
     }
 )
+
+# What it takes to make each backend run, for the tooling gap a non-run reports.
+_BACKEND_REMEDY = {
+    "asan": (
+        "device ASan needs a repro built with -fsanitize=address for an xnack+ "
+        "target, HSA_XNACK=1, and the ASan-instrumented ROCm runtime (lib/asan)"
+    ),
+}
+_DEFAULT_REMEDY = "the RocJITsu backend must be built and ROCJITSU_BUILD exported"
 
 
 @dataclass(frozen=True)
@@ -46,19 +58,33 @@ def _findings(check: dict[str, Any]) -> list[dict[str, Any]]:
 def _signal_for(finding: dict[str, Any]) -> str:
     severity = str(finding.get("severity") or "").lower()
     sanitizer = str(finding.get("sanitizer") or "").lower()
+    # Checked first: everything that is not a race used to fall through to the
+    # Waitcheck hazard, which would label an observed out-of-bounds access a
+    # possible race and send the reader to ConSan.
+    if severity == "memory_error" or sanitizer == "asan":
+        return SIGNAL_MEMORY_ERROR
     if severity == "race" or sanitizer == "consan":
         return SIGNAL_RACE
     return SIGNAL_HAZARD
 
 
+def _missing_signal(sanitizer: str) -> str:
+    if sanitizer == "asan":
+        return SIGNAL_MEMORY_ERROR
+    return SIGNAL_RACE if sanitizer == "consan" else SIGNAL_HAZARD
+
+
 def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
     """Rule-based verdict from a sanitizer report, before any LLM involvement.
 
-    An observed ConSan race is a definite finding, so it outranks a waitcheck
-    hazard, which is a static warning that a kernel *may* be missing a wait and
-    needs a dynamic run to confirm.
+    An ASan memory error comes first: it names the faulting instruction and the
+    allocation it ran past, which is the most specific evidence any backend
+    gives. An observed ConSan race is also a definite finding, so it outranks a
+    waitcheck hazard, which is a static warning that a kernel *may* be missing a
+    wait and needs a dynamic run to confirm.
     """
     checks = report.get("checks") or []
+    memory_errors: list[dict[str, Any]] = []
     races: list[dict[str, Any]] = []
     hazards: list[dict[str, Any]] = []
     not_checked: list[str] = []
@@ -70,13 +96,35 @@ def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
             not_checked.append(f"{check.get('sanitizer', '?')}: {reason}")
             continue
         for finding in _findings(check):
-            if _signal_for(finding) == SIGNAL_RACE:
+            signal = _signal_for(finding)
+            if signal == SIGNAL_MEMORY_ERROR:
+                memory_errors.append(finding)
+            elif signal == SIGNAL_RACE:
                 races.append(finding)
             else:
                 hazards.append(finding)
 
     target = str(report.get("target") or "unknown")
     verdict = str(report.get("overall_verdict") or "")
+
+    if memory_errors:
+        first = memory_errors[0]
+        where = (
+            first.get("kernel_name")
+            or (first.get("metadata") or {}).get("function")
+            or "an unattributed site"
+        )
+        return SanitizerClassification(
+            category="illegal_mem",
+            confidence=0.95,
+            rationale=(
+                f"ASan reported {len(memory_errors)} invalid memory access(es) on {target}; "
+                f"the first is a {first.get('code') or 'memory error'} in {where}. ASan "
+                f"saw the access land in a redzone or freed memory, so the access "
+                f"itself is observed, not inferred."
+            ),
+            signals=[SIGNAL_MEMORY_ERROR],
+        )
 
     if races:
         first = races[0]
@@ -129,7 +177,7 @@ def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
 
 
 class SanitizerReportAdapter:
-    """Read an Aorta sanitizer_report.json and surface ConSan/waitcheck findings."""
+    """Read an Aorta sanitizer_report.json and surface ASan/ConSan/waitcheck findings."""
 
     adapter_id = "sanitizer_report"
 
@@ -191,16 +239,14 @@ class SanitizerReportAdapter:
                 # mean failure, is what keeps a state added upstream from
                 # arriving as a pass.
                 if reason in MISSING_BACKEND_REASONS or state == "not_checked":
-                    description = (
-                        f"{name} did not run ({reason or state}); the RocJITsu "
-                        f"backend must be built and ROCJITSU_BUILD exported."
-                    )
+                    remedy = _BACKEND_REMEDY.get(name, _DEFAULT_REMEDY)
+                    description = f"{name} did not run ({reason or state}); {remedy}."
                 else:
                     description = f"{name} did not complete ({reason or state})."
                 tooling_gaps.append(
                     {
                         "description": description,
-                        "missing_signal": SIGNAL_RACE if name == "consan" else SIGNAL_HAZARD,
+                        "missing_signal": _missing_signal(name),
                         "suggested_tool": "aorta sweep run",
                     }
                 )

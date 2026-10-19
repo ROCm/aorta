@@ -21,6 +21,9 @@ _WAITCHECK_TARGETS = frozenset(
 )
 _CONSAN_FULL = frozenset({"gfx942", "gfx950", "gfx1100", "gfx1201", "gfx1250"})
 _CONSAN_PARTIAL: frozenset[str] = frozenset()
+# Device ASan needs an xnack+ code object, so only XNACK-capable targets. These
+# are the two TheRock publishes ASan-instrumented ROCm for.
+_ASAN_DEVICE = frozenset({"gfx942", "gfx950"})
 
 
 def support(sanitizer: str, target: str) -> dict[str, object]:
@@ -66,5 +69,23 @@ def support(sanitizer: str, target: str) -> dict[str, object]:
             "runnable": False,
             "requires": "hardware-or-simulator",
             "note": f"ConSan not supported on {target}",
+        }
+    if sanitizer == "asan":
+        if target in _ASAN_DEVICE:
+            return {
+                "level": "full",
+                "runnable": True,
+                "requires": "hardware-or-simulator",
+                "note": (
+                    f"{target} device ASan: needs an {target}:xnack+ build, "
+                    "HSA_XNACK=1 and the ASan-instrumented ROCm runtime (lib/asan); "
+                    "measured on gfx950"
+                ),
+            }
+        return {
+            "level": "none",
+            "runnable": False,
+            "requires": "hardware-or-simulator",
+            "note": f"device ASan not supported on {target}: no xnack+ code object target",
         }
     raise ValueError(f"unknown sanitizer {sanitizer!r}")
