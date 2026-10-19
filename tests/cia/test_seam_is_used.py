@@ -1,11 +1,8 @@
-"""The one thing that submits jobs goes through the seam.
+"""The one thing that starts jobs goes through the seam.
 
-``launch()`` exists so that a scheduler-less backend is a branch in one place
-rather than an edit at every call site -- finding F4 of the port plan, and the
-subject of ``test_launch_seam.py``. That test went through the seam while the
-only production submitter, the triage driver, imported ``submit_sbatch`` and
-called it directly. The seam was tested and bypassed, which is the state an
-abstraction rots in: green tests, and a second call site to find later.
+``launch()`` selects a backend, and that backend is the only implementation
+allowed to reach the Slurm submission primitive. The triage driver must not
+reach past this seam.
 """
 
 from __future__ import annotations
@@ -13,12 +10,10 @@ from __future__ import annotations
 import ast
 import pathlib
 
-import pytest
-
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CIA = ROOT / "src" / "aorta" / "cia"
-#: Where submit_sbatch is defined, and the seam that is allowed to call it.
-_ALLOWED = {"launch/cluster.py", "launch/__init__.py"}
+#: Where submit_sbatch is defined, and the backend allowed to call it.
+_ALLOWED = {"launch/cluster.py", "launch/backend.py"}
 
 
 def _modules_calling(name: str) -> list[str]:
@@ -77,6 +72,7 @@ def test_the_seam_still_forwards_everything_it_is_given(monkeypatch, tmp_path):
         working_dir="/tmp",
         env_vars={"A": "1"},
         node="node-01",
+        backend="slurm",
     )
     assert seen["command"] == "echo hi"
     assert seen["env_vars"] == {"A": "1"}
