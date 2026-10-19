@@ -231,10 +231,80 @@ captured no records) is fixed in `15275dad`. On bundle `97c1640b`
 `barrier=2/2` and `dynamic_complete=true`, so a Triton object with real LDS or
 atomic sites can now reach a genuine verdict.
 
+## AddressSanitizer (ASan)
+
+`sanitizers: [asan]` runs an ASan-instrumented repro and reports every invalid
+memory access ASan saw, host or GPU, as a `memory_error` finding: the error class
+(`heap-buffer-overflow`, `heap-use-after-free`, ...), the kernel, the source
+line, the access, and the line that allocated the buffer. Unlike Waitcheck and
+ConSan, ASan is applied when the program is **compiled**, so aorta cannot
+instrument a kernel after the fact: the recipe names a build that already has it.
+
+```yaml
+source:
+  kind: kernel
+  kernel: {name: store_index}
+  asan_command: fixtures/bin/asan_heap_overflow
+  # asan_objects: [bin/real_binary]   # required when asan_command is a script
+sanitizers: [asan]
+```
+
+Three things have to be true, and each one fails silently when it is not, which
+is why aorta checks all three instead of trusting the build:
+
+1. **The GPU code is built for an `xnack+` target.** `hipcc -fsanitize=address
+   -shared-libsan -g --offload-arch=gfx950:xnack+`. With a plain `gfx950` target
+   the compiler drops device ASan with only a warning and the build succeeds;
+   `-fno-gpu-sanitize` does the same. Before running anything aorta reads the
+   device code object out of the binary and fails closed
+   (`asan_device_not_instrumented`) unless a `<target>:xnack+` code object
+   carries ASan instrumentation. When `asan_command` is a script, name the real
+   binaries in `asan_objects`.
+2. **The ASan-instrumented ROCm runtime is loaded.** The GPU half reports by a
+   hostcall that only `lib/asan/libamdhip64` handles. With the stock runtime a
+   real detection aborts with `Hostcall: no handler found for service ID 4` and
+   no report (`asan_device_report_lost`). Point `AORTA_ASAN_ROCM_LIB` at the
+   instrumented `lib/asan` directory, or `ROCM_ASAN_PATH` at an install root
+   (TheRock's name for it); a directory whose `libamdhip64` is not instrumented
+   is refused. Without one the check is `not_checked` (`asan_runtime_not_found`).
+3. **XNACK is on.** aorta pins `HSA_XNACK=1`; an xnack+ kernel will not load
+   without it (`hipErrorInvalidDeviceFunction`).
+
+aorta also pins `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:exitcode=1:symbolize=1`
+(replacing any inherited value, so a parent cannot set `exitcode=0`), prepends
+the instrumented libraries to `LD_LIBRARY_PATH`, and preloads the host ASan
+runtime so an uninstrumented launcher such as Python can load them. Leak checking
+is off because LeakSanitizer reports the stock runtime's own allocations on a
+correct program and rewrites the exit code when it does.
+
+Where the runtime comes from:
+
+- ROCm 7.x: the `*-asan` packages (`hip-runtime-amd-asan`, `hsa-rocr-asan`,
+  `comgr-asan`, `rocm-core-asan`, and `rocblas-asan`, `hipblaslt-asan`,
+  `miopen-hip-asan`, `rccl-asan` ... for library coverage) from
+  `repo.radeon.com/rocm/apt/<ver>`. They are published for Ubuntu only. On an
+  el9 host they work unpacked into a scratch directory with `dpkg -x`-style
+  extraction, given a `libstdc++` with `GLIBCXX_3.4.30` on `LD_LIBRARY_PATH`.
+- ROCm 10 (TheRock): nightly ASan tarballs and packages for gfx94X and gfx950
+  (`nightly.repo.amd.com/rocm/core/tarball-asan/`); set `ROCM_ASAN_PATH` to the
+  extracted tree. None is published for the stable 10.0 the CI image pins, and
+  the CI image ships no `lib/asan`, so these recipes are not in the nightly.
+
+What a PASS does **not** cover, measured on gfx950: accesses that skip past the
+redzone (a store 1 MiB past a buffer was not caught), `hipMallocManaged`
+allocations (an overflow was not caught), and any code not compiled with ASan,
+including ROCm library kernels unless the `*-asan` library packages are loaded.
+LDS overflows, `hipMalloc` and `hipHostMalloc` overflows, out-of-bounds reads and
+device use-after-free were all caught. `recipes/sanitizers/asan-heap-overflow.yaml`
+(expect FAIL) and `asan-clean.yaml` (expect PASS) are the worked pair; the build
+commands are at the top of `fixtures/repro/asan_heap_overflow.hip`.
+
 ## Verdict and health rules
 
 - Waitcheck structured hazard → `warn`.
 - ConSan attributed race → `fail`.
+- ASan memory error → `fail`, whatever the exit code; a device detection the
+  runtime could not report → `error`.
 - Backend timeout, launch failure, unexpected exit, missing verdict, or
   incomplete coverage → `error`.
 - Missing backend or unsupported worklist scoping → `not_checked`.

@@ -834,6 +834,26 @@ class TestClassification:
         )
         assert verdict.category == "illegal_mem"
 
+    @pytest.mark.parametrize(
+        "finding,phrase",
+        [(_ASAN_FINDING, "reported 1 invalid memory access"), (_CONSAN_FINDING, "1 race finding")],
+    )
+    def test_a_finding_repeated_per_kernel_is_counted_once(self, finding, phrase):
+        """Both dynamic backends repeat a check's findings in kernel_results."""
+
+        sanitizer = finding["sanitizer"]
+        verdict = classify_sanitizer(
+            _report(
+                {
+                    "sanitizer": sanitizer,
+                    "state": "ran",
+                    "findings": [finding],
+                    "kernel_results": [{"findings": [finding]}],
+                }
+            )
+        )
+        assert phrase in verdict.rationale
+
     def test_a_consan_race_alone_is_unchanged(self):
         verdict = classify_sanitizer(
             _report({"sanitizer": "consan", "state": "ran", "findings": [_CONSAN_FINDING]})

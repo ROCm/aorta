@@ -48,10 +48,23 @@ class SanitizerClassification:
 
 
 def _findings(check: dict[str, Any]) -> list[dict[str, Any]]:
-    """All findings for a check, including any attributed per-kernel results."""
-    out: list[dict[str, Any]] = list(check.get("findings") or [])
-    for kernel in check.get("kernel_results") or []:
-        out.extend(kernel.get("findings") or [])
+    """All findings for a check, each once.
+
+    ``kernel_results[].findings`` repeat the check's findings per kernel rather
+    than adding to them (#451), so concatenating the two counted every finding
+    twice. Per-kernel findings are still read, for a report that carries them
+    only there.
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for finding in [
+        *(check.get("findings") or []),
+        *(f for kernel in check.get("kernel_results") or [] for f in kernel.get("findings") or []),
+    ]:
+        key = json.dumps(finding, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(finding)
     return out
 
 

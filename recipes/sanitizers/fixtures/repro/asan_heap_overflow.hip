@@ -54,7 +54,7 @@ int main() {
       return 3;
     }
   }
-  hipFree(device);
+  if (hipFree(device) != hipSuccess) return 2;
   printf("asan repro: %d elements verified\n", kElements);
   return 0;
 }
