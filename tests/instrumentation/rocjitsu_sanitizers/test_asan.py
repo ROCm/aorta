@@ -168,6 +168,24 @@ class TestParseRealReports:
         assert sides == ["device", "host"]
 
     @pytest.mark.parametrize(
+        "signature,name",
+        [
+            ("write_n_plus_one(int*, int)", "write_n_plus_one"),
+            # Itanium demangling prints a template function's return type.
+            ("void store_index<float>(float*, int)", "store_index<float>"),
+            (
+                "void rocprim::detail::k<std::pair<int, int> >(std::pair<int, int>*)",
+                "rocprim::detail::k<std::pair<int, int> >",
+            ),
+            ("_triton_store_kernel", "_triton_store_kernel"),
+        ],
+    )
+    def test_kernel_name_drops_parameters_and_return_type(self, signature, name):
+        from aorta.instrumentation.rocjitsu_sanitizers.asan import _function_name
+
+        assert _function_name(signature) == name
+
+    @pytest.mark.parametrize(
         "header,kind",
         [
             ("attempting double-free on 0x602000000010 in thread T0:", "double-free"),
@@ -335,12 +353,14 @@ class TestPreflight:
         assert (code_object.processor, code_object.features) == ("gfx950", ("xnack+",))
 
     def test_host_side_asan_strings_do_not_vouch_for_the_device(self, tmp_path):
-        """The measured trap: -fsanitize=address without :xnack+ instruments the
-        host half, so __asan_report_* is in the file, while the GPU code has none."""
+        """Measured on gfx950: ``-fsanitize=address -fno-gpu-sanitize`` with a
+        ``gfx950:xnack+`` target keeps the xnack+ code object and 20 host-side
+        ``__asan_report_*`` strings, and the GPU code carries no instrumentation.
+        Only reading the marker inside the device ELF tells the two apart."""
 
         binary = _binary(
             tmp_path,
-            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950", _device_elf(instrumented=False))),
+            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=False))),
             host=b"\0__asan_report_store4\0__asan_report_load4\0",
         )
         evidence = inspect_device_instrumentation(binary)
@@ -409,6 +429,12 @@ class TestPreflight:
         evidence = inspect_device_instrumentation(_binary(tmp_path, compressed))
         assert evidence.code_objects == ()
         assert evidence.compressed_bundles == 1
+
+    def test_stray_ccob_bytes_are_not_a_compressed_bundle(self, tmp_path):
+        """Four bytes recur by chance in a large binary; the header fields must fit."""
+
+        stray = b"CCOB" + struct.pack("<HH", 0x4142, 0x4344)
+        assert inspect_device_instrumentation(_binary(tmp_path, stray)).compressed_bundles == 0
 
 
 # --------------------------------------------------------------------------- #
