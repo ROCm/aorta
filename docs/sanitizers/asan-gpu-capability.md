@@ -143,4 +143,6 @@ allocated at `:34:7`; `asan-clean.yaml` reports `pass`. A build without `:xnack+
 `error: asan_device_not_instrumented`. A stock runtime directory → `not_checked:
 asan_runtime_not_found`. The stock runtime preloaded → `error: asan_device_report_lost`.
 Inherited `ASAN_OPTIONS=exitcode=0:halt_on_error=0 HSA_XNACK=0` → still `fail` with the finding.
-`test_asan_gpu.py` runs all five cases (not skipped) when a runtime resolves.
+`test_asan_gpu.py` runs all five cases (not skipped) when a runtime resolves. The mixed-TU
+binary above → `error: asan_device_not_instrumented`, refused before it runs (job 85339; the
+same matrix otherwise gave identical verdicts to job 83182).
