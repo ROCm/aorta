@@ -26,11 +26,14 @@ measured to pass a run that checked nothing (gfx950, ROCm 7.0.2 and ROCm 10):
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import functools
 import hashlib
 import os
 import re
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -432,13 +435,14 @@ class InstrumentationEvidence:
         return f"{self.path}: {listed}"
 
 
-def _parse_bundle(data: bytes, base: int, kernels: Sequence[str]) -> list[DeviceCodeObject]:
-    """Read the AMDGPU entries of one uncompressed clang offload bundle.
+def _bundle_entries(data: bytes, base: int) -> list[tuple[str, int, int]]:
+    """The AMDGPU entries of one uncompressed clang offload bundle.
 
     Layout: the 24-byte magic, a little-endian u64 entry count, then per entry
     u64 offset, u64 size, u64 triple length and the triple, with offsets taken
-    from the start of the bundle. Anything implausible is treated as not a
-    bundle rather than as evidence.
+    from the start of the bundle. Returns ``(triple, start, end)`` with offsets
+    into ``data``. Anything implausible is treated as not a bundle rather than
+    as evidence.
     """
 
     try:
@@ -459,7 +463,7 @@ def _parse_bundle(data: bytes, base: int, kernels: Sequence[str]) -> list[Device
     except struct.error:
         return []
 
-    objects = []
+    found = []
     for entry_offset, entry_size, triple in entries:
         if "amdgcn" not in triple:
             continue
@@ -467,14 +471,27 @@ def _parse_bundle(data: bytes, base: int, kernels: Sequence[str]) -> list[Device
         end = start + entry_size
         if entry_size == 0 or end > len(data):
             continue
-        processor_and_features = triple.rpartition("--")[2]
-        processor, *features = processor_and_features.split(":")
+        found.append((triple, start, end))
+    return found
+
+
+def _split_target(triple: str) -> tuple[str, tuple[str, ...]]:
+    processor, *features = triple.rpartition("--")[2].split(":")
+    return processor, tuple(features)
+
+
+def _parse_bundle(data: bytes, base: int, kernels: Sequence[str]) -> list[DeviceCodeObject]:
+    """Read the AMDGPU entries of one uncompressed clang offload bundle."""
+
+    objects = []
+    for triple, start, end in _bundle_entries(data, base):
+        processor, features = _split_target(triple)
         blob = data[start:end]
         objects.append(
             DeviceCodeObject(
                 triple=triple,
                 processor=processor,
-                features=tuple(features),
+                features=features,
                 asan_instrumented=_ASAN_MARKER in blob,
                 kernels_found=tuple(name for name in kernels if name.encode() in blob),
             )
@@ -496,8 +513,8 @@ def _count_compressed_bundles(data: bytes) -> int:
     return count
 
 
-def _bare_code_object(data: bytes, kernels: Sequence[str]) -> DeviceCodeObject | None:
-    """Describe ``data`` when it is itself an AMDGPU code object (a ``.hsaco``)."""
+def _amdgpu_target(data: bytes) -> tuple[str, tuple[str, ...]] | None:
+    """Processor and features of ``data`` when it is an AMDGPU code object."""
 
     if len(data) < 52 or data[:4] != _ELF_MAGIC or data[4] != 2 or data[5] != 1:
         return None
@@ -511,6 +528,15 @@ def _bare_code_object(data: bytes, kernels: Sequence[str]) -> DeviceCodeObject |
         for feature in (_SRAMECC_FEATURE.get(flags & 0xC00), _XNACK_FEATURE.get(flags & 0x300))
         if feature
     )
+    return processor, features
+
+
+def _bare_code_object(data: bytes, kernels: Sequence[str]) -> DeviceCodeObject | None:
+    """Describe ``data`` when it is itself an AMDGPU code object (a ``.hsaco``)."""
+
+    if (target := _amdgpu_target(data)) is None:
+        return None
+    processor, features = target
     return DeviceCodeObject(
         triple=f"amdgcn-amd-amdhsa--{':'.join((processor, *features))}",
         processor=processor,
@@ -553,6 +579,230 @@ def inspect_device_instrumentation(
         path=str(path),
         code_objects=tuple(objects),
         compressed_bundles=_count_compressed_bundles(data),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Kernel inventory: which kernels a file's device code defines
+# --------------------------------------------------------------------------- #
+
+_SHT_SYMTAB = 2
+_SHT_DYNSYM = 11
+_SYMBOL_SIZE = 24
+_FATBIN_SECTION = ".hip_fatbin"
+# Every kernel has a descriptor symbol, ``<kernel>.kd``; it is what the runtime
+# looks a kernel up by, so it is the authoritative list of what an object defines.
+_KERNEL_DESCRIPTOR = ".kd"
+
+
+@dataclass(frozen=True)
+class _Section:
+    name: str
+    kind: int
+    offset: int
+    size: int
+    link: int
+    entsize: int
+
+
+def _elf_sections(read: Callable[[int, int], bytes], size: int) -> list[_Section] | None:
+    """The section headers of a little-endian ELF64 image, or ``None``."""
+
+    header = read(0, 64)
+    if len(header) < 64 or header[:4] != _ELF_MAGIC or header[4] != 2 or header[5] != 1:
+        return None
+    (table_offset,) = struct.unpack_from("<Q", header, 0x28)
+    entry_size, count, names_index = struct.unpack_from("<HHH", header, 0x3A)
+    if (
+        table_offset == 0
+        or entry_size < 64
+        or count == 0
+        or names_index >= count
+        or table_offset + entry_size * count > size
+    ):
+        return None
+    table = read(table_offset, entry_size * count)
+    raw = [struct.unpack_from("<IIQQQQIIQQ", table, index * entry_size) for index in range(count)]
+    names_offset, names_size = raw[names_index][4], raw[names_index][5]
+    names = read(names_offset, names_size) if names_offset + names_size <= size else b""
+    sections = []
+    for name_offset, kind, _flags, _address, offset, length, link, _info, _align, entsize in raw:
+        end = names.find(b"\0", name_offset) if name_offset < len(names) else -1
+        name = names[name_offset:end].decode("ascii", errors="replace") if end != -1 else ""
+        sections.append(_Section(name, kind, offset, length, link, entsize))
+    return sections
+
+
+def _kernel_symbols(blob: bytes) -> tuple[str, ...]:
+    """Mangled names of the kernels an AMDGPU code object defines."""
+
+    sections = _elf_sections(lambda offset, length: blob[offset : offset + length], len(blob))
+    if not sections:
+        return ()
+    names: set[str] = set()
+    for section in sections:
+        if section.kind not in (_SHT_SYMTAB, _SHT_DYNSYM) or section.entsize < _SYMBOL_SIZE:
+            continue
+        if not 0 <= section.link < len(sections):
+            continue
+        strings_section = sections[section.link]
+        strings = blob[strings_section.offset : strings_section.offset + strings_section.size]
+        end = min(section.offset + section.size, len(blob))
+        for entry in range(section.offset, end - _SYMBOL_SIZE + 1, section.entsize):
+            (name_offset,) = struct.unpack_from("<I", blob, entry)
+            terminator = strings.find(b"\0", name_offset)
+            if terminator <= name_offset:
+                continue
+            name = strings[name_offset:terminator].decode("utf-8", errors="replace")
+            if name.endswith(_KERNEL_DESCRIPTOR) and len(name) > len(_KERNEL_DESCRIPTOR):
+                names.add(name[: -len(_KERNEL_DESCRIPTOR)])
+    return tuple(sorted(names))
+
+
+@functools.cache
+def _cxa_demangle() -> Callable[[str], str | None] | None:
+    try:
+        library = ctypes.CDLL(ctypes.util.find_library("stdc++") or "libstdc++.so.6")
+        libc = ctypes.CDLL(None)
+    except OSError:
+        return None
+    demangle_fn = library["__cxa_demangle"]
+    demangle_fn.restype = ctypes.c_void_p
+    demangle_fn.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    free = libc.free
+    free.argtypes = [ctypes.c_void_p]
+    free.restype = None
+
+    def call(symbol: str) -> str | None:
+        status = ctypes.c_int()
+        pointer = demangle_fn(symbol.encode(), None, None, ctypes.byref(status))
+        if not pointer:
+            return None
+        try:
+            if status.value != 0:
+                return None
+            return ctypes.string_at(pointer).decode("utf-8", errors="replace")
+        finally:
+            free(pointer)
+
+    return call
+
+
+def demangle(symbol: str) -> str:
+    """``symbol`` as the HIP runtime prints it in a dispatch log.
+
+    The runtime demangles with the C++ ABI's ``__cxa_demangle``, so this calls
+    the same function rather than an approximation of it. A name that is not
+    mangled (an ``extern "C"`` kernel, a Triton kernel) is returned unchanged.
+    """
+
+    if not symbol.startswith("_Z"):
+        return symbol
+    call = _cxa_demangle()
+    demangled = call(symbol) if call is not None else None
+    return demangled or symbol
+
+
+@dataclass(frozen=True)
+class KernelCodeObject:
+    """One GPU code object and the kernels it defines, as the runtime names them."""
+
+    triple: str
+    processor: str
+    features: tuple[str, ...]
+    asan_instrumented: bool
+    kernels: tuple[str, ...]
+
+    @property
+    def checked(self) -> bool:
+        return "xnack+" in self.features and self.asan_instrumented
+
+
+@dataclass(frozen=True)
+class KernelInventory:
+    """The device code one file carries, kernel by kernel."""
+
+    path: str
+    code_objects: tuple[KernelCodeObject, ...] = ()
+    compressed_bundles: int = 0
+    unreadable: str | None = None
+
+    @property
+    def has_device_code(self) -> bool:
+        return bool(self.code_objects) or self.compressed_bundles > 0
+
+
+def _kernel_code_object(
+    triple: str, processor: str, features: tuple[str, ...], blob: bytes
+) -> KernelCodeObject:
+    return KernelCodeObject(
+        triple=triple,
+        processor=processor,
+        features=features,
+        asan_instrumented=_ASAN_MARKER in blob,
+        kernels=tuple(demangle(name) for name in _kernel_symbols(blob)),
+    )
+
+
+def kernel_inventory(path: Path) -> KernelInventory:
+    """Which kernels ``path`` defines, per device code object.
+
+    A host binary is read through its ``.hip_fatbin`` section only: the
+    libraries a PyTorch process loads run to gigabytes and their device code to
+    a fraction of that. A standalone offload bundle or code object -- what
+    ``hipModuleLoad`` and Triton load -- is read whole. Compressed bundles are
+    counted and not opened, so a file can carry device code this cannot name.
+    """
+
+    try:
+        with path.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+
+            def read(offset: int, length: int) -> bytes:
+                stream.seek(offset)
+                return stream.read(length)
+
+            head = read(0, 64)
+            if head[:4] == _ELF_MAGIC:
+                if len(head) >= 20 and struct.unpack_from("<H", head, 18)[0] == _EM_AMDGPU:
+                    data = read(0, size)
+                    if (target := _amdgpu_target(data)) is None:
+                        return KernelInventory(path=str(path))
+                    processor, features = target
+                    triple = f"amdgcn-amd-amdhsa--{':'.join((processor, *features))}"
+                    return KernelInventory(
+                        path=str(path),
+                        code_objects=(_kernel_code_object(triple, processor, features, data),),
+                    )
+                sections = _elf_sections(read, size) or []
+                region = b"".join(
+                    read(section.offset, section.size)
+                    for section in sections
+                    if section.name == _FATBIN_SECTION and section.offset + section.size <= size
+                )
+            elif head.startswith((_BUNDLE_MAGIC, _COMPRESSED_BUNDLE_MAGIC)):
+                region = read(0, size)
+            else:
+                return KernelInventory(path=str(path))
+    except OSError as error:
+        return KernelInventory(path=str(path), unreadable=f"{type(error).__name__}: {error}")
+
+    objects = []
+    start = 0
+    while (index := region.find(_BUNDLE_MAGIC, start)) != -1:
+        for triple, begin, end in _bundle_entries(region, index):
+            processor, features = _split_target(triple)
+            objects.append(_kernel_code_object(triple, processor, features, region[begin:end]))
+        start = index + len(_BUNDLE_MAGIC)
+    return KernelInventory(
+        path=str(path),
+        code_objects=tuple(objects),
+        compressed_bundles=_count_compressed_bundles(region),
     )
 
 

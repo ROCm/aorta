@@ -505,3 +505,118 @@ def test_run_no_logs_without_save_logs(monkeypatch, tmp_path):
     wl.run()
 
     assert not list(tmp_path.glob("*.subprocess.*.log"))
+
+
+# --------------------------------------------------------------------------- #
+# aorta run --sanitizer asan
+# --------------------------------------------------------------------------- #
+
+_ASAN = {"_aorta_sanitizer": "asan"}
+
+
+def _recorded_builds(monkeypatch, build_dir, config):
+    """setup() with hipcc recorded instead of run; returns (workload, commands)."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    wl = HrxWorkload({"build_dir": str(build_dir), **config})
+    wl.setup()
+    return wl, calls
+
+
+def test_asan_run_builds_the_probe_and_its_code_object_with_device_asan(monkeypatch, tmp_path):
+    monkeypatch.delenv("AORTA_ASAN_RUN", raising=False)
+    wl, (genco, main) = _recorded_builds(
+        monkeypatch, tmp_path, {"probe": "module", "gpu_arch": "gfx950", **_ASAN}
+    )
+
+    assert genco[1] == "--genco"
+    assert {"-fsanitize=address", "-g", "--offload-arch=gfx950:xnack+"} <= set(genco)
+    # A link flag; a --genco build links nothing.
+    assert "-shared-libsan" not in genco
+    assert {"-fsanitize=address", "-g", "-shared-libsan", "--offload-arch=gfx950:xnack+"} <= set(main)
+    assert wl._binary == tmp_path / "gfx950-asan" / _PROBES["module"].binary
+
+
+def test_plain_run_builds_exactly_as_before(monkeypatch, tmp_path):
+    _, calls = _recorded_builds(monkeypatch, tmp_path, {"probe": "module", "gpu_arch": "gfx950"})
+    genco, main = calls
+    assert genco[1:3] == ["--genco", "--offload-arch=gfx950"]
+    assert main[1:3] == ["-O2", "--offload-arch=gfx950"]
+    assert not any("sanitize" in arg or "libsan" in arg for cmd in calls for arg in cmd)
+
+
+def test_asan_build_keeps_an_explicit_xnack_plus(monkeypatch, tmp_path):
+    _, (main,) = _recorded_builds(
+        monkeypatch, tmp_path, {"probe": "static", "gpu_arch": "gfx950:sramecc+:xnack+", **_ASAN}
+    )
+    assert "--offload-arch=gfx950:sramecc+:xnack+" in main
+
+
+def test_asan_build_adds_xnack_after_other_features(monkeypatch, tmp_path):
+    _, (main,) = _recorded_builds(
+        monkeypatch, tmp_path, {"probe": "static", "gpu_arch": "gfx942:sramecc+", **_ASAN}
+    )
+    assert "--offload-arch=gfx942:sramecc+:xnack+" in main
+
+
+def test_asan_run_refuses_an_xnack_off_target(monkeypatch, tmp_path):
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    wl = HrxWorkload({"gpu_arch": "gfx950:xnack-", "build_dir": str(tmp_path), **_ASAN})
+    with pytest.raises(ValueError, match="turns XNACK off"):
+        wl.setup()
+
+
+def test_asan_run_refuses_the_hrx_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setenv("HRX_GPU_DRIVER", "amdgpu")
+    wl = HrxWorkload({"gpu_arch": "gfx950", "build_dir": str(tmp_path), **_ASAN})
+    with pytest.raises(RuntimeError, match="HRX_GPU_DRIVER"):
+        wl.setup()
+
+
+def test_the_hrx_runtime_is_still_allowed_without_asan(monkeypatch, tmp_path):
+    monkeypatch.setenv("HRX_GPU_DRIVER", "amdgpu")
+    _recorded_builds(monkeypatch, tmp_path, {"probe": "static", "gpu_arch": "gfx950"})
+
+
+def test_asan_build_declares_what_the_run_cannot_see_loaded(monkeypatch, tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    monkeypatch.setenv("AORTA_ASAN_RUN", str(evidence))
+    wl, _ = _recorded_builds(
+        monkeypatch, tmp_path / "build", {"probe": "module", "gpu_arch": "gfx950", **_ASAN}
+    )
+    assert (evidence / "code_objects.txt").read_text().splitlines() == [
+        str(wl._binary),
+        str(wl._binary.parent / _PROBES["module"].kernel_object),
+    ]
+
+
+def test_a_plain_build_declares_nothing(monkeypatch, tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    monkeypatch.setenv("AORTA_ASAN_RUN", str(evidence))
+    _recorded_builds(monkeypatch, tmp_path / "build", {"probe": "module", "gpu_arch": "gfx950"})
+    assert not (evidence / "code_objects.txt").exists()
+
+
+@pytest.mark.parametrize(
+    ("built", "config"),
+    [("gfx950", _ASAN), ("gfx950-asan", {})],
+    ids=["plain-binary-asan-run", "asan-binary-plain-run"],
+)
+def test_asan_and_plain_builds_never_reuse_each_other(monkeypatch, tmp_path, built, config):
+    existing = _arch_dir(tmp_path, built) / _PROBES["static"].binary
+    existing.write_bytes(b"\x7fELF")
+    existing.chmod(0o755)
+
+    _, calls = _recorded_builds(
+        monkeypatch, tmp_path, {"probe": "static", "gpu_arch": "gfx950", **config}
+    )
+    assert calls, "a build of the other kind must not be reused"

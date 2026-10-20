@@ -413,6 +413,12 @@ class RunRequest:
     # ``_aorta_env_probe`` key absent. ``kw_only`` so positional callers
     # are unaffected, matching ``stop_after`` above.
     env_probe: dict[str, str] | None = field(default=None, kw_only=True)
+    # ``"asan"`` when this process is the child of ``aorta run --sanitizer
+    # asan``. A sanitizer has to be present from process start, so this does
+    # not turn one on: it is refused unless the ASan runtime is already loaded,
+    # and it tells workloads (as ``config["_aorta_sanitizer"]``) to build any
+    # GPU code of their own with ASan. ``kw_only`` like the fields above.
+    sanitizer: Literal["asan"] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         # Defensively deep-copy mutable dict fields.  ``frozen=True``
@@ -432,6 +438,19 @@ class RunRequest:
         # construction and steer an in-flight probe. ``None`` short-circuits.
         if self.env_probe is not None:
             object.__setattr__(self, "env_probe", copy.deepcopy(self.env_probe))
+
+
+def _validate_sanitizer(sanitizer: object) -> None:
+    if sanitizer != "asan":
+        raise ValueError(f"sanitizer must be 'asan' or None, got {sanitizer!r}")
+    from aorta.instrumentation.rocjitsu_sanitizers.asan_run import active_asan_run
+
+    if active_asan_run() is None:
+        raise ValueError(
+            "sanitizer='asan' needs a process that started under ASan; run it "
+            "through `aorta run --sanitizer asan`, which re-launches the run with "
+            "the ASan runtime preloaded and collects what it reports"
+        )
 
 
 def run_trials(request: RunRequest) -> list[TrialResult]:
@@ -471,6 +490,8 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         raise ValueError(
             "request_fingerprint must be a lowercase SHA-256 hex string"
         )
+    if request.sanitizer is not None:
+        _validate_sanitizer(request.sanitizer)
 
     # 2. Validate collector recipe names.  The CLI also validates this
     #    against KNOWN_RECIPES, but ``run_trials`` is a public library
@@ -635,6 +656,21 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     effective_overlay.update(env_descriptor.env)
     effective_overlay.update(mitigation_env)
     effective_overlay.update(request.extra_env)
+    if request.sanitizer == "asan":
+        from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
+            owned_setting_conflicts,
+        )
+
+        conflicts = owned_setting_conflicts(effective_overlay)
+        if conflicts:
+            raise ValueError(
+                "--sanitizer asan sets "
+                + ", ".join(conflicts)
+                + " itself, and this cell's environment, mitigations or extra_env "
+                "would change them -- which would replace the instrumented runtime "
+                "or hide its reports, so the run would check nothing while "
+                "appearing to. Drop those settings for an ASan run."
+            )
     startup_env: dict[str, str] = {}
     if effective_trial_isolation == "process":
         startup_config = dict(request.config_overrides)
@@ -858,6 +894,7 @@ def _run_single_trial_in_process_worker(
         "mitigation_index": request.mitigation_index,
         "save_logs": request.save_logs,
         "env_probe": copy.deepcopy(request.env_probe),
+        "sanitizer": request.sanitizer,
     }
     # Fail before spawning with an actionable error rather than letting the
     # worker fail while serializing its request.
@@ -1058,6 +1095,8 @@ def _run_single_trial(
     # a caller-supplied value.
     config["_aorta_environment"] = asdict(env_descriptor)
     config["_aorta_trial_isolation"] = request.trial_isolation
+    if request.sanitizer is not None:
+        config["_aorta_sanitizer"] = request.sanitizer
 
     # In-container env-probe contract (isolated docker/venv envs only).
     # The triage runner supplies ``{"src": ..., "out": ...}`` so a
