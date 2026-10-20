@@ -356,6 +356,36 @@ class TestEvaluate:
         assert (hung.state, hung.verdict) == (ExecutionState.TIMED_OUT, Verdict.ERROR)
         assert (found.state, found.verdict) == (ExecutionState.TIMED_OUT, Verdict.FAIL)
 
+    @pytest.mark.parametrize(
+        "kernel,dispatched,ok",
+        [
+            ("store_index", ["store_index(int*, int)"], True),
+            ("store_index(int*, int)", ["store_index(int*, int)"], True),
+            ("_Z11store_indexPii", ["store_index(int*, int)"], True),
+            ("store_index", ["amdgcn.device.init", "__amd_rocclr_initHeap"], False),
+            ("store_index", ["store_index_v2(int*, int)"], False),
+        ],
+    )
+    def test_the_selected_kernel_must_be_among_the_dispatched(self, kernel, dispatched, ok):
+        check = evaluate_asan_output(_process(""), kernel=kernel, dispatched=dispatched)
+        assert (check.verdict is Verdict.PASS) is ok
+
+    def test_the_dispatch_log_is_read_from_every_process(self, tmp_path):
+        from aorta.instrumentation.rocjitsu_sanitizers.asan import read_dispatch_log
+
+        assert read_dispatch_log(tmp_path) is None
+        (tmp_path / "hip_dispatch.log_10").write_text(
+            ":3: 1 us:  ShaderName : amdgcn.device.init\n:3: 2 us:  ShaderName : warmup(float*)\n"
+        )
+        (tmp_path / "hip_dispatch.log_11").write_text(
+            ":3: 3 us:  ShaderName : store_index(int*, int)\n"
+        )
+        assert read_dispatch_log(tmp_path) == (
+            "amdgcn.device.init",
+            "warmup(float*)",
+            "store_index(int*, int)",
+        )
+
     def test_launch_error(self):
         check = evaluate_asan_output(
             _process(returncode=None, launch_error="PermissionError: denied")
@@ -682,6 +712,18 @@ class TestRuntime:
         assert env["LD_PRELOAD"] == f"{runtime.host_runtime}:/operator/libhook.so"
         assert env["ASAN_SYMBOLIZER_PATH"] == str(runtime.symbolizer)
         assert env["UNRELATED"] == "kept"
+        assert "AMD_LOG_LEVEL_FILE" not in env
+
+    def test_dispatch_logging_is_pinned_over_an_inherited_log_level(self, tmp_path):
+        runtime = resolve_asan_runtime({"ROCM_PATH": str(_rocm_tree(tmp_path / "rocm"))})
+        env = asan_environment(
+            {"AMD_LOG_LEVEL": "4", "AMD_LOG_MASK": "0x7fffffff"},
+            runtime,
+            dispatch_log=tmp_path / "hip_dispatch.log",
+        )
+        # Decimal: the runtime reads a 0x-prefixed mask as selecting nothing.
+        assert (env["AMD_LOG_LEVEL"], env["AMD_LOG_MASK"]) == ("3", "128")
+        assert env["AMD_LOG_LEVEL_FILE"] == str(tmp_path / "hip_dispatch.log")
 
 
 # --------------------------------------------------------------------------- #
@@ -689,13 +731,24 @@ class TestRuntime:
 # --------------------------------------------------------------------------- #
 
 
-def _script(tmp_path: Path, *, stderr_fixture: str | None, code: int) -> Path:
+def _script(
+    tmp_path: Path,
+    *,
+    stderr_fixture: str | None,
+    code: int,
+    dispatch: str | None = "store_index(int*, int)",
+) -> Path:
+    """A stand-in repro. ``dispatch`` is the kernel it logs as dispatched, the way
+    the HIP runtime does under AMD_LOG_LEVEL_FILE (one file per pid)."""
+
     marker = tmp_path / "ran"
     lines = [
         "#!/bin/sh",
         f'echo ran > "{marker}"',
         'echo "ASAN_OPTIONS=$ASAN_OPTIONS HSA_XNACK=$HSA_XNACK"',
     ]
+    if dispatch is not None:
+        lines.append(f'echo ":3: 1 us:  ShaderName : {dispatch}" >> "${{AMD_LOG_LEVEL_FILE}}_$$"')
     if stderr_fixture is not None:
         lines.append(f'cat "{FIXTURES / stderr_fixture}" >&2')
     lines.append(f"exit {code}")
@@ -751,6 +804,60 @@ class TestRunAsan:
             objects=(_instrumented(tmp_path),),
         )
         assert (check.state, check.verdict) == (ExecutionState.RAN, Verdict.PASS)
+
+    def test_a_clean_run_that_logged_no_dispatch_is_unverified(self, tmp_path, runtime):
+        check = run_asan(
+            _worklist(),
+            command=_script(tmp_path, stderr_fixture=None, code=0, dispatch=None),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.ERROR
+        assert check.reason.startswith("asan_dispatch_unverified:")
+
+    def test_a_clean_run_that_dispatched_another_kernel_is_an_error(self, tmp_path, runtime):
+        """The ASan-adjacent failure the review found: a repro that never launched
+        the selected kernel exits 0 with no report."""
+
+        check = run_asan(
+            _worklist(),
+            command=_script(tmp_path, stderr_fixture=None, code=0, dispatch="warmup(float*)"),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.reason.startswith("asan_kernel_not_dispatched: store_index")
+        assert "warmup" in check.reason
+        assert dict(check.backend)["dispatched_kernels"] == "warmup"
+
+    def test_a_stale_dispatch_log_does_not_count(self, tmp_path, runtime):
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "hip_dispatch.log_1").write_text("ShaderName : store_index(int*, int)\n")
+        check = run_asan(
+            _worklist(),
+            command=_script(tmp_path, stderr_fixture=None, code=0, dispatch=None),
+            output_dir=out,
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.reason.startswith("asan_dispatch_unverified:")
+
+    def test_a_detection_needs_no_dispatch_evidence(self, tmp_path, runtime):
+        check = run_asan(
+            _worklist(),
+            command=_script(
+                tmp_path,
+                stderr_fixture="device_heap_buffer_overflow_write.txt",
+                code=1,
+                dispatch=None,
+            ),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.FAIL
 
     def test_an_uninstrumented_build_errors_before_anything_runs(self, tmp_path, runtime):
         script = _script(tmp_path, stderr_fixture=None, code=0)
@@ -810,7 +917,9 @@ class TestRunAsan:
             runtime=runtime,
             objects=(_instrumented(tmp_path),),
         )
-        assert (check.state, check.verdict) == (ExecutionState.RAN, Verdict.PASS)
+        # Past the preflight and run; /bin/true dispatches nothing, which is the
+        # next rule's business, not the preflight's.
+        assert check.reason.startswith("asan_dispatch_unverified:")
 
     def test_a_kernel_absent_from_the_checked_code_is_refused(self, tmp_path, runtime):
         check = run_asan(

@@ -109,6 +109,17 @@ _INIT_FAILURE = re.compile(
     r"|ERROR: AddressSanitizer failed to allocate"
     r"|AddressSanitizer: CHECK failed"
 )
+# HIP's own runtime log records every kernel dispatch by name at level 3 under
+# LOG_KERN, one file per process when AMD_LOG_LEVEL_FILE is set (the runtime
+# appends _<pid>). AMD_LOG_MASK is read as decimal: 128 is LOG_KERN, and a
+# 0x-prefixed value selects nothing at all.
+DISPATCH_LOG_NAME = "hip_dispatch.log"
+_DISPATCH_LOG_ENV = {"AMD_LOG_LEVEL": "3", "AMD_LOG_MASK": "128"}
+_DISPATCH_LINE = re.compile(r"ShaderName : (?P<signature>.+?)\s*$", re.MULTILINE)
+# Dispatched by the runtime itself: ASan's module constructor and the device heap
+# initialiser.
+_RUNTIME_KERNELS = frozenset({"amdgcn.device.init", "__amd_rocclr_initHeap"})
+
 # The kernel never ran, so a clean exit afterwards says nothing about it.
 _KERNEL_NOT_LOADED = re.compile(
     r"hipErrorInvalidDeviceFunction|invalid device function|hipErrorNoBinaryForGpu"
@@ -675,7 +686,9 @@ def resolve_asan_runtime(environ: Mapping[str, str] | None = None) -> AsanRuntim
     )
 
 
-def asan_environment(base: Mapping[str, str], runtime: AsanRuntime) -> dict[str, str]:
+def asan_environment(
+    base: Mapping[str, str], runtime: AsanRuntime, *, dispatch_log: Path | None = None
+) -> dict[str, str]:
     """The child environment for an ASan run: the parent's, plus the contract.
 
     The instrumented libraries are prepended to ``LD_LIBRARY_PATH`` and the host
@@ -685,9 +698,14 @@ def asan_environment(base: Mapping[str, str], runtime: AsanRuntime) -> dict[str,
     ConSan, and a stock library ahead of it on the path silently turns every
     device detection into an abort. The preload is what lets an uninstrumented
     launcher (Python, a shell script) load instrumented libraries at all.
+    ``dispatch_log`` pins HIP's kernel-dispatch logging to that file, replacing
+    any inherited ``AMD_LOG_*`` setting.
     """
 
     env = dict(base)
+    if dispatch_log is not None:
+        env.update(_DISPATCH_LOG_ENV)
+        env["AMD_LOG_LEVEL_FILE"] = str(dispatch_log)
     env["HSA_XNACK"] = "1"
     env["ASAN_OPTIONS"] = ASAN_OPTIONS_PINNED
     library_path = os.pathsep.join(
@@ -737,12 +755,59 @@ def _error(reason: str, *, returncode: int | None = None) -> CheckResult:
     )
 
 
-def evaluate_asan_output(process: ProcessResult) -> CheckResult:
+def read_dispatch_log(output_dir: Path) -> tuple[str, ...] | None:
+    """Kernel signatures the HIP runtime logged as dispatched, in order.
+
+    ``None`` when no process wrote a dispatch log at all, which is not the same
+    as a log that names no kernel.
+    """
+
+    try:
+        logs = sorted(output_dir.glob(f"{DISPATCH_LOG_NAME}*"))
+    except OSError:
+        return None
+    if not logs:
+        return None
+    signatures: list[str] = []
+    for log in logs:
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        signatures.extend(match.group("signature") for match in _DISPATCH_LINE.finditer(text))
+    return tuple(signatures)
+
+
+def _was_dispatched(kernel: str, signatures: Sequence[str]) -> bool:
+    for signature in signatures:
+        name = _function_name(signature)
+        if kernel in (name, signature) or (kernel.startswith("_Z") and name in kernel):
+            return True
+    return False
+
+
+def _workload_kernels(signatures: Sequence[str]) -> list[str]:
+    return [
+        name
+        for name in dict.fromkeys(_function_name(signature) for signature in signatures)
+        if name not in _RUNTIME_KERNELS
+    ]
+
+
+def evaluate_asan_output(
+    process: ProcessResult,
+    *,
+    kernel: str | None = None,
+    dispatched: Sequence[str] | None = None,
+) -> CheckResult:
     """Decide one ASan run. Only a clean exit with no report is a PASS.
 
     A report is a result whatever the exit code says: ASan aborts the process on
     its first error by design, so a nonzero exit beside a report is the report,
-    not a backend failure.
+    not a backend failure. When ``kernel`` is given, a clean exit also has to show
+    that kernel among the ``dispatched`` signatures (:func:`read_dispatch_log`):
+    ASan leaves no trace of a kernel that ran clean, so without the dispatch log
+    a repro that never launched its kernel would pass.
     """
 
     parsed = parse_asan_output(f"{process.stderr}\n{process.stdout}")
@@ -801,6 +866,21 @@ def evaluate_asan_output(process: ProcessResult) -> CheckResult:
         if parsed.leak_reports:
             reason += ": LeakSanitizer ran although aorta pins detect_leaks=0"
         return _error(reason, returncode=process.returncode)
+    if kernel is not None:
+        if dispatched is None:
+            return _error(
+                "asan_dispatch_unverified: the HIP runtime wrote no dispatch log "
+                "(AMD_LOG_LEVEL_FILE), so nothing shows the selected kernel ran",
+                returncode=0,
+            )
+        if not _was_dispatched(kernel, dispatched):
+            ran = _workload_kernels(dispatched)
+            return _error(
+                f"asan_kernel_not_dispatched: {kernel} was never dispatched, so a clean "
+                "exit says nothing about it; the run dispatched "
+                + (", ".join(ran[:10]) if ran else "no workload kernel"),
+                returncode=0,
+            )
     return _check(state=ExecutionState.RAN, verdict=Verdict.PASS, returncode=0)
 
 
@@ -939,15 +1019,27 @@ def run_asan(
                 }
             )
             output_dir.mkdir(parents=True, exist_ok=True)
+            # A log left by an earlier run in this directory would vouch for a
+            # dispatch this run never made.
+            for stale in output_dir.glob(f"{DISPATCH_LOG_NAME}*"):
+                stale.unlink()
             process = run_argv(
                 (str(command),),
                 timeout_seconds=timeout_seconds,
-                env=asan_environment(os.environ, resolved),
+                env=asan_environment(
+                    os.environ, resolved, dispatch_log=output_dir / DISPATCH_LOG_NAME
+                ),
             )
             (output_dir / "asan.log").write_text(
                 f"{process.stdout}\n{process.stderr}", encoding="utf-8"
             )
-            check = evaluate_asan_output(process)
+            dispatched = read_dispatch_log(output_dir)
+            backend["dispatched_kernels"] = (
+                ", ".join(_workload_kernels(dispatched)) or "none"
+                if dispatched is not None
+                else "no dispatch log"
+            )
+            check = evaluate_asan_output(process, kernel=selected.name, dispatched=dispatched)
 
     kernel_result = KernelCheckResult(
         identity=selected,
