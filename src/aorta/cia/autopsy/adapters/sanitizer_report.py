@@ -29,6 +29,10 @@ MISSING_BACKEND_REASONS = frozenset(
     }
 )
 
+# The ASan backend's reason when the GPU detected an access but the stock runtime
+# aborted before printing a report: a detection, unlocated.
+ASAN_REPORT_LOST = "asan_device_report_lost"
+
 # What it takes to make each backend run, for the tooling gap a non-run reports.
 _BACKEND_REMEDY = {
     "asan": (
@@ -101,13 +105,19 @@ def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
     races: list[dict[str, Any]] = []
     hazards: list[dict[str, Any]] = []
     not_checked: list[str] = []
+    lost_reports: list[str] = []
 
     for check in checks:
         state = str(check.get("state") or "")
         if state != "ran":
             reason = str(check.get("reason") or state or "unknown")
             not_checked.append(f"{check.get('sanitizer', '?')}: {reason}")
-            continue
+            if reason.startswith(ASAN_REPORT_LOST):
+                lost_reports.append(reason)
+            # A check can fail to finish and still have seen something: an ASan
+            # report written before a timeout is a finding, not a tooling gap.
+            if str(check.get("verdict") or "") != "fail":
+                continue
         for finding in _findings(check):
             signal = _signal_for(finding)
             if signal == SIGNAL_MEMORY_ERROR:
@@ -135,6 +145,19 @@ def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
                 f"the first is a {first.get('code') or 'memory error'} in {where}. ASan "
                 f"saw the access land in a redzone or freed memory, so the access "
                 f"itself is observed, not inferred."
+            ),
+            signals=[SIGNAL_MEMORY_ERROR],
+        )
+
+    if lost_reports:
+        return SanitizerClassification(
+            category="illegal_mem",
+            confidence=0.6,
+            rationale=(
+                f"Device ASan detected an invalid memory access on {target}, but the HIP "
+                "runtime that was loaded could not report it, so where it happened is "
+                "unknown. Rerun with the ASan-instrumented ROCm runtime (lib/asan) to get "
+                "the kernel, line and allocation."
             ),
             signals=[SIGNAL_MEMORY_ERROR],
         )
@@ -265,7 +288,8 @@ class SanitizerReportAdapter:
                 )
                 if SIGNAL_NOT_CHECKED not in signals:
                     signals.append(SIGNAL_NOT_CHECKED)
-                continue
+                if str(check.get("verdict") or "") != "fail":
+                    continue
 
             for finding in _findings(check):
                 signal = _signal_for(finding)

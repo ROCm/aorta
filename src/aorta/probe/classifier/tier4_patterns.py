@@ -144,7 +144,9 @@ _BUILTIN_PATTERNS: tuple[BuiltinPattern, ...] = (
         # The report header, which host and device reports share. Device reports
         # print no 'SUMMARY:' line, so matching that would miss every GPU
         # finding; LeakSanitizer reports say 'ERROR: LeakSanitizer' and stay out.
-        regex=re.compile(r"^==\d+==ERROR: AddressSanitizer: ", re.MULTILINE),
+        # Not anchored, matching the ASan backend's parser: the header can follow
+        # unterminated output or colour codes, or carry log_exe_name's prefix.
+        regex=re.compile(r"==(?:[^=\s]+==)?\d+==ERROR: AddressSanitizer: "),
         sample=(
             "==4242==ERROR: AddressSanitizer: heap-buffer-overflow on amdgpu "
             "device 0 at pc 0x7bf4d3f0a820"

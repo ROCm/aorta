@@ -211,11 +211,28 @@ class TestParseRealReports:
             "this binary was built with AddressSanitizer\n",
             "ERROR: AddressSanitizer: heap-buffer-overflow (no pid prefix)\n",
             "==12==ERROR: LeakSanitizer: detected memory leaks\n",
-            "  ==12==ERROR: AddressSanitizer: indented, so not at line start\n",
         ],
     )
     def test_text_that_only_mentions_asan_is_not_a_finding(self, text):
         assert parse_asan_output(text).findings == ()
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "  ",
+            # Program output with no trailing newline before the runtime writes.
+            "step 3/10 loss=0.42",
+            # ASan colours its output when stderr is a terminal.
+            "\x1b[1m\x1b[31m",
+            # log_exe_name=1 puts the executable before the pid.
+            "==repro",
+        ],
+        ids=["indented", "after-unterminated-output", "ansi-colour", "exe-name"],
+    )
+    def test_a_header_that_does_not_start_its_line_is_found(self, prefix):
+        before, after = _fixture("device_heap_buffer_overflow_write.txt").split("==203==", 1)
+        (finding,) = parse_asan_output(f"{before}{prefix}==203=={after}").findings
+        assert finding.kernel_name == "write_n_plus_one"
 
 
 # --------------------------------------------------------------------------- #
@@ -263,8 +280,34 @@ class TestEvaluate:
             _process(_fixture("xnack_off_invalid_device_function.txt"), returncode=2)
         )
         assert check.verdict is Verdict.ERROR
-        assert check.reason.startswith("asan_command_exit_2")
+        assert check.reason.startswith("asan_kernel_not_loaded:")
         assert "HSA_XNACK=1" in check.reason
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "PROBE_HIP_ERROR hipGetLastError() -> "
+            "hipErrorInvalidDeviceFunction (invalid device function)\n",
+            "hipErrorNoBinaryForGpu: Unable to find code object for all current devices!\n",
+            "Triton Error [HIP]: Code: 209, Messsage: no kernel image is available\n",
+        ],
+    )
+    def test_a_kernel_that_never_loaded_is_an_error_even_at_exit_0(self, stderr):
+        """A repro that reports its launch failure and still exits 0 checked nothing."""
+
+        check = evaluate_asan_output(_process(stderr, returncode=0))
+        assert check.verdict is Verdict.ERROR
+        assert check.reason.startswith("asan_kernel_not_loaded:")
+
+    def test_init_failure_is_an_error(self):
+        check = evaluate_asan_output(
+            _process(
+                "==5==Shadow memory range interleaves with an existing memory mapping. "
+                "ASan cannot proceed correctly. ABORTING.\n",
+                returncode=1,
+            )
+        )
+        assert check.reason.startswith("asan_init_failed:")
 
     def test_a_leak_report_with_no_memory_error_is_an_error(self):
         check = evaluate_asan_output(
@@ -324,9 +367,24 @@ def _bundle(*entries: tuple[str, bytes]) -> bytes:
     return b"__CLANG_OFFLOAD_BUNDLE__" + struct.pack("<Q", len(entries)) + table + payloads
 
 
-def _device_elf(*, instrumented: bool) -> bytes:
-    symbols = b"\0__asan_report_store4\0__asan_init\0" if instrumented else b"\0store_index\0"
+def _device_elf(*, instrumented: bool, kernel: str = "store_index") -> bytes:
+    symbols = f"\0_Z{len(kernel)}{kernel}Pii\0{kernel}.kd\0".encode()
+    if instrumented:
+        symbols += b"\0__asan_report_store4\0__asan_init\0"
     return b"\x7fELF" + b"\0" * 28 + symbols + b"\0" * 16
+
+
+def _bare_code_object(tmp_path: Path, *, e_flags: int, instrumented: bool) -> Path:
+    """A minimal 64-bit little-endian AMDGPU ELF, i.e. a ``.hsaco``."""
+
+    header = bytearray(64)
+    header[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", header, 18, 224)
+    struct.pack_into("<I", header, 48, e_flags)
+    body = b"\0_Z11store_indexPii\0" + (b"\0__asan_report_store4\0" if instrumented else b"")
+    path = tmp_path / "kernel.hsaco"
+    path.write_bytes(bytes(header) + body)
+    return path
 
 
 _HOST = "host-x86_64-unknown-linux-gnu-"
@@ -384,14 +442,25 @@ class TestPreflight:
     def test_another_targets_instrumentation_does_not_count(self, tmp_path):
         binary = _binary(
             tmp_path,
-            _bundle(
-                ("hipv4-amdgcn-amd-amdhsa--gfx942:xnack+", _device_elf(instrumented=True)),
-                ("hipv4-amdgcn-amd-amdhsa--gfx950", _device_elf(instrumented=False)),
-            ),
+            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx942:xnack+", _device_elf(instrumented=True))),
         )
         evidence = inspect_device_instrumentation(binary)
         assert evidence.instrumented_for("gfx942")
-        assert not evidence.instrumented_for("gfx950")
+        assert evidence.problems("gfx950") == ["no gfx950 code object"]
+
+    def test_an_unchecked_object_for_another_target_still_fails(self, tmp_path):
+        """The GPU that runs the binary is not necessarily the one the recipe names:
+        a gfx942 box behind a gfx950 label would run the unchecked object."""
+
+        binary = _binary(
+            tmp_path,
+            _bundle(
+                ("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True)),
+                ("hipv4-amdgcn-amd-amdhsa--gfx942", _device_elf(instrumented=False)),
+            ),
+        )
+        problems = inspect_device_instrumentation(binary).problems("gfx950")
+        assert problems == ["device code without ASan: hipv4-amdgcn-amd-amdhsa--gfx942"]
 
     def test_other_target_features_beside_xnack(self, tmp_path):
         binary = _binary(
@@ -405,8 +474,9 @@ class TestPreflight:
         )
         assert inspect_device_instrumentation(binary).instrumented_for("gfx950")
 
-    def test_every_bundle_in_the_file_is_read(self, tmp_path):
-        """One bundle per translation unit; the linker concatenates them."""
+    def test_one_unchecked_translation_unit_fails_the_binary(self, tmp_path):
+        """One bundle per translation unit, and the runtime loads each: a TU built
+        without :xnack+ still runs with XNACK on, unchecked, beside a checked one."""
 
         binary = _binary(
             tmp_path,
@@ -415,7 +485,51 @@ class TestPreflight:
         )
         evidence = inspect_device_instrumentation(binary)
         assert len(evidence.code_objects) == 2
+        assert not evidence.instrumented_for("gfx950")
+        assert "device code without ASan: hipv4-amdgcn-amd-amdhsa--gfx950" in (
+            evidence.problems("gfx950")
+        )
+
+    def test_every_translation_unit_instrumented_is_fine(self, tmp_path):
+        triple = "hipv4-amdgcn-amd-amdhsa--gfx950:xnack+"
+        binary = _binary(
+            tmp_path,
+            _bundle((triple, _device_elf(instrumented=True))),
+            _bundle((triple, _device_elf(instrumented=True, kernel="other_kernel"))),
+        )
+        evidence = inspect_device_instrumentation(binary, kernels=("store_index", "other_kernel"))
         assert evidence.instrumented_for("gfx950")
+        assert evidence.holds_kernel("gfx950", "store_index")
+        assert evidence.holds_kernel("gfx950", "other_kernel")
+        assert not evidence.holds_kernel("gfx950", "absent_kernel")
+
+    def test_a_compressed_bundle_beside_a_readable_one_fails(self, tmp_path):
+        compressed = b"CCOB" + struct.pack("<HH", 2, 2) + b"\0" * 32
+        binary = _binary(
+            tmp_path,
+            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True))),
+            compressed,
+        )
+        (problem,) = inspect_device_instrumentation(binary).problems("gfx950")
+        assert problem.startswith("1 compressed offload bundle(s)")
+
+    @pytest.mark.parametrize(
+        "e_flags,instrumented,expected",
+        [
+            (0x74F, True, True),  # gfx950, sramecc any, xnack+ -- measured
+            (0x54F, True, False),  # xnack any
+            (0x74F, False, False),  # -fno-gpu-sanitize shape: xnack+ without ASan
+            (0x74C, True, False),  # gfx942
+        ],
+    )
+    def test_a_bare_code_object_is_read_from_its_elf_header(
+        self, tmp_path, e_flags, instrumented, expected
+    ):
+        path = _bare_code_object(tmp_path, e_flags=e_flags, instrumented=instrumented)
+        evidence = inspect_device_instrumentation(path, kernels=("store_index",))
+        assert evidence.instrumented_for("gfx950") is expected
+        (code_object,) = evidence.code_objects
+        assert code_object.kernels_found == ("store_index",)
 
     def test_a_truncated_or_bogus_bundle_is_skipped(self, tmp_path):
         bogus = b"__CLANG_OFFLOAD_BUNDLE__" + struct.pack("<Q", 3) + b"\x01\x02"
@@ -510,6 +624,20 @@ class TestRuntime:
             therock / "lib" / "llvm" / "lib",
             therock / "lib" / "rocm_sysdeps" / "lib",
         )
+        # No compiler runtime of its own here, so the ROCm root's is used.
+        assert runtime.host_runtime.is_relative_to(root)
+
+    def test_an_asan_tree_with_its_own_compiler_runtime_uses_it(self, tmp_path):
+        root = _rocm_tree(tmp_path / "rocm")
+        therock = tmp_path / "therock-asan"
+        (therock / "lib").mkdir(parents=True)
+        (therock / "lib" / "libamdhip64.so.7").write_bytes(b"\0__asan_init\0")
+        own = therock / "lib" / "llvm" / "lib" / "clang" / "23" / "lib" / "linux"
+        own.mkdir(parents=True)
+        (own / "libclang_rt.asan-x86_64.so").write_bytes(b"\x7fELF")
+        runtime = resolve_asan_runtime({"ROCM_PATH": str(root), "ROCM_ASAN_PATH": str(therock)})
+        assert runtime is not None
+        assert runtime.host_runtime == own / "libclang_rt.asan-x86_64.so"
 
     def test_environment_pins_the_contract_over_hostile_inheritance(self, tmp_path):
         runtime = resolve_asan_runtime({"ROCM_PATH": str(_rocm_tree(tmp_path / "rocm"))})
@@ -524,7 +652,14 @@ class TestRuntime:
             runtime,
         )
         assert env["ASAN_OPTIONS"] == ASAN_OPTIONS_PINNED
-        assert "detect_leaks=0" in env["ASAN_OPTIONS"]
+        options = dict(item.split("=", 1) for item in env["ASAN_OPTIONS"].split(":"))
+        assert options == {
+            "detect_leaks": "0",
+            "halt_on_error": "1",
+            "exitcode": "1",
+            "symbolize": "1",
+            "color": "never",
+        }
         assert env["HSA_XNACK"] == "1"
         library_path = env["LD_LIBRARY_PATH"].split(os.pathsep)
         assert library_path[0] == str(runtime.rocm_lib_dirs[0])
@@ -630,6 +765,48 @@ class TestRunAsan:
         binary = _instrumented(tmp_path, instrumented=False)
         check = run_asan(_worklist(), command=binary, output_dir=tmp_path / "out", runtime=runtime)
         assert check.reason.startswith("asan_device_not_instrumented:")
+
+    def test_an_elf_command_is_checked_even_beside_named_objects(self, tmp_path, runtime):
+        """Naming objects must not let a recipe verify one build and run another."""
+
+        unchecked = _binary(
+            tmp_path,
+            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950", _device_elf(instrumented=False))),
+            name="build-plain-app",
+        )
+        check = run_asan(
+            _worklist(),
+            command=unchecked,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.reason.startswith("asan_device_not_instrumented:")
+        assert "build-plain-app" in check.reason
+
+    def test_an_elf_launcher_with_no_device_code_is_not_held_to_it(self, tmp_path, runtime):
+        launcher = tmp_path / "launcher"
+        launcher.write_bytes(Path("/bin/true").read_bytes())
+        launcher.chmod(0o755)
+        check = run_asan(
+            _worklist(),
+            command=launcher,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert (check.state, check.verdict) == (ExecutionState.RAN, Verdict.PASS)
+
+    def test_a_kernel_absent_from_the_checked_code_is_refused(self, tmp_path, runtime):
+        check = run_asan(
+            _worklist("some_other_kernel"),
+            command=_script(tmp_path, stderr_fixture=None, code=0),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.reason.startswith("asan_kernel_not_in_checked_code:")
+        assert not (tmp_path / "ran").exists()
 
     def test_no_runtime_is_not_checked_and_runs_nothing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ROCM_PATH", str(tmp_path / "missing"))
@@ -786,8 +963,13 @@ class TestPipeline:
 
 
 def test_support_matrix():
-    assert support("asan", "gfx950")["runnable"] is True
-    assert support("asan", "gfx942")["runnable"] is True
+    assert (support("asan", "gfx950")["level"], support("asan", "gfx942")["level"]) == (
+        "full",
+        "full",
+    )
+    # The compiler builds xnack+ objects for these; no prebuilt runtime exists.
+    assert support("asan", "gfx90a")["level"] == "partial"
+    assert support("asan", "gfx908")["runnable"] is True
     assert support("asan", "gfx1100")["runnable"] is False
 
 
@@ -853,6 +1035,38 @@ class TestClassification:
             )
         )
         assert phrase in verdict.rationale
+
+    def test_a_finding_from_a_timed_out_check_is_kept(self):
+        """ASan is the first backend to return findings from a check that did not
+        finish; the report already says fail, and CIA must not say nothing ran."""
+
+        verdict = classify_sanitizer(
+            _report(
+                {
+                    "sanitizer": "asan",
+                    "state": "timed_out",
+                    "verdict": "fail",
+                    "reason": "asan_timeout",
+                    "findings": [_ASAN_FINDING],
+                }
+            )
+        )
+        assert (verdict.category, verdict.confidence) == ("illegal_mem", 0.95)
+
+    def test_a_lost_device_report_is_a_detection_not_a_gap(self):
+        verdict = classify_sanitizer(
+            _report(
+                {
+                    "sanitizer": "asan",
+                    "state": "error",
+                    "verdict": "error",
+                    "reason": "asan_device_report_lost: device ASan detected ...",
+                    "findings": [],
+                }
+            )
+        )
+        assert (verdict.category, verdict.signals) == ("illegal_mem", [SIGNAL_MEMORY_ERROR])
+        assert "No sanitizer actually executed" not in verdict.rationale
 
     def test_a_consan_race_alone_is_unchanged(self):
         verdict = classify_sanitizer(

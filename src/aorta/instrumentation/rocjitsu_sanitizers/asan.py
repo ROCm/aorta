@@ -54,7 +54,7 @@ ASAN = "asan"
 # inherited ``exitcode=0`` or ``halt_on_error=0`` would weaken the check, and the
 # point of pinning is that the parent environment cannot. halt_on_error and
 # exitcode restate the defaults for that reason.
-ASAN_OPTIONS_PINNED = "detect_leaks=0:halt_on_error=1:exitcode=1:symbolize=1"
+ASAN_OPTIONS_PINNED = "detect_leaks=0:halt_on_error=1:exitcode=1:symbolize=1:color=never"
 
 ENV_ROCM_ASAN_LIB = "AORTA_ASAN_ROCM_LIB"
 ENV_ASAN_RUNTIME = "AORTA_ASAN_RUNTIME"
@@ -65,7 +65,10 @@ _HOST_RUNTIME_NAMES = ("libclang_rt.asan-x86_64.so", "libclang_rt.asan.so")
 _HOST_RUNTIME_ARCH_DIRS = ("linux", "x86_64-unknown-linux-gnu")
 _ASAN_MARKER = b"__asan_"
 
-_HEADER = re.compile(r"^==(?P<pid>\d+)==ERROR: AddressSanitizer: (?P<rest>.*?)\s*$")
+# Searched, not anchored: a header can follow unterminated program output on
+# the same line, and log_exe_name puts the executable's name before the pid.
+_HEADER = re.compile(r"==(?:[^=\s]+==)?(?P<pid>\d+)==ERROR: AddressSanitizer: (?P<rest>.*?)\s*$")
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _DEVICE_HEADER = re.compile(
     r"^(?P<kind>[A-Za-z0-9_-]+) on amdgpu device (?P<device>\d+) at pc (?P<pc>0x[0-9a-fA-F]+)"
 )
@@ -97,7 +100,7 @@ _STACK_HEADER = re.compile(
 _SOURCE_LOCATION = re.compile(r"(?P<loc>\S+:\d+(?::\d+)?)$")
 _LANE = re.compile(r"\b\d+ : 0x[0-9a-fA-F]+")
 _SUMMARY_LOC = re.compile(r"^SUMMARY: AddressSanitizer: \S+ (?P<loc>\S+:\d+(?::\d+)?) in ")
-_LEAK_REPORT = re.compile(r"^==\d+==ERROR: LeakSanitizer:", re.MULTILINE)
+_LEAK_REPORT = re.compile(r"==(?:[^=\s]+==)?\d+==ERROR: LeakSanitizer:")
 _HOSTCALL_LOST = re.compile(r"Hostcall: no handler found for service ID 4\b")
 _RUNTIME_NOT_FIRST = "ASan runtime does not come first in initial library list"
 _INCOMPATIBLE_RUNTIMES = "linked against incompatible ASan runtimes"
@@ -106,7 +109,25 @@ _INIT_FAILURE = re.compile(
     r"|ERROR: AddressSanitizer failed to allocate"
     r"|AddressSanitizer: CHECK failed"
 )
-_INVALID_DEVICE_FUNCTION = re.compile(r"hipErrorInvalidDeviceFunction|invalid device function")
+# The kernel never ran, so a clean exit afterwards says nothing about it.
+_KERNEL_NOT_LOADED = re.compile(
+    r"hipErrorInvalidDeviceFunction|invalid device function|hipErrorNoBinaryForGpu"
+    r"|no kernel image is available|Unable to find code object"
+)
+
+_EM_AMDGPU = 224
+# The EF_AMDGPU_MACH field of a code object's e_flags (low byte). Unlisted values
+# name no target, so such an object can never satisfy a recipe's target.
+_AMDGPU_MACH = {
+    0x030: "gfx908",
+    0x03F: "gfx90a",
+    0x040: "gfx940",
+    0x04B: "gfx941",
+    0x04C: "gfx942",
+    0x04F: "gfx950",
+}
+_XNACK_FEATURE = {0x300: "xnack+", 0x200: "xnack-"}
+_SRAMECC_FEATURE = {0xC00: "sramecc+", 0x800: "sramecc-"}
 
 _BUNDLE_MAGIC = b"__CLANG_OFFLOAD_BUNDLE__"
 _COMPRESSED_BUNDLE_MAGIC = b"CCOB"
@@ -183,7 +204,7 @@ def _function_name(signature: str) -> str:
 
 
 def _report_blocks(lines: list[str]) -> list[tuple[re.Match[str], list[str]]]:
-    starts = [(index, match) for index, line in enumerate(lines) if (match := _HEADER.match(line))]
+    starts = [(index, match) for index, line in enumerate(lines) if (match := _HEADER.search(line))]
     blocks = []
     for position, (index, match) in enumerate(starts):
         end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
@@ -303,6 +324,7 @@ def parse_asan_output(text: str) -> ParsedAsanOutput:
     output that imitates one costs a false alarm at worst.
     """
 
+    text = _ANSI_ESCAPE.sub("", text)
     lines = text.splitlines()
     findings = tuple(_finding_from_block(header, body) for header, body in _report_blocks(lines))
     return ParsedAsanOutput(
@@ -328,10 +350,16 @@ class DeviceCodeObject:
     processor: str
     features: tuple[str, ...]
     asan_instrumented: bool
+    # Which of the kernel names asked about occur in this code object.
+    kernels_found: tuple[str, ...] = ()
 
     @property
     def xnack_on(self) -> bool:
         return "xnack+" in self.features
+
+    @property
+    def checked(self) -> bool:
+        return self.xnack_on and self.asan_instrumented
 
 
 @dataclass(frozen=True)
@@ -342,10 +370,40 @@ class InstrumentationEvidence:
     code_objects: tuple[DeviceCodeObject, ...]
     compressed_bundles: int
 
+    @property
+    def has_device_code(self) -> bool:
+        return bool(self.code_objects) or self.compressed_bundles > 0
+
+    def problems(self, target: str) -> list[str]:
+        """Why this binary's device code cannot vouch for an ASan run on ``target``.
+
+        Every code object has to be instrumented, not just one. A binary links one
+        bundle per translation unit, the runtime loads each, and an object built
+        without ``:xnack+`` still runs with XNACK on -- so one unchecked object
+        beside a checked one runs its kernels unchecked. Objects for other targets
+        are held to the same rule, because the GPU that runs the binary is not
+        necessarily the one the recipe names.
+        """
+
+        found = []
+        if self.compressed_bundles:
+            found.append(
+                f"{self.compressed_bundles} compressed offload bundle(s), which aorta "
+                "cannot inspect (rebuild without --offload-compress)"
+            )
+        unchecked = [item.triple for item in self.code_objects if not item.checked]
+        if unchecked:
+            found.append("device code without ASan: " + ", ".join(unchecked))
+        if not any(item.processor == target for item in self.code_objects):
+            found.append(f"no {target} code object")
+        return found
+
     def instrumented_for(self, target: str) -> bool:
+        return not self.problems(target)
+
+    def holds_kernel(self, target: str, name: str) -> bool:
         return any(
-            item.processor == target and item.xnack_on and item.asan_instrumented
-            for item in self.code_objects
+            item.processor == target and name in item.kernels_found for item in self.code_objects
         )
 
     def describe(self) -> str:
@@ -362,7 +420,7 @@ class InstrumentationEvidence:
         return f"{self.path}: {listed}"
 
 
-def _parse_bundle(data: bytes, base: int) -> list[DeviceCodeObject]:
+def _parse_bundle(data: bytes, base: int, kernels: Sequence[str]) -> list[DeviceCodeObject]:
     """Read the AMDGPU entries of one uncompressed clang offload bundle.
 
     Layout: the 24-byte magic, a little-endian u64 entry count, then per entry
@@ -399,12 +457,14 @@ def _parse_bundle(data: bytes, base: int) -> list[DeviceCodeObject]:
             continue
         processor_and_features = triple.rpartition("--")[2]
         processor, *features = processor_and_features.split(":")
+        blob = data[start:end]
         objects.append(
             DeviceCodeObject(
                 triple=triple,
                 processor=processor,
                 features=tuple(features),
-                asan_instrumented=_ASAN_MARKER in data[start:end],
+                asan_instrumented=_ASAN_MARKER in blob,
+                kernels_found=tuple(name for name in kernels if name.encode() in blob),
             )
         )
     return objects
@@ -424,6 +484,30 @@ def _count_compressed_bundles(data: bytes) -> int:
     return count
 
 
+def _bare_code_object(data: bytes, kernels: Sequence[str]) -> DeviceCodeObject | None:
+    """Describe ``data`` when it is itself an AMDGPU code object (a ``.hsaco``)."""
+
+    if len(data) < 52 or data[:4] != _ELF_MAGIC or data[4] != 2 or data[5] != 1:
+        return None
+    (machine,) = struct.unpack_from("<H", data, 18)
+    if machine != _EM_AMDGPU:
+        return None
+    (flags,) = struct.unpack_from("<I", data, 48)
+    processor = _AMDGPU_MACH.get(flags & 0xFF, f"amdgpu-mach-0x{flags & 0xFF:02x}")
+    features = tuple(
+        feature
+        for feature in (_SRAMECC_FEATURE.get(flags & 0xC00), _XNACK_FEATURE.get(flags & 0x300))
+        if feature
+    )
+    return DeviceCodeObject(
+        triple=f"amdgcn-amd-amdhsa--{':'.join((processor, *features))}",
+        processor=processor,
+        features=features,
+        asan_instrumented=_ASAN_MARKER in data,
+        kernels_found=tuple(name for name in kernels if name.encode() in data),
+    )
+
+
 def is_elf(path: Path) -> bool:
     try:
         with path.open("rb") as stream:
@@ -432,21 +516,26 @@ def is_elf(path: Path) -> bool:
         return False
 
 
-def inspect_device_instrumentation(path: Path) -> InstrumentationEvidence:
+def inspect_device_instrumentation(
+    path: Path, *, kernels: Sequence[str] = ()
+) -> InstrumentationEvidence:
     """Read every offload bundle in ``path`` and report its device code objects.
 
     Instrumentation is decided per code object: the ``__asan_`` marker has to be
     inside the device ELF itself, because the host half of an ASan build carries
     ``__asan_report_*`` references even when the device half was dropped.
-    Compressed (``CCOB``) bundles are counted, not decompressed; a binary that
-    holds only those is reported as unreadable rather than as uninstrumented.
+    Compressed (``CCOB``) bundles are counted, not decompressed. ``kernels`` are
+    looked up by name in each code object, which matches a plain name inside its
+    mangled symbol.
     """
 
     data = path.read_bytes()
+    if (bare := _bare_code_object(data, kernels)) is not None:
+        return InstrumentationEvidence(path=str(path), code_objects=(bare,), compressed_bundles=0)
     objects: list[DeviceCodeObject] = []
     start = 0
     while (index := data.find(_BUNDLE_MAGIC, start)) != -1:
-        objects.extend(_parse_bundle(data, index))
+        objects.extend(_parse_bundle(data, index, kernels))
         start = index + len(_BUNDLE_MAGIC)
     return InstrumentationEvidence(
         path=str(path),
@@ -486,8 +575,8 @@ def _instrumented_hip_runtime(lib_dir: Path) -> Path | None:
     return None
 
 
-def _host_runtime(core: Path) -> Path | None:
-    clang_root = core / "lib" / "llvm" / "lib" / "clang"
+def _host_runtime(llvm_root: Path) -> Path | None:
+    clang_root = llvm_root / "lib" / "clang"
     if not safe_is_dir(clang_root):
         return None
     try:
@@ -547,8 +636,19 @@ def resolve_asan_runtime(environ: Mapping[str, str] | None = None) -> AsanRuntim
     if hip_runtime is None or lib_dir is None:
         return None
 
+    # An instrumented tree that ships its own compiler runtime (TheRock's ASan
+    # tarball does, under lib/llvm) is preferred to the stock ROCm root's, so the
+    # host runtime matches the libraries it is loaded with.
+    llvm_roots = list(
+        dict.fromkeys((lib_dir / "llvm", lib_dir.parent / "llvm", core / "lib" / "llvm"))
+    )
     explicit_runtime = env.get(ENV_ASAN_RUNTIME, "").strip()
-    host_runtime = Path(explicit_runtime) if explicit_runtime else _host_runtime(core)
+    if explicit_runtime:
+        host_runtime: Path | None = Path(explicit_runtime)
+    else:
+        host_runtime = next(
+            (found for root in llvm_roots if (found := _host_runtime(root)) is not None), None
+        )
     if host_runtime is None or not host_runtime.is_file():
         return None
 
@@ -559,12 +659,19 @@ def resolve_asan_runtime(environ: Mapping[str, str] | None = None) -> AsanRuntim
         for directory in (lib_dir / "llvm" / "lib", lib_dir / "rocm_sysdeps" / "lib")
         if safe_is_dir(directory)
     )
-    symbolizer = core / "lib" / "llvm" / "bin" / "llvm-symbolizer"
+    symbolizer = next(
+        (
+            candidate
+            for root in llvm_roots
+            if (candidate := root / "bin" / "llvm-symbolizer").is_file()
+        ),
+        None,
+    )
     return AsanRuntime(
         rocm_lib_dirs=(lib_dir, *extra),
         hip_runtime=hip_runtime,
         host_runtime=host_runtime,
-        symbolizer=symbolizer if symbolizer.is_file() else None,
+        symbolizer=symbolizer,
     )
 
 
@@ -681,13 +788,16 @@ def evaluate_asan_output(process: ProcessResult) -> CheckResult:
             "asan_init_failed: the ASan runtime could not initialise",
             returncode=process.returncode,
         )
+    # Whatever the exit code: a repro that reports its launch failure and still
+    # exits 0 checked nothing.
+    if _KERNEL_NOT_LOADED.search(f"{process.stderr}\n{process.stdout}"):
+        return _error(
+            "asan_kernel_not_loaded: the kernel would not load, so nothing was "
+            "checked -- an xnack+ code object needs HSA_XNACK=1 on an XNACK-capable GPU",
+            returncode=process.returncode,
+        )
     if process.returncode != 0:
         reason = f"asan_command_exit_{process.returncode}{_launch_diagnostic(process)}"
-        if _INVALID_DEVICE_FUNCTION.search(f"{process.stderr}\n{process.stdout}"):
-            reason += (
-                ": the kernel would not load -- an xnack+ code object needs "
-                "HSA_XNACK=1 on an XNACK-capable GPU"
-            )
         if parsed.leak_reports:
             reason += ": LeakSanitizer ran although aorta pins detect_leaks=0"
         return _error(reason, returncode=process.returncode)
@@ -702,35 +812,54 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _preflight(objects: Sequence[Path], *, target: str) -> tuple[CheckResult | None, list[str]]:
-    """Fail closed unless every named binary carries device ASan for ``target``."""
+def _preflight(
+    objects: Sequence[Path], *, target: str, kernel: str
+) -> tuple[CheckResult | None, list[str]]:
+    """Fail closed unless the device code that can run is all ASan-instrumented.
 
-    descriptions = []
+    Every binary in ``objects`` that carries device code is held to
+    :meth:`InstrumentationEvidence.problems`, and the selected kernel has to be in
+    one of them, so a PASS cannot come from checking some other build.
+    """
+
+    descriptions: list[str] = []
+    holders = []
     for path in objects:
         if not path.is_file():
             return _error(f"asan_object_not_found: {path}"), descriptions
-        evidence = inspect_device_instrumentation(path)
+        evidence = inspect_device_instrumentation(path, kernels=(kernel,))
         descriptions.append(evidence.describe())
-        if not evidence.code_objects and evidence.compressed_bundles:
+        if not evidence.has_device_code:
+            continue
+        if problems := evidence.problems(target):
+            advice = (
+                ". Device code without ASan runs unchecked. -fsanitize=address is "
+                "silently dropped for a target without :xnack+, and -fno-gpu-sanitize "
+                f"drops it too; build only for --offload-arch={target}:xnack+"
+                if any(problem.startswith("device code without ASan") for problem in problems)
+                else ""
+            )
             return (
-                _error(
-                    f"asan_instrumentation_unverified: {path} holds only compressed "
-                    "offload bundles, which aorta does not decompress; rebuild "
-                    "without --offload-compress"
-                ),
+                _error(f"asan_device_not_instrumented: {path}: {'; '.join(problems)}{advice}"),
                 descriptions,
             )
-        if not evidence.instrumented_for(target):
-            return (
-                _error(
-                    f"asan_device_not_instrumented: {evidence.describe()}. No "
-                    f"{target}:xnack+ code object carries ASan instrumentation, so "
-                    "device memory errors would go unseen; -fsanitize=address is "
-                    f"silently dropped for a target without :xnack+ (build with "
-                    f"--offload-arch={target}:xnack+)"
-                ),
-                descriptions,
-            )
+        holders.append(evidence)
+    if not holders:
+        return (
+            _error(
+                "asan_device_not_instrumented: none of "
+                f"{', '.join(str(path) for path in objects)} carries device code"
+            ),
+            descriptions,
+        )
+    if not any(evidence.holds_kernel(target, kernel) for evidence in holders):
+        return (
+            _error(
+                f"asan_kernel_not_in_checked_code: {kernel} is in no {target} code object "
+                "of the checked binaries, so their instrumentation says nothing about it"
+            ),
+            descriptions,
+        )
     return None, descriptions
 
 
@@ -762,15 +891,22 @@ def run_asan(
         return _not_checked("asan_command_not_found")
 
     # The build is checked before the runtime is looked for: it needs no GPU and
-    # no ASan runtime, so a mis-built repro is reported on any host.
-    checked = tuple(objects) or ((command,) if is_elf(command) else ())
+    # no ASan runtime, so a mis-built repro is reported on any host. An ELF command
+    # is always checked, named objects or not, so a recipe cannot verify one build
+    # and run another; one without device code (a launcher) is skipped there.
+    checked = list(dict.fromkeys(objects))
+    if is_elf(command) and command not in checked:
+        checked.insert(0, command)
+    if selected.code_object is not None and Path(selected.code_object).is_file():
+        checked.append(Path(selected.code_object))
+    checked = list(dict.fromkeys(checked))
     if not checked:
         return _error(
             f"asan_instrumentation_unverifiable: {command} is not an ELF executable, "
             "so its device code cannot be inspected; name the instrumented binaries "
             "in sanitizer_plan.source.asan_objects"
         )
-    failure, evidence = _preflight(checked, target=selected.target)
+    failure, evidence = _preflight(checked, target=selected.target, kernel=selected.name)
     backend = {
         "command": str(command),
         "command_sha256": _sha256_file(command),
