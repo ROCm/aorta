@@ -330,6 +330,57 @@ device use-after-free were all caught. `recipes/sanitizers/asan-heap-overflow.ya
 (expect FAIL) and `asan-clean.yaml` (expect PASS) are the worked pair; the build
 commands are at the top of `fixtures/repro/asan_heap_overflow.hip`.
 
+### Running a workload under ASan: `aorta run --sanitizer asan`
+
+The recipe above checks one repro. `aorta run --workload <name> --sanitizer asan`
+runs any workload under ASan instead, then says which of the kernels it dispatched
+ASan actually checked. A sanitizer has to be in a process from its first
+instruction, so the command runs itself twice: the parent stays uninstrumented,
+makes `<results-dir>/<workload>/asan/<run>/`, and runs the same `aorta run` with the
+ASan environment. That is the four requirements above plus: the HIP and HSA
+runtimes preloaded by name (so PyTorch's bundled `libamdhip64` binds to the
+instrumented build), PyTorch's caching allocator off, Triton building with ASan and
+without buffer instructions, and three records that every process the workload
+starts writes into that directory -- ASan's reports (`log_path`), HIP's dispatch
+log, and the files the loader loaded (`LD_DEBUG=files`). The parent then writes
+`asan_report.json` beside them.
+
+A dispatched kernel counts as checked only when aorta finds it defined in an
+ASan-instrumented, xnack+ code object, and in no uninstrumented one, among the files
+that process loaded, the code objects the workload declared, and Triton's kernel
+cache. Kernels are matched on the full signature HIP logs (`store_index(int*,
+int)`), read from each code object's kernel-descriptor symbols. A kernel aorta
+cannot find counts as unchecked, so the rule can only under-state coverage.
+
+| exit | verdict | meaning |
+|---|---|---|
+| 0 | `pass` | no memory error, and every dispatched kernel was checked |
+| 1 | `fail` / `error` | a memory error; a report that could have been lost; or a failed trial |
+| 3 | `not_checked` | no memory error, but some kernels ran from code ASan does not check |
+
+What that means per workload, measured on MI350:
+
+- `hrx` and `hrx_perf` build their own HIP code, so under the mode they build it with
+  device ASan (`--offload-arch=<arch>:xnack+`, into `<build_dir>/<arch>-asan`) and
+  declare it, and a clean run **passes**. The HRX runtime replaces the HIP runtime
+  ASan reports through, so an `HRX_GPU_DRIVER` cell is refused. `aorta run` has no
+  option for workload config, and `gpu_arch` defaults to `gfx942`, so on gfx950 set
+  it from a recipe or the Python API.
+- The PyTorch workloads (`gpu_smoke`, `training`, `inference`, `llm_determinism`,
+  `race`) run and report **not checked**: PyTorch's kernels, and those of the ROCm
+  libraries it calls, are built without ASan and shipped compressed. Triton kernels
+  compiled during the run are built with ASan, but triton-rocm 3.6.0 cannot assemble
+  any ASan-instrumented kernel, so on that version a workload that compiles one fails.
+- `tokenspeed_serve` does its GPU work in a container, which the mode does not reach.
+
+A workload that loads code objects by file (`hipModuleLoad`) must declare them with
+`asan_run.declare_code_objects`, or their kernels count as unchecked: the loader's
+record does not list them, and a workload may delete its build before the run ends,
+so a declaration records what each file defines when it is declared. A cell whose
+environment, mitigations or `extra_env` would change a setting the mode owns
+(`LD_PRELOAD`, `ASAN_OPTIONS`, `HSA_XNACK`, ...) is refused rather than run with the
+check silently off. A PASS under the mode has the same limits as a recipe PASS.
+
 ## Verdict and health rules
 
 - Waitcheck structured hazard → `warn`.

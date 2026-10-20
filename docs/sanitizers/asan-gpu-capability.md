@@ -182,3 +182,30 @@ Inherited `ASAN_OPTIONS=exitcode=0:halt_on_error=0 HSA_XNACK=0` → still `fail`
 `test_asan_gpu.py` runs all five cases (not skipped) when a runtime resolves. The mixed-TU
 binary above → `error: asan_device_not_instrumented`, refused before it runs (job 85339; the
 same matrix otherwise gave identical verdicts to job 83182).
+
+## aorta's own workloads under ASan: the run mode
+
+`aorta run --sanitizer asan` (see the package README) runs a workload under ASan and judges
+each dispatched kernel. Measured on gfx950, ROCm 7.0.2 and its ASan runtime:
+
+| case | verdict | how the kernels were attributed |
+|---|---|---|
+| `hrx` static probe, `gfx950` | `pass` | `add100(float*, float const*, unsigned long)`, from the probe binary the loader loaded |
+| `hrx` module probe | `pass` | `add100`, from the `hipModuleLoad`ed code object `hrx` declared |
+| `hrx` graph probe | `pass` | the graph-launched kernel is logged and attributed like any other |
+| `hrx_perf` triad | `pass` | `fill` and `triad`, both checked |
+| `hrx` running a planted `i <= n` overflow | `fail` | device `heap-buffer-overflow` at `hrx_probe_oob.cpp:12:24`, read from the per-process `log_path` file |
+| the same, stock runtime | `error` | `Hostcall: no handler found for service ID 4` in the HIP log |
+| an `extra_env` that sets `LD_PRELOAD` | refused | before any trial ran |
+| `gpu_smoke` through the CLI (container) | `not_checked`, exit 3 | 0 of 3 kernels: `vectorized_elementwise_kernel` (fill, add) and `reduce_kernel`, defined in compressed device code in `libtorch_hip`, `librocblas`, `libMIOpen`, `librccl`, `librocsolver`, `librocsparse` |
+
+Native jobs 85755/85760 (`cv350-rck-g03-c13-18`, `-c12-18`); container job 85756. The
+`gpu_smoke` control without `--sanitizer` passes in the same container, and a planted overflow
+run under the mode's environment there fails, so its `not_checked` is about coverage.
+
+Two things the first measurement got wrong, both now covered by tests. `python -m aorta.cli`
+cannot start the child (`aorta.cli` is a package without `__main__`), which a test that only
+compared the command line let through. And job 85755 reported every clean `hrx` run
+`not_checked`: `hrx` deletes its temporary build directory in `cleanup()`, so by the time the
+parent read the evidence the declared probes were gone. A declaration now records what each
+file defines when it is declared, and job 85760 is the measurement after that change.
