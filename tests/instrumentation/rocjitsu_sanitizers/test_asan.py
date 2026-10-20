@@ -234,6 +234,21 @@ class TestParseRealReports:
         (finding,) = parse_asan_output(f"{before}{prefix}==203=={after}").findings
         assert finding.kernel_name == "write_n_plus_one"
 
+    def test_colour_codes_on_the_body_lines_are_stripped(self):
+        """ASan's decorator colours the access, location and allocation lines too,
+        each starting with an escape sequence, when it colours at all."""
+
+        coloured = []
+        for line in _fixture("device_heap_buffer_overflow_write.txt").splitlines():
+            if line.startswith(("WRITE of size", "0x", "allocated by thread")):
+                line = f"\x1b[1m\x1b[34m{line}\x1b[1m\x1b[0m"
+            coloured.append(line)
+        (finding,) = parse_asan_output("\n".join(coloured)).findings
+        meta = _meta(finding)
+        assert meta["access"] == "WRITE"
+        assert meta["region"].startswith("located 0 bytes after 4000-byte region")
+        assert meta["allocated_at"] == "/work/src/asan_probe.hip:93:3"
+
 
 # --------------------------------------------------------------------------- #
 # Verdicts
