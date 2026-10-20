@@ -249,8 +249,8 @@ source:
 sanitizers: [asan]
 ```
 
-Three things have to be true, and each one fails silently when it is not, which
-is why aorta checks all three instead of trusting the build:
+Four things have to be true, and each one fails silently when it is not, which
+is why aorta checks all four instead of trusting the build:
 
 1. **All of the GPU code is built for an `xnack+` target.** `hipcc -fsanitize=address
    -shared-libsan -g --offload-arch=gfx950:xnack+`. With a plain `gfx950` target
@@ -276,6 +276,13 @@ is why aorta checks all three instead of trusting the build:
    kernel will not load without it (`hipErrorInvalidDeviceFunction`). A run that
    prints a load failure is an error (`asan_kernel_not_loaded`) whatever its exit
    code, because a repro that swallows the error and exits 0 checked nothing.
+4. **The selected kernel was dispatched.** ASan leaves no trace of a kernel that
+   ran clean, so aorta pins HIP's own dispatch logging (`AMD_LOG_LEVEL=3`,
+   `AMD_LOG_MASK=128` -- decimal; the runtime reads a `0x` value as selecting
+   nothing -- and `AMD_LOG_LEVEL_FILE` in the output directory, one file per
+   process) and a clean exit passes only if the selected kernel appears in it
+   (`asan_kernel_not_dispatched`; no log at all is `asan_dispatch_unverified`).
+   The runtime's own messages go to that file too, and are read with the streams.
 
 aorta also pins `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:exitcode=1:symbolize=1:color=never`
 (replacing any inherited value, so a parent cannot set `exitcode=0`), prepends
@@ -308,10 +315,16 @@ in Triton, whose AMD backend emits them by default; Composable Kernel's
 global-memory path is built on them). Hand-written
 assembly kernels (Tensile) cannot be instrumented at all. The preflight therefore
 proves a code object was *built with* device ASan, not that every access in it is
-checked. Nor does a PASS prove the selected kernel was dispatched: ASan leaves no
-record of a kernel that ran clean, so a repro should check its own output, as
-`asan_heap_overflow.hip` does. Run one process per check: reports from several
-processes interleaved on one stream can be misattributed to each other.
+checked. The dispatch check shows the kernel ran, not that its result was right,
+so a repro should still check its own output, as `asan_heap_overflow.hip` does.
+Run one process per check: ASan reports from several processes interleaved on one
+stream can be misattributed to each other.
+
+ROCm's own ASan library builds cover little of what a Meta-style workload runs on
+MI350, measured on the `*-asan` packages: MIOpen 7.0.2 and 7.2.4 and rocBLAS 7.0.2
+carry **no gfx950 code object at all** (gfx90a and gfx942 only), and on gfx942
+290 of MIOpen 7.0.2's 294 code objects -- every one of them Composable Kernel code
+-- carry no ASan instrumentation.
 LDS overflows, `hipMalloc` and `hipHostMalloc` overflows, out-of-bounds reads and
 device use-after-free were all caught. `recipes/sanitizers/asan-heap-overflow.yaml`
 (expect FAIL) and `asan-clean.yaml` (expect PASS) are the worked pair; the build
@@ -322,7 +335,8 @@ commands are at the top of `fixtures/repro/asan_heap_overflow.hip`.
 - Waitcheck structured hazard → `warn`.
 - ConSan attributed race → `fail`.
 - ASan memory error → `fail`, whatever the exit code; a device detection the
-  runtime could not report → `error`.
+  runtime could not report, or a clean exit without the selected kernel's
+  dispatch → `error`.
 - Backend timeout, launch failure, unexpected exit, missing verdict, or
   incomplete coverage → `error`.
 - Missing backend or unsupported worklist scoping → `not_checked`.

@@ -103,6 +103,42 @@ Composable Kernel builds its global-memory path on buffer intrinsics (its
 them by default (measured below), so an instrumented code object can still have unchecked
 accesses.
 
+## Proving the kernel ran
+
+A clean ASan run leaves no trace, so a repro that never launched its kernel exits 0 like one
+that ran clean. HIP's own log records dispatches. At `AMD_LOG_LEVEL=3` with
+`AMD_LOG_MASK=128` (`LOG_KERN`), each launch writes a `ShaderName : <kernel signature>` line, and
+`AMD_LOG_LEVEL_FILE=<path>` sends it to `<path>_<pid>` per process. The ASan clean fixture's log
+is 3.6 KB with one `ShaderName : store_index(int*, int)` line, and zero lines with XNACK off
+(jobs 85370, 85390).
+
+Two traps:
+- **`AMD_LOG_MASK` is read as decimal.** Every `0x`-prefixed value selected nothing but the
+  always-on lines.
+- **The runtime writes its own messages to that file too**, including `Hostcall: no handler
+  found for service ID 4`, so the backend reads the file for every runtime signal (job 85399
+  caught it reading only stderr).
+
+A binary that holds `store_index` and never launches it now gives `error:
+asan_kernel_not_dispatched` (job 85402).
+
+## ROCm's ASan library builds on MI350
+
+The `*-asan` library packages were unpacked, every offload bundle decompressed with
+`clang-offload-bundler`, and the code objects counted:
+
+| package | bundles | targets | gfx942 objects with ASan |
+|---|---|---|---|
+| `miopen-hip-asan` 7.0.2 | 294 | gfx90a, gfx942, **no gfx950** | **4 of 294**, every object Composable Kernel code |
+| `miopen-hip-asan` 7.2.4 | 335 | gfx90a, gfx942, **no gfx950** | not counted |
+| `rocblas-asan` 7.0.2 | 64 | gfx90a, gfx942, **no gfx950** | 64 of 64 |
+
+Across the 12,290 Composable Kernel functions in MIOpen 7.0.2's gfx942 objects,
+**89.5% of global, flat and buffer memory instructions are buffer instructions** (670,372
+against 78,517), the kind ASan does not check. MIOpen's 668 other functions use none. So on
+MI350 these libraries carry no device code at all, and on MI300X ASan would check almost none
+of MIOpen's CK kernels. TheRock's ASan builds (nightly, gfx950) were not measured.
+
 ## Python, PyTorch and Triton (measured, not yet supported by the backend)
 
 An off-by-one `tl.store` in a Triton kernel launched from PyTorch (torch 2.10.0+rocm7.0,
