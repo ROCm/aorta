@@ -373,7 +373,7 @@ def _declared_inventories(evidence_dir: Path) -> dict[str, list[KernelInventory]
         if not isinstance(record, dict):
             continue
         inventory = _inventory_from_record(record)
-        if inventory is not None and inventory.path.startswith("/"):
+        if inventory is not None:
             declared.setdefault(inventory.path, []).append(inventory)
     return declared
 

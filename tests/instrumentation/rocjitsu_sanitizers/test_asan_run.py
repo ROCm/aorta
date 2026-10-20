@@ -8,6 +8,7 @@ reads in production rather than on stubs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import struct
@@ -44,6 +45,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
 )
 from aorta.instrumentation.rocjitsu_sanitizers.models import Verdict
 from aorta.run import _trial_worker
+from aorta.run import dispatcher as dispatcher_module
 from aorta.run.dispatcher import RunRequest, run_trials
 from aorta.workloads import Workload, WorkloadResult
 
@@ -584,15 +586,22 @@ def test_a_kernel_also_defined_in_plain_code_is_not_checked(tmp_path):
     assert kernel.defined_in == (str(tmp_path / "probe"), str(plain))
 
 
-def test_unchecked_in_one_process_is_unchecked_for_the_run(tmp_path):
+@pytest.mark.parametrize("plain_pid", [7, 8], ids=["plain-first", "plain-last"])
+def test_unchecked_in_one_process_is_unchecked_for_the_run(tmp_path, plain_pid):
     evidence = _evidence(tmp_path)
+    instrumented_pid = 15 - plain_pid
     _process(
         evidence,
-        7,
+        instrumented_pid,
         program=_instrumented_binary(tmp_path / "a"),
         kernels=["store_index(int*, int)"],
     )
-    _process(evidence, 8, program=_plain_binary(tmp_path / "b"), kernels=["store_index(int*, int)"])
+    _process(
+        evidence,
+        plain_pid,
+        program=_plain_binary(tmp_path / "b"),
+        kernels=["store_index(int*, int)"],
+    )
 
     report = evaluate_asan_run(evidence, returncode=0)
 
@@ -763,12 +772,21 @@ class _ConfigRecordingWorkload(Workload):
         pass
 
 
-def _registered(workload: type[Workload]):
-    entry = MagicMock()
-    entry.name = "recording"
-    entry.load.return_value = workload
+def _registered(workload: type[Workload], policy: str | None = None):
+    """Register ``workload`` as "recording"; ``policy`` names an isolation policy target."""
+
+    workload_entry = MagicMock()
+    workload_entry.name = "recording"
+    workload_entry.load.return_value = workload
+    groups = {"aorta.workloads": [workload_entry]}
+    if policy is not None:
+        policy_entry = MagicMock()
+        policy_entry.name = "recording"
+        policy_entry.group = "aorta.workload_policies"
+        policy_entry.value = policy
+        groups["aorta.workload_policies"] = [policy_entry]
     entries = MagicMock()
-    entries.select.return_value = [entry]
+    entries.select.side_effect = lambda group=None, **_: groups.get(group, [])
     return patch("importlib.metadata.entry_points", return_value=entries)
 
 
@@ -825,6 +843,37 @@ def test_an_asan_run_refuses_a_cell_that_changes_what_it_owns(
         pytest.raises(ValueError, match="sets LD_PRELOAD itself"),
     ):
         run_trials(request)
+
+
+class _ProcessWorkload(_ConfigRecordingWorkload):
+    trial_isolation_default = "process"
+    trial_isolation_required = True
+    trial_isolation_supported = frozenset({"process"})
+
+
+def test_a_process_isolated_trial_hands_the_sanitizer_to_its_worker(
+    tmp_path, inside_an_asan_run, monkeypatch
+):
+    payloads = []
+
+    class _StopError(Exception):
+        pass
+
+    def capture(payload, **kwargs):
+        payloads.append(payload)
+        raise _StopError
+
+    monkeypatch.setattr(dispatcher_module, "launch_trial_worker", capture)
+    with (
+        _registered(_ProcessWorkload, "aorta.run.validation:PROCESS_REQUIRED_POLICY"),
+        contextlib.suppress(_StopError),
+    ):
+        run_trials(
+            RunRequest(workload="recording", trials=1, results_dir=tmp_path, sanitizer="asan")
+        )
+
+    (payload,) = payloads
+    assert payload["run_request"]["sanitizer"] == "asan"
 
 
 def test_the_trial_worker_keeps_the_sanitizer(tmp_path):
