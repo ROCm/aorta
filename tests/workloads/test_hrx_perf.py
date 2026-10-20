@@ -7,6 +7,7 @@ setup-time guards (hipcc absent, bad LD_PRELOAD).
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -511,7 +512,8 @@ def test_asan_run_builds_the_benchmark_with_device_asan(monkeypatch, tmp_path):
         cmd
     )
     assert wl._binary == tmp_path / "build" / "gfx950-asan" / _BENCHES["triad"].binary
-    assert (evidence / "code_objects.txt").read_text().splitlines() == [str(wl._binary)]
+    declared = (evidence / "code_objects.jsonl").read_text().splitlines()
+    assert [json.loads(line)["path"] for line in declared] == [str(wl._binary)]
 
 
 def test_plain_benchmark_build_is_unchanged(monkeypatch, tmp_path):

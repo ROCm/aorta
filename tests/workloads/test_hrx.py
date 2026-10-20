@@ -7,6 +7,7 @@ when hipcc is absent.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 from pathlib import Path
@@ -592,7 +593,8 @@ def test_asan_build_declares_what_the_run_cannot_see_loaded(monkeypatch, tmp_pat
     wl, _ = _recorded_builds(
         monkeypatch, tmp_path / "build", {"probe": "module", "gpu_arch": "gfx950", **_ASAN}
     )
-    assert (evidence / "code_objects.txt").read_text().splitlines() == [
+    declared = (evidence / "code_objects.jsonl").read_text().splitlines()
+    assert [json.loads(line)["path"] for line in declared] == [
         str(wl._binary),
         str(wl._binary.parent / _PROBES["module"].kernel_object),
     ]
@@ -603,7 +605,7 @@ def test_a_plain_build_declares_nothing(monkeypatch, tmp_path):
     evidence.mkdir()
     monkeypatch.setenv("AORTA_ASAN_RUN", str(evidence))
     _recorded_builds(monkeypatch, tmp_path / "build", {"probe": "module", "gpu_arch": "gfx950"})
-    assert not (evidence / "code_objects.txt").exists()
+    assert not (evidence / "code_objects.jsonl").exists()
 
 
 @pytest.mark.parametrize(

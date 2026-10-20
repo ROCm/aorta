@@ -376,20 +376,81 @@ def test_this_process_does_not_have_the_runtime_loaded():
     assert not asan_run._asan_runtime_loaded()
 
 
-def test_declared_code_objects_are_recorded_as_absolute_paths(tmp_path, monkeypatch):
+def _declarations(evidence: Path) -> list[dict]:
+    return [json.loads(line) for line in (evidence / "code_objects.jsonl").read_text().splitlines()]
+
+
+def test_a_declaration_records_what_each_file_defines_then(tmp_path, monkeypatch):
     evidence = tmp_path / "evidence"
     evidence.mkdir()
+    build = tmp_path / "build"
+    build.mkdir()
+    _instrumented_binary(build / "probe")
+    _write(build / "kernel.code", _bundle([(_GFX950_XNACK, _code_object(["add100"], asan=True))]))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
 
-    declare_code_objects([Path("build/probe"), tmp_path / "build" / "kernel.code"])
-    declare_code_objects(["build/probe"])
+    declare_code_objects([Path("build/probe"), build / "kernel.code"])
+    declare_code_objects(["build/missing"])
 
-    assert (evidence / "code_objects.txt").read_text().splitlines() == [
-        f"{tmp_path}/build/probe",
-        f"{tmp_path}/build/kernel.code",
-        f"{tmp_path}/build/probe",
+    records = _declarations(evidence)
+    assert [record["path"] for record in records] == [
+        f"{build}/probe",
+        f"{build}/kernel.code",
+        f"{build}/missing",
     ]
+    assert [obj["kernels"] for obj in records[0]["code_objects"]] == [["store_index(int*, int)"]]
+    assert records[1]["code_objects"][0]["asan_instrumented"] is True
+    assert records[2]["code_objects"] == [] and records[2]["unreadable"]
+
+
+def test_a_declaration_survives_the_workload_deleting_its_build(tmp_path, monkeypatch):
+    """hrx removes its temporary build directory in cleanup(), before the parent looks."""
+
+    evidence = _evidence(tmp_path)
+    build = tmp_path / "aorta-hrx-tmp" / "gfx950-asan"
+    build.mkdir(parents=True)
+    probe = _instrumented_binary(build / "hrx_probe")
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([probe])
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
+    probe.unlink()
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.PASS, report.reason
+
+
+def test_without_a_declaration_a_deleted_build_is_not_checked(tmp_path):
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "hrx_probe")
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
+    probe.unlink()
+
+    assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.NOT_CHECKED
+
+
+def test_a_declaration_the_parent_cannot_parse_is_ignored(tmp_path):
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "hrx_probe")
+    (evidence / "code_objects.jsonl").write_text(
+        "not json\n"
+        "[1, 2]\n"
+        + json.dumps(
+            {
+                "path": "relative/probe",
+                "compressed_bundles": 0,
+                "unreadable": None,
+                "code_objects": [],
+            }
+        )
+        + "\n"
+        + json.dumps({"path": "/x", "code_objects": "wrong"})
+        + "\n"
+    )
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
+
+    assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.PASS
 
 
 def test_declaring_outside_an_asan_run_does_nothing(tmp_path, monkeypatch):
@@ -549,14 +610,15 @@ def test_a_relative_program_path_is_not_resolved(tmp_path, monkeypatch):
     assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.NOT_CHECKED
 
 
-def test_a_declared_code_object_attributes_a_module_kernel(tmp_path):
+def test_a_declared_code_object_attributes_a_module_kernel(tmp_path, monkeypatch):
     """hrx's module probe: the kernel arrives through hipModuleLoad, not the loader."""
 
     evidence = _evidence(tmp_path)
     module = _write(
         tmp_path / "add100.code", _bundle([(_GFX950_XNACK, _code_object(["add100"], asan=True))])
     )
-    (evidence / "code_objects.txt").write_text(f"{module}\n")
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([module])
     _process(evidence, 7, program=_plain_binary(tmp_path / "probe", kernels=()), kernels=["add100"])
 
     report = evaluate_asan_run(evidence, returncode=0)

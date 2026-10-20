@@ -40,6 +40,7 @@ from .asan import (
     ASAN_OPTIONS_PINNED,
     DISPATCH_LOG_NAME,
     AsanRuntime,
+    KernelCodeObject,
     KernelInventory,
     _function_name,
     asan_environment,
@@ -60,7 +61,7 @@ EXIT_NOT_CHECKED = 3
 # the HIP runtime ``_<pid>``.
 _ASAN_LOG = "asan"
 _LD_LOG = "ld"
-_DECLARED = "code_objects.txt"
+_DECLARED = "code_objects.jsonl"
 _TRITON_CACHE = "triton-cache"
 
 # ASAN_OPTIONS splits on these, so log_path cannot contain them.
@@ -221,12 +222,53 @@ def owned_setting_conflicts(
     )
 
 
-def declare_code_objects(paths: Iterable[Path | str]) -> None:
-    """Record device code a workload loads by file, for the run's coverage check.
+def _inventory_record(inventory: KernelInventory) -> dict[str, object]:
+    return {
+        "path": inventory.path,
+        "compressed_bundles": inventory.compressed_bundles,
+        "unreadable": inventory.unreadable,
+        "code_objects": [
+            {
+                "triple": code_object.triple,
+                "processor": code_object.processor,
+                "features": list(code_object.features),
+                "asan_instrumented": code_object.asan_instrumented,
+                "kernels": list(code_object.kernels),
+            }
+            for code_object in inventory.code_objects
+        ],
+    }
 
-    ``hipModuleLoad`` reads a code object without going through the dynamic
-    loader, so the loader's record never lists it, and a kernel loaded that way
-    would count as unchecked whether or not it was built with ASan. A no-op
+
+def _inventory_from_record(record: Mapping[str, object]) -> KernelInventory | None:
+    try:
+        return KernelInventory(
+            path=str(record["path"]),
+            compressed_bundles=int(record["compressed_bundles"]),  # type: ignore[call-overload]
+            unreadable=record["unreadable"] if isinstance(record["unreadable"], str) else None,
+            code_objects=tuple(
+                KernelCodeObject(
+                    triple=str(item["triple"]),
+                    processor=str(item["processor"]),
+                    features=tuple(str(feature) for feature in item["features"]),
+                    asan_instrumented=item["asan_instrumented"] is True,
+                    kernels=tuple(str(kernel) for kernel in item["kernels"]),
+                )
+                for item in record["code_objects"]  # type: ignore[union-attr]
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def declare_code_objects(paths: Iterable[Path | str]) -> None:
+    """Record device code a workload built, for the run's coverage check.
+
+    Two reasons a workload has to say so. ``hipModuleLoad`` reads a code object
+    without going through the dynamic loader, so the loader's record never
+    lists it. And a workload may delete its build before the run ends -- hrx
+    removes its temporary build directory in ``cleanup()`` -- so what each file
+    defines is read here, while it exists, rather than after the run. A no-op
     outside an ASan run.
     """
 
@@ -234,9 +276,8 @@ def declare_code_objects(paths: Iterable[Path | str]) -> None:
     if not evidence or not Path(evidence).is_dir():
         return
     lines = [
-        f"{resolved}\n"
-        for resolved in (str(Path(path).resolve()) for path in paths)
-        if "\n" not in resolved
+        json.dumps(_inventory_record(kernel_inventory(Path(path).resolve())), sort_keys=True) + "\n"
+        for path in paths
     ]
     if not lines:
         return
@@ -313,15 +354,28 @@ def loaded_files(ld_log: str) -> LoadedFiles:
     return LoadedFiles(tuple(dict.fromkeys(programs)), tuple(dict.fromkeys(objects)))
 
 
-def _declared_objects(evidence_dir: Path) -> list[str]:
+def _declared_inventories(evidence_dir: Path) -> dict[str, list[KernelInventory]]:
+    """What each declared file defined when it was declared, by path."""
+
     manifest = evidence_dir / _DECLARED
     if manifest.is_symlink() or not manifest.is_file():
-        return []
+        return {}
     try:
         lines = manifest.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return []
-    return list(dict.fromkeys(line for line in lines if line.startswith("/")))
+        return {}
+    declared: dict[str, list[KernelInventory]] = {}
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        inventory = _inventory_from_record(record)
+        if inventory is not None and inventory.path.startswith("/"):
+            declared.setdefault(inventory.path, []).append(inventory)
+    return declared
 
 
 def _jit_objects(evidence_dir: Path) -> list[str]:
@@ -474,12 +528,13 @@ def evaluate_asan_run(
         # them, go to this log once AMD_LOG_LEVEL_FILE is set.
         lost |= parse_asan_output(text).device_report_lost
 
-    shared = [*_declared_objects(evidence_dir), *_jit_objects(evidence_dir)]
-    inventories: dict[str, KernelInventory] = {}
+    declared = _declared_inventories(evidence_dir)
+    shared = [*declared, *_jit_objects(evidence_dir)]
+    inventories: dict[str, list[KernelInventory]] = dict(declared)
 
-    def inventory(path: str) -> KernelInventory:
+    def inventory(path: str) -> list[KernelInventory]:
         if path not in inventories:
-            inventories[path] = kernel_inventory(Path(path))
+            inventories[path] = [kernel_inventory(Path(path))]
         return inventories[path]
 
     coverage: dict[str, KernelCoverage] = {}
@@ -498,20 +553,20 @@ def evaluate_asan_run(
         if not signatures:
             continue
         definitions: dict[str, list[tuple[str, bool, str]]] = {}
-        process_opaque: list[str] = []
+        process_opaque: dict[str, None] = {}
         for path in dict.fromkeys((*loaded.programs, *loaded.objects, *shared)):
             # A relative program path names the executable from the process's
             # own working directory, which the loader does not record.
             if not path.startswith("/"):
                 continue
-            found = inventory(path)
-            if found.compressed_bundles:
-                process_opaque.append(path)
-            for code_object in found.code_objects:
-                for kernel in code_object.kernels:
-                    definitions.setdefault(_normalized(kernel), []).append(
-                        (path, code_object.checked, code_object.triple)
-                    )
+            for found in inventory(path):
+                if found.compressed_bundles:
+                    process_opaque.setdefault(path, None)
+                for code_object in found.code_objects:
+                    for kernel in code_object.kernels:
+                        definitions.setdefault(_normalized(kernel), []).append(
+                            (path, code_object.checked, code_object.triple)
+                        )
         for path in process_opaque:
             opaque.setdefault(path, None)
         for signature in signatures:
