@@ -116,9 +116,10 @@ _INIT_FAILURE = re.compile(
 DISPATCH_LOG_NAME = "hip_dispatch.log"
 _DISPATCH_LOG_ENV = {"AMD_LOG_LEVEL": "3", "AMD_LOG_MASK": "128"}
 _DISPATCH_LINE = re.compile(r"ShaderName : (?P<signature>.+?)\s*$", re.MULTILINE)
-# Dispatched by the runtime itself: ASan's module constructor and the device heap
-# initialiser.
-_RUNTIME_KERNELS = frozenset({"amdgcn.device.init", "__amd_rocclr_initHeap"})
+# Dispatched by the runtime itself: ASan's module constructor and destructor, and
+# the HIP runtime's own __amd_rocclr_* blit and heap kernels.
+_RUNTIME_KERNELS = frozenset({"amdgcn.device.init", "amdgcn.device.fini"})
+_RUNTIME_KERNEL_PREFIX = "__amd_rocclr_"
 
 # The kernel never ran, so a clean exit afterwards says nothing about it.
 _KERNEL_NOT_LOADED = re.compile(
@@ -755,11 +756,13 @@ def _error(reason: str, *, returncode: int | None = None) -> CheckResult:
     )
 
 
-def read_dispatch_log(output_dir: Path) -> tuple[str, ...] | None:
-    """Kernel signatures the HIP runtime logged as dispatched, in order.
+def read_hip_log(output_dir: Path) -> str | None:
+    """Every process's HIP runtime log from an ASan run, concatenated.
 
-    ``None`` when no process wrote a dispatch log at all, which is not the same
-    as a log that names no kernel.
+    ``None`` when no process wrote one, which is not the same as a log that
+    names no kernel. The runtime's own messages land here rather than on stderr
+    once AMD_LOG_LEVEL_FILE is set -- the unhandled-hostcall abort among them --
+    so it is evidence for every runtime signal, not only for dispatches.
     """
 
     try:
@@ -768,14 +771,19 @@ def read_dispatch_log(output_dir: Path) -> tuple[str, ...] | None:
         return None
     if not logs:
         return None
-    signatures: list[str] = []
+    texts = []
     for log in logs:
         try:
-            text = log.read_text(encoding="utf-8", errors="replace")
+            texts.append(log.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
-        signatures.extend(match.group("signature") for match in _DISPATCH_LINE.finditer(text))
-    return tuple(signatures)
+    return "\n".join(texts)
+
+
+def dispatched_kernels(hip_log: str) -> tuple[str, ...]:
+    """Kernel signatures a HIP runtime log records as dispatched, in order."""
+
+    return tuple(match.group("signature") for match in _DISPATCH_LINE.finditer(hip_log))
 
 
 def _was_dispatched(kernel: str, signatures: Sequence[str]) -> bool:
@@ -790,7 +798,7 @@ def _workload_kernels(signatures: Sequence[str]) -> list[str]:
     return [
         name
         for name in dict.fromkeys(_function_name(signature) for signature in signatures)
-        if name not in _RUNTIME_KERNELS
+        if name not in _RUNTIME_KERNELS and not name.startswith(_RUNTIME_KERNEL_PREFIX)
     ]
 
 
@@ -798,19 +806,21 @@ def evaluate_asan_output(
     process: ProcessResult,
     *,
     kernel: str | None = None,
-    dispatched: Sequence[str] | None = None,
+    hip_log: str | None = None,
 ) -> CheckResult:
     """Decide one ASan run. Only a clean exit with no report is a PASS.
 
     A report is a result whatever the exit code says: ASan aborts the process on
     its first error by design, so a nonzero exit beside a report is the report,
-    not a backend failure. When ``kernel`` is given, a clean exit also has to show
-    that kernel among the ``dispatched`` signatures (:func:`read_dispatch_log`):
-    ASan leaves no trace of a kernel that ran clean, so without the dispatch log
-    a repro that never launched its kernel would pass.
+    not a backend failure. ``hip_log`` (:func:`read_hip_log`) is read for the
+    same signals as the process's own streams. When ``kernel`` is given, a clean
+    exit also has to show that kernel dispatched in it: ASan leaves no trace of a
+    kernel that ran clean, so without it a repro that never launched its kernel
+    would pass.
     """
 
-    parsed = parse_asan_output(f"{process.stderr}\n{process.stdout}")
+    streams = f"{process.stderr}\n{process.stdout}\n{hip_log or ''}"
+    parsed = parse_asan_output(streams)
     if process.timed_out:
         return _check(
             state=ExecutionState.TIMED_OUT,
@@ -855,7 +865,7 @@ def evaluate_asan_output(
         )
     # Whatever the exit code: a repro that reports its launch failure and still
     # exits 0 checked nothing.
-    if _KERNEL_NOT_LOADED.search(f"{process.stderr}\n{process.stdout}"):
+    if _KERNEL_NOT_LOADED.search(streams):
         return _error(
             "asan_kernel_not_loaded: the kernel would not load, so nothing was "
             "checked -- an xnack+ code object needs HSA_XNACK=1 on an XNACK-capable GPU",
@@ -867,12 +877,13 @@ def evaluate_asan_output(
             reason += ": LeakSanitizer ran although aorta pins detect_leaks=0"
         return _error(reason, returncode=process.returncode)
     if kernel is not None:
-        if dispatched is None:
+        if hip_log is None:
             return _error(
                 "asan_dispatch_unverified: the HIP runtime wrote no dispatch log "
                 "(AMD_LOG_LEVEL_FILE), so nothing shows the selected kernel ran",
                 returncode=0,
             )
+        dispatched = dispatched_kernels(hip_log)
         if not _was_dispatched(kernel, dispatched):
             ran = _workload_kernels(dispatched)
             return _error(
@@ -1033,13 +1044,13 @@ def run_asan(
             (output_dir / "asan.log").write_text(
                 f"{process.stdout}\n{process.stderr}", encoding="utf-8"
             )
-            dispatched = read_dispatch_log(output_dir)
+            hip_log = read_hip_log(output_dir)
             backend["dispatched_kernels"] = (
-                ", ".join(_workload_kernels(dispatched)) or "none"
-                if dispatched is not None
+                ", ".join(_workload_kernels(dispatched_kernels(hip_log))) or "none"
+                if hip_log is not None
                 else "no dispatch log"
             )
-            check = evaluate_asan_output(process, kernel=selected.name, dispatched=dispatched)
+            check = evaluate_asan_output(process, kernel=selected.name, hip_log=hip_log)
 
     kernel_result = KernelCheckResult(
         identity=selected,

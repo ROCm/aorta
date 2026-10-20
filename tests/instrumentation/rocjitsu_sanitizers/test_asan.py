@@ -367,24 +367,47 @@ class TestEvaluate:
         ],
     )
     def test_the_selected_kernel_must_be_among_the_dispatched(self, kernel, dispatched, ok):
-        check = evaluate_asan_output(_process(""), kernel=kernel, dispatched=dispatched)
+        hip_log = "\n".join(f":3: 1 us:  ShaderName : {signature}" for signature in dispatched)
+        check = evaluate_asan_output(_process(""), kernel=kernel, hip_log=hip_log)
         assert (check.verdict is Verdict.PASS) is ok
 
     def test_the_dispatch_log_is_read_from_every_process(self, tmp_path):
-        from aorta.instrumentation.rocjitsu_sanitizers.asan import read_dispatch_log
+        from aorta.instrumentation.rocjitsu_sanitizers.asan import (
+            dispatched_kernels,
+            read_hip_log,
+        )
 
-        assert read_dispatch_log(tmp_path) is None
+        assert read_hip_log(tmp_path) is None
         (tmp_path / "hip_dispatch.log_10").write_text(
             ":3: 1 us:  ShaderName : amdgcn.device.init\n:3: 2 us:  ShaderName : warmup(float*)\n"
         )
         (tmp_path / "hip_dispatch.log_11").write_text(
             ":3: 3 us:  ShaderName : store_index(int*, int)\n"
         )
-        assert read_dispatch_log(tmp_path) == (
+        assert dispatched_kernels(read_hip_log(tmp_path)) == (
             "amdgcn.device.init",
             "warmup(float*)",
             "store_index(int*, int)",
         )
+
+    def test_a_lost_report_recorded_only_in_the_runtime_log_is_recognised(self):
+        """Measured on gfx950: with AMD_LOG_LEVEL_FILE set, the HIP runtime writes its
+        unhandled-hostcall abort to that file, not to stderr."""
+
+        check = evaluate_asan_output(
+            _process("", returncode=-6),
+            kernel="store_index",
+            hip_log=_fixture("stock_runtime_hostcall_abort.txt"),
+        )
+        assert check.reason.startswith("asan_device_report_lost:")
+
+    def test_a_load_failure_recorded_only_in_the_runtime_log_is_recognised(self):
+        check = evaluate_asan_output(
+            _process("", returncode=0),
+            kernel="store_index",
+            hip_log=":3: 1 us:  hipLaunchKernel: Returned hipErrorInvalidDeviceFunction\n",
+        )
+        assert check.reason.startswith("asan_kernel_not_loaded:")
 
     def test_launch_error(self):
         check = evaluate_asan_output(
