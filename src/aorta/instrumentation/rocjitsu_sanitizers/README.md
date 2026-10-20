@@ -252,14 +252,19 @@ sanitizers: [asan]
 Three things have to be true, and each one fails silently when it is not, which
 is why aorta checks all three instead of trusting the build:
 
-1. **The GPU code is built for an `xnack+` target.** `hipcc -fsanitize=address
+1. **All of the GPU code is built for an `xnack+` target.** `hipcc -fsanitize=address
    -shared-libsan -g --offload-arch=gfx950:xnack+`. With a plain `gfx950` target
    the compiler drops device ASan with only a warning and the build succeeds;
-   `-fno-gpu-sanitize` does the same. Before running anything aorta reads the
-   device code object out of the binary and fails closed
-   (`asan_device_not_instrumented`) unless a `<target>:xnack+` code object
-   carries ASan instrumentation. When `asan_command` is a script, name the real
-   binaries in `asan_objects`.
+   `-fno-gpu-sanitize` does the same. Before running anything aorta reads every
+   device code object out of the checked binaries (the `asan_command` when it is
+   an ELF, every `asan_objects` entry, and a `.hsaco` the kernel identity names)
+   and fails closed (`asan_device_not_instrumented`) unless **each one** is
+   `xnack+` and instrumented. One is not enough: the runtime loads every
+   translation unit's object, and one built without `xnack+` still runs, so an
+   unchecked kernel beside a checked one would pass. A compressed bundle, which
+   cannot be inspected, fails too, and so does a selected kernel found in none of
+   the checked objects (`asan_kernel_not_in_checked_code`). When `asan_command`
+   is a script, name the real binaries in `asan_objects`.
 2. **The ASan-instrumented ROCm runtime is loaded.** The GPU half reports by a
    hostcall that only `lib/asan/libamdhip64` handles. With the stock runtime a
    real detection aborts with `Hostcall: no handler found for service ID 4` and
@@ -267,10 +272,12 @@ is why aorta checks all three instead of trusting the build:
    instrumented `lib/asan` directory, or `ROCM_ASAN_PATH` at an install root
    (TheRock's name for it); a directory whose `libamdhip64` is not instrumented
    is refused. Without one the check is `not_checked` (`asan_runtime_not_found`).
-3. **XNACK is on.** aorta pins `HSA_XNACK=1`; an xnack+ kernel will not load
-   without it (`hipErrorInvalidDeviceFunction`).
+3. **XNACK is on, and the kernel loaded.** aorta pins `HSA_XNACK=1`; an xnack+
+   kernel will not load without it (`hipErrorInvalidDeviceFunction`). A run that
+   prints a load failure is an error (`asan_kernel_not_loaded`) whatever its exit
+   code, because a repro that swallows the error and exits 0 checked nothing.
 
-aorta also pins `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:exitcode=1:symbolize=1`
+aorta also pins `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:exitcode=1:symbolize=1:color=never`
 (replacing any inherited value, so a parent cannot set `exitcode=0`), prepends
 the instrumented libraries to `LD_LIBRARY_PATH`, and preloads the host ASan
 runtime so an uninstrumented launcher such as Python can load them. Leak checking
@@ -295,12 +302,16 @@ redzone (a store 1 MiB past a buffer was not caught), `hipMallocManaged`
 allocations (an overflow was not caught), and any code not compiled with ASan,
 including ROCm library kernels unless the `*-asan` library packages are loaded.
 Nor does it cover **buffer-addressed accesses inside an instrumented kernel**:
-ASan instruments `global_*`/`flat_*` accesses, and a `buffer_store` (Composable
-Kernel's addressing throughout, and Triton's AMD buffer-ops lowering by default)
-gets no shadow check, so an overflow through one is silently missed. Hand-written
+ASan instruments `global_*`/`flat_*` accesses, and a `buffer_store` gets no
+shadow check, so an overflow through one is silently missed (measured in HIP, and
+in Triton, whose AMD backend emits them by default; Composable Kernel's
+global-memory path is built on them). Hand-written
 assembly kernels (Tensile) cannot be instrumented at all. The preflight therefore
 proves a code object was *built with* device ASan, not that every access in it is
-checked.
+checked. Nor does a PASS prove the selected kernel was dispatched: ASan leaves no
+record of a kernel that ran clean, so a repro should check its own output, as
+`asan_heap_overflow.hip` does. Run one process per check: reports from several
+processes interleaved on one stream can be misattributed to each other.
 LDS overflows, `hipMalloc` and `hipHostMalloc` overflows, out-of-bounds reads and
 device use-after-free were all caught. `recipes/sanitizers/asan-heap-overflow.yaml`
 (expect FAIL) and `asan-clean.yaml` (expect PASS) are the worked pair; the build

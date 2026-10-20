@@ -62,11 +62,17 @@ small workloads, not whole training runs.
 
 ## Five silent failures, and what the backend does about each
 
-1. **No `:xnack+`**: `clang++: warning: ignoring '-fsanitize=address' option for offload arch
-   'gfx950'`, and the build succeeds. The same happens with `-fno-gpu-sanitize` on an `xnack+`
-   target: the device code object is `gfx950:xnack+` with 0 ASan symbols while the host half
-   carries 20 `__asan_report_*` strings. So the backend reads the device ELF out of each clang
-   offload bundle and requires the ASan marker *inside it* (`asan_device_not_instrumented`).
+1. **No `:xnack+`, anywhere**: `clang++: warning: ignoring '-fsanitize=address' option for
+   offload arch 'gfx950'`, and the build succeeds. The same happens with `-fno-gpu-sanitize` on an
+   `xnack+` target: the device code object is `gfx950:xnack+` with 0 ASan symbols while the host
+   half carries 20 `__asan_report_*` strings.
+   - **One unchecked translation unit is enough.** A binary whose instrumented `gfx950:xnack+` TU
+     launches a kernel from a TU built for plain `gfx950` ran that kernel's overflow to exit 0
+     under the full ASan setup (job 85339).
+   - So the backend reads every device ELF out of every clang offload bundle and requires each
+     one to be `xnack+` with the ASan marker *inside it*. It also refuses compressed bundles and
+     a selected kernel found in none of them (`asan_device_not_instrumented`,
+     `asan_kernel_not_in_checked_code`).
 2. **Stock runtime**: detects, then aborts unreported. The resolver refuses a directory whose
    `libamdhip64` has no ASan instrumentation (stock: 0 `__asan_` strings; ASan build: 40), and
    the evaluator recognises the abort (`asan_device_report_lost`). Proven end to end by
