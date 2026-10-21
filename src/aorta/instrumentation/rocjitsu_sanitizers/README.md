@@ -320,8 +320,8 @@ so a repro should still check its own output, as `asan_heap_overflow.hip` does.
 Run one process per check: ASan reports from several processes interleaved on one
 stream can be misattributed to each other.
 
-ROCm's own ASan library builds cover little of what a Meta-style workload runs on
-MI350, measured on the `*-asan` packages: MIOpen 7.0.2 and 7.2.4 and rocBLAS 7.0.2
+ROCm's own ASan library builds cover little of what a production PyTorch workload runs
+on MI350, measured on the `*-asan` packages: MIOpen 7.0.2 and 7.2.4 and rocBLAS 7.0.2
 carry **no gfx950 code object at all** (gfx90a and gfx942 only), and on gfx942
 290 of MIOpen 7.0.2's 294 code objects -- every one of them Composable Kernel code
 -- carry no ASan instrumentation.
