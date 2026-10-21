@@ -139,7 +139,10 @@ against 78,517), the kind ASan does not check. MIOpen's 668 other functions use 
 MI350 these libraries carry no device code at all, and on MI300X ASan would check almost none
 of MIOpen's CK kernels. TheRock's ASan builds (nightly, gfx950) were not measured.
 
-## Python, PyTorch and Triton (measured, not yet supported by the backend)
+## Python, PyTorch and Triton
+
+`aorta run --sanitizer asan` (the last section) applies every setting below except the
+named-barrier workaround.
 
 An off-by-one `tl.store` in a Triton kernel launched from PyTorch (torch 2.10.0+rocm7.0,
 triton-rocm 3.6.0, `rocm/dev-ubuntu-22.04:7.0.2` + the 7.0.2 `*-asan` packages; jobs 83210 and
@@ -199,9 +202,9 @@ each dispatched kernel. Measured on gfx950, ROCm 7.0.2 and its ASan runtime:
 | an `extra_env` that sets `LD_PRELOAD` | refused | before any trial ran |
 | `gpu_smoke` through the CLI (container) | `not_checked`, exit 3 | 0 of 3 kernels: `vectorized_elementwise_kernel` (fill, add) and `reduce_kernel`, defined in compressed device code in `libtorch_hip`, `librocblas`, `libMIOpen`, `librccl`, `librocsolver`, `librocsparse` |
 
-Native jobs 85755/85760 (`cv350-rck-g03-c13-18`, `-c12-18`); container job 85756. The
-`gpu_smoke` control without `--sanitizer` passes in the same container, and a planted overflow
-run under the mode's environment there fails, so its `not_checked` is about coverage.
+Native jobs 85755 and 85760; container job 85756. The `gpu_smoke` control without
+`--sanitizer` passes in the same container, and a planted overflow run under the mode's
+environment there fails, so its `not_checked` is about coverage.
 
 Two things the first measurement got wrong, both now covered by tests. `python -m aorta.cli`
 cannot start the child (`aorta.cli` is a package without `__main__`), which a test that only
