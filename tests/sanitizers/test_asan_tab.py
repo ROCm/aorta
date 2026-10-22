@@ -276,12 +276,13 @@ def test_a_valid_file_round_trips(tmp_path):
     assert '<p class="asan-lead">a note</p>' in page
 
 
-def _cli(*args: str) -> subprocess.CompletedProcess:
+def _cli(*args: str, preexec_fn=None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(_SCRIPTS / "add_asan_tab.py"), *args],
         capture_output=True,
         text=True,
         check=False,
+        preexec_fn=preexec_fn,
     )
 
 
@@ -302,6 +303,36 @@ def test_cli_leaves_the_page_alone_when_the_results_are_bad(tmp_path):
     assert result.returncode == 1
     assert "error:" in result.stderr
     assert page.read_text(encoding="utf-8") == original
+
+
+def test_cli_leaves_the_page_whole_when_writing_it_fails(tmp_path):
+    resource = pytest.importorskip("resource")
+    page = tmp_path / "index.html"
+    original = _nightly_page().encode("utf-8")
+    page.write_bytes(original)
+    # A file-size limit below the augmented page fails the write partway through.
+    limit = len(original) + 1024
+    augmented = gen.add_asan_tab(original.decode("utf-8"), gen.load_asan_runs(_COMMITTED))
+    assert len(augmented.encode("utf-8")) > limit
+
+    def cap_file_size():
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+    result = _cli("--results", str(_COMMITTED), "--page", str(page), preexec_fn=cap_file_size)
+    assert result.returncode == 1
+    assert "error:" in result.stderr
+    assert page.read_bytes() == original
+    assert [p.name for p in tmp_path.iterdir()] == ["index.html"]
+
+
+def test_cli_keeps_the_page_mode_and_leaves_no_temporary_file(tmp_path):
+    page = tmp_path / "index.html"
+    page.write_text(_nightly_page(), encoding="utf-8")
+    page.chmod(0o644)
+    result = _cli("--results", str(_COMMITTED), "--page", str(page))
+    assert result.returncode == 0, result.stderr
+    assert page.stat().st_mode & 0o777 == 0o644
+    assert [p.name for p in tmp_path.iterdir()] == ["index.html"]
 
 
 def test_pages_adds_the_tab_after_publishing_the_sanitizer_page_and_only_warns_on_failure():

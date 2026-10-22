@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -26,6 +29,20 @@ def _generator():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _replace(path: Path, text: str) -> None:
+    # The page is the published nightly dashboard: a failed write must leave it whole,
+    # so write beside it and rename over it only once the new copy is complete.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(text)
+        os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,10 +56,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         runs = gen.load_asan_runs(args.results)
         page = gen.add_asan_tab(args.page.read_text(encoding="utf-8"), runs)
+        _replace(args.page, page)
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    args.page.write_text(page, encoding="utf-8")
     rows = sum(len(run["rows"]) for run in runs)
     print(f"added the ASan tab to {args.page} ({len(runs)} run(s), {rows} row(s))")
     return 0
