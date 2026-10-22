@@ -601,11 +601,11 @@ jobs:
             # timeout-minutes ceiling) does not need excusing: it takes this whole
             # payload down, so the line below never runs at all.
             #
-            # --known-vacuous names the two rows that are ALREADY vacuous on the
-            # ROCm 10 objects this lane scans, so the check can be armed today
-            # without being red for reasons nobody can act on here. Measured on
-            # the real survey trees of runs 33755195031, 33872660689, 33965800908
-            # and 34032862308, both on the same 169,996,560-byte Tensile object:
+            # --known-vacuous names the row that is ALREADY vacuous on the ROCm 10
+            # object this lane scans, so the check can be armed today without
+            # being red for reasons nobody can act on here. Measured on the real
+            # survey trees of runs 33755195031, 33872660689, 33965800908 and
+            # 34032862308, on the same 169,996,560-byte Tensile object:
             #
             #   consan-gemm     consan_strict_load_rejection, 0 findings. ConSan
             #                   needs 1,721,958,400 B of patched image against a
@@ -613,20 +613,20 @@ jobs:
             #                   it. consan_policy does not change that -- see
             #                   daily-consan-gemm.yaml and
             #                   docs/sanitizers/consan-gemm-patched-image-growth-cap.md.
-            #   waitcheck-gemm  worklist_not_fully_checked, 0 findings. The
-            #                   rj_waitcheck CFG dataflow non-convergence of #453.
+            #
+            # waitcheck-gemm was on this list for the #453 CFG non-convergence.
+            # It has produced signal on every night since 2026-10-05, and the
+            # comparator failed this job for the stale entry, so it is checked
+            # for real again.
             #
             # This is NOT a blessing and is deliberately not spelled as an
-            # expected_error: it says these outcomes are wrong and being worked,
-            # not that they are acceptable. It is self-retiring -- the comparator
-            # FAILS if a listed case starts producing signal, so a fixed row cannot
-            # leave a stale suppression behind, and it fails if a listed case has no
-            # report at all. Both remaining Tab 2 rows are the known-vacuous GEMM
-            # pair; synthetic tiny_vecadd and lds_reduce controls are not published.
-            # Every row this sweep sees is on that list, so --vacuous-only cannot
-            # fail this lane for a run that produced no signal. What remains is
-            # --require (the report must exist) and the self-retiring property
-            # above.
+            # expected_error: it says the outcome is wrong and being worked, not
+            # that it is acceptable. It is self-retiring -- the comparator FAILS if
+            # a listed case starts producing signal, so a fixed row cannot leave a
+            # stale suppression behind, and it fails if a listed case has no
+            # report at all. Synthetic tiny_vecadd and lds_reduce controls are not
+            # published. The open-source model rows run in sanitizers-model-survey
+            # and are checked there.
             echo "[$(date +%T)] survey: rejecting vacuous outcomes …"
             REQUIRE=""
             for c in ${CONSAN_CASES} ${WAITCHECK_CASES}; do
@@ -636,7 +636,6 @@ jobs:
             python scripts/sanitizers/compare_verdict_baselines.py \
               --vacuous-only ${REQUIRE} \
               --known-vacuous informational/consan-gemm \
-              --known-vacuous informational/waitcheck-gemm \
               "${SANITIZER_OUT}"
           '
 
@@ -687,6 +686,150 @@ jobs:
         working-directory: docker
         run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
 
+  sanitizers-model-survey:
+    name: gfx950 open-source model kernels (Tab 2, non-gating)
+    # After the GEMM survey, not beside it: both need the one MI350 runner, and
+    # daily-consan-gemm alone holds that job for up to 100 minutes, which is why
+    # the model kernels have their own job and ceiling instead of a share of it.
+    needs: [sanitizers-gpu, sanitizers-survey]
+    if: always() && needs.sanitizers-gpu.result != 'skipped'
+    runs-on: [self-hosted, gpu]
+    # Measured on gfx950 with 8 GPUs: 189 launches, two waitcheck sweeps and 25
+    # ConSan cases took 2 min 20 s. The ceiling is for a night where kernels hang:
+    # model_survey.py starts a ConSan case only while its 900 s timeout still fits
+    # in a 1500 s per-model budget, so two models end well inside 90 minutes.
+    timeout-minutes: 90
+    steps:
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+
+      # The kernel sources come from the aorta-model-kernels release asset, which
+      # model_survey.py downloads itself and refuses unless its SHA-256 matches
+      # the digest pinned in that script. The inventories under
+      # recipes/sanitizers/models/ say which kernels each model contributes.
+      - name: Run model-kernel survey (Tab 2)
+        env:
+          ROCJITSU_ARTIFACTS_TOKEN: ${{ secrets.ROCJITSU_ARTIFACTS_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/ci/docker_cmd.sh exec \
+            -e ROCJITSU_REF="${ROCJITSU_REF}" \
+            -e ROCJITSU_RUN="${{ needs.sanitizers-gpu.outputs.rocjitsu_run_id }}" \
+            -e GH_TOKEN="${ROCJITSU_ARTIFACTS_TOKEN}" \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            SANITIZER_ROOT=".sanitizer-nightly"
+            ROCJITSU_PREBUILT="${SANITIZER_ROOT}/rocjitsu-prebuilt"
+            SANITIZER_OUT="${SANITIZER_ROOT}/out"
+
+            echo "[$(date +%T)] setup: installing aorta (editable, [tests]) …"
+            python -m pip install --upgrade pip
+            pip install -e ".[tests]"
+
+            # Same bundle the gate job judged: ROCJITSU_RUN pins its run id.
+            echo "[$(date +%T)] setup: downloading prebuilt rocjitsu sanitizer bundle (${ROCJITSU_REF}) …"
+            rm -rf "${ROCJITSU_PREBUILT}"
+            mkdir -p "${SANITIZER_ROOT}"
+            python scripts/sanitizers/download_sanitizer_artifacts.py \
+              --branch "${ROCJITSU_REF}" --run "${ROCJITSU_RUN:-latest}" \
+              --dest "${ROCJITSU_PREBUILT}" --force
+            export ROCJITSU_PREBUILT="$(cd "${ROCJITSU_PREBUILT}" && pwd)"
+            echo "ROCJITSU_PREBUILT=${ROCJITSU_PREBUILT}"
+            if [ ! -f "${ROCJITSU_PREBUILT}/sha256sums.txt" ]; then
+              echo "::error::prebuilt bundle has no sha256sums.txt; refusing unverified artifacts" >&2
+              exit 1
+            fi
+            # Drop the cross-repo PAT before anything below runs downloaded code:
+            # the release asset, rj_waitcheck and the ConSan hook.
+            unset GH_TOKEN GITHUB_TOKEN
+
+            # Same resolver-derived PATH and LD_LIBRARY_PATH lines as the other two
+            # payloads, for the same reasons (issue #381).
+            export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
+            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+
+            # One run covers every model. It exits non-zero only for an
+            # infrastructure fault -- an asset that fails its digest, a pair count
+            # that drifted from the inventory, nothing compiled -- which should fail
+            # this job loudly. A sanitizer verdict never does.
+            MODELS="gpt-oss qwen3"
+            INVENTORIES=""
+            for m in ${MODELS}; do
+              INVENTORIES="${INVENTORIES} --inventory recipes/sanitizers/models/${m}.yaml"
+            done
+            echo "[$(date +%T)] models: waitcheck + ConSan over ${MODELS} …"
+            # shellcheck disable=SC2086  # INVENTORIES is a deliberate argument list
+            python scripts/sanitizers/model_survey.py run ${INVENTORIES} \
+              --work "${SANITIZER_ROOT}/model-survey-work" \
+              --out "${SANITIZER_OUT}/informational" \
+              --consan-budget-seconds 1500
+
+            # Same vacuity check as the GEMM survey, over the four model rows. A
+            # model whose ConSan had nothing to instrument on some kernels reads
+            # partial beside its waitcheck preflight, which this accepts; a report
+            # with no signal at all, or a missing one, fails the job.
+            echo "[$(date +%T)] models: rejecting vacuous outcomes …"
+            REQUIRE=""
+            for m in ${MODELS}; do
+              REQUIRE="${REQUIRE} --require informational/consan-${m} --require informational/waitcheck-${m}"
+            done
+            # shellcheck disable=SC2086  # REQUIRE is a deliberate argument list
+            python scripts/sanitizers/compare_verdict_baselines.py \
+              --vacuous-only ${REQUIRE} "${SANITIZER_OUT}"
+          '
+
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Upload model-kernel survey results
+        # Its own artifact, matched by the publish job download pattern below, so
+        # the model rows land in incoming/informational/ beside the GEMM rows.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-models-${{ github.run_id }}
+          path: .sanitizer-nightly/out
+          if-no-files-found: warn
+
+      - name: Clean up build/temp state
+        if: always()
+        run: rm -rf .sanitizer-nightly
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
+
   # Publishing is split in two so that rendering and writing never share a token.
   #
   #   render  runs on ANY ref, holds only `contents: read`, and does everything
@@ -707,10 +850,11 @@ jobs:
   # recorded ref is not refs/heads/main.
   render:
     name: render sanitizer dashboard
-    # Both GPU jobs, so the dashboard renders Tab 1 and Tab 2 from the same run.
-    # Gated on the GATE job only: the survey is non-gating and may legitimately be
-    # killed by the cap in #370, and rendering Tab 1 must not depend on it.
-    needs: [sanitizers-gpu, sanitizers-survey]
+    # Every GPU job, so the dashboard renders Tab 1 and Tab 2 from the same run.
+    # Gated on the GATE job only: the survey jobs are non-gating and may
+    # legitimately be killed by the cap in #370, and rendering Tab 1 must not
+    # depend on them.
+    needs: [sanitizers-gpu, sanitizers-survey, sanitizers-model-survey]
     # Run even when the GPU job failed (to render the failure, not a stale green
     # page) but NOT when it was skipped. Deliberately NO main-only guard here --
     # that guard lives on `push`, the only job that can write.

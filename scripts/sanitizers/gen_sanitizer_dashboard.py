@@ -1800,10 +1800,30 @@ _SURVEY_RECIPE: dict[str, str] = {
     "waitcheck-gemm": "daily-waitcheck-gemm-object",
 }
 
+# Open-source model workloads surveyed by scripts/sanitizers/model_survey.py. Both
+# sanitizer cases of a model come from one inventory, recipes/sanitizers/models/
+# <model>.yaml, rather than from a daily-* aorta recipe.
+_MODEL_SURVEY_GROUPS: tuple[str, ...] = ("gpt-oss", "qwen3")
+
 
 def _survey_recipe_for(name: str) -> str:
     """The recipe filename stem that produces survey case ``name``'s report."""
+    group, _sanitizer = _split_survey_case(name)
+    if group in _MODEL_SURVEY_GROUPS:
+        return f"models/{group}"
     return _SURVEY_RECIPE.get(name, f"daily-{name}")
+
+
+def _survey_command_for(name: str) -> str:
+    """The copy-paste command that reproduces survey case ``name``'s report."""
+    stem = _survey_recipe_for(name)
+    group, _sanitizer = _split_survey_case(name)
+    if group in _MODEL_SURVEY_GROUPS:
+        return (
+            "python scripts/sanitizers/model_survey.py run "
+            f"--inventory recipes/sanitizers/{stem}.yaml --out results"
+        )
+    return f"aorta sweep run --recipe recipes/sanitizers/{stem}.yaml"
 
 
 def _split_survey_case(name: str) -> tuple[str, str | None]:
@@ -1907,11 +1927,7 @@ def survey_cases_from_informational_dir(
                 # recipe rename rewrite a historical run's reproduce command --
                 # the same "prose must not outlive its manifest" rule the run-area
                 # renderers follow.
-                "command": _published_command(case_dir)
-                or (
-                    "aorta sweep run --recipe "
-                    f"recipes/sanitizers/{_survey_recipe_for(name)}.yaml"
-                ),
+                "command": _published_command(case_dir) or _survey_command_for(name),
                 "report_rel": report_rel,
                 # These are the cases ``main`` co-publishes as complete run areas
                 # (report + logs + manifests + index.html) under
@@ -5510,7 +5526,7 @@ def main() -> int:
                     case=survey_case.name,
                     cls="survey",
                     recipe_stem=stem,
-                    command=f"aorta sweep run --recipe recipes/sanitizers/{stem}.yaml",
+                    command=_survey_command_for(survey_case.name),
                     meta=run["meta"],
                     summary=survey_summary,
                     report=survey_report,

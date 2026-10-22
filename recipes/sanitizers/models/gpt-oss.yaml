@@ -1,0 +1,27 @@
+# Model-kernel survey inventory: gpt-oss (workload survey, non-gating).
+#
+# Read by scripts/sanitizers/model_survey.py in the sanitizers-model-survey
+# nightly job. Every (kernel, scenario) pair the specs below list for a kept
+# role is launched once, and the object Triton compiles for that launch is
+# scanned by waitcheck. One scenario per kernel (the first the spec lists, which
+# is its most frequent launch shape) is then dispatched under ConSan, rotating
+# through the kernels across nights when the time budget runs out.
+#
+# The sources come from the aorta-model-kernels release asset pinned in
+# .github/workflows/sanitizers-nightly.yml; asset_version must match it.
+schema_version: 1
+model: gpt-oss
+asset_version: "1"
+specs:
+  - attention.json
+  - misc.json
+  - moe.json
+# Kernels gpt-oss launches when serving. The specs also carry dead-for-gpt-oss
+# and training-only kernels, which are left out.
+roles:
+  - launched
+  - conditional
+expected_pairs: 182
+consan:
+  timeout_seconds: 900
+  exclude: {}
