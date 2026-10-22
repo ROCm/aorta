@@ -165,7 +165,14 @@ class LocalVLLMBackend:
             )
 
     async def probe_tools(self, timeout: float | None = None) -> None:
-        """Raise unless vLLM returns one valid native function call."""
+        """Raise unless vLLM returns one valid native function call.
+
+        The named ``tool_choice`` deliberately tests a superset of Chat's
+        runtime requirement, which binds tools with the default automatic
+        choice. Forcing one call avoids a flaky probe where a capable model
+        legitimately answers in text, but a failure can therefore mean that
+        forced choice is unsupported even when automatic tool calling works.
+        """
         budget = PROBE_TIMEOUT if timeout is None else max(0.1, timeout)
         url = settings.vllm_base_url.rstrip("/") + "/chat/completions"
         request = {
