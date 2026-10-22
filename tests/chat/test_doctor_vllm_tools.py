@@ -50,6 +50,49 @@ def test_native_local_vllm_gets_a_real_tools_check(monkeypatch):
     assert backend.tools_calls == 1
 
 
+def test_native_mode_is_normalized_before_the_tools_check(monkeypatch):
+    backend = _Backend()
+    monkeypatch.setattr(factory, "get_backend", lambda: backend)
+    monkeypatch.setattr(settings, "llm_tool_mode", " Native ")
+
+    report = doctor.Report()
+    doctor._check_backend(report)
+
+    assert _check(report, "llm native tools").status == doctor.OK
+    assert backend.tools_calls == 1
+
+
+def test_a_remote_backend_in_native_mode_is_not_probed(monkeypatch):
+    class _Remote:
+        name = "openai"
+
+        async def probe(self, timeout=None):
+            return None
+
+        def describe(self):
+            return "remote test endpoint"
+
+    monkeypatch.setattr(factory, "get_backend", lambda: _Remote())
+    monkeypatch.setattr(settings, "llm_tool_mode", "native")
+
+    report = doctor.Report()
+    doctor._check_backend(report)
+
+    assert _check(report, "llm backend").status == doctor.OK
+    assert all(check.name != "llm native tools" for check in report.checks)
+
+
+def test_no_backend_reports_native_tools_as_skipped(monkeypatch):
+    monkeypatch.setattr(settings, "llm_provider", "vllm")
+    monkeypatch.setattr(settings, "llm_tool_mode", "native")
+
+    report = doctor.run_checks(backend=False)
+
+    check = _check(report, "llm native tools")
+    assert check.status == doctor.SKIP
+    assert check.detail == "not checked (--no-backend)"
+
+
 def test_a_failed_tools_probe_is_a_doctor_failure(monkeypatch):
     backend = _Backend(tools_error=RuntimeError("server rejected tools"))
     monkeypatch.setattr(factory, "get_backend", lambda: backend)
