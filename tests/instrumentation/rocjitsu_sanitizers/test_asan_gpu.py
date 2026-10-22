@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aorta.instrumentation.rocjitsu_sanitizers import (
     Verdict,
@@ -79,8 +80,11 @@ def _staged_recipe(tmp_path: Path, name: str, binary: str, *defines: str) -> Pat
     bin_dir = tmp_path / "fixtures" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     _build(bin_dir / binary, f"--offload-arch={ARCH}:xnack+", *ASAN_FLAGS, *defines)
+    # The shipped recipe names gfx950; it has to name what the fixture was built for.
+    data = yaml.safe_load((SANITIZERS / name).read_text())
+    data["sanitizer_plan"]["target"] = ARCH
     recipe = tmp_path / name
-    shutil.copyfile(SANITIZERS / name, recipe)
+    recipe.write_text(yaml.safe_dump(data, sort_keys=False))
     return recipe
 
 

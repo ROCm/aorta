@@ -288,6 +288,25 @@ class SanitizerReportAdapter:
                 )
                 if SIGNAL_NOT_CHECKED not in signals:
                     signals.append(SIGNAL_NOT_CHECKED)
+                if name == "asan" and reason.startswith(ASAN_REPORT_LOST):
+                    # The GPU did detect an invalid access; only its report was lost.
+                    # That is evidence of a memory error, beside the gap for the report.
+                    if SIGNAL_MEMORY_ERROR not in signals:
+                        signals.append(SIGNAL_MEMORY_ERROR)
+                    evidence.append(
+                        {
+                            "uri": rel,
+                            "line_start": 1,
+                            "line_end": 1,
+                            "excerpt": (
+                                "asan: the GPU detected an invalid memory access, but the "
+                                "process aborted before reporting it (the stock HIP runtime, "
+                                f"not the ASan build, was loaded): {reason}"
+                            )[:500],
+                            "adapter": self.adapter_id,
+                            "signal": SIGNAL_MEMORY_ERROR,
+                        }
+                    )
                 if str(check.get("verdict") or "") != "fail":
                     continue
 

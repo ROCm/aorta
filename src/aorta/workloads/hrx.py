@@ -449,7 +449,7 @@ class HrxWorkload(Workload):
             objects = [self._binary]
             if self._spec.kernel_object:
                 objects.append(self._build_root() / self._spec.kernel_object)
-            declare_code_objects(objects)
+            declare_code_objects(objects, loaded_by=self._binary)
 
     def _run_hipcc(self, args: list[str], what: str) -> None:
         cmd = [self._hipcc, *args]

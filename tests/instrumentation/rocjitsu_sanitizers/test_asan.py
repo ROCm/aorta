@@ -1495,6 +1495,38 @@ class TestClassification:
         assert "RocJITsu" not in gap["description"]
         assert gap["missing_signal"] == SIGNAL_MEMORY_ERROR
 
+    def test_the_adapter_carries_a_lost_report_as_evidence_too(self, tmp_path):
+        """The autopsy router reads the adapter, not classify_sanitizer: without this the
+        detection reached it only as a tooling gap."""
+
+        root = tmp_path / "bundle"
+        (root / "aorta").mkdir(parents=True)
+        (root / "aorta" / "sanitizer_report.json").write_text(
+            json.dumps(
+                _report(
+                    {
+                        "sanitizer": "asan",
+                        "state": "error",
+                        "verdict": "error",
+                        "reason": "asan_device_report_lost: device ASan detected ...",
+                        "findings": [],
+                    }
+                )
+            )
+        )
+        artifact = SanitizerReportAdapter().collect(
+            BundleContext(
+                root=root,
+                manifest={"paths": {"sanitizer_report": "aorta/sanitizer_report.json"}},
+                job_id="asan-test",
+            )
+        )
+        assert SIGNAL_MEMORY_ERROR in artifact.signals
+        (evidence,) = [item for item in artifact.evidence if item["signal"] == SIGNAL_MEMORY_ERROR]
+        assert "aborted before reporting it" in evidence["excerpt"]
+        (gap,) = artifact.tooling_gaps
+        assert gap["missing_signal"] == SIGNAL_MEMORY_ERROR
+
 
 def test_the_asan_detector_id_routes_to_illegal_mem():
     """The tier-4 id carries the word the illegal_mem leg keys on, and no word an

@@ -100,9 +100,9 @@ def _run_under_asan(ctx: click.Context, workload: str, results_dir: Path) -> Non
         )
     if not _WORKLOAD_NAME.fullmatch(workload):
         raise click.ClickException(f"--workload {workload!r} is not a workload name")
-    evidence_dir = new_evidence_dir(results_dir / workload / "asan")
     command = _child_command(_forwarded_args(ctx))
     try:
+        evidence_dir = new_evidence_dir(results_dir, (workload, "asan"))
         outcome = run_under_asan(command, evidence_dir=evidence_dir, runtime=runtime)
     except ValueError as error:
         raise click.ClickException(str(error)) from error

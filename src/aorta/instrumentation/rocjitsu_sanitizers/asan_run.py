@@ -34,6 +34,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from aorta.run import _fsafe
+
 from .asan import (
     _RUNTIME_KERNEL_PREFIX,
     _RUNTIME_KERNELS,
@@ -46,6 +48,7 @@ from .asan import (
     asan_environment,
     dispatched_kernels,
     kernel_inventory,
+    normalized_signature,
     parse_asan_output,
 )
 from .models import Finding, Verdict
@@ -261,22 +264,29 @@ def _inventory_from_record(record: Mapping[str, object]) -> KernelInventory | No
         return None
 
 
-def declare_code_objects(paths: Iterable[Path | str]) -> None:
+def declare_code_objects(paths: Iterable[Path | str], *, loaded_by: Path | str) -> None:
     """Record device code a workload built, for the run's coverage check.
 
     Two reasons a workload has to say so. ``hipModuleLoad`` reads a code object
     without going through the dynamic loader, so the loader's record never
     lists it. And a workload may delete its build before the run ends -- hrx
     removes its temporary build directory in ``cleanup()`` -- so what each file
-    defines is read here, while it exists, rather than after the run. A no-op
+    defines is read here, while it exists, rather than after the run.
+    ``loaded_by`` is the program that loads the files: the declaration is
+    evidence for a process running that program and for no other. A no-op
     outside an ASan run.
     """
 
     evidence = os.environ.get(ENV_ASAN_RUN, "").strip()
     if not evidence or not Path(evidence).is_dir():
         return
+    program = str(Path(loaded_by).absolute())
     lines = [
-        json.dumps(_inventory_record(kernel_inventory(Path(path).resolve())), sort_keys=True) + "\n"
+        json.dumps(
+            {**_inventory_record(kernel_inventory(Path(path).resolve())), "loaded_by": program},
+            sort_keys=True,
+        )
+        + "\n"
         for path in paths
     ]
     if not lines:
@@ -354,28 +364,41 @@ def loaded_files(ld_log: str) -> LoadedFiles:
     return LoadedFiles(tuple(dict.fromkeys(programs)), tuple(dict.fromkeys(objects)))
 
 
-def _declared_inventories(evidence_dir: Path) -> dict[str, list[KernelInventory]]:
-    """What each declared file defined when it was declared, by path."""
+def _declared_inventories(
+    evidence_dir: Path,
+) -> tuple[dict[str, list[KernelInventory]], dict[str, list[str]]]:
+    """What each declared file defined when it was declared, and who declared it.
+
+    Returns the inventories by path, and the declared paths by the program that loads
+    them -- keyed both as the program was named and as it resolves, since the loader
+    records a program the way it was invoked.
+    """
 
     manifest = evidence_dir / _DECLARED
     if manifest.is_symlink() or not manifest.is_file():
-        return {}
+        return {}, {}
     try:
         lines = manifest.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return {}
+        return {}, {}
     declared: dict[str, list[KernelInventory]] = {}
+    declared_by: dict[str, list[str]] = {}
     for line in lines:
         try:
             record = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(record, dict):
+        if not isinstance(record, dict) or not isinstance(program := record.get("loaded_by"), str):
             continue
         inventory = _inventory_from_record(record)
-        if inventory is not None:
-            declared.setdefault(inventory.path, []).append(inventory)
-    return declared
+        if inventory is None:
+            continue
+        declared.setdefault(inventory.path, []).append(inventory)
+        for key in dict.fromkeys((program, os.path.realpath(program))):
+            paths = declared_by.setdefault(key, [])
+            if inventory.path not in paths:
+                paths.append(inventory.path)
+    return declared, declared_by
 
 
 def _jit_objects(evidence_dir: Path) -> list[str]:
@@ -386,10 +409,6 @@ def _jit_objects(evidence_dir: Path) -> list[str]:
         return sorted(str(path) for path in cache.rglob("*.hsaco") if path.is_file())
     except OSError:
         return []
-
-
-def _normalized(signature: str) -> str:
-    return re.sub(r"\s+", "", signature)
 
 
 def _is_runtime_kernel(signature: str) -> bool:
@@ -528,8 +547,8 @@ def evaluate_asan_run(
         # them, go to this log once AMD_LOG_LEVEL_FILE is set.
         lost |= parse_asan_output(text).device_report_lost
 
-    declared = _declared_inventories(evidence_dir)
-    shared = [*declared, *_jit_objects(evidence_dir)]
+    declared, declared_by = _declared_inventories(evidence_dir)
+    jit = _jit_objects(evidence_dir)
     inventories: dict[str, list[KernelInventory]] = dict(declared)
 
     def inventory(path: str) -> list[KernelInventory]:
@@ -554,7 +573,18 @@ def evaluate_asan_run(
             continue
         definitions: dict[str, list[tuple[str, bool, str]]] = {}
         process_opaque: dict[str, None] = {}
-        for path in dict.fromkeys((*loaded.programs, *loaded.objects, *shared)):
+        # A declaration is evidence only for the program that declared it, and Triton's
+        # cache only for a process that loaded Triton, so a kernel another process
+        # declared or compiled is never taken as proof of what this one ran.
+        own = [
+            path
+            for program in loaded.programs
+            for key in dict.fromkeys((program, os.path.realpath(program)))
+            for path in declared_by.get(key, ())
+        ]
+        if any(Path(path).name.startswith("libtriton") for path in loaded.objects):
+            own += jit
+        for path in dict.fromkeys((*loaded.programs, *loaded.objects, *own)):
             # A relative program path names the executable from the process's
             # own working directory, which the loader does not record.
             if not path.startswith("/"):
@@ -564,13 +594,13 @@ def evaluate_asan_run(
                     process_opaque.setdefault(path, None)
                 for code_object in found.code_objects:
                     for kernel in code_object.kernels:
-                        definitions.setdefault(_normalized(kernel), []).append(
+                        definitions.setdefault(normalized_signature(kernel), []).append(
                             (path, code_object.checked, code_object.triple)
                         )
         for path in process_opaque:
             opaque.setdefault(path, None)
         for signature in signatures:
-            defined = definitions.get(_normalized(signature), [])
+            defined = definitions.get(normalized_signature(signature), [])
             if not defined:
                 reason = "defined in no device code aorta could read from this process's files"
                 if process_opaque:
@@ -579,6 +609,16 @@ def evaluate_asan_run(
                         f"{len(process_opaque)} file(s) with compressed bundles)"
                     )
                 decision = KernelCoverage(signature, False, reason)
+            elif process_opaque and all(checked for _, checked, _ in defined):
+                # Device code aorta cannot open could hold the copy that actually ran.
+                decision = KernelCoverage(
+                    signature,
+                    False,
+                    "defined in ASan-instrumented code, but the process also loaded device "
+                    f"code aorta cannot open ({len(process_opaque)} file(s)), which could "
+                    "define the copy that ran",
+                    tuple(dict.fromkeys(path for path, _, _ in defined)),
+                )
             elif all(checked for _, checked, _ in defined):
                 decision = KernelCoverage(
                     signature,
@@ -619,6 +659,12 @@ def evaluate_asan_run(
     elif init_failed:
         verdict = Verdict.ERROR
         reason = "ASan failed to start in a process"
+    elif returncode != 0:
+        # As for a recipe: a run that did not finish cleanly and reported nothing cannot
+        # vouch for what it never reached, or for a report it died before delivering.
+        verdict = Verdict.ERROR
+        status = "reported no exit status" if returncode is None else f"exited {returncode}"
+        reason = f"the run {status} without an ASan report, so ASan cannot vouch for it"
     elif not hip_logs:
         verdict = Verdict.NOT_CHECKED
         reason = "no process wrote a HIP runtime log, so no GPU kernel ran under the check"
@@ -679,15 +725,28 @@ def _runtime_record(runtime: AsanRuntime) -> dict[str, object]:
 # --------------------------------------------------------------------------- #
 
 
-def new_evidence_dir(root: Path) -> Path:
-    """A fresh, empty directory under ``root`` for one run's evidence."""
+def new_evidence_dir(results_dir: Path, components: Sequence[str]) -> Path:
+    """A fresh, empty directory at ``results_dir``/*components*/``<stamp>-<pid>``.
 
-    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    root = root.absolute()
-    root.mkdir(parents=True, exist_ok=True)
-    evidence = root / f"{stamp}-{os.getpid()}"
-    evidence.mkdir()
-    return evidence
+    Everything below ``results_dir`` is created by descending from it without
+    following a symlink, as the dispatcher creates its workload directory: a stale
+    or planted ``<results>/<workload>`` or ``asan`` link would otherwise send the
+    evidence, and every runtime log written into it, outside the tree the operator
+    named. ``results_dir`` itself is the operator's boundary and may be a link.
+    """
+
+    results_dir = results_dir.absolute()
+    results_dir.mkdir(parents=True, exist_ok=True)
+    stamp = f"{_dt.datetime.now(_dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
+    try:
+        with _fsafe.open_dir_nofollow(results_dir, list(components), create_missing=True) as fd:
+            os.mkdir(stamp, dir_fd=fd)
+    except (_fsafe.UnsafePathError, FileExistsError) as error:
+        raise ValueError(
+            f"refusing to create ASan evidence under {results_dir.joinpath(*components)}: "
+            f"{error}. Remove the link, or point --results-dir at the intended location."
+        ) from error
+    return results_dir.joinpath(*components, stamp)
 
 
 def write_report(report: AsanRunReport, evidence_dir: Path) -> Path:

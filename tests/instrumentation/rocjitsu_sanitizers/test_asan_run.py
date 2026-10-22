@@ -403,8 +403,8 @@ def test_a_declaration_records_what_each_file_defines_then(tmp_path, monkeypatch
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
 
-    declare_code_objects([Path("build/probe"), build / "kernel.code"])
-    declare_code_objects(["build/missing"])
+    declare_code_objects([Path("build/probe"), build / "kernel.code"], loaded_by=build / "probe")
+    declare_code_objects(["build/missing"], loaded_by=build / "probe")
 
     records = _declarations(evidence)
     assert [record["path"] for record in records] == [
@@ -425,7 +425,7 @@ def test_a_declaration_survives_the_workload_deleting_its_build(tmp_path, monkey
     build.mkdir(parents=True)
     probe = _instrumented_binary(build / "hrx_probe")
     monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
-    declare_code_objects([probe])
+    declare_code_objects([probe], loaded_by=probe)
     _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
     probe.unlink()
 
@@ -469,7 +469,7 @@ def test_a_declaration_the_parent_cannot_parse_is_ignored(tmp_path):
 def test_declaring_outside_an_asan_run_does_nothing(tmp_path, monkeypatch):
     monkeypatch.delenv(ENV_ASAN_RUN, raising=False)
     monkeypatch.chdir(tmp_path)
-    declare_code_objects([tmp_path / "probe"])
+    declare_code_objects([tmp_path / "probe"], loaded_by=tmp_path / "probe")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -676,7 +676,7 @@ def test_a_declared_code_object_attributes_a_module_kernel(tmp_path, monkeypatch
         tmp_path / "add100.code", _bundle([(_GFX950_XNACK, _code_object(["add100"], asan=True))])
     )
     monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
-    declare_code_objects([module])
+    declare_code_objects([module], loaded_by=tmp_path / "probe")
     _process(evidence, 7, program=_plain_binary(tmp_path / "probe", kernels=()), kernels=["add100"])
 
     report = evaluate_asan_run(evidence, returncode=0)
@@ -694,14 +694,86 @@ def test_without_the_declaration_a_module_kernel_is_not_checked(tmp_path):
     assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.NOT_CHECKED
 
 
-def test_triton_cache_kernels_are_attributed(tmp_path):
-    evidence = _evidence(tmp_path)
+def _triton_cache(evidence: Path) -> None:
     cache = evidence / "triton-cache" / "abc123"
     cache.mkdir(parents=True)
     _write(cache / "add_kernel.hsaco", _code_object(["add_kernel"], asan=True))
-    _process(evidence, 7, program=_python(tmp_path), kernels=["add_kernel"])
+
+
+def test_triton_cache_kernels_are_attributed_to_a_process_that_loaded_triton(tmp_path):
+    evidence = _evidence(tmp_path)
+    _triton_cache(evidence)
+    (tmp_path / "triton" / "_C").mkdir(parents=True)
+    libtriton = _write(tmp_path / "triton" / "_C" / "libtriton.so", b"")
+    _process(
+        evidence, 7, program=_python(tmp_path), kernels=["add_kernel"], objects=[libtriton]
+    )
 
     assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.PASS
+
+
+def test_the_triton_cache_is_no_evidence_for_a_process_that_never_loaded_triton(tmp_path):
+    evidence = _evidence(tmp_path)
+    _triton_cache(evidence)
+    _process(evidence, 7, program=_python(tmp_path), kernels=["add_kernel"])
+
+    assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.NOT_CHECKED
+
+
+def test_a_declaration_is_evidence_only_for_the_program_that_made_it(tmp_path, monkeypatch):
+    """One process declares an instrumented add100; another runs an add100 nobody declared."""
+
+    evidence = _evidence(tmp_path)
+    module = _write(
+        tmp_path / "add100.code", _bundle([(_GFX950_XNACK, _code_object(["add100"], asan=True))])
+    )
+    declaring = _plain_binary(tmp_path / "probe", kernels=())
+    other = _plain_binary(tmp_path / "other", kernels=())
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([module], loaded_by=declaring)
+    _process(evidence, 7, program=declaring, kernels=["add100"])
+    _process(evidence, 8, program=other, kernels=["add100"])
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    (kernel,) = report.kernels
+    assert not kernel.checked and "defined in no device code" in kernel.reason
+
+
+def test_unopenable_device_code_can_hold_the_copy_that_ran(tmp_path):
+    """A readable instrumented definition proves nothing beside code aorta cannot open."""
+
+    evidence = _evidence(tmp_path)
+    opaque = _compressed_binary(tmp_path / "libopaque.so")
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe"),
+        kernels=["store_index(int*, int)"],
+        objects=[opaque],
+    )
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    (kernel,) = report.kernels
+    assert not kernel.checked and "could define the copy that ran" in kernel.reason
+
+
+@pytest.mark.parametrize("returncode", [1, -9, None])
+def test_a_run_that_did_not_finish_cleanly_is_an_error(tmp_path, returncode):
+    """Every kernel checked, no report -- and the run failed, so it vouches for nothing."""
+
+    evidence = _evidence(tmp_path)
+    _process(
+        evidence, 7, program=_instrumented_binary(tmp_path / "probe"), kernels=["store_index(int*, int)"]
+    )
+
+    report = evaluate_asan_run(evidence, returncode=returncode)
+
+    assert report.verdict is Verdict.ERROR
+    assert "without an ASan report, so ASan cannot vouch for it" in report.reason
 
 
 def test_a_memory_error_fails_the_run(tmp_path):
@@ -742,9 +814,29 @@ def test_a_lost_device_report_is_an_error(tmp_path):
 
 
 def test_a_run_that_never_started_the_hip_runtime_is_not_checked(tmp_path):
-    report = evaluate_asan_run(_evidence(tmp_path), returncode=1)
+    report = evaluate_asan_run(_evidence(tmp_path), returncode=0)
     assert report.verdict is Verdict.NOT_CHECKED
     assert "no process wrote a HIP runtime log" in report.reason
+
+
+def test_evidence_is_created_below_the_results_dir(tmp_path):
+    evidence = asan_run.new_evidence_dir(tmp_path / "results", ("hrx", "asan"))
+    assert evidence.parent == tmp_path / "results" / "hrx" / "asan"
+    assert evidence.is_dir() and not evidence.is_symlink()
+
+
+@pytest.mark.parametrize("linked", [("hrx",), ("hrx", "asan")])
+def test_a_planted_link_below_the_results_dir_is_refused(tmp_path, linked):
+    results = tmp_path / "results"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = results.joinpath(*linked)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="refusing to create ASan evidence"):
+        asan_run.new_evidence_dir(results, ("hrx", "asan"))
+    assert list(outside.iterdir()) == []
 
 
 def test_a_symlinked_evidence_file_is_not_read(tmp_path):

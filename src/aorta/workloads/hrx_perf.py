@@ -258,7 +258,7 @@ class HrxPerfWorkload(Workload):
                 declare_code_objects,
             )
 
-            declare_code_objects([self._binary])
+            declare_code_objects([self._binary], loaded_by=self._binary)
 
     def _build(self) -> Path:
         # Artifacts live in an arch subdir so a shared build_dir reused across
