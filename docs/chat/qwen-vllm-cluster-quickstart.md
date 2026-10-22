@@ -93,8 +93,7 @@ if [ ! -x .venv-ui/bin/aorta ]; then
 fi
 
 source .venv-ui/bin/activate
-# Doctor requires the version-matched, per-user Chat index before it starts the UI.
-aorta chat index fetch
+aorta chat index fetch   # doctor FAILs without one, and the UI launcher gates on doctor
 aorta chat --help
 ```
 
