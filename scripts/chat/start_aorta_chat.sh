@@ -374,11 +374,12 @@ require_command ss
 mkdir -p "$RUNTIME_DIR"
 if [[ "$MODE" == "stop" ]]; then
   : >"$STOP_REQUEST_FILE"
+  trap 'rm -f "$STOP_REQUEST_FILE"; release_ui_lock' EXIT
   acquire_ui_lock true
-  trap release_ui_lock EXIT
-  stop_local_tunnel
-  stop_remote_ui
-  rm -f "$STOP_REQUEST_FILE"
+  stop_rc=0
+  stop_local_tunnel || stop_rc=$?
+  stop_remote_ui || stop_rc=$?
+  ((stop_rc == 0)) || exit "$stop_rc"
   printf 'AORTA Chat UI and tunnel are stopped.\n'
   exit 0
 fi
