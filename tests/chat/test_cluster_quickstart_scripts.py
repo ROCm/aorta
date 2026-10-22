@@ -159,6 +159,21 @@ def test_ruby_runbook_supplies_the_required_site_configuration() -> None:
     assert "git switch cia_models" not in source
 
 
+def test_quickstart_fetches_the_per_user_chat_index() -> None:
+    source = QUICKSTART.read_text(encoding="utf-8")
+    prepare = source[
+        source.index("## 1. Prepare the AORTA checkout") : source.index(
+            "## 2. Create the vLLM Slurm script"
+        )
+    ]
+
+    assert "per-user Chat index" in source
+    assert "aorta chat index fetch" in prepare
+    assert prepare.index("source .venv-ui/bin/activate") < prepare.index(
+        "aorta chat index fetch"
+    )
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires bash launcher execution")
 def test_model_worker_uses_safe_ports_and_qwen_parsers(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
@@ -540,6 +555,39 @@ def test_ui_stop_ignores_an_unrecorded_matching_tunnel(tmp_path: Path) -> None:
     finally:
         manual.terminate()
         manual.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process inspection")
+def test_ui_stop_refuses_a_reused_tunnel_pid(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    fake_bin = _fake_ui_commands(tmp_path)
+    victim = subprocess.Popen(["sleep", "30"])
+    tunnel_pid = runtime / "aorta-chat-tunnel-8080.pid"
+    tunnel_pid.write_text(f"{victim.pid}\n", encoding="utf-8")
+
+    try:
+        stopped = subprocess.run(
+            [str(SCRIPTS[1]), "--stop"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "AORTA_CHAT_LOGIN_HOST": "login.example.invalid",
+                "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+            },
+        )
+
+        assert stopped.returncode != 0
+        assert f"refusing to stop unfamiliar tunnel PID {victim.pid}" in stopped.stderr
+        assert victim.poll() is None, "an unrelated process from a reused PID was killed"
+        assert tunnel_pid.is_file(), "the unowned PID record was discarded"
+        assert not (runtime / "aorta-chat-stop-8080.requested").exists()
+    finally:
+        victim.terminate()
+        victim.wait(timeout=5)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires bash launcher execution")

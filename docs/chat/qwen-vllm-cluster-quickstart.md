@@ -35,6 +35,9 @@ The command returns after `/health` passes. It enables Qwen's reasoning and XML
 tool parsers, prints the selected compute-node URL, and never inspects port
 8000. The Chat launcher runs `aorta chat doctor`—including its native
 function-call probe—before starting the UI.
+Each user must complete [Prepare the AORTA checkout](#1-prepare-the-aorta-checkout)
+once first; that step fetches the per-user Chat index required by the full
+Doctor report.
 Startup output is limited to Slurm state changes and one progress message every
 30 seconds; add `--verbose` to print every five-second poll.
 Shutdown follows the same policy instead of printing every `COMPLETING` poll.
@@ -90,6 +93,8 @@ if [ ! -x .venv-ui/bin/aorta ]; then
 fi
 
 source .venv-ui/bin/activate
+# Doctor requires the version-matched, per-user Chat index before it starts the UI.
+aorta chat index fetch
 aorta chat --help
 ```
 
