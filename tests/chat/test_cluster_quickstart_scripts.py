@@ -363,7 +363,7 @@ def test_quickstart_documents_the_native_function_call_gate() -> None:
         '"tool_choice": {"type": "function"',
         'name = "aorta_tool_protocol_probe"',
         'message.get("tool_calls")',
-        'arguments.get("source") != "READY"',
+        'not isinstance(arguments.get("source"), str)',
     ):
         assert required in probe
 

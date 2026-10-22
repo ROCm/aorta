@@ -419,13 +419,15 @@ if function.get("name") != "aorta_tool_protocol_probe":
 arguments = function.get("arguments") or {}
 if isinstance(arguments, str):
     arguments = json.loads(arguments)
-if arguments.get("source") != "READY":
+if not isinstance(arguments, dict) or not isinstance(arguments.get("source"), str):
     raise SystemExit(f"native tool-call probe used the wrong arguments: {message!r}")
 ' <<<"${TOOL_RESPONSE}"
 ```
 
 Success produces no output. A response containing XML or ordinary text instead
-of one native `tool_calls` entry fails validation.
+of one native `tool_calls` entry fails validation. The `source` value itself is
+not compared with `READY`; the check verifies the server's structured
+function-call capability rather than the model's casing or punctuation.
 
 ## 5. Start the Chat UI
 

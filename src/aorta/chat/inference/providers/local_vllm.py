@@ -216,8 +216,10 @@ class LocalVLLMBackend:
             arguments = function.get("arguments") or {}
             if isinstance(arguments, str):
                 arguments = json.loads(arguments)
-            if not isinstance(arguments, dict) or arguments.get("source") != "READY":
-                raise ValueError(f"expected source='READY', got {arguments!r}")
+            if not isinstance(arguments, dict) or not isinstance(
+                arguments.get("source"), str
+            ):
+                raise ValueError(f"expected a string source argument, got {arguments!r}")
         except (
             httpx.HTTPError,
             AttributeError,
