@@ -113,27 +113,50 @@ remote_llm_api_key = "sk-..."
 ### Azure OpenAI Service
 
 Azure OpenAI is **not** OpenAI-wire-compatible: it rewrites the URL path to
-`/openai/deployments/<deployment>` and requires an `api-version` query
-parameter, neither of which the `openai` backend can express. Route it through
-LiteLLM.
+`/openai/deployments/<deployment>/chat/completions` and requires an
+`api-version` query parameter, neither of which the `openai` backend can
+express. Route it through LiteLLM, which builds that path **only** for a model
+prefixed `azure/`:
+
+```bash
+aorta chat config init --profile azure-openai
+```
+
+or by hand:
 
 ```toml
 llm_provider = "litellm"
 remote_llm_model = "azure/<your-deployment-name>"
+remote_llm_base_url = "https://<resource>.openai.azure.com"
+remote_llm_api_version = "<the api-version your endpoint documents>"
+remote_llm_api_key = "<your key>"
 ```
 
-The credentials do not go in `remote_llm_api_key`; LiteLLM reads its own
-environment variables, and Azure needs all three:
+The same settings cover a corporate gateway that exposes only the Azure
+deployment path. Three details decide whether the request lands:
 
-```bash
-export AZURE_API_KEY=...
-export AZURE_API_BASE=https://<resource>.openai.azure.com
-export AZURE_API_VERSION=2024-02-01
-```
+- **The model is the deployment name with `azure/` in front**, not the
+  underlying model name. Without the prefix, LiteLLM treats the base URL as an
+  OpenAI-compatible endpoint and posts to `<base>/chat/completions`, which such
+  a gateway answers with `404 Resource not found`
+  ([#556](https://github.com/ROCm/aorta/issues/556)).
+- **The base URL stops before `/openai`.** LiteLLM appends
+  `/openai/deployments/...` itself, so a base URL ending in `/openai` requests
+  `/openai/openai/deployments/...`.
+- **Set `remote_llm_api_version`.** Left empty, LiteLLM reads
+  `AZURE_API_VERSION` and otherwise falls back to its own default, which is a
+  preview version a gateway may not serve.
 
-`AZURE_API_VERSION` must be in the environment — `ChatLiteLLM` exposes no
-`api_version` field, so there is no setting for it. Note the model name is the
-**deployment** name prefixed with `azure/`, not the underlying model name.
+The key goes out in Azure's `api-key` header. A gateway that wants it in a
+header of its own, such as API Management's `Ocp-Apim-Subscription-Key`, takes
+`remote_llm_auth_header` as below. With `remote_llm_api_key` and
+`remote_llm_base_url` empty, LiteLLM falls back to `AZURE_API_KEY` and
+`AZURE_API_BASE`.
+
+`aorta chat doctor` warns, and the startup log says the same, when
+`llm_provider = "litellm"` has a base URL and a model with no provider prefix,
+or an `azure/` model whose base URL ends in `/openai`. Neither check makes a
+request.
 
 ### Anthropic, Gemini, Bedrock
 
@@ -452,7 +475,9 @@ found what it wants keeps calling them and returns no prose).
 | `Access denied due to missing subscription key` | Azure API Management's wording for the same thing: `remote_llm_auth_header = "Ocp-Apim-Subscription-Key"`. |
 | `Incorrect API key provided: unused` from `platform.openai.com` | `remote_llm_auth_header` is set but `remote_llm_base_url` is empty, so the request went to OpenAI. The preflight line says `at the provider default endpoint` when this is wrong. |
 | `404` on an `*.openai.azure.com` endpoint | Azure OpenAI needs the `litellm` backend, not `openai`. |
-| `missing_keys: ['AZURE_API_VERSION', ...]` | Export all three `AZURE_*` variables; there is no setting for `api_version`. |
+| `litellm.exceptions.NotFoundError: ... Resource not found` on `llm_provider = "litellm"` | The model has no `azure/` prefix, so the request went to `<base>/chat/completions` and the gateway only serves Azure deployment paths. Set `remote_llm_model = "azure/<deployment>"` and `remote_llm_api_version`; see [Azure OpenAI Service](#azure-openai-service). `aorta chat doctor` flags this configuration as a warning. |
+| `remote_llm_model is 'azure/', which names no Azure deployment` | The `azure-openai` profile's model prompt was accepted unchanged. Put the deployment name after `azure/`. |
+| `missing_keys: ['AZURE_API_VERSION', ...]` | Set `remote_llm_api_version`, or export the `AZURE_*` variables LiteLLM reads. |
 | `I wasn't able to answer that -- check the warning logged...` | The act loop produced no usable text. Which attempts it made first depends on `llm_tool_mode` and on whether a tool had already run, so read the warning logged beside this message — it names the step that gave up. `aorta chat doctor` covers the configuration faults that reach this message by other routes. |
 | `this process will use native from here` | Not an error. A *round* under `text` returned neither text nor a tool call — the line names the signature that was observed — and native then proved the protocol works, so chat switched for the rest of this process. It is a claim about that round, not about the query: earlier rounds may have run tools successfully, their results are on the turn's trace, and the retry is seeded with them. The same line is logged whether native *answered* the query or only *drove structured tool calls* without answering it — the clause before the comma says which, and only the first means this query got a reply. Set `llm_tool_mode` yourself to pin it either way. |
 | `The escalated native tool-calling request failed ... without making a tool call` | The retry was tried and the request did not come back, having called nothing. If it is a local vLLM, it needs both `--enable-auto-tool-choice` and a matching `--tool-call-parser` (see the endpoint row in the table above); otherwise the endpoint may simply have been unwell. The protocol does *not* move, and the line says which attempt it was — after the second, native is not tried again in this process. Set `llm_tool_mode = "text"` to skip the attempt entirely. |
