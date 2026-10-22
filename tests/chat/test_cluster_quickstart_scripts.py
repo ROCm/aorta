@@ -220,7 +220,18 @@ def test_model_worker_uses_safe_ports_and_qwen_parsers(tmp_path: Path) -> None:
     assert "--tool-call-parser qwen3_xml" in commands
     assert "--reasoning-parser qwen3" in commands
     assert "--default-chat-template-kwargs" not in commands
-    assert "--port 8000" not in commands
+
+
+def test_model_launcher_refuses_the_reserved_8000_port() -> None:
+    started = subprocess.run(
+        [str(SCRIPTS[0]), "--port-start", "8000", "--port-end", "8100"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert started.returncode != 0
+    assert "--port-start must be at least 8001" in started.stderr
 
 
 def test_model_launcher_rejects_ports_above_the_tcp_limit_before_submission() -> None:
