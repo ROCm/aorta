@@ -245,3 +245,17 @@ run before the workload under the same environment. With the ROCm 7.0.2 ASan run
 |---|---|---|
 | affected (two nodes, jobs 92222 and 92223) | `fail` 3 of 3: `unknown-crash` on the CPU's first read of a page the GPU had touched | 1–2 s |
 | sound (job 92224) | `pass` 3 of 3: 4 of 4 kernels checked on 8 GPUs | 8–10 s |
+
+Through the run mode at the commit that added the canary, on one sound node and two affected
+ones, each job starting with the pure-HIP check as a control (jobs 92282, 92283, 92284):
+
+| | sound node | affected nodes |
+|---|---|---|
+| `gpu_smoke` through the CLI, ASan PyTorch | `pass`, 3 of 3 kernels checked, node verified in 9.3 s | `error`, exit 1, workload not run, in 2.1 s |
+| a planted overflow, ASan PyTorch | `fail`: `heap-buffer-overflow` | `error`: node health |
+| `hrx` static probe, native | `pass`, node verified in 9.7 s | `error`, workload not run |
+| `test_asan_gpu.py` | 7 passed | the canary's test fails, and so do both recipe tests: the overflow recipe passes |
+
+Built without ASan, the canary is the pure-HIP check on its own:
+`hipcc --offload-arch=gfx950:xnack+ asan_canary.hip -o canary && HSA_XNACK=1 ./canary` exits 0
+on the sound node and 3 on an affected one, in about 4.5 s (jobs 92293 and 92294).
