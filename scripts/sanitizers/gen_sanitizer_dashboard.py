@@ -31,6 +31,10 @@ When ``--status`` points at an unhealthy manifest, an error-colored "stale" bann
 rendered at the top of both ``index.html`` and ``summary.md`` so a failed nightly
 never leaves the previous healthy page looking current.
 
+The published page has a third tab, **AddressSanitizer (manual run)**, that this
+nightly never renders: ASan has no nightly lane, so Pages adds it at deploy time from
+committed results (``add_asan_tab`` / ``scripts/sanitizers/add_asan_tab.py``).
+
 Three input shapes are supported:
 
 * ``--results-dir DIR`` -- a single run laid out as
@@ -4523,6 +4527,307 @@ def build_html(
   </div>
 </div></body></html>
 """
+
+
+# AddressSanitizer has no nightly lane: the CI GPU image ships no ASan runtime, so
+# its results come from manual runs and are committed to the repo rather than
+# written to sanitizer-results by this workflow. Pages adds them to the page it
+# copied from that branch (add_asan_tab), so the nightly's own page, history and
+# data.json stay exactly what the nightly measured.
+ASAN_RESULTS_SCHEMA = "aorta.asan_manual_runs/1"
+
+# Run-mode verdicts (asan_run.Verdict values) and how the tab spells them.
+_ASAN_VERDICTS: dict[str, str] = {
+    "pass": "pass",
+    "fail": "fail",
+    "error": "error",
+    "not_checked": "not checked",
+}
+
+_ASAN_TAB_LABEL = "AddressSanitizer (manual run)"
+
+_ASAN_TAB_CSS = """
+  #tab-asan:checked ~ .tabbar label[for="tab-asan"] {
+    color:var(--text-1); background:var(--panel);
+    border-color:var(--border); border-bottom:1px solid var(--panel); }
+  #tab-asan:focus-visible ~ .tabbar label[for="tab-asan"] {
+    outline:2px solid var(--blue); outline-offset:-2px; }
+  #tab-asan:checked ~ #panel-asan { display:block; }
+  .asan-desc { display:block; font-family:inherit; font-size:13px; color:var(--text-3); margin-top:2px; }
+  .asan-lead { font-size:14px; color:var(--text-2); margin:0 0 12px; line-height:1.5; }
+  .asan-heading { font-size:20px; font-weight:600; margin:24px 0 12px; }
+"""
+
+_ASAN_LEGEND: tuple[str, ...] = (
+    "pass: every dispatched kernel ran from ASan-instrumented device code and ASan "
+    "reported no memory error.",
+    "not checked: ASan reported no memory error, but some dispatched kernels ran from "
+    "device code it does not instrument (named under Not checked), so it cannot vouch "
+    "for the whole run.",
+    "fail: ASan reported a memory error and named the kernel. error: the run ended "
+    "without a usable ASan report.",
+)
+
+_ASAN_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+
+
+def _asan_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _asan_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _check_asan_row(row: Any, where: str) -> None:
+    """Refuse a row whose fields contradict the run mode's verdict rules.
+
+    The page shows these rows as measurements, so a ``pass`` with an unchecked kernel,
+    a ``fail`` with no finding, or more kernels checked than dispatched is an error in
+    the committed file, not something to render.
+    """
+    if not isinstance(row, dict):
+        raise ValueError(f"{where} is not an object")
+    group = row.get("group")
+    if group not in ("workload", "control"):
+        raise ValueError(f"{where}.group must be 'workload' or 'control'")
+    for key in ("name", "description") + (("command",) if group == "workload" else ()):
+        if not _asan_text(row.get(key)):
+            raise ValueError(f"{where}.{key} must be a non-empty string")
+    verdict = row.get("verdict")
+    if verdict not in _ASAN_VERDICTS:
+        raise ValueError(f"{where}.verdict must be one of {sorted(_ASAN_VERDICTS)}")
+    expected = row.get("expected")
+    if group == "control" and expected not in _ASAN_VERDICTS:
+        raise ValueError(f"{where}: a control must name its expected verdict")
+    if group == "workload" and expected is not None:
+        raise ValueError(f"{where}: only a control has an expected verdict")
+    kernels = row.get("kernels")
+    if not isinstance(kernels, dict):
+        raise ValueError(f"{where}.kernels must be an object")
+    dispatched, checked = kernels.get("dispatched"), kernels.get("checked")
+    if not (_asan_count(dispatched) and _asan_count(checked) and checked <= dispatched):
+        raise ValueError(f"{where}.kernels needs counts with 0 <= checked <= dispatched")
+    unchecked = row.get("unchecked")
+    if checked < dispatched and not _asan_text(unchecked):
+        raise ValueError(f"{where}.unchecked must say why {dispatched - checked} kernel(s) were not checked")
+    if checked == dispatched and unchecked is not None:
+        raise ValueError(f"{where}.unchecked is set but every kernel was checked")
+    findings = row.get("findings")
+    if not isinstance(findings, list) or not all(
+        isinstance(finding, dict) and _asan_text(finding.get("code")) for finding in findings
+    ):
+        raise ValueError(f"{where}.findings must be a list of objects with a 'code'")
+    if (verdict == "fail") != bool(findings):
+        raise ValueError(f"{where}: a fail verdict needs findings, and only a fail has them")
+    if verdict == "pass" and (dispatched == 0 or checked < dispatched):
+        raise ValueError(f"{where}: pass needs at least one kernel and every kernel checked")
+    if verdict == "not_checked" and checked == dispatched and dispatched > 0:
+        raise ValueError(f"{where}: not_checked with every kernel checked is a pass")
+
+
+def load_asan_runs(path: Path) -> list[dict[str, Any]]:
+    """The committed manual ASan runs, validated (raises ``ValueError``)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{path}: unreadable ({error})") from error
+    if not isinstance(data, dict) or data.get("schema") != ASAN_RESULTS_SCHEMA:
+        raise ValueError(f"{path}: schema is not {ASAN_RESULTS_SCHEMA!r}")
+    runs = data.get("runs")
+    if not isinstance(runs, list) or not runs:
+        raise ValueError(f"{path}: 'runs' must be a non-empty list")
+    for index, run in enumerate(runs):
+        where = f"{path}: runs[{index}]"
+        if not isinstance(run, dict):
+            raise ValueError(f"{where} is not an object")
+        for key in ("date", "gpu", "run_mode"):
+            if not _asan_text(run.get(key)):
+                raise ValueError(f"{where}.{key} must be a non-empty string")
+        if not _ASAN_DATE_RE.match(run["date"]):
+            raise ValueError(f"{where}.date must be YYYY-MM-DD")
+        for key in ("stack", "notes"):
+            items = run.get(key, [])
+            if not isinstance(items, list) or not all(_asan_text(item) for item in items):
+                raise ValueError(f"{where}.{key} must be a list of non-empty strings")
+        if not run.get("stack"):
+            raise ValueError(f"{where}.stack must name the software the run used")
+        url = run.get("run_mode_url")
+        if url is not None and not (isinstance(url, str) and url.startswith("https://")):
+            raise ValueError(f"{where}.run_mode_url must be an https:// URL")
+        rows = run.get("rows")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"{where}.rows must be a non-empty list")
+        for row_index, row in enumerate(rows):
+            _check_asan_row(row, f"{where}.rows[{row_index}]")
+    return runs
+
+
+def _asan_verdict_html(verdict: str) -> str:
+    return _verdict_html(_ASAN_VERDICTS[verdict])
+
+
+def _asan_finding_text(finding: Mapping[str, Any]) -> str:
+    """One ASan finding as a sentence: what, how, where, in which kernel (pure)."""
+    parts = [str(finding["code"])]
+    access, size = finding.get("access"), finding.get("size")
+    if access:
+        parts.append(f"{access} of size {size}" if size is not None else str(access))
+    if finding.get("region"):
+        parts.append(str(finding["region"]))
+    text = ", ".join(parts)
+    if finding.get("kernel"):
+        text += f", in {finding['kernel']}"
+    if finding.get("location"):
+        text += f" at {finding['location']}"
+    return text
+
+
+def _asan_name_cell(row: Mapping[str, Any]) -> str:
+    # A workload's name is the identifier aorta knows it by; a control's is prose.
+    name = f"<span class=mono>{_esc(row['name'])}</span>" if row["group"] == "workload" else _esc(row["name"])
+    return f"<td>{name}<span class=asan-desc>{_esc(row['description'])}</span></td>"
+
+
+def _asan_kernels_cell(row: Mapping[str, Any]) -> str:
+    kernels = row["kernels"]
+    return f"<td class=num>{kernels['checked']} / {kernels['dispatched']}</td>"
+
+
+def _asan_workloads_html(rows: list[dict[str, Any]]) -> str:
+    body = "".join(
+        f"<tr>{_asan_name_cell(row)}"
+        f"<td>{_asan_verdict_html(row['verdict'])}</td>"
+        f"{_asan_kernels_cell(row)}"
+        f"<td>{_esc(row.get('unchecked') or '') or '<span class=dash>&mdash;</span>'}</td>"
+        f"<td class=num>{len(row['findings'])}</td>"
+        f"<td class=mono>{_esc(row['command'])}</td></tr>"
+        for row in rows
+    )
+    return (
+        f'<section class="panel"><h2>aorta workloads <span class=count>{len(rows)} '
+        f'workload{"" if len(rows) == 1 else "s"}</span></h2>'
+        '<div class="table-wrap"><table><thead><tr><th>Workload</th><th>Verdict</th>'
+        "<th class=num>Kernels checked</th><th>Not checked</th><th class=num>Findings</th>"
+        f"<th>Command</th></tr></thead><tbody>{body}</tbody></table></div></section>"
+    )
+
+
+def _asan_controls_html(rows: list[dict[str, Any]]) -> str:
+    body = []
+    for row in rows:
+        matched = row["verdict"] == row["expected"]
+        outcome = "Expected outcome" if matched else "Unexpected outcome"
+        findings = "; ".join(_asan_finding_text(finding) for finding in row["findings"])
+        body.append(
+            f"<tr>{_asan_name_cell(row)}"
+            f"<td>{_asan_verdict_html(row['expected'])}</td>"
+            f"<td>{_asan_verdict_html(row['verdict'])}</td>"
+            f'<td><span class="pill {"ok" if matched else "bad"}">{outcome}</span></td>'
+            f"{_asan_kernels_cell(row)}"
+            f"<td class=wrap-any>{_esc(findings) or '<span class=dash>no memory error reported</span>'}"
+            "</td></tr>"
+        )
+    return (
+        f'<section class="panel"><h2>Planted-bug controls <span class=count>{len(rows)} '
+        f'control{"" if len(rows) == 1 else "s"}</span></h2>'
+        '<p class="asan-lead">Each control plants a known out-of-bounds access, or '
+        "deliberately none, so the same run shows whether ASan catches memory errors on "
+        "this stack.</p>"
+        '<div class="table-wrap"><table><thead><tr><th>Control</th><th>Expected</th>'
+        "<th>Observed</th><th>Outcome</th><th class=num>Kernels checked</th>"
+        f"<th>Finding</th></tr></thead><tbody>{''.join(body)}</tbody></table></div></section>"
+    )
+
+
+def _asan_run_html(run: Mapping[str, Any]) -> str:
+    """One manual run: its provenance, then its workloads and its controls (pure)."""
+    mode = _esc(run["run_mode"])
+    if run.get("run_mode_url"):
+        mode = f'<a href="{_esc(run["run_mode_url"])}">{mode}</a>'
+    facts = (
+        '<section class="panel"><div class="kv">'
+        + _fact_html("Run", f"manual, {_esc(run['date'])}")
+        + _fact_html("GPU", _esc(run["gpu"]))
+        + _fact_html("Stack", "<br>".join(_esc(item) for item in run["stack"]))
+        + _fact_html("Run mode", mode)
+        + "</div>"
+        + "".join(f'<p class="asan-lead">{_esc(note)}</p>' for note in run.get("notes", []))
+        + "</section>"
+    )
+    workloads = [row for row in run["rows"] if row["group"] == "workload"]
+    controls = [row for row in run["rows"] if row["group"] == "control"]
+    return (
+        facts
+        + (_asan_workloads_html(workloads) if workloads else "")
+        + (_asan_controls_html(controls) if controls else "")
+    )
+
+
+def asan_panel_html(runs: list[dict[str, Any]]) -> str:
+    """The ASan tab's content for validated ``runs`` (pure)."""
+    dates = sorted({run["date"] for run in runs})
+    legend = "".join(
+        f'<li><span class="check">{_svg(_ICON_CHECK, size=10, width=3.5)}</span>{_esc(line)}</li>'
+        for line in _ASAN_LEGEND
+    )
+    return (
+        '<div class="info-banner">'
+        f"{_svg(_ICON_INFO, size=18, width=2)}"
+        "<p><strong>Manual runs, not a nightly lane.</strong> These results were "
+        f"produced by hand ({_esc(', '.join(dates))}) and committed to the repo. The CI "
+        "GPU image has no ASan runtime yet, so nothing on this tab is refreshed nightly "
+        "or affects nightly pass/fail.</p></div>"
+        + "".join(_asan_run_html(run) for run in runs)
+        + '<details class="panel notes" open><summary>Reading the verdicts'
+        f"{_chevron_html()}</summary><ul>{legend}</ul></details>"
+    )
+
+
+_TAB_RADIO_RE = re.compile(r"<input type=radio name=santab id=tab-survey class=tabradio>")
+_TAB_LABEL_RE = re.compile(r'<label for="tab-survey">[^<]*</label>')
+_TABS_END_RE = re.compile(r"</section>\s*(</div>\s*</div></body></html>\s*)\Z")
+_PAGE_END = "</div></body></html>"
+
+
+def add_asan_tab(page: str, runs: list[dict[str, Any]]) -> str:
+    """``page`` with an ASan tab beside the nightly's two (pure).
+
+    ``page`` is what ``build_html`` renders: the tabbed page, or the no-runs page,
+    which has no tabs to join and so gets the results as a section of its own.
+    Raises ``ValueError`` rather than guess where the tab belongs when the markup it
+    joins is not there, or when the page already has one.
+    """
+    if "id=tab-asan" in page or "id=panel-asan" in page:
+        raise ValueError("page already has an ASan tab")
+    if page.count("</head>") != 1:
+        raise ValueError("page has no single </head> to add the tab's style to")
+    panel = asan_panel_html(runs)
+    radio, label = _TAB_RADIO_RE.search(page), _TAB_LABEL_RE.search(page)
+    if radio and label:
+        end = _TABS_END_RE.search(page)
+        if end is None or not radio.end() <= label.start() < label.end() <= end.start():
+            raise ValueError("page does not end with the tab panels this tab joins")
+        page = (
+            page[: radio.end()]
+            + "\n  <input type=radio name=santab id=tab-asan class=tabradio>"
+            + page[radio.end() : label.end()]
+            + f'\n    <label for="tab-asan">{_esc(_ASAN_TAB_LABEL)}</label>'
+            + page[label.end() : end.start(1)]
+            + f"<section class=tabpanel id=panel-asan>\n  {panel}\n  </section>\n  "
+            + page[end.start(1) :]
+        )
+    elif radio is None and label is None and page.count(_PAGE_END) == 1:
+        at = page.index(_PAGE_END)
+        page = (
+            page[:at]
+            + f"<section id=panel-asan><h2 class=asan-heading>{_esc(_ASAN_TAB_LABEL)}</h2>\n"
+            + f"{panel}</section>\n"
+            + page[at:]
+        )
+    else:
+        raise ValueError("page has neither the nightly's tab bar nor the no-runs layout")
+    return page.replace("</head>", f"<style>{_ASAN_TAB_CSS}</style></head>", 1)
 
 
 def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
