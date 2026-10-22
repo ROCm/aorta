@@ -369,6 +369,9 @@ aorta = [
     "cia/watch/watch_config.yaml",
     "ebpf/scripts/*.bt",
     "ebpf/scripts/PROVENANCE.md",
+    # The ASan run mode builds this on the node. Left out of the wheel, every run
+    # reports its node health as not verified and cannot pass.
+    "instrumentation/rocjitsu_sanitizers/asan_canary.hip",
     "workloads/hrx_kernels/*.cpp",
     "workloads/hrx_kernels/README.md",
     "workloads/tokenspeed/*.sh",

@@ -86,6 +86,7 @@ def _run_under_asan(ctx: click.Context, workload: str, results_dir: Path) -> Non
     from aorta.instrumentation.rocjitsu_sanitizers.asan import resolve_asan_runtime
     from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
         EXIT_NOT_CHECKED,
+        NodeHealthStatus,
         new_evidence_dir,
         run_under_asan,
     )
@@ -111,11 +112,17 @@ def _run_under_asan(ctx: click.Context, workload: str, results_dir: Path) -> Non
         click.echo(line, err=True)
     click.echo(f"ASan report: {outcome.report_path}", err=True)
     verdict = outcome.report.verdict
+    health = outcome.report.node_health
     if verdict is Verdict.FAIL:
         raise click.ClickException("ASan found a memory error")
+    if health is not None and health.status is NodeHealthStatus.FAILED:
+        raise click.ClickException(
+            "this node failed ASan's health check, so the workload was not run; "
+            "run it on another node"
+        )
     if verdict is Verdict.ERROR:
         raise click.ClickException("ASan could not check this run")
-    if outcome.returncode != 0:
+    if outcome.returncode:
         ctx.exit(outcome.returncode)
     if verdict is not Verdict.PASS:
         ctx.exit(EXIT_NOT_CHECKED)
@@ -201,13 +208,16 @@ def _run_under_asan(ctx: click.Context, workload: str, results_dir: Path) -> Non
     type=click.Choice(["asan"]),
     default=None,
     help=(
-        "Run the workload under a sanitizer. 'asan' re-runs this command with "
-        "the ASan-instrumented ROCm runtime (ROCM_ASAN_PATH / AORTA_ASAN_ROCM_LIB) "
-        "and then reports which dispatched kernels ASan actually checked. Exit "
-        "status: 1 on a memory error, a lost report or a failed trial; "
-        "3 when the run was clean but some kernels ran from device code built "
-        "without ASan (PyTorch's own, for instance); 0 only when every kernel "
-        "was checked."
+        "Run the workload under a sanitizer. 'asan' first runs a small ASan "
+        "canary on this node's GPUs (built with hipcc), because on a node whose "
+        "GPU page migration corrupts memory no ASan result can be trusted. It "
+        "then re-runs this command with the ASan-instrumented ROCm runtime "
+        "(ROCM_ASAN_PATH / AORTA_ASAN_ROCM_LIB) and reports which dispatched "
+        "kernels ASan actually checked. Exit status: 1 on a memory error, a lost "
+        "report, a failed trial or a node that fails the canary (the workload is "
+        "then not run); 3 when the run was clean but some kernels ran from device "
+        "code built without ASan (PyTorch's own, for instance), or no canary could "
+        "run; 0 only when every kernel was checked on a node the canary passed."
     ),
 )
 @click.option(

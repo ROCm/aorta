@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import struct
 import subprocess
 import zlib
@@ -36,6 +37,8 @@ from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
     EXIT_NOT_CHECKED,
     REPORT_NAME,
     AsanRunOutcome,
+    NodeHealth,
+    NodeHealthStatus,
     active_asan_run,
     asan_run_environment,
     declare_code_objects,
@@ -44,11 +47,18 @@ from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
     owned_setting_conflicts,
     write_report,
 )
+from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
 from aorta.instrumentation.rocjitsu_sanitizers.models import Verdict
+from aorta.instrumentation.rocm_paths import RocmRoots, resolve_rocm_roots
 from aorta.run import _trial_worker
 from aorta.run import dispatcher as dispatcher_module
 from aorta.run.dispatcher import RunRequest, run_trials
 from aorta.workloads import Workload, WorkloadResult
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 FIXTURES = Path(__file__).parent / "fixtures" / "asan"
 
@@ -896,6 +906,671 @@ def test_the_summary_names_unchecked_kernels(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Node health
+# --------------------------------------------------------------------------- #
+
+# The start of what the canary reported on a node whose GPU page migration corrupts
+# memory: a host read of a page the GPU had touched. Paths shortened.
+_SHADOW_CORRUPTION_REPORT = """\
+=================================================================
+==3299796==ERROR: AddressSanitizer: unknown-crash on address 0x7b8be5000000 at pc 0x0000002254ae bp 0x7ffdff2a61b0 sp 0x7ffdff2a61a8
+READ of size 8 at 0x7b8be5000000 thread T0
+    #0 0x0000002254ad in main /src/asan_canary.hip:124:50
+    #1 0x7fcc1262a60f in __libc_start_call_main (/lib64/libc.so.6+0x2a60f)
+
+Address 0x7b8be5000000 is a wild pointer inside of access range of size 0x000000000008.
+SUMMARY: AddressSanitizer: unknown-crash /src/asan_canary.hip:124:50 in main
+==3299796==ABORTING
+"""
+# The same, tripped inside the HSA runtime, whose frames carry no symbols.
+_SHADOW_CORRUPTION_IN_THE_RUNTIME = """\
+=================================================================
+==1068==ERROR: AddressSanitizer: unknown-crash on address 0x7b06eddfcb88 at pc 0x7f06fc507bae bp 0x7fffd98261f0 sp 0x7fffd98261e8
+READ of size 8 at 0x7b06eddfcb88 thread T0
+    #0 0x7f06fc507bad  (/opt/rocm/lib/asan/libhsa-runtime64.so+0x19ebad) (BuildId: 41079eb4d84220e2ac5fcf56df7c118ae5330f64)
+    #1 0x7f06fd3d9361  (/opt/rocm/lib/asan/libamdhip64.so+0xa48361) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+
+==1068==ABORTING
+"""
+_CANARY_OK = (
+    "AORTA_ASAN_CANARY gpu=0 check=untouched_gpu_read bad_words=0 of=8388608 ok\n"
+    "AORTA_ASAN_CANARY verdict=PASS gpus=8\n"
+)
+_CANARY_KERNEL = "store_index(int*, int)"
+
+
+def _executable(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return path
+
+
+def _topology(root: Path, *versions: int) -> Path:
+    """A KFD topology with one node per ``gfx_target_version``; 0 is a CPU."""
+
+    for index, version in enumerate(versions):
+        node = root / str(index)
+        node.mkdir(parents=True)
+        (node / "properties").write_text(
+            f"cpu_cores_count 0\ngfx_target_version {version}\nmax_waves_per_simd 16\n"
+        )
+    return root
+
+
+def test_gpu_targets_come_from_the_driver_topology(tmp_path):
+    topology = _topology(tmp_path / "nodes", 0, 90500, 90500, 90402)
+    assert asan_run.gpu_targets(topology) == ("gfx950", "gfx942")
+
+
+@pytest.mark.parametrize(
+    ("version", "target"),
+    [
+        (90500, "gfx950"),
+        (90402, "gfx942"),
+        (90010, "gfx90a"),
+        (90008, "gfx908"),
+        (110001, "gfx1101"),
+    ],
+)
+def test_a_target_version_names_its_target(version, target):
+    assert asan_run._gfx_target(version) == target
+
+
+def test_no_topology_and_cpu_nodes_list_no_gpu(tmp_path):
+    assert asan_run.gpu_targets(tmp_path / "missing") == ()
+    assert asan_run.gpu_targets(_topology(tmp_path / "cpus", 0, 0)) == ()
+
+
+def test_hipcc_is_looked_for_as_hrx_looks_for_it(tmp_path, monkeypatch):
+    rocm = tmp_path / "rocm"
+    monkeypatch.setattr(
+        asan_run,
+        "resolve_rocm_roots",
+        lambda environ: RocmRoots(rocm, rocm, rocm, layout="classic", source="ROCM_PATH"),
+    )
+    path = {"PATH": str(tmp_path / "path")}
+    assert asan_run._hipcc(path) is None
+    on_path = _executable(tmp_path / "path" / "hipcc")
+    assert asan_run._hipcc(path) == str(on_path)
+    in_rocm = _executable(rocm / "bin" / "hipcc")
+    assert asan_run._hipcc(path) == str(in_rocm)
+    named = _executable(tmp_path / "mine" / "hipcc")
+    assert asan_run._hipcc({**path, "HIPCC": str(named)}) == str(named)
+
+
+def _canary_ok(directory: Path, binary: Path, argv: tuple[str, ...]) -> ProcessResult:
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    return ProcessResult(argv, 0, _CANARY_OK, "")
+
+
+def _canary_shadow_corrupted(directory: Path, binary: Path, argv: tuple[str, ...]):
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    (directory / "asan.41").write_text(_SHADOW_CORRUPTION_REPORT)
+    return ProcessResult(argv, 1, "", "")
+
+
+def _canary_shadow_corrupted_in_the_runtime(directory: Path, binary: Path, argv: tuple[str, ...]):
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    (directory / "asan.41").write_text(_SHADOW_CORRUPTION_IN_THE_RUNTIME)
+    return ProcessResult(argv, 1, "", "")
+
+
+def _canary_data_corrupted(directory: Path, binary: Path, argv: tuple[str, ...]):
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    return ProcessResult(
+        argv,
+        3,
+        "AORTA_ASAN_CANARY gpu=0 check=cpu_pattern_gpu bad_words=8388608 of=8388608 FAIL\n"
+        "AORTA_ASAN_CANARY gpu=0 check=gpu_pattern_cpu bad_words=12 of=8388608 FAIL\n"
+        "AORTA_ASAN_CANARY verdict=FAIL gpus=8\n",
+        "",
+    )
+
+
+def _canary_crashed(directory: Path, binary: Path, argv: tuple[str, ...]):
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    return ProcessResult(argv, -11, "", "")
+
+
+def _canary_hung(directory: Path, binary: Path, argv: tuple[str, ...]):
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    return ProcessResult(argv, None, "", "", timed_out=True)
+
+
+def _canary_unlaunchable(directory: Path, binary: Path, argv: tuple[str, ...]):
+    return ProcessResult(argv, None, "", "", launch_error="PermissionError: [Errno 13]")
+
+
+def _canary_without_a_gpu(directory: Path, binary: Path, argv: tuple[str, ...]):
+    return ProcessResult(
+        argv,
+        2,
+        "AORTA_ASAN_CANARY hip_error hipGetDeviceCount(&gpus): no ROCm-capable device is detected\n",
+        "",
+    )
+
+
+def _canary_without_pageable_access(directory: Path, binary: Path, argv: tuple[str, ...]):
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    return ProcessResult(
+        argv,
+        3,
+        "AORTA_ASAN_CANARY gpu=3 check=pageable_memory_access FAIL\n"
+        "AORTA_ASAN_CANARY verdict=FAIL gpus=8\n",
+        "",
+    )
+
+
+def _canary_silent(directory: Path, binary: Path, argv: tuple[str, ...]):
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    return ProcessResult(argv, 0, "", "")
+
+
+def _canary_says_it_failed(directory: Path, binary: Path, argv: tuple[str, ...]):
+    _process(directory, 41, program=binary, kernels=[_CANARY_KERNEL])
+    return ProcessResult(argv, 0, "AORTA_ASAN_CANARY verdict=FAIL gpus=8\n", "")
+
+
+class _Node:
+    """``run_argv`` on a node with a gfx950 GPU: hipcc builds a synthetic canary, which runs as told."""
+
+    def __init__(self, hipcc: Path) -> None:
+        self.hipcc = hipcc
+        self.canary = _canary_ok
+        self.build_returncode = 0
+        self.instrumented = True
+        self.builds: list[tuple[tuple[str, ...], dict[str, str]]] = []
+        self.runs: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    def __call__(self, argv, *, timeout_seconds, env):
+        argv = tuple(argv)
+        if argv[0] == str(self.hipcc):
+            self.builds.append((argv, dict(env)))
+            if self.build_returncode:
+                error = "clang: error: invalid target ID 'gfx1100:xnack+'\n"
+                return ProcessResult(argv, self.build_returncode, "", error)
+            output = Path(argv[argv.index("-o") + 1])
+            (_instrumented_binary if self.instrumented else _plain_binary)(output)
+            return ProcessResult(argv, 0, "", "")
+        self.runs.append((argv, dict(env)))
+        return self.canary(Path(env[ENV_ASAN_RUN]), Path(argv[0]), argv)
+
+
+@pytest.fixture
+def node(tmp_path, monkeypatch):
+    hipcc = _executable(tmp_path / "rocm" / "bin" / "hipcc")
+    fake = _Node(hipcc)
+    monkeypatch.setattr(asan_run, "gpu_targets", lambda: ("gfx950",))
+    monkeypatch.setattr(asan_run, "_hipcc", lambda environ: str(hipcc))
+    monkeypatch.setattr(asan_run, "run_argv", fake)
+    return fake
+
+
+def _check(tmp_path: Path, **kwargs) -> NodeHealth:
+    return asan_run.check_node_health(
+        _evidence(tmp_path), _runtime(tmp_path), environ={"PATH": "/usr/bin"}, **kwargs
+    )
+
+
+def test_a_clean_canary_vouches_for_the_node(tmp_path, node):
+    health = _check(tmp_path)
+
+    assert health.status is NodeHealthStatus.HEALTHY, health.reason
+    assert health.gpus == 8
+    assert health.reason == (
+        "an in-bounds canary ran clean under ASan on 8 GPU(s), all 1 of its kernels checked "
+        "and its data intact through GPU page migration"
+    )
+    directory = tmp_path / "evidence" / "node-health"
+    assert health.evidence_dir == str(directory)
+    assert health.canary is not None and health.canary.verdict is Verdict.PASS
+    assert json.loads((directory / REPORT_NAME).read_text())["verdict"] == "pass"
+    assert (directory / "canary.log").read_text() == _CANARY_OK
+
+
+def test_the_canary_is_built_with_device_asan_for_every_gpu_target(tmp_path, node, monkeypatch):
+    monkeypatch.setattr(asan_run, "gpu_targets", lambda: ("gfx950", "gfx942"))
+    _check(tmp_path)
+
+    ((argv, env),) = node.builds
+    directory = tmp_path / "evidence" / "node-health"
+    assert argv == (
+        str(node.hipcc),
+        "-O1",
+        "-g",
+        "-fsanitize=address",
+        "-shared-libsan",
+        "--offload-arch=gfx950:xnack+",
+        "--offload-arch=gfx942:xnack+",
+        str(asan_run.CANARY_SOURCE),
+        "-o",
+        str(directory / "asan_canary"),
+    )
+    llvm_bin = str(resolve_rocm_roots({"PATH": "/usr/bin"}).llvm_bin_dir)
+    assert env["PATH"].split(os.pathsep) == [llvm_bin, "/usr/bin"]
+    assert (directory / "build.log").read_text().startswith(f"$ {node.hipcc} -O1 -g")
+
+
+def test_the_canary_runs_in_the_environment_the_workload_gets(tmp_path, node):
+    runtime = _runtime(tmp_path)
+    evidence = _evidence(tmp_path)
+    base = {"PATH": "/usr/bin", "HIP_VISIBLE_DEVICES": "0,1", "LD_PRELOAD": "/opt/mine.so"}
+    torch_lib = tmp_path / "torch" / "lib"
+
+    asan_run.check_node_health(evidence, runtime, environ=base, torch_lib=torch_lib)
+
+    ((argv, env),) = node.runs
+    directory = evidence / "node-health"
+    workload = asan_run_environment(base, runtime, evidence, torch_lib=torch_lib)
+    assert argv == (str(directory / "asan_canary"),)
+    assert env == {
+        key: value.replace(str(evidence), str(directory)) for key, value in workload.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("canary", "reason"),
+    [
+        (
+            _canary_shadow_corrupted,
+            "the canary, whose every access is in bounds, reported unknown-crash (host) at "
+            "/src/asan_canary.hip:124:50; GPU page migration on this node is likely corrupting "
+            "ASan's shadow memory",
+        ),
+        (
+            _canary_shadow_corrupted_in_the_runtime,
+            "the canary, whose every access is in bounds, reported unknown-crash (host); GPU "
+            "page migration on this node is likely corrupting ASan's shadow memory",
+        ),
+        (
+            _canary_data_corrupted,
+            "data the canary sent through GPU page migration came back wrong (GPU 0 "
+            "cpu_pattern_gpu: 8388608 of 8388608 words wrong; GPU 0 gpu_pattern_cpu: 12 of "
+            "8388608 words wrong), and ASan's shadow memory takes the same path",
+        ),
+        (
+            _canary_crashed,
+            "the canary's own ASan run was error: the run exited -11 without an ASan report, "
+            "so ASan cannot vouch for it",
+        ),
+        (_canary_hung, "the canary did not finish in 120 s"),
+        (_canary_unlaunchable, "the canary could not start: PermissionError: [Errno 13]"),
+        (
+            _canary_without_a_gpu,
+            "the canary hit a HIP error: hipGetDeviceCount(&gpus): no ROCm-capable device is "
+            "detected",
+        ),
+        (
+            _canary_without_pageable_access,
+            "a GPU cannot reach pageable host memory, which device ASan needs to read its "
+            "shadow memory (GPU 3 pageable_memory_access)",
+        ),
+        (
+            _canary_silent,
+            "the canary's ASan run passed, but the canary never reported its own checks passing",
+        ),
+        (
+            _canary_says_it_failed,
+            "the canary's ASan run passed, but the canary never reported its own checks passing",
+        ),
+    ],
+    ids=[
+        "memory-error",
+        "memory-error-in-the-runtime",
+        "corrupted-data",
+        "crash",
+        "hang",
+        "unlaunchable",
+        "hip-error",
+        "no-pageable-access",
+        "silent",
+        "says-it-failed",
+    ],
+)
+def test_a_canary_that_is_not_clean_fails_the_node(tmp_path, node, canary, reason):
+    node.canary = canary
+
+    health = _check(tmp_path)
+
+    assert health.status is NodeHealthStatus.FAILED
+    assert health.reason == reason
+    assert health.canary is not None
+    assert (Path(health.evidence_dir) / REPORT_NAME).is_file()
+
+
+def test_a_canary_kernel_asan_does_not_check_fails_the_node(tmp_path, node):
+    """The canary checking 0 kernels: here a build that dropped device ASan."""
+
+    node.instrumented = False
+
+    health = _check(tmp_path)
+
+    assert health.status is NodeHealthStatus.FAILED
+    assert health.reason.startswith("the canary's own ASan run was not_checked: no memory error")
+    assert health.canary is not None and health.canary.unchecked
+
+
+def test_more_than_three_failed_checks_are_counted(tmp_path, node):
+    lines = "".join(
+        f"AORTA_ASAN_CANARY gpu={gpu} check=cpu_pattern_gpu bad_words=9 of=9 FAIL\n"
+        for gpu in range(5)
+    )
+    node.canary = lambda directory, binary, argv: ProcessResult(argv, 3, lines, "")
+
+    reason = _check(tmp_path).reason
+
+    assert "GPU 2 cpu_pattern_gpu: 9 of 9 words wrong; and 2 more)" in reason
+    assert "GPU 3" not in reason
+
+
+def test_without_a_gpu_the_node_is_not_verified(tmp_path, node, monkeypatch):
+    monkeypatch.setattr(asan_run, "gpu_targets", lambda: ())
+
+    health = _check(tmp_path)
+
+    assert health.status is NodeHealthStatus.NOT_VERIFIED
+    assert health.reason.startswith("the kernel driver lists no GPU")
+    assert node.builds == node.runs == []
+    assert not (tmp_path / "evidence" / "node-health").exists()
+
+
+def test_without_hipcc_the_node_is_not_verified(tmp_path, node, monkeypatch):
+    monkeypatch.setattr(asan_run, "_hipcc", lambda environ: None)
+
+    health = _check(tmp_path)
+
+    assert health.status is NodeHealthStatus.NOT_VERIFIED
+    assert health.reason.startswith("hipcc was not found")
+    assert node.builds == node.runs == []
+
+
+def test_without_the_canary_source_the_node_is_not_verified(tmp_path, node, monkeypatch):
+    monkeypatch.setattr(asan_run, "CANARY_SOURCE", tmp_path / "gone.hip")
+
+    health = _check(tmp_path)
+
+    assert health.status is NodeHealthStatus.NOT_VERIFIED
+    assert (
+        health.reason
+        == f"the canary source {tmp_path / 'gone.hip'} is missing from this installation"
+    )
+    assert node.builds == node.runs == []
+
+
+def test_a_canary_that_does_not_build_leaves_the_node_not_verified(tmp_path, node):
+    node.build_returncode = 1
+
+    health = _check(tmp_path)
+
+    assert health.status is NodeHealthStatus.NOT_VERIFIED
+    assert health.reason == (
+        "the canary did not build: hipcc exited 1: clang: error: invalid target ID 'gfx1100:xnack+'"
+    )
+    assert node.runs == []
+    assert "invalid target ID" in (tmp_path / "evidence" / "node-health" / "build.log").read_text()
+
+
+def _clean_workload_run(evidence: Path, tmp_path: Path) -> None:
+    _process(
+        evidence, 7, program=_instrumented_binary(tmp_path / "probe"), kernels=[_CANARY_KERNEL]
+    )
+
+
+def _memory_error_run(evidence: Path, tmp_path: Path) -> None:
+    _process(evidence, 7, program=_plain_binary(tmp_path / "probe"), kernels=[_CANARY_KERNEL])
+    (evidence / "asan.7").write_text(
+        (FIXTURES / "device_heap_buffer_overflow_read.txt").read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    "run", [_clean_workload_run, _memory_error_run], ids=["clean", "memory-error"]
+)
+def test_a_node_that_failed_its_health_check_makes_any_run_an_error(tmp_path, run):
+    evidence = _evidence(tmp_path)
+    run(evidence, tmp_path)
+    health = NodeHealth(NodeHealthStatus.FAILED, "the canary reported unknown-crash")
+
+    report = evaluate_asan_run(evidence, returncode=0, node_health=health)
+
+    assert report.verdict is Verdict.ERROR
+    assert report.reason == (
+        "node health check failed, so ASan results on this node cannot be trusted: "
+        "the canary reported unknown-crash"
+    )
+    assert report.node_health is health
+
+
+def test_an_unverified_node_cannot_pass(tmp_path):
+    evidence = _evidence(tmp_path)
+    _clean_workload_run(evidence, tmp_path)
+    health = NodeHealth(NodeHealthStatus.NOT_VERIFIED, "hipcc was not found")
+
+    report = evaluate_asan_run(evidence, returncode=0, node_health=health)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    assert report.reason == (
+        "no memory error in 1 dispatched kernel(s), all from ASan-instrumented device code, "
+        "but nothing verified that ASan works on this node: hipcc was not found"
+    )
+
+
+@pytest.mark.parametrize(
+    ("run", "verdict"),
+    [(_memory_error_run, Verdict.FAIL), (None, Verdict.NOT_CHECKED)],
+    ids=["memory-error", "not-checked"],
+)
+def test_an_unverified_node_changes_no_other_verdict(tmp_path, run, verdict):
+    evidence = _evidence(tmp_path)
+    if run is not None:
+        run(evidence, tmp_path)
+    health = NodeHealth(NodeHealthStatus.NOT_VERIFIED, "hipcc was not found")
+
+    unverified = evaluate_asan_run(evidence, returncode=1 if run else 0, node_health=health)
+    plain = evaluate_asan_run(evidence, returncode=1 if run else 0)
+
+    assert (unverified.verdict, unverified.reason) == (verdict, plain.reason)
+
+
+@pytest.mark.parametrize(
+    "run", [_clean_workload_run, _memory_error_run], ids=["clean", "memory-error"]
+)
+def test_a_healthy_node_changes_no_verdict(tmp_path, run):
+    evidence = _evidence(tmp_path)
+    run(evidence, tmp_path)
+    health = NodeHealth(NodeHealthStatus.HEALTHY, "an in-bounds canary ran clean")
+
+    healthy = evaluate_asan_run(evidence, returncode=0, node_health=health)
+    plain = evaluate_asan_run(evidence, returncode=0)
+
+    assert (healthy.verdict, healthy.reason) == (plain.verdict, plain.reason)
+
+
+class _Workload:
+    """``subprocess.run`` for the workload: leaves ``evidence`` in the run's evidence directory."""
+
+    def __init__(self, tmp_path: Path, evidence) -> None:
+        self.tmp_path = tmp_path
+        self.evidence = evidence
+        self.calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(self, command, *, env, check):
+        self.calls.append((list(command), dict(env)))
+        self.evidence(Path(env[ENV_ASAN_RUN]), self.tmp_path)
+        return subprocess.CompletedProcess(command, 0)
+
+
+@pytest.fixture
+def workload(tmp_path, monkeypatch):
+    fake = _Workload(tmp_path, _clean_workload_run)
+    monkeypatch.setattr(asan_run, "subprocess", MagicMock(run=fake.run))
+    monkeypatch.setattr(asan_run, "torch_library_dir", lambda: None)
+    return fake
+
+
+def _run_under_asan(tmp_path: Path) -> AsanRunOutcome:
+    return asan_run.run_under_asan(
+        ["aorta", "run"],
+        evidence_dir=_evidence(tmp_path),
+        runtime=_runtime(tmp_path),
+        environ={"PATH": "/usr/bin"},
+    )
+
+
+def test_a_node_that_fails_its_health_check_is_not_given_the_workload(tmp_path, node, workload):
+    node.canary = _canary_shadow_corrupted
+
+    outcome = _run_under_asan(tmp_path)
+
+    assert workload.calls == []
+    assert outcome.returncode is None
+    report = outcome.report
+    assert report.verdict is Verdict.ERROR
+    assert report.reason.startswith(
+        "node health check failed, so ASan results on this node cannot be trusted: the canary, "
+        "whose every access is in bounds, reported unknown-crash (host)"
+    )
+    assert report.findings == () and report.kernels == ()
+    data = json.loads(outcome.report_path.read_text())
+    assert data["node_health"]["status"] == "failed"
+    assert [finding["code"] for finding in data["node_health"]["canary"]["findings"]] == [
+        "unknown-crash"
+    ]
+
+
+def test_a_healthy_node_runs_the_workload_and_judges_it_alone(tmp_path, node, workload):
+    """The canary's kernel, its evidence and its report stay out of the workload's."""
+
+    workload.evidence = lambda evidence, root: _process(
+        evidence, 7, program=_instrumented_binary(root / "probe", ["add100"]), kernels=["add100"]
+    )
+
+    outcome = _run_under_asan(tmp_path)
+
+    ((command, env),) = workload.calls
+    assert command == ["aorta", "run"]
+    assert env[ENV_ASAN_RUN] == str(tmp_path / "evidence")
+    report = outcome.report
+    assert outcome.returncode == 0
+    assert report.verdict is Verdict.PASS, report.reason
+    assert [kernel.signature for kernel in report.kernels] == ["add100"]
+    assert report.node_health is not None
+    assert report.node_health.status is NodeHealthStatus.HEALTHY
+    data = json.loads(outcome.report_path.read_text())
+    assert data["node_health"]["canary"]["kernels"]["detail"][0]["signature"] == _CANARY_KERNEL
+
+
+def test_the_canary_and_the_workload_get_the_same_environment(
+    tmp_path, node, workload, monkeypatch
+):
+    torch_lib = tmp_path / "torch" / "lib"
+    monkeypatch.setattr(asan_run, "torch_library_dir", lambda: torch_lib)
+    evidence = _evidence(tmp_path)
+
+    asan_run.run_under_asan(
+        ["aorta", "run"],
+        evidence_dir=evidence,
+        runtime=_runtime(tmp_path),
+        environ={"PATH": "/usr/bin", "HIP_VISIBLE_DEVICES": "3"},
+    )
+
+    ((_, canary),) = node.runs
+    ((_, ran),) = workload.calls
+    directory = str(evidence / "node-health")
+    assert canary == {key: value.replace(str(evidence), directory) for key, value in ran.items()}
+    assert canary["HIP_VISIBLE_DEVICES"] == "3"
+    assert str(torch_lib) in canary["LD_LIBRARY_PATH"].split(os.pathsep)
+
+
+def test_the_canary_prints_the_lines_its_judge_reads():
+    source = asan_run.CANARY_SOURCE.read_text(encoding="utf-8")
+    formats = re.findall(r'printf\("(AORTA_ASAN_CANARY [^"]*)\\n"', source)
+
+    def printed(prefix: str, *args: object) -> str:
+        (fmt,) = [fmt for fmt in formats if fmt.startswith(prefix)]
+        return re.sub(r"%(?:ll|z)([du])", r"%\1", fmt) % args
+
+    failed_word = re.search(r'bad \? "(\w+)" : "ok"', source)
+    passed_word = re.search(r'failures \? "\w+" : "(\w+)"', source)
+    assert failed_word is not None and passed_word is not None
+    check = asan_run._CANARY_FAILED_CHECK.fullmatch(
+        printed("AORTA_ASAN_CANARY gpu=%d check=%s ", 1, "cpu_pattern_gpu", 7, 9, failed_word[1])
+    )
+    assert check is not None
+    assert (check["gpu"], check["check"], check["bad"], check["of"]) == (
+        "1",
+        "cpu_pattern_gpu",
+        "7",
+        "9",
+    )
+    pageable = asan_run._CANARY_FAILED_CHECK.fullmatch(
+        printed("AORTA_ASAN_CANARY gpu=%d check=pageable", 3)
+    )
+    assert pageable is not None and pageable["bad"] is None
+    passed = asan_run._CANARY_PASSED.fullmatch(
+        printed("AORTA_ASAN_CANARY verdict=", passed_word[1], 8)
+    )
+    assert passed is not None and passed["gpus"] == "8"
+    error = asan_run._CANARY_HIP_ERROR.fullmatch(
+        printed("AORTA_ASAN_CANARY hip_error %s", "hipMalloc(&bad)", "out of memory")
+    )
+    assert error is not None and error["what"] == "hipMalloc(&bad): out of memory"
+
+
+def test_an_unverified_node_runs_the_workload_but_it_cannot_pass(
+    tmp_path, node, workload, monkeypatch
+):
+    monkeypatch.setattr(asan_run, "gpu_targets", lambda: ())
+
+    outcome = _run_under_asan(tmp_path)
+
+    assert len(workload.calls) == 1
+    assert outcome.report.verdict is Verdict.NOT_CHECKED
+    assert outcome.report.reason.endswith(
+        "but nothing verified that ASan works on this node: the kernel driver lists no GPU "
+        f"({asan_run.KFD_TOPOLOGY}), so no canary could run"
+    )
+
+
+def test_the_summary_reports_node_health(tmp_path, node, workload):
+    healthy = _run_under_asan(tmp_path).report.summary()
+    assert healthy[0].startswith("ASan: PASS -- ")
+    assert healthy[1].startswith("Node health: verified in ")
+    assert healthy[1].endswith(
+        " s -- an in-bounds canary ran clean under ASan on 8 GPU(s), "
+        "all 1 of its kernels checked and its data intact through GPU page migration"
+    )
+
+
+def test_the_summary_names_what_a_failed_canary_reported(tmp_path, node, workload):
+    node.canary = _canary_shadow_corrupted
+
+    summary = _run_under_asan(tmp_path).report.summary()
+
+    assert summary[0].startswith("ASan: ERROR -- node health check failed, so ASan results")
+    assert summary[1] == (
+        f"Node health: FAILED -- the canary's evidence is in {tmp_path / 'evidence' / 'node-health'}"
+    )
+    assert summary[2] == "  canary: unknown-crash (host) at /src/asan_canary.hip:124:50"
+
+
+def test_the_summary_says_when_the_node_was_not_verified(tmp_path):
+    health = NodeHealth(NodeHealthStatus.NOT_VERIFIED, "hipcc was not found")
+    report = evaluate_asan_run(_evidence(tmp_path), returncode=0, node_health=health)
+    assert report.summary()[1] == "Node health: NOT VERIFIED -- hipcc was not found"
+
+
+def test_the_canary_source_ships_in_the_wheel():
+    root = Path(__file__).resolve().parents[3]
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    entry = "instrumentation/rocjitsu_sanitizers/asan_canary.hip"
+    assert entry in data["tool"]["setuptools"]["package-data"]["aorta"]
+    assert root / "src" / "aorta" / entry == asan_run.CANARY_SOURCE
+    assert asan_run.CANARY_SOURCE.is_file()
+
+
+# --------------------------------------------------------------------------- #
 # The dispatcher
 # --------------------------------------------------------------------------- #
 
@@ -1127,6 +1802,41 @@ def test_the_parent_exit_status_follows_the_verdict(
     (command,) = commands
     assert command == run_cli._child_command(
         ["--workload=hrx", f"--results-dir={tmp_path / 'results'}", "--sanitizer=asan"]
+    )
+
+
+def test_a_node_that_fails_its_health_check_exits_1_and_says_so(monkeypatch, tmp_path):
+    monkeypatch.delenv(ENV_ASAN_RUN, raising=False)
+    monkeypatch.setattr(
+        "aorta.instrumentation.rocjitsu_sanitizers.asan.resolve_asan_runtime",
+        lambda: _runtime(tmp_path),
+    )
+
+    def fake_run(command, *, evidence_dir, runtime):
+        report = asan_run.AsanRunReport(
+            verdict=Verdict.ERROR,
+            reason="node health check failed, so ASan results on this node cannot be trusted",
+            returncode=None,
+            findings=(),
+            kernels=(),
+            processes=(),
+            opaque_device_code=(),
+            evidence_dir=str(evidence_dir),
+            node_health=NodeHealth(NodeHealthStatus.FAILED, "the canary reported unknown-crash"),
+        )
+        return AsanRunOutcome(None, report, evidence_dir / REPORT_NAME)
+
+    monkeypatch.setattr(asan_run, "run_under_asan", fake_run)
+    result = CliRunner().invoke(
+        run_cli.run,
+        ["--workload", "hrx", "--sanitizer", "asan", "--results-dir", str(tmp_path / "results")],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "Node health: FAILED" in result.output
+    assert (
+        "Error: this node failed ASan's health check, so the workload was not run; run it on "
+        "another node" in result.output
     )
 
 

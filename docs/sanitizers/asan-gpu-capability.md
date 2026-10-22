@@ -212,3 +212,36 @@ compared the command line let through. And job 85755 reported every clean `hrx` 
 `not_checked`: `hrx` deletes its temporary build directory in `cleanup()`, so by the time the
 parent read the evidence the declared probes were gone. A declaration now records what each
 file defines when it is declared, and job 85760 is the measurement after that change.
+
+## Node health: GPU page migration that corrupts memory
+
+Device ASan reads its shadow memory, which is ordinary anonymous host memory, through XNACK
+page faults, and the driver can migrate those pages into VRAM and back. On some MI350 nodes
+that migration corrupts data. A pure-HIP check with no ASan writes known patterns through
+fresh `MAP_NORESERVE` mappings without huge pages, reads them on the GPU, and reads them back
+on the CPU:
+
+- On affected GPUs every word comes back wrong once the GPU has faulted the pages into VRAM.
+  The same pages advised to stay in host memory (`hipMemAdvise`, preferred location CPU)
+  round-trip intact, so the fault is in migration.
+- On other affected GPUs the patterns survive, but pages nothing wrote read back nonzero.
+  Most of ASan's shadow is such pages.
+
+The fault is per GPU and comes and goes. One node had it on half of its GPUs. Another passed
+the check, then hung minutes later in the driver's SVM restore path under ASan load. Kernel,
+amdgpu version, boot parameters, GPU firmware and sysctls were identical on affected and sound
+nodes.
+
+On an affected node ASan is wrong in both directions. Measured with `test_asan_gpu.py` (job
+92263), the clean recipe **failed** on a bogus report, and the planted-overflow recipe
+**passed**: the overflow went unseen. The bogus reports are `unknown-crash`, on the host
+(interceptors, the HSA runtime, Python's allocator) or on the device, and their shadow-byte
+dumps are full of unrelated page contents.
+
+The run mode's canary, `asan_canary.hip`, is that pure-HIP check built with device ASan and
+run before the workload under the same environment. With the ROCm 7.0.2 ASan runtime:
+
+| node, by the pure-HIP check | canary on its own, 3 runs each | time |
+|---|---|---|
+| affected (two nodes, jobs 92222 and 92223) | `fail` 3 of 3: `unknown-crash` on the CPU's first read of a page the GPU had touched | 1–2 s |
+| sound (job 92224) | `pass` 3 of 3: 4 of 4 kernels checked on 8 GPUs | 8–10 s |

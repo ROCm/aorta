@@ -20,11 +20,14 @@ import yaml
 
 from aorta.instrumentation.rocjitsu_sanitizers import (
     Verdict,
+    asan_run,
     execute_sanitizer_run,
     inspect_device_instrumentation,
     read_report,
     resolve_asan_runtime,
 )
+from aorta.instrumentation.rocjitsu_sanitizers.asan import kernel_inventory
+from aorta.instrumentation.rocjitsu_sanitizers.asan_run import NodeHealthStatus
 from aorta.instrumentation.rocm_paths import resolve_rocm_roots
 
 REPO = Path(__file__).resolve().parents[3]
@@ -120,3 +123,27 @@ def test_the_clean_recipe_passes(tmp_path):
     recipe = _staged_recipe(tmp_path, "asan-clean.yaml", "asan_clean")
     report = read_report(execute_sanitizer_run(recipe, output_dir=tmp_path / "out"))
     assert report.overall_verdict is Verdict.PASS, report.checks[0].reason
+
+
+@pytest.mark.rocm
+def test_the_node_health_canary_builds_with_device_asan(tmp_path):
+    binary, why = asan_run._build_canary(_hipcc(), (ARCH,), tmp_path, os.environ)
+    assert binary is not None, why
+    (code_object,) = kernel_inventory(binary).code_objects
+    assert code_object.checked and code_object.processor == ARCH
+    assert {kernel.split("(")[0] for kernel in code_object.kernels} >= {
+        "aorta_canary_count_nonzero",
+        "aorta_canary_count_mismatch",
+        "aorta_canary_write_pattern",
+        "aorta_canary_write_sparse",
+    }
+
+
+@pytest.mark.gpu
+@pytest.mark.rocm
+@requires_runtime
+def test_the_node_health_canary_runs_clean_on_this_node(tmp_path):
+    """Fails on a node whose GPU page migration corrupts memory, where every ASan test here would."""
+
+    health = asan_run.check_node_health(tmp_path, resolve_asan_runtime())
+    assert health.status is NodeHealthStatus.HEALTHY, health.reason

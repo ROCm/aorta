@@ -19,6 +19,10 @@ and xnack+ everywhere aorta can see it defined. A kernel defined nowhere aorta
 can read counts as unchecked, so the rule can only under-state coverage.
 PyTorch's own kernels are the common case: its device code is built without
 ASan and shipped compressed, and the report says so instead of passing.
+
+Before any of that, the parent checks the node (:func:`check_node_health`): on
+a node whose GPU page migration corrupts memory, ASan's shadow memory is
+corrupted with it, and nothing the workload's run reports could be trusted.
 """
 
 from __future__ import annotations
@@ -29,13 +33,18 @@ import importlib.util
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from aorta.run import _fsafe
 
+from ..rocm_paths import resolve_rocm_roots
 from .asan import (
     _RUNTIME_KERNEL_PREFIX,
     _RUNTIME_KERNELS,
@@ -51,6 +60,7 @@ from .asan import (
     normalized_signature,
     parse_asan_output,
 )
+from .execution import ProcessResult, run_argv
 from .models import Finding, Verdict
 
 ENV_ASAN_RUN = "AORTA_ASAN_RUN"
@@ -449,6 +459,60 @@ class ProcessRecord:
         return {"pid": self.pid, "programs": list(self.programs), "kernels": list(self.kernels)}
 
 
+def _finding_line(finding: Finding) -> str:
+    metadata = dict(finding.metadata)
+    where = metadata.get("location") or finding.kernel_name or "unknown location"
+    return f"{finding.code} ({metadata.get('side', 'host')}) at {where}"
+
+
+class NodeHealthStatus(str, Enum):
+    """What the node-health canary established before the workload ran."""
+
+    HEALTHY = "healthy"
+    FAILED = "failed"
+    NOT_VERIFIED = "not_verified"
+
+
+@dataclass(frozen=True)
+class NodeHealth:
+    """Whether this node's ASan results can be trusted, from :func:`check_node_health`.
+
+    ``failed`` is any canary that did not come back clean -- a memory error from a
+    program whose every access is in bounds, data that GPU page migration corrupted, a
+    crash, a hang, a kernel ASan could not be shown to check -- because a workload run
+    on that node cannot be told apart from the node's own fault. ``not_verified`` means
+    no canary could run, so nothing either way.
+    """
+
+    status: NodeHealthStatus
+    reason: str
+    evidence_dir: str | None = None
+    seconds: float | None = None
+    gpus: int | None = None
+    canary: AsanRunReport | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status.value,
+            "reason": self.reason,
+            "evidence_dir": self.evidence_dir,
+            "seconds": round(self.seconds, 2) if self.seconds is not None else None,
+            "gpus": self.gpus,
+            "canary": self.canary.to_dict() if self.canary is not None else None,
+        }
+
+    def summary(self) -> list[str]:
+        if self.status is NodeHealthStatus.HEALTHY:
+            took = f" in {self.seconds:.1f} s" if self.seconds is not None else ""
+            return [f"Node health: verified{took} -- {self.reason}"]
+        if self.status is NodeHealthStatus.NOT_VERIFIED:
+            return [f"Node health: NOT VERIFIED -- {self.reason}"]
+        lines = [f"Node health: FAILED -- the canary's evidence is in {self.evidence_dir}"]
+        if self.canary is not None:
+            lines += [f"  canary: {_finding_line(finding)}" for finding in self.canary.findings[:2]]
+        return lines
+
+
 @dataclass(frozen=True)
 class AsanRunReport:
     """What one ASan run found and what it could vouch for."""
@@ -463,6 +527,7 @@ class AsanRunReport:
     evidence_dir: str
     command: tuple[str, ...] = ()
     runtime: Mapping[str, object] | None = None
+    node_health: NodeHealth | None = None
 
     @property
     def unchecked(self) -> tuple[KernelCoverage, ...]:
@@ -484,6 +549,7 @@ class AsanRunReport:
             "processes": [process.to_dict() for process in self.processes],
             "opaque_device_code": list(self.opaque_device_code),
             "runtime": dict(self.runtime) if self.runtime is not None else None,
+            "node_health": self.node_health.to_dict() if self.node_health is not None else None,
             "evidence_dir": self.evidence_dir,
         }
 
@@ -495,10 +561,9 @@ class AsanRunReport:
             Verdict.NOT_CHECKED: "NOT CHECKED",
         }.get(self.verdict, self.verdict.value.upper())
         lines = [f"ASan: {label} -- {self.reason}"]
-        for finding in self.findings[:3]:
-            metadata = dict(finding.metadata)
-            where = metadata.get("location") or finding.kernel_name or "unknown location"
-            lines.append(f"  {finding.code} ({metadata.get('side', 'host')}) at {where}")
+        if self.node_health is not None:
+            lines += self.node_health.summary()
+        lines += [f"  {_finding_line(finding)}" for finding in self.findings[:3]]
         if self.verdict is not Verdict.FAIL:
             unchecked = self.unchecked
             for kernel in unchecked[:3]:
@@ -520,6 +585,7 @@ def evaluate_asan_run(
     returncode: int | None,
     command: Sequence[str] = (),
     runtime: AsanRuntime | None = None,
+    node_health: NodeHealth | None = None,
 ) -> AsanRunReport:
     """Read an ASan run's evidence directory and decide what it shows.
 
@@ -527,6 +593,10 @@ def evaluate_asan_run(
     detection could have been lost -- the stock runtime's hostcall abort, the
     host runtime not first, two runtimes, ASan failing to start -- is an error.
     Only then does coverage decide between pass and not checked.
+
+    ``node_health`` comes before all of it: on a node that failed its health
+    check the run is an error whatever its evidence says, and on one nothing
+    could verify, a run that would pass is not checked instead.
     """
 
     reports = _per_process(evidence_dir, _ASAN_LOG)
@@ -684,6 +754,22 @@ def evaluate_asan_run(
             "ASan-instrumented device code"
         )
 
+    if node_health is not None and node_health.status is NodeHealthStatus.FAILED:
+        verdict = Verdict.ERROR
+        reason = (
+            "node health check failed, so ASan results on this node cannot be trusted: "
+            f"{node_health.reason}"
+        )
+    elif (
+        node_health is not None
+        and node_health.status is NodeHealthStatus.NOT_VERIFIED
+        and verdict is Verdict.PASS
+    ):
+        verdict = Verdict.NOT_CHECKED
+        reason = (
+            f"{reason}, but nothing verified that ASan works on this node: {node_health.reason}"
+        )
+
     return AsanRunReport(
         verdict=verdict,
         reason=reason,
@@ -695,6 +781,7 @@ def evaluate_asan_run(
         evidence_dir=str(evidence_dir),
         command=tuple(command),
         runtime=_runtime_record(runtime) if runtime is not None else None,
+        node_health=node_health,
     )
 
 
@@ -718,6 +805,232 @@ def _runtime_record(runtime: AsanRuntime) -> dict[str, object]:
         "symbolizer": str(runtime.symbolizer) if runtime.symbolizer is not None else None,
         "asan_options": ASAN_OPTIONS_PINNED,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Node health
+# --------------------------------------------------------------------------- #
+
+CANARY_SOURCE = Path(__file__).with_name("asan_canary.hip")
+NODE_HEALTH_DIR = "node-health"
+KFD_TOPOLOGY = Path("/sys/class/kfd/kfd/topology/nodes")
+_CANARY_BINARY = "asan_canary"
+_CANARY_BUILD_FLAGS = ("-O1", "-g", "-fsanitize=address", "-shared-libsan")
+_BUILD_TIMEOUT = 300.0
+# About ten seconds on a sound 8-GPU node.
+_CANARY_TIMEOUT = 120.0
+_GFX_TARGET_VERSION = re.compile(r"^gfx_target_version (?P<version>\d+)\s*$", re.MULTILINE)
+_CANARY_FAILED_CHECK = re.compile(
+    r"^AORTA_ASAN_CANARY gpu=(?P<gpu>\d+) check=(?P<check>\S+)"
+    r"(?: bad_words=(?P<bad>\d+) of=(?P<of>\d+))? FAIL\s*$",
+    re.MULTILINE,
+)
+_CANARY_PASSED = re.compile(r"^AORTA_ASAN_CANARY verdict=PASS gpus=(?P<gpus>\d+)\s*$", re.MULTILINE)
+_CANARY_HIP_ERROR = re.compile(r"^AORTA_ASAN_CANARY hip_error (?P<what>.+?)\s*$", re.MULTILINE)
+_SHADOW_SUSPECT = "GPU page migration on this node is likely corrupting ASan's shadow memory"
+
+
+def _gfx_target(version: int) -> str:
+    """The target a KFD ``gfx_target_version`` names: 90500 is gfx950, 90010 gfx90a."""
+
+    return f"gfx{version // 10000}{version // 100 % 100:x}{version % 100:x}"
+
+
+def gpu_targets(topology: Path = KFD_TOPOLOGY) -> tuple[str, ...]:
+    """The GPU targets the kernel driver lists, read from sysfs without touching a GPU."""
+
+    try:
+        nodes = sorted(topology.iterdir())
+    except OSError:
+        return ()
+    targets: dict[str, None] = {}
+    for node in nodes:
+        try:
+            properties = (node / "properties").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match = _GFX_TARGET_VERSION.search(properties)
+        # CPU nodes report version 0.
+        if match is not None and int(match.group("version")):
+            targets.setdefault(_gfx_target(int(match.group("version"))), None)
+    return tuple(targets)
+
+
+def _hipcc(environ: Mapping[str, str]) -> str | None:
+    candidates = (
+        environ.get("HIPCC", ""),
+        str(resolve_rocm_roots(dict(environ)).bin_dir / "hipcc"),
+        shutil.which("hipcc", path=environ.get("PATH")) or "",
+    )
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _write_new(path: Path, text: str) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(text)
+
+
+def _build_canary(
+    hipcc: str, targets: Sequence[str], directory: Path, environ: Mapping[str, str]
+) -> tuple[Path | None, str]:
+    """Build the canary into ``directory``: the binary, or ``None`` and why not."""
+
+    binary = directory / _CANARY_BINARY
+    command = (
+        hipcc,
+        *_CANARY_BUILD_FLAGS,
+        *(f"--offload-arch={target}:xnack+" for target in targets),
+        str(CANARY_SOURCE),
+        "-o",
+        str(binary),
+    )
+    env = dict(environ)
+    # hipcc shells out to clang-offload-bundler, which is on PATH in neither install layout.
+    env["PATH"] = os.pathsep.join(
+        part for part in (str(resolve_rocm_roots(env).llvm_bin_dir), env.get("PATH", "")) if part
+    )
+    built = run_argv(command, timeout_seconds=_BUILD_TIMEOUT, env=env)
+    _write_new(directory / "build.log", f"$ {shlex.join(command)}\n{built.stdout}{built.stderr}")
+    if built.returncode == 0 and binary.is_file():
+        return binary, ""
+    if built.timed_out:
+        return None, f"hipcc did not finish in {_BUILD_TIMEOUT:.0f} s"
+    if built.launch_error is not None:
+        return None, f"hipcc could not start: {built.launch_error}"
+    lines = [
+        line.strip() for line in f"{built.stdout}\n{built.stderr}".splitlines() if line.strip()
+    ]
+    error = next((line for line in lines if "error" in line.lower()), lines[-1] if lines else "")
+    return None, f"hipcc exited {built.returncode}" + (f": {error}" if error else "")
+
+
+def _judge_canary(report: AsanRunReport, process: ProcessResult) -> tuple[NodeHealthStatus, str]:
+    output = f"{process.stdout}\n{process.stderr}"
+    passed = _CANARY_PASSED.search(output)
+    if report.findings:
+        first = report.findings[0]
+        metadata = dict(first.metadata)
+        where = metadata.get("location") or first.kernel_name
+        found = f"{first.code} ({metadata.get('side', 'host')})" + (f" at {where}" if where else "")
+        return (
+            NodeHealthStatus.FAILED,
+            f"the canary, whose every access is in bounds, reported {found}; {_SHADOW_SUSPECT}",
+        )
+    if failed := list(_CANARY_FAILED_CHECK.finditer(output)):
+        details = "; ".join(
+            f"GPU {check['gpu']} {check['check']}"
+            + (f": {check['bad']} of {check['of']} words wrong" if check["bad"] is not None else "")
+            for check in failed[:3]
+        ) + (f"; and {len(failed) - 3} more" if len(failed) > 3 else "")
+        if all(check["bad"] is None for check in failed):
+            return (
+                NodeHealthStatus.FAILED,
+                f"a GPU cannot reach pageable host memory, which device ASan needs to read its "
+                f"shadow memory ({details})",
+            )
+        return (
+            NodeHealthStatus.FAILED,
+            f"data the canary sent through GPU page migration came back wrong ({details}), "
+            "and ASan's shadow memory takes the same path",
+        )
+    if process.timed_out:
+        return NodeHealthStatus.FAILED, f"the canary did not finish in {_CANARY_TIMEOUT:.0f} s"
+    if process.launch_error is not None:
+        return NodeHealthStatus.FAILED, f"the canary could not start: {process.launch_error}"
+    if hip_error := _CANARY_HIP_ERROR.search(output):
+        return NodeHealthStatus.FAILED, f"the canary hit a HIP error: {hip_error['what']}"
+    if report.verdict is Verdict.PASS and passed is not None:
+        return (
+            NodeHealthStatus.HEALTHY,
+            f"an in-bounds canary ran clean under ASan on {passed['gpus']} GPU(s), all "
+            f"{len(report.kernels)} of its kernels checked and its data intact through GPU "
+            "page migration",
+        )
+    if report.verdict is Verdict.PASS:
+        return (
+            NodeHealthStatus.FAILED,
+            "the canary's ASan run passed, but the canary never reported its own checks passing",
+        )
+    return (
+        NodeHealthStatus.FAILED,
+        f"the canary's own ASan run was {report.verdict.value}: {report.reason}",
+    )
+
+
+def check_node_health(
+    evidence_dir: Path,
+    runtime: AsanRuntime,
+    *,
+    environ: Mapping[str, str] | None = None,
+    torch_lib: Path | None = None,
+) -> NodeHealth:
+    """Run the node-health canary under the environment a workload gets, and judge it.
+
+    Device ASan reads its shadow memory through the GPU's XNACK page faults, and on some
+    nodes the page migration behind them corrupts data. There every check misfires:
+    in-bounds code reports memory errors, and a real error can be missed. Nothing in a
+    workload's own evidence tells that apart from a real result. So :data:`CANARY_SOURCE`,
+    built here with device ASan for every GPU target the driver lists, sends known data
+    down that path on every visible GPU with every access in bounds, and is judged as a
+    workload is: it has to PASS, every kernel checked, with its own data checks intact.
+    The build takes about a second and the run about ten on an 8-GPU node. Its evidence,
+    and its ``asan_report.json``, go to ``evidence_dir/node-health``.
+    """
+
+    started = time.monotonic()
+    env = os.environ if environ is None else environ
+    targets = gpu_targets()
+    if not targets:
+        return NodeHealth(
+            NodeHealthStatus.NOT_VERIFIED,
+            f"the kernel driver lists no GPU ({KFD_TOPOLOGY}), so no canary could run",
+        )
+    hipcc = _hipcc(env)
+    if hipcc is None:
+        return NodeHealth(
+            NodeHealthStatus.NOT_VERIFIED,
+            "hipcc was not found ($HIPCC, the ROCm bin directory, PATH), so the canary "
+            "could not be built",
+        )
+    if not CANARY_SOURCE.is_file():
+        return NodeHealth(
+            NodeHealthStatus.NOT_VERIFIED,
+            f"the canary source {CANARY_SOURCE} is missing from this installation",
+        )
+    directory = evidence_dir.absolute() / NODE_HEALTH_DIR
+    os.mkdir(directory)
+    binary, why = _build_canary(hipcc, targets, directory, env)
+    if binary is None:
+        return NodeHealth(
+            NodeHealthStatus.NOT_VERIFIED,
+            f"the canary did not build: {why}",
+            evidence_dir=str(directory),
+            seconds=time.monotonic() - started,
+        )
+    process = run_argv(
+        (str(binary),),
+        timeout_seconds=_CANARY_TIMEOUT,
+        env=asan_run_environment(env, runtime, directory, torch_lib=torch_lib),
+    )
+    _write_new(directory / "canary.log", f"{process.stdout}{process.stderr}")
+    report = evaluate_asan_run(
+        directory, returncode=process.returncode, command=process.argv, runtime=runtime
+    )
+    write_report(report, directory)
+    status, reason = _judge_canary(report, process)
+    passed = _CANARY_PASSED.search(f"{process.stdout}\n{process.stderr}")
+    return NodeHealth(
+        status,
+        reason,
+        evidence_dir=str(directory),
+        seconds=time.monotonic() - started,
+        gpus=int(passed["gpus"]) if passed is not None else None,
+        canary=report,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -762,7 +1075,8 @@ def write_report(report: AsanRunReport, evidence_dir: Path) -> Path:
 
 @dataclass(frozen=True)
 class AsanRunOutcome:
-    returncode: int
+    # None when the node failed its health check and the command was not run.
+    returncode: int | None
     report: AsanRunReport
     report_path: Path
 
@@ -774,12 +1088,26 @@ def run_under_asan(
     runtime: AsanRuntime,
     environ: Mapping[str, str] | None = None,
 ) -> AsanRunOutcome:
-    """Run ``command`` with the ASan run environment and judge what it left."""
+    """Check the node, run ``command`` with the ASan run environment, and judge what it left.
+
+    A node that fails :func:`check_node_health` is not given the command at all. Whatever
+    ASan reported there could be the node's fault rather than the command's, and a clean
+    run could have missed what the node hid, so the result would be an error either way;
+    the canary has already shown that in seconds, where the workload could take minutes.
+    """
 
     base = os.environ if environ is None else environ
-    env = asan_run_environment(base, runtime, evidence_dir, torch_lib=torch_library_dir())
-    completed = subprocess.run(list(command), env=env, check=False)
+    torch_lib = torch_library_dir()
+    health = check_node_health(evidence_dir, runtime, environ=base, torch_lib=torch_lib)
+    returncode = None
+    if health.status is not NodeHealthStatus.FAILED:
+        env = asan_run_environment(base, runtime, evidence_dir, torch_lib=torch_lib)
+        returncode = subprocess.run(list(command), env=env, check=False).returncode
     report = evaluate_asan_run(
-        evidence_dir, returncode=completed.returncode, command=command, runtime=runtime
+        evidence_dir,
+        returncode=returncode,
+        command=command,
+        runtime=runtime,
+        node_health=health,
     )
-    return AsanRunOutcome(completed.returncode, report, write_report(report, evidence_dir))
+    return AsanRunOutcome(returncode, report, write_report(report, evidence_dir))

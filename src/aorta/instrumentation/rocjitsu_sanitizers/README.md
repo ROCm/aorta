@@ -354,9 +354,35 @@ cannot find counts as unchecked, so the rule can only under-state coverage.
 
 | exit | verdict | meaning |
 |---|---|---|
-| 0 | `pass` | no memory error, and every dispatched kernel was checked |
-| 1 | `fail` / `error` | a memory error; a report that could have been lost; or a failed trial |
-| 3 | `not_checked` | no memory error, but some kernels ran from code ASan does not check |
+| 0 | `pass` | no memory error, every dispatched kernel was checked, and the node passed its health check |
+| 1 | `fail` / `error` | a memory error; a report that could have been lost; a failed trial; or a node that failed its health check |
+| 3 | `not_checked` | no memory error, but some kernels ran from code ASan does not check, or no health check could run |
+
+**Node health.** Device ASan reads its shadow memory, which is ordinary host memory,
+through the GPU's XNACK page faults, and the driver may migrate those pages to VRAM and
+back. On some MI350 nodes that migration corrupts data, and every check there misfires:
+an in-bounds program reports host-side `unknown-crash` errors, and a real error can go
+unseen. Nothing in a workload's own report tells that apart from a real result. So before
+the workload, the parent builds a small canary, [`asan_canary.hip`](asan_canary.hip),
+with `hipcc -O1 -g -fsanitize=address -shared-libsan --offload-arch=<gpu>:xnack+` for
+each GPU target the driver lists, into `<run>/node-health/`, and runs it under the same
+environment. On every visible GPU it sends known data through fresh anonymous mappings
+without huge pages, which is how ASan maps its shadow, with every access in bounds. It is
+judged exactly as a workload is: it has to `pass` with its own data checks intact. The
+build takes about a second, and the run about ten on an 8-GPU node.
+
+- A canary that reports a memory error, finds its data corrupted, crashes, hangs, or runs
+  a kernel ASan cannot be shown to check fails the node. The run is an `error` (exit 1)
+  and the workload is **not run**: on that node its result would be an error either way,
+  and the workload can take minutes. `asan_report.json` keeps the canary's report under
+  `node_health`.
+- When no canary can run (no `hipcc`, no GPU in the driver's topology, or a canary that
+  does not build), `node_health` is `not_verified`, and a run that would have passed is
+  `not_checked` (exit 3). A memory error still fails.
+- The canary checks the node when the run starts. The fault was measured to come and go
+  on some GPUs, so a long run can still meet it later. A report of host-side
+  `unknown-crash` errors inside runtime code (interceptors, the HSA runtime's threads,
+  Python's allocator) is worth repeating on another node.
 
 What that means per workload, measured on MI350:
 
