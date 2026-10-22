@@ -33,6 +33,7 @@ import hashlib
 import os
 import re
 import struct
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,8 @@ _ACCESS = re.compile(r"^(?P<access>READ|WRITE) of size (?P<size>\d+)\s+(?P<where
 _WORKGROUP = re.compile(r"in workgroup id \((?P<wg>[^)]*)\)")
 _FRAME0 = re.compile(r"^\s*#0 0x[0-9a-fA-F]+ in (?P<body>.+?)\s*$")
 _FRAME = re.compile(r"^\s*#\d+ 0x[0-9a-fA-F]+ in (?P<body>.+?)\s*$")
+# Any stack frame, including one with no symbol: "#1 0x7f46... (/lib/libamdhip64.so+0xa3b)".
+_ANY_FRAME = re.compile(r"^\s*#\d+ 0x[0-9a-fA-F]+")
 _LOCATED = re.compile(r"^0x[0-9a-fA-F]+ is (?P<what>located .+?)\s*$")
 # Device-side LDS is lowered into a device-malloc'd buffer when ASan is on, so an
 # LDS overflow is located relative to that buffer by this line; the "located"
@@ -146,6 +149,12 @@ _SRAMECC_FEATURE = {0xC00: "sramecc+", 0x800: "sramecc-"}
 
 _BUNDLE_MAGIC = b"__CLANG_OFFLOAD_BUNDLE__"
 _COMPRESSED_BUNDLE_MAGIC = b"CCOB"
+# A CCOB header's method field is llvm::compression::Format: 0 is zlib, 1 is zstd.
+_CCOB_ZLIB = 0
+_CCOB_ZSTD = 1
+_CCOB_VERSIONS = (1, 2, 3)
+# Bounds the buffer a header can ask for. Code compresses well, but not this well.
+_MAX_INFLATION = 256
 _ELF_MAGIC = b"\x7fELF"
 # Bounds on what a well-formed bundle header can declare, so a stray copy of the
 # magic inside unrelated bytes is skipped instead of being read as a bundle.
@@ -282,16 +291,21 @@ def _finding_from_block(header: re.Match[str], body: list[str]) -> Finding:
         if match := _STACK_HEADER.match(line):
             stack = match.group("which")
             continue
-        if stack is not None and (match := _FRAME.match(line)):
-            _, frame_location = _split_frame(match.group("body"))
-            key = "freed_at" if stack == "freed" else "allocated_at"
-            if (
-                frame_location is not None
-                and key not in metadata
-                and not any(marker in frame_location for marker in _RUNTIME_SOURCE_MARKERS)
-            ):
-                metadata[key] = frame_location
-            continue
+        if stack is not None:
+            if _ANY_FRAME.match(line):
+                if match := _FRAME.match(line):
+                    _, frame_location = _split_frame(match.group("body"))
+                    key = "freed_at" if stack == "freed" else "allocated_at"
+                    if (
+                        frame_location is not None
+                        and key not in metadata
+                        and not any(marker in frame_location for marker in _RUNTIME_SOURCE_MARKERS)
+                    ):
+                        metadata[key] = frame_location
+                continue
+            # A stack ends at its first non-frame line: the blank line before the next
+            # section, or that section's header ("Thread T1 created by T0 here:").
+            stack = None
         if location is None and (match := _SUMMARY_LOC.match(line)):
             location = match.group("loc")
 
@@ -383,6 +397,7 @@ class InstrumentationEvidence:
 
     path: str
     code_objects: tuple[DeviceCodeObject, ...]
+    # Compressed bundles that could not be opened, i.e. device code aorta cannot see.
     compressed_bundles: int
 
     @property
@@ -403,8 +418,9 @@ class InstrumentationEvidence:
         found = []
         if self.compressed_bundles:
             found.append(
-                f"{self.compressed_bundles} compressed offload bundle(s), which aorta "
-                "cannot inspect (rebuild without --offload-compress)"
+                f"{self.compressed_bundles} compressed offload bundle(s) that aorta could "
+                "not open (zstd needs the system libzstd; or rebuild without "
+                "--offload-compress)"
             )
         unchecked = [item.triple for item in self.code_objects if not item.checked]
         if unchecked:
@@ -493,24 +509,121 @@ def _parse_bundle(data: bytes, base: int, kernels: Sequence[str]) -> list[Device
                 processor=processor,
                 features=features,
                 asan_instrumented=_ASAN_MARKER in blob,
-                kernels_found=tuple(name for name in kernels if name.encode() in blob),
+                kernels_found=_kernels_found(blob, kernels),
             )
         )
     return objects
 
 
-def _count_compressed_bundles(data: bytes) -> int:
-    count = 0
+def _ccob_method(data: bytes, index: int) -> int | None:
+    """The compression method of a plausible CCOB header at ``index``, else ``None``."""
+
+    try:
+        version, method = struct.unpack_from("<HH", data, index + 4)
+    except struct.error:
+        return None
+    if version in _CCOB_VERSIONS and method in (_CCOB_ZLIB, _CCOB_ZSTD):
+        return method
+    return None
+
+
+def _ccob_extent(data: bytes, index: int) -> tuple[int, int, int] | None:
+    """(payload start, payload end, uncompressed size) of the CCOB at ``index``.
+
+    Version 2 and 3 headers record the bundle's total size and its size once inflated.
+    Version 1 records no total, so where its payload ends is unknown.
+    """
+
+    try:
+        (version,) = struct.unpack_from("<H", data, index + 4)
+        if version == 2:
+            total, size = struct.unpack_from("<II", data, index + 8)
+            header = 24
+        elif version == 3:
+            total, size = struct.unpack_from("<QQ", data, index + 8)
+            header = 32
+        else:
+            return None
+    except struct.error:
+        return None
+    if total <= header or index + total > len(data) or size > _MAX_INFLATION * total:
+        return None
+    return index + header, index + total, size
+
+
+@functools.cache
+def _zstd_decompress() -> Callable[[bytes, int], bytes | None] | None:
+    try:
+        library = ctypes.CDLL(ctypes.util.find_library("zstd") or "libzstd.so.1")
+    except OSError:
+        return None
+    decompress = library.ZSTD_decompress
+    decompress.restype = ctypes.c_size_t
+    decompress.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t]
+    is_error = library.ZSTD_isError
+    is_error.restype = ctypes.c_uint
+    is_error.argtypes = [ctypes.c_size_t]
+
+    def call(payload: bytes, size: int) -> bytes | None:
+        out = ctypes.create_string_buffer(size)
+        written = decompress(out, size, payload, len(payload))
+        if is_error(written) or written != size:
+            return None
+        return out.raw
+
+    return call
+
+
+def _inflate(data: bytes, index: int) -> bytes | None:
+    """The offload bundle compressed at ``index``, or ``None`` if it cannot be opened."""
+
+    method = _ccob_method(data, index)
+    extent = _ccob_extent(data, index) if method is not None else None
+    if extent is None:
+        return None
+    start, end, size = extent
+    payload = data[start:end]
+    if method == _CCOB_ZLIB:
+        try:
+            inflated: bytes | None = zlib.decompressobj().decompress(payload, size + 1)
+        except zlib.error:
+            return None
+    else:
+        decompress = _zstd_decompress()
+        inflated = decompress(payload, size) if decompress is not None else None
+    if inflated is None or len(inflated) != size or not inflated.startswith(_BUNDLE_MAGIC):
+        return None
+    return inflated
+
+
+def _offload_bundles(data: bytes) -> tuple[list[tuple[bytes, int]], int]:
+    """Every clang offload bundle in ``data``, inflating the compressed ones.
+
+    Returns ``(bundle bytes, offset)`` pairs for :func:`_bundle_entries`, and how many
+    compressed bundles could not be opened. That count is device code aorta cannot see,
+    so callers treat it as such rather than as absent.
+    """
+
+    bundles = []
+    start = 0
+    while (index := data.find(_BUNDLE_MAGIC, start)) != -1:
+        bundles.append((data, index))
+        start = index + len(_BUNDLE_MAGIC)
+    unopened = 0
     start = 0
     while (index := data.find(_COMPRESSED_BUNDLE_MAGIC, start)) != -1:
         start = index + 1
-        try:
-            version, method = struct.unpack_from("<HH", data, index + 4)
-        except struct.error:
-            break
-        if version in (1, 2, 3) and method in (1, 2):
-            count += 1
-    return count
+        if _ccob_method(data, index) is None:
+            continue
+        inflated = _inflate(data, index)
+        if inflated is None:
+            unopened += 1
+            continue
+        bundles.append((inflated, 0))
+        extent = _ccob_extent(data, index)
+        if extent is not None:
+            start = extent[1]
+    return bundles, unopened
 
 
 def _amdgpu_target(data: bytes) -> tuple[str, tuple[str, ...]] | None:
@@ -542,7 +655,7 @@ def _bare_code_object(data: bytes, kernels: Sequence[str]) -> DeviceCodeObject |
         processor=processor,
         features=features,
         asan_instrumented=_ASAN_MARKER in data,
-        kernels_found=tuple(name for name in kernels if name.encode() in data),
+        kernels_found=_kernels_found(data, kernels),
     )
 
 
@@ -562,23 +675,24 @@ def inspect_device_instrumentation(
     Instrumentation is decided per code object: the ``__asan_`` marker has to be
     inside the device ELF itself, because the host half of an ASan build carries
     ``__asan_report_*`` references even when the device half was dropped.
-    Compressed (``CCOB``) bundles are counted, not decompressed. ``kernels`` are
-    looked up by name in each code object, which matches a plain name inside its
-    mangled symbol.
+    Compressed (``CCOB``) bundles are inflated and held to the same rule; one that
+    cannot be opened is counted in ``compressed_bundles``. ``kernels`` are looked up
+    by name in each code object, which matches a plain name inside its mangled
+    symbol.
     """
 
     data = path.read_bytes()
     if (bare := _bare_code_object(data, kernels)) is not None:
         return InstrumentationEvidence(path=str(path), code_objects=(bare,), compressed_bundles=0)
-    objects: list[DeviceCodeObject] = []
-    start = 0
-    while (index := data.find(_BUNDLE_MAGIC, start)) != -1:
-        objects.extend(_parse_bundle(data, index, kernels))
-        start = index + len(_BUNDLE_MAGIC)
+    bundles, unopened = _offload_bundles(data)
     return InstrumentationEvidence(
         path=str(path),
-        code_objects=tuple(objects),
-        compressed_bundles=_count_compressed_bundles(data),
+        code_objects=tuple(
+            code_object
+            for bundle, base in bundles
+            for code_object in _parse_bundle(bundle, base, kernels)
+        ),
+        compressed_bundles=unopened,
     )
 
 
@@ -693,6 +807,72 @@ def _cxa_demangle() -> Callable[[str], str | None] | None:
     return call
 
 
+def normalized_signature(signature: str) -> str:
+    """``signature`` without whitespace, which demanglers do not agree on."""
+
+    return re.sub(r"\s+", "", signature)
+
+
+def _without_templates(name: str) -> str:
+    depth = 0
+    kept = []
+    for char in name:
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+        elif depth == 0:
+            kept.append(char)
+    return "".join(kept)
+
+
+def _parameters(signature: str) -> str:
+    depth = 0
+    for index, char in enumerate(signature):
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+        elif char == "(" and depth == 0:
+            return normalized_signature(signature[index:])
+    return ""
+
+
+def _names_kernel(selection: str, signature: str) -> bool:
+    """Whether a kernel selection names the kernel with this demangled signature.
+
+    A selection with a parameter list is a signature: it matches the same function with
+    the same parameters, whether or not it spells the return type a template kernel's
+    demangled name carries. A plain name matches the function name, with or without its
+    template arguments and namespace, so ``store_index`` still selects
+    ``store_index(int*, int)``.
+    """
+
+    function = _function_name(signature)
+    if "(" in selection:
+        return _function_name(selection) == function and _parameters(selection) == _parameters(
+            signature
+        )
+    bare = _without_templates(function)
+    return selection in (function, bare, bare.rsplit("::", 1)[-1])
+
+
+def _kernels_found(blob: bytes, kernels: Sequence[str]) -> tuple[str, ...]:
+    """Which of ``kernels`` this code object defines, read from its kernel symbols."""
+
+    if not kernels:
+        return ()
+    defined = [(symbol, demangle(symbol)) for symbol in _kernel_symbols(blob)]
+    return tuple(
+        name
+        for name in kernels
+        if any(
+            name == symbol if name.startswith("_Z") else _names_kernel(name, readable)
+            for symbol, readable in defined
+        )
+    )
+
+
 def demangle(symbol: str) -> str:
     """``symbol`` as the HIP runtime prints it in a dispatch log.
 
@@ -729,6 +909,7 @@ class KernelInventory:
 
     path: str
     code_objects: tuple[KernelCodeObject, ...] = ()
+    # Compressed bundles that could not be opened, i.e. device code aorta cannot see.
     compressed_bundles: int = 0
     unreadable: str | None = None
 
@@ -756,7 +937,8 @@ def kernel_inventory(path: Path) -> KernelInventory:
     libraries a PyTorch process loads run to gigabytes and their device code to
     a fraction of that. A standalone offload bundle or code object -- what
     ``hipModuleLoad`` and Triton load -- is read whole. Compressed bundles are
-    counted and not opened, so a file can carry device code this cannot name.
+    inflated; one that cannot be opened is counted, so a file can still carry
+    device code this cannot name.
     """
 
     try:
@@ -792,18 +974,13 @@ def kernel_inventory(path: Path) -> KernelInventory:
     except OSError as error:
         return KernelInventory(path=str(path), unreadable=f"{type(error).__name__}: {error}")
 
+    bundles, unopened = _offload_bundles(region)
     objects = []
-    start = 0
-    while (index := region.find(_BUNDLE_MAGIC, start)) != -1:
-        for triple, begin, end in _bundle_entries(region, index):
+    for bundle, base in bundles:
+        for triple, begin, end in _bundle_entries(bundle, base):
             processor, features = _split_target(triple)
-            objects.append(_kernel_code_object(triple, processor, features, region[begin:end]))
-        start = index + len(_BUNDLE_MAGIC)
-    return KernelInventory(
-        path=str(path),
-        code_objects=tuple(objects),
-        compressed_bundles=_count_compressed_bundles(region),
-    )
+            objects.append(_kernel_code_object(triple, processor, features, bundle[begin:end]))
+    return KernelInventory(path=str(path), code_objects=tuple(objects), compressed_bundles=unopened)
 
 
 # --------------------------------------------------------------------------- #
@@ -1037,11 +1214,18 @@ def dispatched_kernels(hip_log: str) -> tuple[str, ...]:
 
 
 def _was_dispatched(kernel: str, signatures: Sequence[str]) -> bool:
-    for signature in signatures:
-        name = _function_name(signature)
-        if kernel in (name, signature) or (kernel.startswith("_Z") and name in kernel):
-            return True
-    return False
+    """Whether HIP's dispatch log shows the selected kernel itself, not a namesake.
+
+    A mangled selection names one overload, so it is demangled and compared whole; one
+    that cannot be demangled has no correspondence to establish and is never matched.
+    """
+
+    if kernel.startswith("_Z"):
+        readable = demangle(kernel)
+        if readable == kernel:
+            return False
+        kernel = readable
+    return any(_names_kernel(kernel, signature) for signature in signatures)
 
 
 def _workload_kernels(signatures: Sequence[str]) -> list[str]:

@@ -7,10 +7,13 @@ ROCm and no compiler.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import json
 import os
 import stat
 import struct
+import zlib
 from pathlib import Path
 
 import pytest
@@ -84,7 +87,46 @@ def _meta(finding) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 
 
+_RUNTIME_ONLY_STACKS = """\
+==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010 at pc 0x55 bp 0x7f sp 0x7f
+READ of size 4 at 0x602000000010 thread T1
+    #0 0x555555550001 in worker /src/app.cpp:12:5
+
+0x602000000010 is located 0 bytes inside of 4-byte region [0x602000000010,0x602000000014)
+freed by thread T0 here:
+    #0 0x7f0000000001 in free /build/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:52:3
+    #1 0x7f0000000002  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3b226)
+
+previously allocated by thread T0 here:
+    #0 0x7f0000000003 in malloc /build/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:68:3
+
+Thread T1 created by T0 here:
+    #0 0x7f0000000004 in pthread_create /build/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:245:3
+    #1 0x555555550002 in main /src/app.cpp:30:3
+
+SUMMARY: AddressSanitizer: heap-use-after-free /src/app.cpp:12:5 in worker
+"""
+
+
 class TestParseRealReports:
+    def test_a_stack_ends_where_its_frames_do(self):
+        """Every frame of both stacks is runtime code, so neither site is known; the
+        thread-creation line that follows them is not where anything was allocated."""
+
+        (finding,) = parse_asan_output(_RUNTIME_ONLY_STACKS).findings
+        metadata = _meta(finding)
+        assert "allocated_at" not in metadata and "freed_at" not in metadata
+        assert metadata["location"] == "/src/app.cpp:12:5"
+
+    def test_a_frame_without_a_symbol_does_not_end_its_stack(self):
+        report = _RUNTIME_ONLY_STACKS.replace(
+            "    #1 0x7f0000000002  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3b226)\n",
+            "    #1 0x7f0000000002  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3b226)\n"
+            "    #2 0x555555550003 in release /src/app.cpp:20:7\n",
+        )
+        (finding,) = parse_asan_output(report).findings
+        assert _meta(finding)["freed_at"] == "/src/app.cpp:20:7"
+
     def test_device_write_overflow_names_the_kernel_line_and_allocation(self):
         parsed = parse_asan_output(_fixture("device_heap_buffer_overflow_write.txt"))
         (finding,) = parsed.findings
@@ -364,6 +406,13 @@ class TestEvaluate:
             ("_Z11store_indexPii", ["store_index(int*, int)"], True),
             ("store_index", ["amdgcn.device.init", "__amd_rocclr_initHeap"], False),
             ("store_index", ["store_index_v2(int*, int)"], False),
+            # A mangled selection names one kernel: a namesake or another overload is not it.
+            ("_Z14store_index_v2Pii", ["store_index(int*, int)"], False),
+            ("_Z11store_indexPii", ["store_index(float*, int)"], False),
+            ("store_index(int*, int)", ["store_index(float*, int)"], False),
+            ("_Znot_a_mangled_name", ["store_index(int*, int)"], False),
+            ("vec_add", ["void vec_add<float>(float*, float const*, float const*, int)"], True),
+            ("foo", ["ns::foo(int)"], True),
         ],
     )
     def test_the_selected_kernel_must_be_among_the_dispatched(self, kernel, dispatched, ok):
@@ -435,23 +484,79 @@ def _bundle(*entries: tuple[str, bytes]) -> bytes:
     return b"__CLANG_OFFLOAD_BUNDLE__" + struct.pack("<Q", len(entries)) + table + payloads
 
 
+def _amdgpu_elf(symbols, *, instrumented: bool, e_flags: int = 0x34F) -> bytes:
+    """A real AMDGPU ELF defining ``symbols`` as kernels, each with its ``.kd`` descriptor."""
+
+    strings = b"\0"
+    table = b"\0" * 24
+    for name in (*symbols, *(f"{symbol}.kd" for symbol in symbols)):
+        table += struct.pack("<IBBHQQ", len(strings), 0x12, 0, 1, 0, 0)
+        strings += name.encode() + b"\0"
+    text = b"\0call __asan_report_store4\0__asan_init\0" if instrumented else b"\0plain code\0"
+    sections = [
+        (".text", 1, text, 0, 0),
+        (".symtab", 2, table, 3, 24),
+        (".strtab", 3, strings, 0, 0),
+    ]
+    names = b"\0"
+    name_offsets = []
+    for name, *_ in sections:
+        name_offsets.append(len(names))
+        names += name.encode() + b"\0"
+    shstrtab = len(names)
+    names += b".shstrtab\0"
+    body = b""
+    offsets = []
+    for _, _, data, _, _ in sections:
+        offsets.append(64 + len(body))
+        body += data
+    names_offset = 64 + len(body)
+    body += names
+    count = len(sections) + 2
+    header = (
+        b"\x7fELF\x02\x01\x01"
+        + b"\0" * 9
+        + struct.pack(
+            "<HHIQQQIHHHHHH",
+            1,
+            224,
+            1,
+            0,
+            0,
+            64 + len(body),
+            e_flags,
+            64,
+            0,
+            0,
+            64,
+            count,
+            count - 1,
+        )
+    )
+    shdrs = b"\0" * 64
+    for (_, kind, data, link, entsize), offset, name_offset in zip(
+        sections, offsets, name_offsets, strict=True
+    ):
+        shdrs += struct.pack(
+            "<IIQQQQIIQQ", name_offset, kind, 0, 0, offset, len(data), link, 0, 1, entsize
+        )
+    shdrs += struct.pack("<IIQQQQIIQQ", shstrtab, 3, 0, 0, names_offset, len(names), 0, 0, 1, 0)
+    return header + body + shdrs
+
+
 def _device_elf(*, instrumented: bool, kernel: str = "store_index") -> bytes:
-    symbols = f"\0_Z{len(kernel)}{kernel}Pii\0{kernel}.kd\0".encode()
-    if instrumented:
-        symbols += b"\0__asan_report_store4\0__asan_init\0"
-    return b"\x7fELF" + b"\0" * 28 + symbols + b"\0" * 16
+    """A code object defining ``kernel(int*, int)``."""
+
+    return _amdgpu_elf([f"_Z{len(kernel)}{kernel}Pii"], instrumented=instrumented)
 
 
 def _bare_code_object(tmp_path: Path, *, e_flags: int, instrumented: bool) -> Path:
-    """A minimal 64-bit little-endian AMDGPU ELF, i.e. a ``.hsaco``."""
+    """A standalone AMDGPU code object, i.e. a ``.hsaco``."""
 
-    header = bytearray(64)
-    header[:6] = b"\x7fELF\x02\x01"
-    struct.pack_into("<H", header, 18, 224)
-    struct.pack_into("<I", header, 48, e_flags)
-    body = b"\0_Z11store_indexPii\0" + (b"\0__asan_report_store4\0" if instrumented else b"")
     path = tmp_path / "kernel.hsaco"
-    path.write_bytes(bytes(header) + body)
+    path.write_bytes(
+        _amdgpu_elf(["_Z11store_indexPii"], instrumented=instrumented, e_flags=e_flags)
+    )
     return path
 
 
@@ -462,6 +567,53 @@ def _binary(tmp_path: Path, *bundles: bytes, host: bytes = b"host code", name="r
     path = tmp_path / name
     path.write_bytes(b"\x7fELF" + b"\0" * 60 + host + b"".join(bundles) + b"\0trailer")
     return path
+
+
+def _libzstd():
+    try:
+        return ctypes.CDLL(ctypes.util.find_library("zstd") or "libzstd.so.1")
+    except OSError:
+        return None
+
+
+def _zstd_compress(data: bytes) -> bytes:
+    library = _libzstd()
+    library.ZSTD_compressBound.restype = ctypes.c_size_t
+    library.ZSTD_compressBound.argtypes = [ctypes.c_size_t]
+    library.ZSTD_compress.restype = ctypes.c_size_t
+    library.ZSTD_compress.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+    ]
+    bound = library.ZSTD_compressBound(len(data))
+    out = ctypes.create_string_buffer(bound)
+    written = library.ZSTD_compress(out, bound, data, len(data), 3)
+    return out.raw[:written]
+
+
+_ZLIB, _ZSTD, _NOT_A_METHOD = 0, 1, 2
+
+
+def _ccob(
+    bundle: bytes, *, method: int = _ZLIB, version: int = 2, payload=None, size=None
+) -> bytes:
+    """A compressed offload bundle, laid out as clang-offload-bundler writes one."""
+
+    if payload is None:
+        payload = zlib.compress(bundle) if method == _ZLIB else _zstd_compress(bundle)
+    size = len(bundle) if size is None else size
+    if version == 2:
+        header = struct.pack("<HHIIQ", version, method, 24 + len(payload), size, 0)
+    else:
+        header = struct.pack("<HHQQQ", version, method, 32 + len(payload), size, 0)
+    return b"CCOB" + header + payload
+
+
+# A zstd header whose payload is not there: well formed, and impossible to open.
+_UNOPENABLE = b"CCOB" + struct.pack("<HH", 2, _ZSTD) + b"\0" * 32
 
 
 class TestPreflight:
@@ -571,15 +723,110 @@ class TestPreflight:
         assert evidence.holds_kernel("gfx950", "other_kernel")
         assert not evidence.holds_kernel("gfx950", "absent_kernel")
 
-    def test_a_compressed_bundle_beside_a_readable_one_fails(self, tmp_path):
-        compressed = b"CCOB" + struct.pack("<HH", 2, 2) + b"\0" * 32
+    @pytest.mark.parametrize(
+        "selection,found",
+        [
+            ("store_index", True),
+            ("store_index(int*, int)", True),
+            ("_Z11store_indexPii", True),
+            ("store_index(float*, int)", False),
+            ("_Z11store_indexPfi", False),
+            ("store_index_v2", False),
+            # A byte search would find these inside the mangled symbol.
+            ("index", False),
+            ("Pii", False),
+        ],
+    )
+    def test_a_selection_is_matched_against_the_kernel_symbols(self, tmp_path, selection, found):
+        binary = _binary(
+            tmp_path,
+            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True))),
+        )
+        evidence = inspect_device_instrumentation(binary, kernels=(selection,))
+        assert evidence.holds_kernel("gfx950", selection) is found
+
+    @pytest.mark.parametrize(
+        "selection",
+        [
+            "foo",
+            "ns::foo",
+            "ns::foo<float>",
+            "ns::foo<float>(float*)",
+            "void ns::foo<float>(float*)",
+        ],
+    )
+    def test_template_and_namespaced_kernels_match_by_name(self, tmp_path, selection):
+        elf = _amdgpu_elf(["_ZN2ns3fooIfEEvPT_"], instrumented=True)
+        binary = _binary(tmp_path, _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", elf)))
+        assert inspect_device_instrumentation(binary, kernels=(selection,)).holds_kernel(
+            "gfx950", selection
+        )
+
+    def test_an_unopenable_compressed_bundle_beside_a_readable_one_fails(self, tmp_path):
+        binary = _binary(
+            tmp_path,
+            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True))),
+            _UNOPENABLE,
+        )
+        (problem,) = inspect_device_instrumentation(binary).problems("gfx950")
+        assert problem.startswith("1 compressed offload bundle(s) that aorta could not open")
+
+    @pytest.mark.parametrize("version", [2, 3])
+    def test_a_compressed_bundle_is_inflated_and_counts(self, tmp_path, version):
+        """PyTorch's ROCm build compresses by default, so this is the common case."""
+
+        triple = "hipv4-amdgcn-amd-amdhsa--gfx950:xnack+"
+        compressed = _ccob(_bundle((triple, _device_elf(instrumented=True))), version=version)
+        evidence = inspect_device_instrumentation(
+            _binary(tmp_path, compressed), kernels=("store_index",)
+        )
+        assert evidence.compressed_bundles == 0
+        assert evidence.instrumented_for("gfx950")
+        assert evidence.holds_kernel("gfx950", "store_index")
+
+    def test_inflated_code_is_held_to_the_every_object_rule(self, tmp_path):
+        compressed = _ccob(
+            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950", _device_elf(instrumented=False)))
+        )
         binary = _binary(
             tmp_path,
             _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True))),
             compressed,
         )
-        (problem,) = inspect_device_instrumentation(binary).problems("gfx950")
-        assert problem.startswith("1 compressed offload bundle(s)")
+        assert inspect_device_instrumentation(binary).problems("gfx950") == [
+            "device code without ASan: hipv4-amdgcn-amd-amdhsa--gfx950"
+        ]
+
+    @pytest.mark.skipif(_libzstd() is None, reason="no libzstd to compress with")
+    def test_a_zstd_bundle_is_inflated(self, tmp_path):
+        """zstd is what hipcc --offload-compress writes (measured: method 1)."""
+
+        triple = "hipv4-amdgcn-amd-amdhsa--gfx950:xnack+"
+        compressed = _ccob(_bundle((triple, _device_elf(instrumented=True))), method=_ZSTD)
+        evidence = inspect_device_instrumentation(_binary(tmp_path, compressed))
+        assert evidence.compressed_bundles == 0
+        assert evidence.instrumented_for("gfx950")
+
+    def test_a_header_with_an_unknown_method_is_not_a_bundle(self, tmp_path):
+        stray = b"CCOB" + struct.pack("<HH", 2, _NOT_A_METHOD) + b"\0" * 32
+        assert inspect_device_instrumentation(_binary(tmp_path, stray)).compressed_bundles == 0
+
+    def test_a_corrupt_payload_is_counted_as_unopened(self, tmp_path):
+        corrupt = _ccob(b"", payload=b"not zlib at all", size=4096)
+        evidence = inspect_device_instrumentation(_binary(tmp_path, corrupt))
+        assert (evidence.code_objects, evidence.compressed_bundles) == ((), 1)
+
+    def test_an_absurd_size_is_not_inflated(self, tmp_path):
+        """The header names the buffer to allocate; a corrupt one must not get it."""
+
+        bundle = _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True)))
+        bomb = _ccob(bundle, version=3, size=1 << 40)
+        evidence = inspect_device_instrumentation(_binary(tmp_path, bomb))
+        assert (evidence.code_objects, evidence.compressed_bundles) == ((), 1)
+
+    def test_an_inflated_payload_that_is_not_a_bundle_is_unopened(self, tmp_path):
+        evidence = inspect_device_instrumentation(_binary(tmp_path, _ccob(b"just some bytes")))
+        assert (evidence.code_objects, evidence.compressed_bundles) == ((), 1)
 
     @pytest.mark.parametrize(
         "e_flags,instrumented,expected",
@@ -606,9 +853,8 @@ class TestPreflight:
         assert evidence.code_objects == ()
         assert not evidence.instrumented_for("gfx950")
 
-    def test_compressed_bundles_are_counted_not_guessed(self, tmp_path):
-        compressed = b"CCOB" + struct.pack("<HH", 2, 2) + b"\0" * 32
-        evidence = inspect_device_instrumentation(_binary(tmp_path, compressed))
+    def test_an_unopenable_compressed_bundle_is_counted_not_guessed(self, tmp_path):
+        evidence = inspect_device_instrumentation(_binary(tmp_path, _UNOPENABLE))
         assert evidence.code_objects == ()
         assert evidence.compressed_bundles == 1
 

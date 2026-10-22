@@ -13,6 +13,7 @@ import json
 import os
 import struct
 import subprocess
+import zlib
 from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -156,8 +157,18 @@ def _plain_binary(path: Path, kernels: Sequence[str] = (_STORE_INDEX,)) -> Path:
 
 
 def _compressed_binary(path: Path) -> Path:
-    # A CCOB v2 header (zstd); the payload is never opened.
-    return _write(path, _host_binary(b"CCOB" + struct.pack("<HH", 2, 2) + b"\0" * 32))
+    # A zstd CCOB header (method 1) with no payload behind it, so it cannot be opened.
+    return _write(path, _host_binary(b"CCOB" + struct.pack("<HH", 2, 1) + b"\0" * 32))
+
+
+def _inflatable_binary(path: Path, kernels: Sequence[str], *, asan: bool) -> Path:
+    """A host binary whose device code sits in a zlib-compressed bundle."""
+
+    triple = _GFX950_XNACK if asan else _GFX950_PLAIN
+    bundle = _bundle([(triple, _code_object(kernels, asan=asan, xnack=asan))])
+    payload = zlib.compress(bundle)
+    header = b"CCOB" + struct.pack("<HHIIQ", 2, 0, 24 + len(payload), len(bundle), 0)
+    return _write(path, _host_binary(header + payload))
 
 
 def _python(tmp_path: Path) -> Path:
@@ -566,6 +577,44 @@ def test_a_kernel_defined_in_compressed_code_is_unattributed_and_not_checked(tmp
     (kernel,) = report.kernels
     assert "defined in no device code" in kernel.reason and "compressed" in kernel.reason
     assert report.opaque_device_code == (str(torch_lib),)
+
+
+def test_a_kernel_in_a_compressed_asan_library_is_checked(tmp_path):
+    """An ASan PyTorch built the default way: its device code is compressed."""
+
+    evidence = _evidence(tmp_path)
+    library = _inflatable_binary(tmp_path / "libtorch_hip.so", [_STORE_INDEX], asan=True)
+    _process(
+        evidence,
+        7,
+        program=_python(tmp_path),
+        kernels=["store_index(int*, int)"],
+        objects=[library],
+    )
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.PASS, report.reason
+    assert report.opaque_device_code == ()
+
+
+def test_a_kernel_in_compressed_plain_code_is_named_as_built_without_asan(tmp_path):
+    """Today's pip PyTorch: inflated, its kernels are found, and found uninstrumented."""
+
+    evidence = _evidence(tmp_path)
+    library = _inflatable_binary(tmp_path / "libtorch_hip.so", [_STORE_INDEX], asan=False)
+    _process(
+        evidence,
+        7,
+        program=_python(tmp_path),
+        kernels=["store_index(int*, int)"],
+        objects=[library],
+    )
+
+    (kernel,) = evaluate_asan_run(evidence, returncode=0).kernels
+
+    assert not kernel.checked
+    assert "built without ASan" in kernel.reason and kernel.defined_in == (str(library),)
 
 
 def test_a_kernel_also_defined_in_plain_code_is_not_checked(tmp_path):
