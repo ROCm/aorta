@@ -4556,16 +4556,73 @@ _ASAN_TAB_CSS = """
   .asan-desc { display:block; font-family:inherit; font-size:13px; color:var(--text-3); margin-top:2px; }
   .asan-lead { font-size:14px; color:var(--text-2); margin:0 0 12px; line-height:1.5; }
   .asan-heading { font-size:20px; font-weight:600; margin:24px 0 12px; }
+  .asan-headline { font-size:16px; color:var(--text-1); margin:4px 0 6px; line-height:1.5; }
+  .asan-prov { display:flex; flex-wrap:wrap; gap:4px 18px; font-size:13px; color:var(--text-3);
+    margin:0 0 14px; }
+  .asan-prov b { color:var(--text-2); font-weight:600; }
+  .asan-prov a { color:var(--blue); }
+  .asan-cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr));
+    gap:12px; margin-bottom:12px; }
+  .asan-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    border-top:3px solid var(--accent); padding:14px 16px; box-shadow:var(--shadow); --accent:var(--blue); }
+  .asan-card.ok { --accent:var(--green); }
+  .asan-card.bad { --accent:var(--v-fail); }
+  .asan-card .k { font-size:var(--fs-kvk); color:var(--text-3); text-transform:uppercase;
+    letter-spacing:.05em; font-weight:600; }
+  .asan-card .big { font-size:32px; font-weight:700; color:var(--text-1); line-height:1.15;
+    margin:6px 0 4px; font-variant-numeric:tabular-nums; }
+  .asan-card .big small { font-size:15px; font-weight:600; color:var(--text-3); margin-left:4px; }
+  .asan-card .sub { font-size:13px; color:var(--text-3); line-height:1.4; }
+  .asan-key { display:flex; flex-wrap:wrap; gap:6px 18px; font-size:12.5px; color:var(--text-3); margin:0 0 10px; }
+  .asan-key span { display:inline-flex; align-items:center; gap:6px; }
+  .asan-sw { display:inline-block; width:12px; height:12px; border-radius:3px; }
+  .asan-bar { display:flex; height:9px; border-radius:999px; overflow:hidden; background:var(--sunken);
+    min-width:160px; box-shadow:0 0 0 1px var(--border) inset; }
+  .asan-bar > span { display:block; height:100%; }
+  .asan-ok { background:var(--green); }
+  .asan-out { background:repeating-linear-gradient(45deg, rgba(148,163,184,.55) 0 3px, rgba(148,163,184,.22) 3px 6px); }
+  .asan-gap { background:var(--v-warn); }
+  .asan-cov-text { font-size:13px; color:var(--text-3); margin-top:6px; font-variant-numeric:tabular-nums; }
+  .asan-cov-text b { color:var(--text-1); font-weight:600; }
+  details.asan-more { margin-top:6px; }
+  details.asan-more > summary { cursor:pointer; font-size:13px; color:var(--blue); list-style:none;
+    user-select:none; display:inline-flex; align-items:center; gap:4px; }
+  details.asan-more > summary::-webkit-details-marker { display:none; }
+  details.asan-more > summary:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
+  details.asan-more .chevron { width:14px; height:14px; }
+  .asan-detail { margin-top:8px; padding:10px 12px; background:var(--inset); border:1px solid var(--border);
+    border-radius:var(--radius-sm); font-size:13px; color:var(--text-2); line-height:1.5; }
+  .asan-detail .k { color:var(--text-3); text-transform:uppercase; font-size:11.5px; font-weight:600;
+    letter-spacing:.05em; display:block; margin-top:6px; }
+  .asan-detail .k:first-child { margin-top:0; }
+  .asan-detail .mono { word-break:break-word; color:var(--text-1); }
+  .asan-finding { display:block; font-size:13px; color:#FCA5A5; margin-top:4px; word-break:break-word; }
+  .asan-report { display:block; font-family:var(--mono); font-size:12.5px; color:var(--text-1); word-break:break-word; }
+  .asan-scope { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .asan-scope h3 { font-size:var(--fs-kvk); text-transform:uppercase; letter-spacing:.05em; font-weight:600;
+    margin:0 0 10px; color:var(--text-3); }
+  .asan-scope ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:9px; }
+  .asan-scope li { display:flex; gap:9px; align-items:flex-start; font-size:13.5px; color:var(--text-2); line-height:1.45; }
+  .asan-scope > div { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px; }
+  .asan-mark { flex:0 0 auto; width:17px; height:17px; border-radius:50%; display:grid; place-items:center; margin-top:1px; }
+  .asan-mark.yes { background:rgba(34,197,94,.14); color:var(--green); box-shadow:0 0 0 1px rgba(34,197,94,.26) inset; }
+  .asan-mark.no { background:rgba(148,163,184,.12); color:var(--text-3); box-shadow:0 0 0 1px rgba(148,163,184,.26) inset; }
+  .asan-notes { margin:12px 0 0; padding:0; list-style:none; font-size:13px; color:var(--text-3); line-height:1.5; }
+  .asan-notes li + li { margin-top:6px; }
+  @media (max-width:760px) { .asan-scope { grid-template-columns:1fr; } }
 """
 
 _ASAN_LEGEND: tuple[str, ...] = (
-    "pass: every dispatched kernel ran from ASan-instrumented device code and ASan "
-    "reported no memory error.",
-    "not checked: ASan reported no memory error, but some dispatched kernels ran from "
-    "device code it does not instrument (named under Not checked), so it cannot vouch "
-    "for the whole run.",
-    "fail: ASan reported a memory error and named the kernel. error: the run ended "
-    "without a usable ASan report.",
+    "pass: every kernel the workload dispatched ran from ASan-instrumented device code, "
+    "and ASan reported no memory error.",
+    "not checked: ASan reported no memory error, but some kernels ran from device code it "
+    "cannot instrument (striped in the coverage bar), so it cannot vouch for the whole run. "
+    "This is the run mode's own verdict, shown unchanged.",
+    "caught: a detection check planted a memory bug and ASan reported it, naming the kernel. "
+    "clean: a check with nothing planted, and ASan reported nothing. Either outcome is the "
+    "one the check expects.",
+    "memory error: ASan reported a memory error in a workload. error: the run ended without "
+    "a usable ASan report.",
 )
 
 _ASAN_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
@@ -4613,6 +4670,11 @@ def _check_asan_row(row: Any, where: str) -> None:
         raise ValueError(f"{where}.unchecked must say why {dispatched - checked} kernel(s) were not checked")
     if checked == dispatched and unchecked is not None:
         raise ValueError(f"{where}.unchecked is set but every kernel was checked")
+    outside = row.get("unchecked_outside_asan", False)
+    if not isinstance(outside, bool):
+        raise ValueError(f"{where}.unchecked_outside_asan must be true or false")
+    if outside and checked == dispatched:
+        raise ValueError(f"{where}.unchecked_outside_asan is set but every kernel was checked")
     findings = row.get("findings")
     if not isinstance(findings, list) or not all(
         isinstance(finding, dict) and _asan_text(finding.get("code")) for finding in findings
@@ -4646,7 +4708,9 @@ def load_asan_runs(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"{where}.{key} must be a non-empty string")
         if not _ASAN_DATE_RE.match(run["date"]):
             raise ValueError(f"{where}.date must be YYYY-MM-DD")
-        for key in ("stack", "notes"):
+        if "kernel_scope" in run and not _asan_text(run["kernel_scope"]):
+            raise ValueError(f"{where}.kernel_scope must be a non-empty string")
+        for key in ("stack", "notes", "covered", "not_covered"):
             items = run.get(key, [])
             if not isinstance(items, list) or not all(_asan_text(item) for item in items):
                 raise ValueError(f"{where}.{key} must be a list of non-empty strings")
@@ -4663,8 +4727,35 @@ def load_asan_runs(path: Path) -> list[dict[str, Any]]:
     return runs
 
 
-def _asan_verdict_html(verdict: str) -> str:
-    return _verdict_html(_ASAN_VERDICTS[verdict])
+# How the tab badges a row: (label, .v colour class). A workload keeps the run
+# mode's verdict; a detection check is judged against what it expects, so a planted
+# bug that ASan reports reads as the success it is.
+_ASAN_WORKLOAD_BADGES: dict[str, tuple[str, str]] = {
+    "pass": ("pass", "pass"),
+    "not_checked": ("not checked", "warn"),
+    "fail": ("memory error", "fail"),
+    "error": ("error", "fail"),
+}
+
+
+def _asan_badge(label: str, cls: str) -> str:
+    return f'<span class="v {cls}">{_esc(label)}</span>'
+
+
+def _asan_control_badge(row: Mapping[str, Any]) -> str:
+    verdict, expected = row["verdict"], row["expected"]
+    if verdict == expected:
+        return _asan_badge("caught" if expected == "fail" else "clean", "pass")
+    if expected == "fail" and verdict in ("pass", "not_checked"):
+        return _asan_badge("missed", "fail")
+    if expected == "pass" and verdict == "fail":
+        return _asan_badge("false alarm", "fail")
+    return _asan_badge(f"expected {_ASAN_VERDICTS[expected]}, got {_ASAN_VERDICTS[verdict]}", "fail")
+
+
+def _asan_expected_html(expected: str) -> str:
+    text = {"fail": "ASan reports it", "pass": "nothing to report"}.get(expected, _ASAN_VERDICTS[expected])
+    return f'<span class="dash">{_esc(text)}</span>'
 
 
 def _asan_finding_text(finding: Mapping[str, Any]) -> str:
@@ -4683,84 +4774,263 @@ def _asan_finding_text(finding: Mapping[str, Any]) -> str:
     return text
 
 
-def _asan_name_cell(row: Mapping[str, Any]) -> str:
+def _asan_short_finding(finding: Mapping[str, Any]) -> str:
+    access, size = finding.get("access"), finding.get("size")
+    how = f" {access} of {size} bytes" if access and size is not None else (f" {access}" if access else "")
+    return f"{finding['code']}{how}"
+
+
+def _asan_outside(row: Mapping[str, Any]) -> int:
+    """Kernels the row dispatched that ASan cannot instrument at all."""
+    kernels = row["kernels"]
+    return kernels["dispatched"] - kernels["checked"] if row.get("unchecked_outside_asan") else 0
+
+
+def _asan_pct(part: int, whole: int) -> str:
+    return f"{100 * part / whole:.4g}%" if whole else "0%"
+
+
+def _asan_coverage_html(row: Mapping[str, Any]) -> str:
+    """A bar of checked kernels against the rest, and the exact counts under it (pure)."""
+    kernels = row["kernels"]
+    dispatched, checked = kernels["dispatched"], kernels["checked"]
+    outside = _asan_outside(row)
+    gap = dispatched - checked - outside
+    segments = "".join(
+        f'<span class="{cls}" style="width:{_asan_pct(count, dispatched)}" title="{_esc(title)}"></span>'
+        for cls, count, title in (
+            ("asan-ok", checked, f"{checked} checked"),
+            ("asan-out", outside, f"{outside} outside ASan's reach"),
+            ("asan-gap", gap, f"{gap} not checked"),
+        )
+        if count
+    )
+    text = f"<b>{checked}</b> of {dispatched} kernel{'' if dispatched == 1 else 's'} checked"
+    if outside:
+        text += f" &middot; {outside} outside ASan's reach"
+    if gap:
+        text += f" &middot; {gap} not checked"
+    label = f"{checked} of {dispatched} kernels checked"
+    return (
+        f'<div class="asan-bar" role="img" aria-label="{label}">{segments}</div>'
+        f'<div class="asan-cov-text">{text}</div>'
+    )
+
+
+def _asan_more_html(summary: str, items: list[tuple[str, str]]) -> str:
+    body = "".join(f'<span class="k">{_esc(label)}</span>{value}' for label, value in items)
+    return (
+        f'<details class="asan-more"><summary>{_esc(summary)}{_chevron_html()}</summary>'
+        f'<div class="asan-detail">{body}</div></details>'
+    )
+
+
+def _asan_name_cell(row: Mapping[str, Any], details: str) -> str:
     # A workload's name is the identifier aorta knows it by; a control's is prose.
     name = f"<span class=mono>{_esc(row['name'])}</span>" if row["group"] == "workload" else _esc(row["name"])
-    return f"<td>{name}<span class=asan-desc>{_esc(row['description'])}</span></td>"
+    return f"<td>{name}<span class=asan-desc>{_esc(row['description'])}</span>{details}</td>"
 
 
-def _asan_kernels_cell(row: Mapping[str, Any]) -> str:
-    kernels = row["kernels"]
-    return f"<td class=num>{kernels['checked']} / {kernels['dispatched']}</td>"
+def _asan_findings_html(findings: list[dict[str, Any]], cls: str = "asan-finding") -> str:
+    return "".join(f'<span class="{cls}">{_esc(_asan_finding_text(item))}</span>' for item in findings)
 
 
 def _asan_workloads_html(rows: list[dict[str, Any]]) -> str:
-    body = "".join(
-        f"<tr>{_asan_name_cell(row)}"
-        f"<td>{_asan_verdict_html(row['verdict'])}</td>"
-        f"{_asan_kernels_cell(row)}"
-        f"<td>{_esc(row.get('unchecked') or '') or '<span class=dash>&mdash;</span>'}</td>"
-        f"<td class=num>{len(row['findings'])}</td>"
-        f"<td class=mono>{_esc(row['command'])}</td></tr>"
-        for row in rows
+    body = []
+    for row in rows:
+        details = [("Command", f"<span class=mono>{_esc(row['command'])}</span>")]
+        if row.get("unchecked"):
+            details.append(("Not checked", _esc(row["unchecked"])))
+        label, cls = _ASAN_WORKLOAD_BADGES[row["verdict"]]
+        findings = row["findings"]
+        errors = (
+            f"<span class=num>{len(findings)}</span>{_asan_findings_html(findings)}"
+            if findings
+            else '<span class="dash">none</span>'
+        )
+        body.append(
+            f"<tr>{_asan_name_cell(row, _asan_more_html('Command and details', details))}"
+            f"<td>{_asan_badge(label, cls)}</td>"
+            f"<td>{_asan_coverage_html(row)}</td>"
+            f"<td class=wrap-any>{errors}</td></tr>"
+        )
+    key = (
+        '<div class="asan-key">'
+        '<span><i class="asan-sw asan-ok"></i>checked by ASan</span>'
+        '<span><i class="asan-sw asan-out"></i>outside ASan&#39;s reach (why: under each workload&#39;s details)</span>'
+        "</div>"
     )
     return (
-        f'<section class="panel"><h2>aorta workloads <span class=count>{len(rows)} '
-        f'workload{"" if len(rows) == 1 else "s"}</span></h2>'
-        '<div class="table-wrap"><table><thead><tr><th>Workload</th><th>Verdict</th>'
-        "<th class=num>Kernels checked</th><th>Not checked</th><th class=num>Findings</th>"
-        f"<th>Command</th></tr></thead><tbody>{body}</tbody></table></div></section>"
+        f'<section class="panel"><h2>Workloads <span class=count>{len(rows)} '
+        f'workload{"" if len(rows) == 1 else "s"}</span></h2>{key}'
+        '<div class="table-wrap"><table><thead><tr><th>Workload</th><th>Result</th>'
+        "<th>Kernel coverage</th><th>Memory errors</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table></div></section>"
     )
 
 
 def _asan_controls_html(rows: list[dict[str, Any]]) -> str:
     body = []
     for row in rows:
-        matched = row["verdict"] == row["expected"]
-        outcome = "Expected outcome" if matched else "Unexpected outcome"
-        findings = "; ".join(_asan_finding_text(finding) for finding in row["findings"])
+        kernels = row["kernels"]
+        findings = row["findings"]
+        details = [("Kernels checked", f"{kernels['checked']} of {kernels['dispatched']}")]
+        if findings:
+            details.append(("ASan report", _asan_findings_html(findings, "asan-report")))
+        reported = (
+            _esc("; ".join(_asan_short_finding(item) for item in findings))
+            if findings
+            else '<span class="dash">no memory error reported</span>'
+        )
         body.append(
-            f"<tr>{_asan_name_cell(row)}"
-            f"<td>{_asan_verdict_html(row['expected'])}</td>"
-            f"<td>{_asan_verdict_html(row['verdict'])}</td>"
-            f'<td><span class="pill {"ok" if matched else "bad"}">{outcome}</span></td>'
-            f"{_asan_kernels_cell(row)}"
-            f"<td class=wrap-any>{_esc(findings) or '<span class=dash>no memory error reported</span>'}"
-            "</td></tr>"
+            f"<tr>{_asan_name_cell(row, _asan_more_html('Full report', details))}"
+            f"<td>{_asan_control_badge(row)}</td>"
+            f"<td>{_asan_expected_html(row['expected'])}</td>"
+            f"<td class=wrap-any>{reported}</td></tr>"
         )
     return (
-        f'<section class="panel"><h2>Planted-bug controls <span class=count>{len(rows)} '
-        f'control{"" if len(rows) == 1 else "s"}</span></h2>'
-        '<p class="asan-lead">Each control plants a known out-of-bounds access, or '
-        "deliberately none, so the same run shows whether ASan catches memory errors on "
-        "this stack.</p>"
-        '<div class="table-wrap"><table><thead><tr><th>Control</th><th>Expected</th>'
-        "<th>Observed</th><th>Outcome</th><th class=num>Kernels checked</th>"
-        f"<th>Finding</th></tr></thead><tbody>{''.join(body)}</tbody></table></div></section>"
+        f'<section class="panel"><h2>Detection checks (planted bugs) <span class=count>{len(rows)} '
+        f'check{"" if len(rows) == 1 else "s"}</span></h2>'
+        '<p class="asan-lead">Each check plants a known out-of-bounds access, or deliberately '
+        "none, in the same run, so it shows whether ASan catches memory errors on this stack.</p>"
+        '<div class="table-wrap"><table><thead><tr><th>Check</th><th>Result</th>'
+        "<th>Expected</th><th>What ASan reported</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table></div></section>"
     )
 
 
+def _asan_card(title: str, value: str, sub: str, tone: str) -> str:
+    return (
+        f'<div class="asan-card {tone}"><div class="k">{_esc(title)}</div>'
+        f'<div class="big">{value}</div><div class="sub">{sub}</div></div>'
+    )
+
+
+def _asan_summary_html(run: Mapping[str, Any]) -> str:
+    """The run's headline sentence and summary cards, computed from its rows (pure)."""
+    workloads = [row for row in run["rows"] if row["group"] == "workload"]
+    controls = [row for row in run["rows"] if row["group"] == "control"]
+    planted = [row for row in controls if row["expected"] == "fail"]
+    clean = [row for row in controls if row["expected"] != "fail"]
+    caught = sum(row["verdict"] == "fail" for row in planted)
+    stayed_clean = sum(row["verdict"] == row["expected"] for row in clean)
+    errors = sum(len(row["findings"]) for row in workloads)
+    checked = sum(row["kernels"]["checked"] for row in workloads)
+    reachable = sum(row["kernels"]["dispatched"] - _asan_outside(row) for row in workloads)
+    outside = sum(_asan_outside(row) for row in workloads)
+    # kernel_scope names the instrumentable kernels as an adjective, e.g. "PyTorch and HIP".
+    scope = run.get("kernel_scope", "instrumentable")
+
+    sentences = []
+    if workloads and reachable and checked == reachable:
+        sentences.append(f"Every {scope} kernel that ran was checked ({checked} of {reachable})")
+    if workloads:
+        sentences.append(
+            "ASan reported no memory error in any workload"
+            if errors == 0
+            else f"ASan reported {errors} memory error{'' if errors == 1 else 's'} in the workloads"
+        )
+    if planted:
+        sentences.append(f"it caught {caught} of {len(planted)} planted bug{'' if len(planted) == 1 else 's'}")
+    headline = ""
+    if sentences:
+        text = "; ".join(sentences)
+        headline = f'<p class="asan-headline">{_esc(text[0].upper() + text[1:])}.</p>'
+
+    counts: dict[str, int] = {}
+    for row in workloads:
+        label = _ASAN_WORKLOAD_BADGES[row["verdict"]][0]
+        counts[label] = counts.get(label, 0) + 1
+    cards = []
+    if workloads:
+        cards.append(
+            _asan_card(
+                "Workloads run",
+                str(len(workloads)),
+                _esc(", ".join(f"{n} {label}" for label, n in counts.items())),
+                "info",
+            )
+        )
+        cards.append(
+            _asan_card(
+                "Memory errors in workloads",
+                str(errors),
+                f"across {len(workloads)} workload{'' if len(workloads) == 1 else 's'}",
+                "ok" if errors == 0 else "bad",
+            )
+        )
+    if planted:
+        sub = "reported with the kernel named"
+        if clean:
+            sub += f"; {stayed_clean} of {len(clean)} clean check{'' if len(clean) == 1 else 's'} stayed clean"
+        cards.append(
+            _asan_card(
+                "Planted bugs caught",
+                f"{caught}<small>of {len(planted)}</small>",
+                _esc(sub),
+                "ok" if caught == len(planted) and stayed_clean == len(clean) else "bad",
+            )
+        )
+    if workloads and reachable:
+        sub = f"{checked} of {reachable}"
+        if outside:
+            sub += f"; {outside} library GEMM{'' if outside == 1 else 's'} outside ASan's reach"
+        cards.append(
+            _asan_card(
+                f"{scope[0].upper()}{scope[1:]} kernels checked",
+                _asan_pct(checked, reachable),
+                _esc(sub),
+                "ok" if checked == reachable else "bad",
+            )
+        )
+    return headline + (f'<div class="asan-cards">{"".join(cards)}</div>' if cards else "")
+
+
+_ICON_MINUS = '<line x1="6" y1="12" x2="18" y2="12"/>'
+
+
+def _asan_scope_html(run: Mapping[str, Any]) -> str:
+    covered, not_covered = run.get("covered", []), run.get("not_covered", [])
+    notes = run.get("notes", [])
+    if not (covered or not_covered or notes):
+        return ""
+    columns = []
+    for title, mark, icon, items in (
+        ("Checked on this stack", "yes", _ICON_CHECK, covered),
+        ("Not checked on this stack", "no", _ICON_MINUS, not_covered),
+    ):
+        if not items:
+            continue
+        badge = f'<span class="asan-mark {mark}">{_svg(icon, size=10, width=3.5)}</span>'
+        entries = "".join(f"<li>{badge}<span>{_esc(item)}</span></li>" for item in items)
+        columns.append(f"<div><h3>{title}</h3><ul>{entries}</ul></div>")
+    scope = f'<div class="asan-scope">{"".join(columns)}</div>' if columns else ""
+    notes_html = ""
+    if notes:
+        notes_html = '<ul class="asan-notes">' + "".join(f"<li>{_esc(note)}</li>" for note in notes) + "</ul>"
+    return f'<section class="panel"><h2>What ASan covers here</h2>{scope}{notes_html}</section>'
+
+
 def _asan_run_html(run: Mapping[str, Any]) -> str:
-    """One manual run: its provenance, then its workloads and its controls (pure)."""
+    """One manual run: summary, provenance, workloads, detection checks, scope (pure)."""
     mode = _esc(run["run_mode"])
     if run.get("run_mode_url"):
         mode = f'<a href="{_esc(run["run_mode_url"])}">{mode}</a>'
-    facts = (
-        '<section class="panel"><div class="kv">'
-        + _fact_html("Run", f"manual, {_esc(run['date'])}")
-        + _fact_html("GPU", _esc(run["gpu"]))
-        + _fact_html("Stack", "<br>".join(_esc(item) for item in run["stack"]))
-        + _fact_html("Run mode", mode)
-        + "</div>"
-        + "".join(f'<p class="asan-lead">{_esc(note)}</p>' for note in run.get("notes", []))
-        + "</section>"
+    provenance = (
+        '<div class="asan-prov">'
+        f"<span><b>Manual run</b> {_esc(run['date'])}</span>"
+        f"<span><b>GPU</b> {_esc(run['gpu'])}</span>"
+        + "".join(f"<span>{_esc(item)}</span>" for item in run["stack"])
+        + f"<span><b>Run mode</b> {mode}</span></div>"
     )
     workloads = [row for row in run["rows"] if row["group"] == "workload"]
     controls = [row for row in run["rows"] if row["group"] == "control"]
     return (
-        facts
+        _asan_summary_html(run)
+        + provenance
         + (_asan_workloads_html(workloads) if workloads else "")
         + (_asan_controls_html(controls) if controls else "")
+        + _asan_scope_html(run)
     )
 
 
@@ -4779,7 +5049,7 @@ def asan_panel_html(runs: list[dict[str, Any]]) -> str:
         "GPU image has no ASan runtime yet, so nothing on this tab is refreshed nightly "
         "or affects nightly pass/fail.</p></div>"
         + "".join(_asan_run_html(run) for run in runs)
-        + '<details class="panel notes" open><summary>Reading the verdicts'
+        + '<details class="panel notes"><summary>Reading the results'
         f"{_chevron_html()}</summary><ul>{legend}</ul></details>"
     )
 

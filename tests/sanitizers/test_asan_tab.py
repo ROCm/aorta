@@ -156,29 +156,136 @@ def test_refuses_a_page_it_cannot_place_the_tab_in(mangle):
         gen.add_asan_tab(mangle(_nightly_page()), _runs())
 
 
+_GEMMS = "17 hipBLASLt GEMM kernels (Cijk_*): generated assembly that ASan can't instrument"
+
+
+def _training(**overrides) -> dict:
+    fields = {
+        "name": "training",
+        "verdict": "not_checked",
+        "kernels": {"dispatched": 58, "checked": 41},
+        "unchecked": _GEMMS,
+        "unchecked_outside_asan": True,
+    }
+    fields.update(overrides)
+    return _row(**fields)
+
+
 def test_workload_and_control_rows_render_what_was_measured():
-    unchecked = "17 hipBLASLt GEMM kernels (Cijk_*), not built with ASan"
     page = gen.asan_panel_html(
         _runs(
-            _row(name="training", verdict="not_checked", kernels={"dispatched": 58, "checked": 41}, unchecked=unchecked),
+            _training(),
             _control(),
             _control(name="in-bounds view", expected="pass", verdict="pass", findings=[]),
         )
     )
-    assert '<span class="v neutral">not checked</span>' in page
-    assert "<td class=num>41 / 58</td>" in page
-    assert f"<td>{unchecked}</td>" in page
-    assert page.count('<span class="pill ok">Expected outcome</span>') == 2
+    assert '<span class="v warn">not checked</span>' in page
+    assert "<b>41</b> of 58 kernels checked &middot; 17 outside ASan's reach" in page
+    assert gen._esc(_GEMMS) in page
+    assert "aorta run --workload gpu_smoke --sanitizer asan" in page
+    assert '<span class="v pass">caught</span>' in page
+    assert '<span class="v pass">clean</span>' in page
     assert "heap-buffer-overflow, READ of size 4, in add100" in page
+    assert "heap-buffer-overflow READ of 4 bytes" in page
     assert "no memory error reported" in page
-    assert "aorta workloads <span class=count>1 workload</span>" in page
-    assert "Planted-bug controls <span class=count>2 controls</span>" in page
+    assert "Workloads <span class=count>1 workload</span>" in page
+    assert "Detection checks (planted bugs) <span class=count>2 checks</span>" in page
 
 
-def test_a_control_that_misses_its_bug_is_flagged():
-    page = gen.asan_panel_html(_runs(_control(verdict="pass", findings=[])))
-    assert '<span class="pill bad">Unexpected outcome</span>' in page
-    assert "Expected outcome" not in page
+def test_a_failed_workload_shows_the_asan_error_not_just_a_count():
+    finding = dict(_OOB, region="0 bytes past the end of a 40-byte allocation")
+    page = gen.asan_panel_html(_runs(_row(verdict="fail", findings=[finding])))
+    assert '<span class="v fail">memory error</span>' in page
+    assert (
+        '<span class="asan-finding">heap-buffer-overflow, READ of size 4, 0 bytes past the end '
+        "of a 40-byte allocation, in add100</span>"
+    ) in page
+
+
+@pytest.mark.parametrize(
+    "control,badge",
+    [
+        pytest.param(_control(verdict="pass", findings=[]), "missed", id="planted-bug-missed"),
+        pytest.param(
+            _control(verdict="not_checked", findings=[], kernels={"dispatched": 1, "checked": 0}, unchecked="x"),
+            "missed",
+            id="planted-bug-not-checked",
+        ),
+        pytest.param(_control(expected="pass"), "false alarm", id="clean-check-reported"),
+        pytest.param(_control(verdict="error", findings=[]), "expected fail, got error", id="error"),
+    ],
+)
+def test_a_detection_check_with_the_wrong_outcome_is_flagged(control, badge):
+    page = gen.asan_panel_html(_runs(control))
+    assert f'<span class="v fail">{badge}</span>' in page
+    assert ">caught<" not in page and ">clean<" not in page
+
+
+def test_a_caught_bug_and_a_clean_check_get_their_own_badges():
+    caught = gen.asan_panel_html(_runs(_control()))
+    clean = gen.asan_panel_html(_runs(_control(expected="pass", verdict="pass", findings=[])))
+    assert '<span class="v pass">caught</span>' in caught and ">clean<" not in caught
+    assert '<span class="v pass">clean</span>' in clean and ">caught<" not in clean
+
+
+def test_a_false_alarm_on_the_clean_check_marks_the_detection_card_bad():
+    page = gen.asan_panel_html(_runs(_control(), _control(name="clean", expected="pass")))
+    planted = _card(page, "Planted bugs caught")
+    assert "1<small>of 1</small>" in planted and "0 of 1 clean check stayed clean" in planted
+    assert "asan-card bad" in planted
+
+
+def _card(page: str, title: str) -> str:
+    start = page.index(f'<div class="k">{title}</div>')
+    return page[page.rindex('<div class="asan-card', 0, start) : page.index("</div></div>", start)]
+
+
+def test_summary_counts_kernels_outside_asans_reach_apart_from_unchecked_ones():
+    runs = _runs(_row(), _training(), _control(), _control(name="clean", expected="pass", verdict="pass", findings=[]))
+    runs[0]["kernel_scope"] = "PyTorch and HIP"
+    page = gen.asan_panel_html(runs)
+    assert "Every PyTorch and HIP kernel that ran was checked (44 of 44)" in page
+    assert "ASan reported no memory error in any workload; it caught 1 of 1 planted bug." in page
+    card = _card(page, "PyTorch and HIP kernels checked")
+    assert 'asan-card ok' in card and ">100%<" in card and "44 of 44; 17 library GEMMs outside" in card
+    assert ">2<" in _card(page, "Workloads run") and "1 pass, 1 not checked" in _card(page, "Workloads run")
+    assert 'asan-card ok' in _card(page, "Memory errors in workloads")
+    planted = _card(page, "Planted bugs caught")
+    assert "1<small>of 1</small>" in planted and "1 of 1 clean check stayed clean" in planted
+
+
+def test_summary_does_not_claim_full_coverage_when_a_kernel_asan_could_check_was_missed():
+    page = gen.asan_panel_html(_runs(_training(unchecked_outside_asan=False)))
+    assert "Every" not in page
+    card = _card(page, "Instrumentable kernels checked")
+    assert "asan-card bad" in card and ">70.69%<" in card and card.endswith("41 of 58")
+    assert '<span class="asan-gap" style="width:29.31%"' in page
+    assert "&middot; 17 not checked" in page
+
+
+def test_summary_reports_memory_errors_and_missed_bugs_as_bad():
+    page = gen.asan_panel_html(_runs(_row(verdict="fail", findings=[dict(_OOB)]), _control(verdict="pass", findings=[])))
+    assert "asan-card bad" in _card(page, "Memory errors in workloads")
+    assert "asan-card bad" in _card(page, "Planted bugs caught")
+    assert "ASan reported 1 memory error in the workloads; it caught 0 of 1 planted bug." in page
+
+
+def test_coverage_bar_splits_checked_from_outside_reach():
+    html = gen._asan_coverage_html(_training())
+    assert '<span class="asan-ok" style="width:70.69%"' in html
+    assert '<span class="asan-out" style="width:29.31%"' in html
+    assert "asan-gap" not in html
+    assert "asan-out" not in gen._asan_coverage_html(_row())
+
+
+def test_scope_box_lists_what_is_and_is_not_checked():
+    runs = _runs()
+    runs[0].update(covered=["global memory"], not_covered=["library GEMMs"], notes=["a note"])
+    page = gen.asan_panel_html(runs)
+    assert "Checked on this stack" in page and "<span>global memory</span>" in page
+    assert "Not checked on this stack" in page and "<span>library GEMMs</span>" in page
+    assert "<li>a note</li>" in page
+    assert "What ASan covers here" not in gen.asan_panel_html(_runs())
 
 
 def test_finding_text_names_the_access_region_kernel_and_location():
@@ -225,6 +332,8 @@ def test_text_from_the_results_file_is_escaped():
         pytest.param(_row(group="smoke"), id="unknown-group"),
         pytest.param(_row(description=""), id="no-description"),
         pytest.param(_row(command=None), id="no-command"),
+        pytest.param(_row(unchecked_outside_asan=True), id="outside-reach-when-all-checked"),
+        pytest.param(_training(unchecked_outside_asan="yes"), id="outside-reach-not-bool"),
     ],
 )
 def test_rejects_rows_that_contradict_the_run_modes_verdicts(tmp_path, row):
@@ -249,6 +358,9 @@ def _run_with(**overrides) -> list[dict]:
         pytest.param(_run_with(run_mode_url="javascript:alert(1)"), None, id="url-not-https"),
         pytest.param(_run_with(rows=[]), None, id="no-rows"),
         pytest.param(_run_with(gpu=" "), None, id="blank-gpu"),
+        pytest.param(_run_with(kernel_scope=""), None, id="blank-kernel-scope"),
+        pytest.param(_run_with(covered="all"), None, id="covered-not-a-list"),
+        pytest.param(_run_with(not_covered=[""]), None, id="empty-not-covered"),
     ],
 )
 def test_rejects_malformed_runs(tmp_path, runs, schema):
@@ -266,14 +378,17 @@ def test_rejects_an_unreadable_file(tmp_path):
 
 
 def test_a_valid_file_round_trips(tmp_path):
-    runs = _runs(_row(), _control())
+    runs = _runs(_row(), _training(), _control())
     runs[0]["notes"] = ["a note"]
+    runs[0]["kernel_scope"] = "PyTorch and HIP"
+    runs[0]["covered"] = ["global memory"]
+    runs[0]["not_covered"] = ["library GEMMs"]
     runs[0]["run_mode_url"] = "https://github.com/ROCm/aorta/pull/567"
     loaded = gen.load_asan_runs(_write(tmp_path, copy.deepcopy(runs)))
     assert loaded == runs
     page = gen.asan_panel_html(loaded)
     assert '<a href="https://github.com/ROCm/aorta/pull/567">aorta run --sanitizer asan</a>' in page
-    assert '<p class="asan-lead">a note</p>' in page
+    assert "<li>a note</li>" in page
 
 
 def _cli(*args: str, preexec_fn=None) -> subprocess.CompletedProcess:
