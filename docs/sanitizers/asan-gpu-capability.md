@@ -10,7 +10,7 @@ checked nothing.
 
 One probe, [`repro/asan_probe.hip`](repro/asan_probe.hip), one defect per mode, built three
 ways: `-fsanitize=address -shared-libsan -g -O1` with `--offload-arch=gfx950:xnack+`, the same
-with plain `gfx950`, and with no sanitizer. Run on `meta64` nodes (gfx950, kernel 6.9, amdgpu
+with plain `gfx950`, and with no sanitizer. Run on MI350 nodes (gfx950, kernel 6.9, amdgpu
 6.14.14):
 
 | stack | HIP runtime | where |
