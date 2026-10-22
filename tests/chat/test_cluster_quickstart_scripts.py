@@ -542,6 +542,39 @@ def test_ui_stop_ignores_an_unrecorded_matching_tunnel(tmp_path: Path) -> None:
         manual.wait(timeout=5)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires bash launcher execution")
+def test_failed_ui_stop_removes_the_stop_request_marker(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/bin/sh\nprintf 'simulated SSH outage\\n' >&2\nexit 255\n",
+        encoding="utf-8",
+    )
+    fake_ss = fake_bin / "ss"
+    fake_ss.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for fake in fake_bin.iterdir():
+        fake.chmod(0o755)
+
+    stopped = subprocess.run(
+        [str(SCRIPTS[1]), "--stop"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "AORTA_CHAT_LOGIN_HOST": "login.example.invalid",
+            "AORTA_CHAT_RUNTIME_DIR": str(runtime),
+        },
+    )
+
+    assert stopped.returncode != 0
+    assert "simulated SSH outage" in stopped.stderr
+    assert not (runtime / "aorta-chat-stop-8080.requested").exists()
+
+
 def test_ui_stop_cancels_a_startup_before_pid_publication(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
