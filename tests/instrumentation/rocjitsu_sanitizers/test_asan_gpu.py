@@ -108,8 +108,9 @@ def test_the_overflow_recipe_fails_on_the_planted_store(tmp_path):
         tmp_path, "asan-heap-overflow.yaml", "asan_heap_overflow", "-DASAN_REPRO_OVERFLOW=1"
     )
     report = read_report(execute_sanitizer_run(recipe, output_dir=tmp_path / "out"))
-    assert report.overall_verdict is Verdict.FAIL
+    assert report.overall_verdict is Verdict.FAIL, report.checks[0].reason
     (check,) = report.checks
+    assert dict(check.backend)["node_health"] == "healthy"
     (finding,) = check.findings
     assert finding.code == "heap-buffer-overflow"
     assert finding.kernel_name == "store_index"
@@ -123,6 +124,7 @@ def test_the_clean_recipe_passes(tmp_path):
     recipe = _staged_recipe(tmp_path, "asan-clean.yaml", "asan_clean")
     report = read_report(execute_sanitizer_run(recipe, output_dir=tmp_path / "out"))
     assert report.overall_verdict is Verdict.PASS, report.checks[0].reason
+    assert dict(report.checks[0].backend)["node_health"] == "healthy"
 
 
 @pytest.mark.rocm

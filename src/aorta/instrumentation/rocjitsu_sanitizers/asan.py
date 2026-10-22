@@ -33,6 +33,7 @@ import hashlib
 import os
 import re
 import struct
+import tempfile
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -1405,6 +1406,10 @@ def run_asan(
     checked for instrumentation before anything runs; it defaults to ``command``
     when that is an ELF executable, and must be given when it is not (a script
     wrapping the real binary), because an unverifiable build fails closed.
+
+    The node-health canary of :func:`asan_run.check_node_health` runs first, under
+    the same runtime: on a node that fails it the repro is not run and the check is
+    an error, and where no canary could run a repro that passes is not checked.
     """
 
     if len(worklist.kernels) != 1:
@@ -1463,28 +1468,48 @@ def run_asan(
                     "symbolizer": str(resolved.symbolizer) if resolved.symbolizer else "not_found",
                 }
             )
+            # asan_run imports this module.
+            from .asan_run import NodeHealthStatus, check_node_health
+
             output_dir.mkdir(parents=True, exist_ok=True)
-            # A log left by an earlier run in this directory would vouch for a
-            # dispatch this run never made.
-            for stale in output_dir.glob(f"{DISPATCH_LOG_NAME}*"):
-                stale.unlink()
-            process = run_argv(
-                (str(command),),
-                timeout_seconds=timeout_seconds,
-                env=asan_environment(
-                    os.environ, resolved, dispatch_log=output_dir / DISPATCH_LOG_NAME
-                ),
+            health = check_node_health(
+                Path(tempfile.mkdtemp(prefix="node-health-", dir=output_dir)), resolved
             )
-            (output_dir / "asan.log").write_text(
-                f"{process.stdout}\n{process.stderr}", encoding="utf-8"
-            )
-            hip_log = read_hip_log(output_dir)
-            backend["dispatched_kernels"] = (
-                ", ".join(_workload_kernels(dispatched_kernels(hip_log))) or "none"
-                if hip_log is not None
-                else "no dispatch log"
-            )
-            check = evaluate_asan_output(process, kernel=selected.name, hip_log=hip_log)
+            backend["node_health"] = health.status.value
+            backend["node_health_reason"] = health.reason
+            backend["node_health_evidence"] = health.evidence_dir or "none"
+            if health.status is NodeHealthStatus.FAILED:
+                check = _error(
+                    "asan_node_unhealthy: the node health check failed, so ASan results "
+                    f"on this node cannot be trusted and the repro was not run: {health.reason}"
+                )
+            else:
+                # A log left by an earlier run in this directory would vouch for a
+                # dispatch this run never made.
+                for stale in output_dir.glob(f"{DISPATCH_LOG_NAME}*"):
+                    stale.unlink()
+                process = run_argv(
+                    (str(command),),
+                    timeout_seconds=timeout_seconds,
+                    env=asan_environment(
+                        os.environ, resolved, dispatch_log=output_dir / DISPATCH_LOG_NAME
+                    ),
+                )
+                (output_dir / "asan.log").write_text(
+                    f"{process.stdout}\n{process.stderr}", encoding="utf-8"
+                )
+                hip_log = read_hip_log(output_dir)
+                backend["dispatched_kernels"] = (
+                    ", ".join(_workload_kernels(dispatched_kernels(hip_log))) or "none"
+                    if hip_log is not None
+                    else "no dispatch log"
+                )
+                check = evaluate_asan_output(process, kernel=selected.name, hip_log=hip_log)
+                if health.status is NodeHealthStatus.NOT_VERIFIED and check.verdict is Verdict.PASS:
+                    check = _not_checked(
+                        "asan_node_health_not_verified: the repro passed, but nothing "
+                        f"verified that ASan works on this node: {health.reason}"
+                    )
 
     kernel_result = KernelCheckResult(
         identity=selected,

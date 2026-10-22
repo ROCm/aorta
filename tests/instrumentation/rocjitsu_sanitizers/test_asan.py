@@ -33,6 +33,7 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     KernelWorklist,
     SelectionRequirement,
     Verdict,
+    asan_run,
     run_sanitizers,
     support,
 )
@@ -46,6 +47,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.asan import (
     resolve_asan_runtime,
     run_asan,
 )
+from aorta.instrumentation.rocjitsu_sanitizers.asan_run import NodeHealth, NodeHealthStatus
 from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
 from aorta.instrumentation.rocjitsu_sanitizers.recipe import load_sanitizer_recipe
 from aorta.triage.recipe import RecipeSchemaError
@@ -1065,6 +1067,28 @@ def runtime(tmp_path) -> AsanRuntime:
     return resolved
 
 
+class _Canary:
+    """Stands in for the node-health check, which builds and runs a GPU program."""
+
+    def __init__(self) -> None:
+        self.status = NodeHealthStatus.HEALTHY
+        self.reason = "the canary passed on 8 GPU(s)"
+        self.calls: list[tuple[Path, AsanRuntime, bool]] = []
+
+    def __call__(self, evidence_dir: Path, runtime: AsanRuntime, **_kw) -> NodeHealth:
+        self.calls.append((evidence_dir, runtime, (evidence_dir.parents[1] / "ran").exists()))
+        directory = evidence_dir / "node-health"
+        directory.mkdir()
+        return NodeHealth(self.status, self.reason, evidence_dir=str(directory))
+
+
+@pytest.fixture(autouse=True)
+def canary(monkeypatch) -> _Canary:
+    fake = _Canary()
+    monkeypatch.setattr(asan_run, "check_node_health", fake)
+    return fake
+
+
 class TestRunAsan:
     def test_a_detection_fails_and_is_attributed_to_the_selected_kernel(self, tmp_path, runtime):
         script = _script(tmp_path, stderr_fixture="device_heap_buffer_overflow_write.txt", code=1)
@@ -1279,6 +1303,106 @@ class TestRunAsan:
             _worklist(), command=tmp_path / "absent", output_dir=tmp_path, runtime=runtime
         )
         assert check.reason == "asan_command_not_found"
+
+
+_CHECK_NODE_HEALTH = asan_run.check_node_health
+
+
+class TestRunAsanNodeHealth:
+    def _run(
+        self, tmp_path, runtime, *, stderr_fixture=None, code=0, dispatch="store_index(int*, int)"
+    ):
+        return run_asan(
+            _worklist(),
+            command=_script(tmp_path, stderr_fixture=stderr_fixture, code=code, dispatch=dispatch),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+
+    def test_the_canary_runs_first_under_the_repros_runtime(self, tmp_path, runtime, canary):
+        check = self._run(tmp_path, runtime)
+        ((evidence_dir, canary_runtime, repro_had_run),) = canary.calls
+        assert canary_runtime is runtime
+        assert not repro_had_run
+        assert evidence_dir.parent == tmp_path / "out"
+        assert (check.state, check.verdict) == (ExecutionState.RAN, Verdict.PASS)
+        backend = dict(check.backend)
+        assert backend["node_health"] == "healthy"
+        assert backend["node_health_reason"] == canary.reason
+        assert backend["node_health_evidence"] == str(evidence_dir / "node-health")
+
+    def test_a_failed_node_is_an_error_and_the_repro_is_not_run(self, tmp_path, runtime, canary):
+        canary.status = NodeHealthStatus.FAILED
+        canary.reason = "the canary, whose every access is in bounds, reported unknown-crash (host)"
+        check = self._run(tmp_path, runtime)
+        assert (check.state, check.verdict) == (ExecutionState.ERROR, Verdict.ERROR)
+        assert check.reason.startswith("asan_node_unhealthy:")
+        assert check.reason.endswith(canary.reason)
+        assert not (tmp_path / "ran").exists()
+        assert not (tmp_path / "out" / "asan.log").exists()
+        assert check.kernel_results[0].verdict is Verdict.ERROR
+        backend = dict(check.backend)
+        assert backend["node_health"] == "failed"
+        assert backend["node_health_evidence"].endswith("node-health")
+
+    def test_a_failed_node_does_not_let_a_detection_through_either(self, tmp_path, runtime, canary):
+        """On such a node a reported error is as untrustworthy as a pass."""
+
+        canary.status = NodeHealthStatus.FAILED
+        check = self._run(
+            tmp_path, runtime, stderr_fixture="device_heap_buffer_overflow_write.txt", code=1
+        )
+        assert check.verdict is Verdict.ERROR
+        assert check.findings == ()
+
+    def test_an_unverified_node_turns_a_pass_into_not_checked(self, tmp_path, runtime, canary):
+        canary.status = NodeHealthStatus.NOT_VERIFIED
+        canary.reason = "hipcc was not found"
+        check = self._run(tmp_path, runtime)
+        assert (check.state, check.verdict) == (ExecutionState.NOT_CHECKED, Verdict.NOT_CHECKED)
+        assert check.reason.startswith("asan_node_health_not_verified:")
+        assert check.reason.endswith("hipcc was not found")
+        assert (tmp_path / "ran").exists()
+        assert dict(check.backend)["node_health"] == "not_verified"
+
+    def test_an_unverified_node_still_fails_a_real_detection(self, tmp_path, runtime, canary):
+        canary.status = NodeHealthStatus.NOT_VERIFIED
+        check = self._run(
+            tmp_path, runtime, stderr_fixture="device_heap_buffer_overflow_write.txt", code=1
+        )
+        assert check.verdict is Verdict.FAIL
+        assert check.findings
+
+    def test_an_unverified_node_leaves_an_error_an_error(self, tmp_path, runtime, canary):
+        canary.status = NodeHealthStatus.NOT_VERIFIED
+        check = self._run(tmp_path, runtime, dispatch=None)
+        assert check.reason.startswith("asan_dispatch_unverified:")
+
+    def test_no_canary_runs_when_the_build_is_refused(self, tmp_path, runtime, canary):
+        run_asan(
+            _worklist(),
+            command=_script(tmp_path, stderr_fixture=None, code=0),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path, instrumented=False),),
+        )
+        assert canary.calls == []
+
+    def test_a_reused_output_directory_gets_a_fresh_canary_directory(
+        self, tmp_path, runtime, monkeypatch
+    ):
+        monkeypatch.setattr(asan_run, "check_node_health", _CHECK_NODE_HEALTH)
+        monkeypatch.setattr(asan_run, "gpu_targets", lambda: ("gfx950",))
+        monkeypatch.setattr(asan_run, "_hipcc", lambda environ: Path("/bin/false"))
+        monkeypatch.setattr(asan_run, "_build_canary", lambda *a: (None, "hipcc exited 1"))
+        first = self._run(tmp_path, runtime)
+        second = self._run(tmp_path, runtime)
+        assert first.reason == second.reason
+        assert first.reason.endswith("the canary did not build: hipcc exited 1")
+        evidence = {dict(check.backend)["node_health_evidence"] for check in (first, second)}
+        assert len(evidence) == 2
+        assert all(Path(path).is_dir() for path in evidence)
 
 
 # --------------------------------------------------------------------------- #

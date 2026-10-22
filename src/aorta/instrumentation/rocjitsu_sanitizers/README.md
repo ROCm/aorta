@@ -249,8 +249,8 @@ source:
 sanitizers: [asan]
 ```
 
-Four things have to be true, and each one fails silently when it is not, which
-is why aorta checks all four instead of trusting the build:
+Five things have to be true, and each one fails silently when it is not, which
+is why aorta checks all five instead of trusting the build:
 
 1. **All of the GPU code is built for an `xnack+` target.** `hipcc -fsanitize=address
    -shared-libsan -g --offload-arch=gfx950:xnack+`. With a plain `gfx950` target
@@ -283,6 +283,14 @@ is why aorta checks all four instead of trusting the build:
    process) and a clean exit passes only if the selected kernel appears in it
    (`asan_kernel_not_dispatched`; no log at all is `asan_dispatch_unverified`).
    The runtime's own messages go to that file too, and are read with the streams.
+5. **The node's GPU page migration is sound.** Before the repro, aorta runs the
+   run mode's node-health canary (see **Node health** below) under the same ASan
+   runtime, into `<output>/asan/node-health-*/node-health/`. A canary that does not
+   come back clean makes the check an `error` (`asan_node_unhealthy`) and the repro
+   is not run; when no canary can run, a repro that would pass is `not_checked`
+   (`asan_node_health_not_verified`) and a memory error still fails. The check's
+   `backend` records `node_health`, its reason, and the canary's evidence directory,
+   which holds the canary's own `asan_report.json`.
 
 aorta also pins `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:exitcode=1:symbolize=1:color=never`
 (replacing any inherited value, so a parent cannot set `exitcode=0`), prepends
