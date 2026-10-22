@@ -1,12 +1,16 @@
 # Workload survey (Tab 2) — public-safe generic-GEMM survey
 
-This directory populates the **Workload survey (observed-only)** tab (Tab 2) of
-the sanitizer dashboard rendered by
-`scripts/sanitizers/gen_sanitizer_dashboard.py --survey`. It realizes the #367
-scope update ("populate aorta-internal kernels on Tab 2") in a strictly
+This directory populates the **Workload survey (observed-only)** section (Tab 2)
+rendered by `scripts/sanitizers/gen_sanitizer_dashboard.py --survey`. It realizes
+the #367 scope update ("populate aorta-internal kernels on Tab 2") in a strictly
 de-branded, public-safe form.
 
-> **These fixtures are not what the published dashboard shows.** The nightly
+> **The dashboard page does not show the survey.** `index.html` renders only the
+> guardrails tab. The survey is rendered into the job summary (`summary.md`) and
+> `data.json`, and each run's landing page lists the survey run areas published
+> under `runs/<id>/survey/`. "Tab 2" below refers to that survey lane.
+
+> **These fixtures are not what the nightly publishes.** The nightly
 > (`.github/workflows/sanitizers-nightly.yml`) renders Tab 2 from
 > `--informational-results-dir`, i.e. live output of the `daily-consan-*` /
 > `daily-waitcheck-*` recipes, and never passes `--survey`. This directory is the

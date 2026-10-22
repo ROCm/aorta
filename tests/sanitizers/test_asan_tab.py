@@ -103,11 +103,11 @@ def test_committed_manual_runs_validate_and_render():
 def test_tab_joins_the_nightly_tabs():
     page = gen.add_asan_tab(_nightly_page(), _runs(_row(), _control()))
     at = page.index
-    assert at("id=tab-survey") < at("id=tab-asan") < at("<div class=tabbar>")
+    assert at("id=tab-guardrails") < at("id=tab-asan") < at("<div class=tabbar>")
     tabbar = page[at("<div class=tabbar>") :]
     tabbar = tabbar[: tabbar.index("</div>")]
     assert '<label for="tab-asan">AddressSanitizer (manual run)</label>' in tabbar
-    assert at("id=panel-survey") < at("<section class=tabpanel id=panel-asan>")
+    assert at("id=panel-guardrails") < at("<section class=tabpanel id=panel-asan>")
     # The panel has to stay a sibling of the radios, inside .tabs, for :checked to show it.
     assert page.endswith("</details>\n  </section>\n  </div>\n</div></body></html>\n")
     assert "#tab-asan:checked ~ #panel-asan { display:block; }" in page
@@ -116,6 +116,36 @@ def test_tab_joins_the_nightly_tabs():
     # The nightly's own default tab is still the one selected.
     assert "id=tab-guardrails class=tabradio checked>" in page
     assert "id=tab-asan class=tabradio>" in page
+
+
+def test_tab_joins_a_page_rendered_before_the_survey_tab_was_dropped():
+    # Pages adds the tab to whatever page the last nightly published, which can be
+    # one an older generator rendered with a Workload survey tab still in it.
+    page = (
+        _nightly_page()
+        .replace(
+            "id=tab-guardrails class=tabradio checked>",
+            "id=tab-guardrails class=tabradio checked>\n"
+            "  <input type=radio name=santab id=tab-survey class=tabradio>",
+        )
+        .replace(
+            '<label for="tab-guardrails">Expected behavior (guardrails)</label>',
+            '<label for="tab-guardrails">Expected behavior (guardrails)</label>\n'
+            '    <label for="tab-survey">Workload survey (observed-only)</label>',
+        )
+        .replace(
+            "  </section>\n  </div>\n</div></body></html>",
+            "  </section>\n\n  <section class=tabpanel id=panel-survey>\n  </section>\n"
+            "  </div>\n</div></body></html>",
+        )
+    )
+    assert page.count("tab-survey") == 2 and "id=panel-survey" in page
+    joined = gen.add_asan_tab(page, _runs())
+    at = joined.index
+    assert at("id=tab-asan") < at("<div class=tabbar>")
+    assert at('<label for="tab-asan">') < at("</div>", at("<div class=tabbar>"))
+    assert at("id=panel-survey") < at("<section class=tabpanel id=panel-asan>")
+    assert joined.endswith("</details>\n  </section>\n  </div>\n</div></body></html>\n")
 
 
 def test_tab_only_adds_to_the_nightly_page():
@@ -147,7 +177,7 @@ def test_no_runs_page_gets_the_results_as_a_section():
         pytest.param(lambda p: gen.add_asan_tab(p, _runs()), id="already-has-the-tab"),
         pytest.param(lambda p: p.replace("</head>", ""), id="no-head"),
         pytest.param(lambda p: p.replace("</div></body></html>", "</div><footer></footer></body></html>"), id="tail-moved"),
-        pytest.param(lambda p: p.replace('<label for="tab-survey">', '<label for="tab-x">'), id="label-without-radio"),
+        pytest.param(lambda p: p.replace('<label for="tab-guardrails">', '<label for="tab-x">'), id="label-without-radio"),
         pytest.param(lambda p: p + "<!-- -->", id="trailing-content"),
     ],
 )
