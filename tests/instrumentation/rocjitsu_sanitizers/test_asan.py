@@ -824,6 +824,28 @@ class TestPreflight:
         evidence = inspect_device_instrumentation(_binary(tmp_path, bomb))
         assert (evidence.code_objects, evidence.compressed_bundles) == ((), 1)
 
+    @pytest.mark.skipif(_libzstd() is None, reason="no libzstd to compress with")
+    def test_an_absurd_size_is_not_allocated_for_zstd(self, tmp_path):
+        """zstd decompresses into a buffer of the header's size, so the bound is all that
+        stands between a corrupt header and a terabyte allocation."""
+
+        bundle = _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True)))
+        bomb = _ccob(bundle, method=_ZSTD, version=3, size=1 << 40)
+        evidence = inspect_device_instrumentation(_binary(tmp_path, bomb))
+        assert (evidence.code_objects, evidence.compressed_bundles) == ((), 1)
+        # Linux overcommit would let the allocation itself succeed lazily, so pin the
+        # guard: a header that claims this much is refused before anything is allocated.
+        import aorta.instrumentation.rocjitsu_sanitizers.asan as asan_module
+
+        assert asan_module._ccob_extent(bomb, 0) is None
+
+    def test_a_size_that_does_not_match_the_payload_is_not_trusted(self, tmp_path):
+        bundle = _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True)))
+        evidence = inspect_device_instrumentation(
+            _binary(tmp_path, _ccob(bundle, size=len(bundle) - 1))
+        )
+        assert (evidence.code_objects, evidence.compressed_bundles) == ((), 1)
+
     def test_an_inflated_payload_that_is_not_a_bundle_is_unopened(self, tmp_path):
         evidence = inspect_device_instrumentation(_binary(tmp_path, _ccob(b"just some bytes")))
         assert (evidence.code_objects, evidence.compressed_bundles) == ((), 1)
