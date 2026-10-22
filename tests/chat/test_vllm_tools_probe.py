@@ -48,7 +48,12 @@ def _client_returning(payload: dict, seen: dict):
     return FakeClient
 
 
-def _tool_response(*, source: object = "READY") -> dict:
+def _tool_response(
+    *,
+    source: object = "READY",
+    name: str = "aorta_tool_protocol_probe",
+    calls: int = 1,
+) -> dict:
     return {
         "choices": [
             {
@@ -56,10 +61,11 @@ def _tool_response(*, source: object = "READY") -> dict:
                     "tool_calls": [
                         {
                             "function": {
-                                "name": "aorta_tool_protocol_probe",
+                                "name": name,
                                 "arguments": json.dumps({"source": source}),
                             }
                         }
+                        for _ in range(calls)
                     ]
                 }
             }
@@ -102,6 +108,8 @@ def test_probe_accepts_any_string_tool_argument(backend, monkeypatch, source):
     [
         ({"choices": [{"message": {"content": "<tool_call>READY</tool_call>"}}]}, "one tool call"),
         (_tool_response(source=7), "string source argument"),
+        (_tool_response(name="other"), "aorta_tool_protocol_probe"),
+        (_tool_response(calls=2), "expected one tool call, got 2"),
     ],
 )
 def test_probe_rejects_text_or_non_string_arguments(backend, monkeypatch, payload, message):
