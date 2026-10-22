@@ -238,8 +238,9 @@ On an affected node ASan is wrong in both directions. Measured with `test_asan_g
 (interceptors, the HSA runtime, Python's allocator) or on the device, and their shadow-byte
 dumps are full of unrelated page contents.
 
-The run mode's canary, `asan_canary.hip`, is that pure-HIP check built with device ASan and
-run before the workload under the same environment. With the ROCm 7.0.2 ASan runtime:
+The canary, `asan_canary.hip`, is that pure-HIP check built with device ASan. The run mode runs
+it before the workload, and the recipe backend before the repro, under the same ASan runtime.
+With the ROCm 7.0.2 ASan runtime:
 
 | node, by the pure-HIP check | canary on its own, 3 runs each | time |
 |---|---|---|
@@ -255,6 +256,15 @@ ones, each job starting with the pure-HIP check as a control (jobs 92282, 92283,
 | a planted overflow, ASan PyTorch | `fail`: `heap-buffer-overflow` | `error`: node health |
 | `hrx` static probe, native | `pass`, node verified in 9.7 s | `error`, workload not run |
 | `test_asan_gpu.py` | 7 passed | the canary's test fails, and so do both recipe tests: the overflow recipe passes |
+
+Through the recipe backend once it runs the canary too, on one sound node and one affected node,
+each job starting with the pure-HIP check as a control (jobs 92455 and 92456):
+
+| | sound node | affected node |
+|---|---|---|
+| `asan-heap-overflow.yaml` | `fail`: device `heap-buffer-overflow`, node verified, 11 s | `error`: node health, repro not run, 2 s |
+| `asan-clean.yaml` | `pass`, node verified, 11 s | `error`: node health, repro not run, 2 s |
+| `test_asan_gpu.py` | 7 passed | 3 failed (both recipe tests now on `error`, not a wrong verdict) and 4 passed |
 
 Built without ASan, the canary is the pure-HIP check on its own:
 `hipcc --offload-arch=gfx950:xnack+ asan_canary.hip -o canary && HSA_XNACK=1 ./canary` exits 0
