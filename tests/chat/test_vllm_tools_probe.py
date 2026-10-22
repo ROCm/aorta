@@ -48,7 +48,7 @@ def _client_returning(payload: dict, seen: dict):
     return FakeClient
 
 
-def _tool_response(*, source: str = "READY") -> dict:
+def _tool_response(*, source: object = "READY") -> dict:
     return {
         "choices": [
             {
@@ -86,14 +86,25 @@ def test_probe_sends_and_validates_a_forced_native_call(backend, monkeypatch):
     assert request["tool_choice"]["function"]["name"] == "aorta_tool_protocol_probe"
 
 
+@pytest.mark.parametrize("source", ["ready", " READY ", "READY.", ""])
+def test_probe_accepts_any_string_tool_argument(backend, monkeypatch, source):
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        _client_returning(_tool_response(source=source), {}),
+    )
+
+    asyncio.run(backend.probe_tools())
+
+
 @pytest.mark.parametrize(
     "payload, message",
     [
         ({"choices": [{"message": {"content": "<tool_call>READY</tool_call>"}}]}, "one tool call"),
-        (_tool_response(source="WRONG"), "source='READY'"),
+        (_tool_response(source=7), "string source argument"),
     ],
 )
-def test_probe_rejects_text_or_wrong_arguments(backend, monkeypatch, payload, message):
+def test_probe_rejects_text_or_non_string_arguments(backend, monkeypatch, payload, message):
     monkeypatch.setattr(
         httpx,
         "AsyncClient",
