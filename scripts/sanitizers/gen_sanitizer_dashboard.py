@@ -17,13 +17,13 @@ emits, into ``--out-dir``:
   reproduce command on the card is actionable (#384). Each case also carries a
   one-line observation summary.
 * ``summary.md`` -- a GitHub Actions job-summary fragment (append to
-  ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail, plus
-  a **Workload survey (observed-only)** section: kernels drawn from multiple
-  workloads (including aorta-internal-sourced kernels supplied via ``--survey`` and
-  the caller-supplied ConSan cases from ``--informational-results-dir``, #347) with
-  **no expected/match column** (a fail / not_checked there is an observation, never
-  a regression). The survey is not rendered on ``index.html``; its run areas are
-  published under ``runs/<id>/survey/`` and listed on each run's landing page.
+  ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail. When
+  survey cases are supplied (``--survey`` / ``--informational-results-dir``, #347)
+  it adds a **Workload survey (observed-only)** section with **no expected/match
+  column** (a fail / not_checked there is an observation, never a regression), and
+  their run areas are written under ``runs/<id>/survey/`` and listed on each run's
+  landing page. The survey is never rendered on ``index.html``, and the nightly
+  supplies no survey cases: its outputs are public.
 * ``data.json`` -- the aggregated structure for any richer consumer.
 * ``status.json`` -- a copy of the ``--status`` run manifest, when supplied, so
   Pages can distinguish a healthy snapshot from a stale one (a failed nightly).
@@ -4906,7 +4906,13 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
 
 
 def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
-    """The survey section of the GitHub job summary: observed-only, non-gating."""
+    """The survey section of the GitHub job summary: observed-only, non-gating.
+
+    Empty when there are no survey cases. The nightly publishes none, and its job
+    summary is public, so the section must not even announce itself.
+    """
+    if not survey:
+        return []
     lines = [
         "## Workload survey (observed-only)",
         "",
@@ -4920,9 +4926,6 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
         "a copy-paste command to reproduce the run.",
         "",
     ]
-    if not survey:
-        lines += ["No workload-survey kernels in this run.", ""]
-        return lines
     lines += _survey_summary_md(_group_survey_entries(survey))
     for entry in survey:
         r = entry["summary"]
@@ -4996,11 +4999,14 @@ def build_summary_md(
             f"{_execution_md(r['execution'])} | {r['findings']} | {r['coverage'] or _DASH} |"
         )
 
+    lines.append("")
+    if survey:
+        lines += [
+            "Two views below: **Expected behavior (guardrails)** (baseline-checked, the "
+            "gate) and **Workload survey (observed-only)** (non-gating).",
+            "",
+        ]
     lines += [
-        "",
-        "Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate) "
-        "and **Workload survey (observed-only)** (non-gating).",
-        "",
         "## Expected behavior (guardrails) \u00b7 Kernel details",
         "",
     ]
@@ -5217,8 +5223,10 @@ def main() -> int:
         )
         survey += informational_survey
     # Mirror the two-class split into data.json: attach the survey list to the run
-    # this job produced (additive; existing per-run keys are untouched).
-    if current_index is not None:
+    # this job produced (additive; existing per-run keys are untouched). Only when
+    # there is one: data.json is published, and an empty key would still
+    # advertise a survey lane the nightly no longer publishes.
+    if current_index is not None and survey:
         runs[current_index]["survey"] = survey
     # What the job summary shows as the survey. It takes its guardrail data from
     # runs[0], so the survey rendered beside it has to describe
@@ -5235,7 +5243,8 @@ def main() -> int:
             args.history_root / str(runs[0]["meta"].get("run", "")) / "survey",
             rel=runs[0].get("rel"),
         )
-        runs[0]["survey"] = displayed_survey
+        if displayed_survey:
+            runs[0]["survey"] = displayed_survey
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(

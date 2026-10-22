@@ -5,15 +5,16 @@ rendered by `scripts/sanitizers/gen_sanitizer_dashboard.py --survey`. It realize
 the #367 scope update ("populate aorta-internal kernels on Tab 2") in a strictly
 de-branded, public-safe form.
 
-> **The dashboard page does not show the survey.** `index.html` renders only the
-> guardrails tab. The survey is rendered into the job summary (`summary.md`) and
-> `data.json`, and each run's landing page lists the survey run areas published
-> under `runs/<id>/survey/`. "Tab 2" below refers to that survey lane.
+> **The survey is not published.** The `sanitizers-survey` nightly job is
+> disabled and the publish job deletes any `runs/<id>/survey/` area, so neither
+> the dashboard, the run landing pages, `summary.md`, `data.json` nor the job
+> summary carries survey results. The generator still renders a survey when one
+> is passed locally (`--survey` / `--informational-results-dir`). "Tab 2" below
+> refers to that local survey output.
 
-> **These fixtures are not what the nightly publishes.** The nightly
-> (`.github/workflows/sanitizers-nightly.yml`) renders Tab 2 from
-> `--informational-results-dir`, i.e. live output of the `daily-consan-*` /
-> `daily-waitcheck-*` recipes, and never passes `--survey`. This directory is the
+> **These fixtures are local-only.** When it was enabled, the nightly rendered
+> Tab 2 from `--informational-results-dir`, i.e. live output of the
+> `daily-consan-*` / `daily-waitcheck-*` recipes, and never passed `--survey`. This directory is the
 > `--survey` path: local rendering, unit tests, and the de-branded reproduction
 > recipes. Read the verdicts below as *recorded fixtures*, not as current CI
 > state — and see the staleness note under the table.
