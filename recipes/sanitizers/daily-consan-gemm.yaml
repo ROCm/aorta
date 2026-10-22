@@ -22,9 +22,9 @@ description: >
   rejects it on the patched-image growth ceiling before instrumenting anything, so
   the row is error with zero findings every night. That is a capacity limit, not
   something consan_policy can change -- see the policy comment below and
-  docs/sanitizers/consan-gemm-patched-image-growth-cap.md. Published as an
-  observed-only workload-survey case (job summary and run landing page, not the
-  dashboard page); it does NOT gate the nightly.
+  docs/sanitizers/consan-gemm-patched-image-growth-cap.md. An observed-only
+  workload-survey case; the survey job that runs it is disabled and its results
+  are not published. It does NOT gate the nightly.
 sanitizer_plan:
   target: gfx950
   source:
