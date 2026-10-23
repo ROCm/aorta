@@ -83,7 +83,7 @@ def p_oracle(ep: rj.Episode, rng: random.Random) -> None:
     if s.clean:
         answer(ep, "none")
     else:
-        answer(ep, s.family, s.kernel, s.offsets[0])
+        answer(ep, s.family, s.kernel, s.offsets[0] if s.offsets else None)
 
 
 def make_constant(ans: dict[str, Any]) -> Policy:

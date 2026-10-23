@@ -223,6 +223,18 @@ def test_the_best_constant_names_a_kernel_with_no_accepted_offset_without_one(tm
     assert const == {"class": "waitcnt", "kernel": "k000", "offset": None} and value == 3.0
 
 
+def test_the_oracle_names_kernel_and_class_when_a_record_has_no_accepted_offset(tmp_path):
+    import rocjitsu_baselines as rb
+
+    root = _constant_corpus(tmp_path)
+    rec = json.loads((root / "scenarios.jsonl").read_text().splitlines()[0])
+    (root / "scenarios.jsonl").write_text(json.dumps(dict(rec, offsets=[])) + "\n")
+    (root / "splits" / "test.txt").write_text(rec["sid"] + "\n")
+    res = rb.report(rj.load_corpus(root, split="test", reward="v1"))
+    assert res["policies"]["oracle"]["per_scenario"] == [{"sid": rec["sid"], "total": 3.0,
+                                                          "outcome": "kernel_only"}]
+
+
 def test_a_v2_corpus_still_takes_either_reward(tmp_path):
     root = _toy_corpus(tmp_path)
     v2 = rj.load_corpus(root, split="test", reward="v2")
