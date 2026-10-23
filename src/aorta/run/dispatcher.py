@@ -664,9 +664,9 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         conflicts = owned_setting_conflicts(effective_overlay)
         if conflicts:
             raise ValueError(
-                "--sanitizer asan sets "
+                "--sanitizer asan owns "
                 + ", ".join(conflicts)
-                + " itself, and this cell's environment, mitigations or extra_env "
+                + ", and this cell's environment, mitigations or extra_env "
                 "would change them -- which would replace the instrumented runtime, "
                 "hide its reports, or run the workload on GPUs the node-health canary "
                 "did not check, so the run could check nothing while appearing to. "

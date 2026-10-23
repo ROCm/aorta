@@ -1789,7 +1789,7 @@ def test_an_asan_run_refuses_a_cell_that_changes_what_it_owns(
     )
     with (
         _registered(_ConfigRecordingWorkload),
-        pytest.raises(ValueError, match="sets LD_PRELOAD itself"),
+        pytest.raises(ValueError, match="owns LD_PRELOAD, "),
     ):
         run_trials(request)
 
@@ -1807,7 +1807,7 @@ def test_an_asan_run_refuses_extra_env_that_selects_other_gpus(
     )
     with (
         _registered(_ConfigRecordingWorkload),
-        pytest.raises(ValueError, match="HIP_VISIBLE_DEVICES.*node-health canary"),
+        pytest.raises(ValueError, match="owns HIP_VISIBLE_DEVICES, .*node-health canary"),
     ):
         run_trials(request)
 
