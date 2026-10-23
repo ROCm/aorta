@@ -187,6 +187,26 @@ def test_a_run_sim_seed_that_is_a_seed_is_accepted_as_before(tmp_path, field, se
     assert action.kind == "tool" and action.seed == seed
 
 
+@pytest.mark.parametrize("offset", ['"' + "1" * 5000 + '"', '"0x' + "f" * 5000 + '"'], ids=["decimal", "hex"])
+def test_an_oversized_v2_answer_offset_gets_no_location_credit_and_the_episode_still_serialises(tmp_path, offset):
+    scenario = {s.scenario_id: s for s in rj.load_corpus(_toy_corpus(tmp_path), split="test", reward="v2")}["ran@toy"]
+    episode = rj.Episode(scenario, seed=0)
+    episode.observe()
+    episode.act('{"answer": {"class": "waitcnt", "kernel": "k000", "offset": ' + offset + "}}")
+    assert [e.name for e in episode.events] == ["kernel_correct", "class_correct"]
+    assert episode.outcome == "kernel_only"
+    json.dumps(episode.summary())
+
+
+def test_an_oversized_v2_json_integer_or_disasm_range_is_a_reply_not_an_exception(tmp_path):
+    big = "1" * 5000
+    malformed = rj.parse_action_v2('{"answer": {"class": "waitcnt", "kernel": "k000", "offset": ' + big + "}}",
+                                   lambda k: k)
+    assert malformed.kind == "malformed"
+    disasm = rj.parse_action_v2('{"tool": "disasm", "kernel": "k000", "start": "' + big + '"}', lambda k: k)
+    assert disasm.kind == "tool" and disasm.start is None
+
+
 def _constant_corpus(root: Path) -> Path:
     """Six waitcnt faults on k000 (instructions 0, 4, 8, 12, 16) at 0, 0, 4, 12, 16 and 16. Each accepted
     offset is exact on at most two and near on at most four; 8, accepted by none, is near on all six."""
