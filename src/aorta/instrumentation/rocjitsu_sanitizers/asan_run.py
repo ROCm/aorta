@@ -15,8 +15,9 @@ The parent then decides what ASan actually checked, kernel by kernel. A
 dispatched kernel counts as checked only when the device code that defines it
 -- found in a file the same process loaded, a file the workload declared with
 :func:`declare_code_objects`, or Triton's kernel cache -- is ASan-instrumented
-and xnack+ everywhere aorta can see it defined. A kernel defined nowhere aorta
-can read counts as unchecked, so the rule can only under-state coverage.
+and xnack+ everywhere aorta can see it defined, and the process loaded nothing
+aorta cannot read. A kernel defined nowhere aorta can read counts as unchecked,
+so the rule can only under-state coverage.
 PyTorch's own kernels are the common case: its device code is built without
 ASan and shipped compressed, and the report says so instead of passing.
 

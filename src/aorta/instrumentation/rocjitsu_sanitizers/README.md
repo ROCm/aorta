@@ -410,10 +410,16 @@ What that means per workload, measured on MI350:
 A workload that loads code objects by file (`hipModuleLoad`) must declare them with
 `asan_run.declare_code_objects`, or their kernels count as unchecked: the loader's
 record does not list them, and a workload may delete its build before the run ends,
-so a declaration records what each file defines when it is declared. A cell whose
+so a declaration records what each file defines when it is declared. A declaration is
+evidence only for the program that made it. A loaded file aorta cannot read, or that
+the loader recorded by a relative path, could hold the copy of a kernel that ran, so it
+leaves that process's kernels unchecked, as compressed device code does. A cell whose
 environment, mitigations or `extra_env` would change a setting the mode owns
-(`LD_PRELOAD`, `ASAN_OPTIONS`, `HSA_XNACK`, ...) is refused rather than run with the
-check silently off. A PASS under the mode has the same limits as a recipe PASS.
+(`LD_PRELOAD`, `ASAN_OPTIONS`, `HSA_XNACK`, ...) or which GPUs the workload sees
+(`HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, ...) is refused rather than run with the
+check silently off, or on GPUs the canary did not check; choose GPUs by setting their
+visibility before `aorta run`. A PASS under the mode has the same limits as a recipe
+PASS.
 
 ## Verdict and health rules
 
