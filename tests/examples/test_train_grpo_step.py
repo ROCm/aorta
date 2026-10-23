@@ -762,6 +762,26 @@ def test_sampling_and_the_loss_forward_evaluate_the_policy_under_one_numerics():
     assert reference.seen == [sampler.seen], "and so does the reference it is compared with"
 
 
+class _KwargRecorder(_SeedRecorder):
+    def generate(self, input_ids, **kw):
+        self.kwargs = kw
+        return super().generate(input_ids, **kw)
+
+
+def test_top_k_and_the_kv_cache_are_passed_to_generate_never_inherited():
+    """A model directory without generation_config.json gets top_k 50 and no KV cache from
+    transformers; the base model's own file says top_k 20. Passing both makes the directory irrelevant."""
+    model = _KwargRecorder()
+    trainer.generate(model, _PadTokenizer(), ["ab"], _GenArgs())
+    assert model.kwargs["top_k"] == trainer.DEFAULT_TOP_K == 20
+    assert model.kwargs["use_cache"] is True
+    args = _GenArgs()
+    args.top_k = 5
+    trainer.generate(model, _PadTokenizer(), ["ab"], args)
+    assert model.kwargs["top_k"] == 5
+    assert trainer.build_parser().parse_args(["--out", "x"]).top_k == 20
+
+
 def test_a_seed_count_that_does_not_match_the_prompts_is_an_error():
     with pytest.raises(ValueError, match="2 seed"):
         trainer.generate(_SeedRecorder(), _PadTokenizer(), ["a", "b", "c"], _GenArgs(),
