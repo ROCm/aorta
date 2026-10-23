@@ -4351,9 +4351,15 @@ def _asan_badge(label: str, cls: str) -> str:
 
 def _asan_control_badge(row: Mapping[str, Any]) -> str:
     verdict, expected = row["verdict"], row["expected"]
+    # Green only for the two outcomes that show ASan working; a check that ended without a
+    # usable verdict is never shown as a success, even when that is what it expected.
+    if verdict == "error":
+        return _asan_badge("error", "fail")
+    if verdict == "not_checked":
+        return _asan_badge("not checked", "warn")
     if verdict == expected:
         return _asan_badge("caught" if expected == "fail" else "clean", "pass")
-    if expected == "fail" and verdict in ("pass", "not_checked"):
+    if expected == "fail" and verdict == "pass":
         return _asan_badge("missed", "fail")
     if expected == "pass" and verdict == "fail":
         return _asan_badge("false alarm", "fail")
@@ -4442,6 +4448,12 @@ def _asan_findings_html(findings: list[dict[str, Any]], cls: str = "asan-finding
     return "".join(f'<span class="{cls}">{_esc(_asan_finding_text(item))}</span>' for item in findings)
 
 
+def _asan_no_findings_html(row: Mapping[str, Any], text: str) -> str:
+    if row["verdict"] == "error":
+        text = "no usable ASan report"
+    return f'<span class="dash">{_esc(text)}</span>'
+
+
 def _asan_workloads_html(rows: list[dict[str, Any]]) -> str:
     body = []
     for row in rows:
@@ -4453,7 +4465,7 @@ def _asan_workloads_html(rows: list[dict[str, Any]]) -> str:
         errors = (
             f"<span class=num>{len(findings)}</span>{_asan_findings_html(findings)}"
             if findings
-            else '<span class="dash">none</span>'
+            else _asan_no_findings_html(row, "none")
         )
         body.append(
             f"<tr>{_asan_name_cell(row, _asan_more_html('Command and details', details))}"
@@ -4487,7 +4499,7 @@ def _asan_controls_html(rows: list[dict[str, Any]]) -> str:
         reported = (
             _esc("; ".join(_asan_short_finding(item) for item in findings))
             if findings
-            else '<span class="dash">no memory error reported</span>'
+            else _asan_no_findings_html(row, "no memory error reported")
         )
         body.append(
             f"<tr>{_asan_name_cell(row, _asan_more_html('Full report', details))}"
@@ -4518,10 +4530,12 @@ def _asan_summary_html(run: Mapping[str, Any]) -> str:
     workloads = [row for row in run["rows"] if row["group"] == "workload"]
     controls = [row for row in run["rows"] if row["group"] == "control"]
     planted = [row for row in controls if row["expected"] == "fail"]
-    clean = [row for row in controls if row["expected"] != "fail"]
+    clean = [row for row in controls if row["expected"] == "pass"]
+    other = [row for row in controls if row["expected"] not in ("fail", "pass")]
     caught = sum(row["verdict"] == "fail" for row in planted)
-    stayed_clean = sum(row["verdict"] == row["expected"] for row in clean)
+    stayed_clean = sum(row["verdict"] == "pass" for row in clean)
     errors = sum(len(row["findings"]) for row in workloads)
+    no_report = sum(row["verdict"] == "error" for row in workloads)
     checked = sum(row["kernels"]["checked"] for row in workloads)
     reachable = sum(row["kernels"]["dispatched"] - _asan_outside(row) for row in workloads)
     outside = sum(_asan_outside(row) for row in workloads)
@@ -4532,11 +4546,17 @@ def _asan_summary_html(run: Mapping[str, Any]) -> str:
     if workloads and reachable and checked == reachable:
         sentences.append(f"Every {scope} kernel that ran was checked ({checked} of {reachable})")
     if workloads:
-        sentences.append(
-            "ASan reported no memory error in any workload"
-            if errors == 0
-            else f"ASan reported {errors} memory error{'' if errors == 1 else 's'} in the workloads"
-        )
+        if errors:
+            sentences.append(f"ASan reported {errors} memory error{'' if errors == 1 else 's'} in the workloads")
+        elif no_report < len(workloads):
+            sentences.append(
+                "ASan reported no memory error in any workload"
+                + (" with a usable report" if no_report else "")
+            )
+        if no_report:
+            sentences.append(
+                f"{no_report} workload{' ended' if no_report == 1 else 's ended'} without a usable ASan report"
+            )
     if planted:
         sentences.append(f"it caught {caught} of {len(planted)} planted bug{'' if len(planted) == 1 else 's'}")
     headline = ""
@@ -4558,24 +4578,29 @@ def _asan_summary_html(run: Mapping[str, Any]) -> str:
                 "info",
             )
         )
+        sub = f"across {len(workloads)} workload{'' if len(workloads) == 1 else 's'}"
+        if no_report:
+            sub += f"; {no_report} without a usable report"
         cards.append(
             _asan_card(
                 "Memory errors in workloads",
                 str(errors),
-                f"across {len(workloads)} workload{'' if len(workloads) == 1 else 's'}",
-                "ok" if errors == 0 else "bad",
+                _esc(sub),
+                "ok" if errors == 0 and no_report == 0 else "bad",
             )
         )
     if planted:
         sub = "reported with the kernel named"
         if clean:
             sub += f"; {stayed_clean} of {len(clean)} clean check{'' if len(clean) == 1 else 's'} stayed clean"
+        if other:
+            sub += f"; {len(other)} check{'' if len(other) == 1 else 's'} without a usable result"
         cards.append(
             _asan_card(
                 "Planted bugs caught",
                 f"{caught}<small>of {len(planted)}</small>",
                 _esc(sub),
-                "ok" if caught == len(planted) and stayed_clean == len(clean) else "bad",
+                "ok" if caught == len(planted) and stayed_clean == len(clean) and not other else "bad",
             )
         )
     if workloads and reachable:

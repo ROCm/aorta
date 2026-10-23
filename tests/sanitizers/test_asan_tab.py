@@ -236,19 +236,90 @@ def test_a_failed_workload_shows_the_asan_error_not_just_a_count():
     "control,badge",
     [
         pytest.param(_control(verdict="pass", findings=[]), "missed", id="planted-bug-missed"),
-        pytest.param(
-            _control(verdict="not_checked", findings=[], kernels={"dispatched": 1, "checked": 0}, unchecked="x"),
-            "missed",
-            id="planted-bug-not-checked",
-        ),
         pytest.param(_control(expected="pass"), "false alarm", id="clean-check-reported"),
-        pytest.param(_control(verdict="error", findings=[]), "expected fail, got error", id="error"),
+        pytest.param(
+            _control(expected="error", verdict="pass", findings=[]), "expected error, got pass", id="other-mismatch"
+        ),
     ],
 )
 def test_a_detection_check_with_the_wrong_outcome_is_flagged(control, badge):
     page = gen.asan_panel_html(_runs(control))
     assert f'<span class="v fail">{badge}</span>' in page
     assert ">caught<" not in page and ">clean<" not in page
+
+
+_NOT_CHECKED = {"findings": [], "kernels": {"dispatched": 1, "checked": 0}, "unchecked": "x"}
+
+
+@pytest.mark.parametrize(
+    "control,badge",
+    [
+        pytest.param(_control(verdict="error", findings=[]), '<span class="v fail">error</span>', id="planted-error"),
+        pytest.param(
+            _control(expected="error", verdict="error", findings=[]),
+            '<span class="v fail">error</span>',
+            id="expected-error",
+        ),
+        pytest.param(
+            _control(verdict="not_checked", **_NOT_CHECKED),
+            '<span class="v warn">not checked</span>',
+            id="planted-not-checked",
+        ),
+        pytest.param(
+            _control(expected="not_checked", verdict="not_checked", **_NOT_CHECKED),
+            '<span class="v warn">not checked</span>',
+            id="expected-not-checked",
+        ),
+    ],
+)
+def test_a_detection_check_without_a_usable_verdict_is_never_green(control, badge):
+    gen._check_asan_row(control, "row")
+    page = gen.asan_panel_html(_runs(_control(name="planted"), control))
+    assert badge in page
+    assert page.count('<span class="v pass">') == 1
+    planted = _card(page, "Planted bugs caught")
+    assert "asan-card bad" in planted
+
+
+@pytest.mark.parametrize("expected", ["error", "not_checked"])
+def test_a_check_expecting_no_usable_verdict_is_not_counted_as_a_clean_check(expected):
+    control = _control(expected=expected, verdict=expected, **_NOT_CHECKED)
+    if expected == "error":
+        control.pop("unchecked")
+        control["kernels"] = {"dispatched": 1, "checked": 1}
+    planted = _card(gen.asan_panel_html(_runs(_control(name="planted"), control)), "Planted bugs caught")
+    assert "clean check" not in planted
+    assert "1 check without a usable result" in planted and "asan-card bad" in planted
+
+
+def test_a_control_that_errored_does_not_claim_asan_reported_nothing():
+    page = gen.asan_panel_html(_runs(_control(verdict="error", findings=[])))
+    assert "no usable ASan report" in page and "no memory error reported" not in page
+
+
+def test_a_run_whose_workloads_all_errored_shows_no_success():
+    page = gen.asan_panel_html(_runs(_row(verdict="error", kernels={"dispatched": 0, "checked": 0})))
+    card = _card(page, "Memory errors in workloads")
+    assert "asan-card bad" in card and "1 without a usable report" in card
+    assert "no memory error in any workload" not in page
+    assert "1 workload ended without a usable ASan report" in page
+    assert "asan-card ok" not in page
+    assert '<span class="dash">no usable ASan report</span>' in page
+
+
+def test_an_errored_workload_beside_clean_ones_qualifies_the_headline():
+    page = gen.asan_panel_html(_runs(_row(), _row(name="other", verdict="error", findings=[])))
+    assert (
+        "ASan reported no memory error in any workload with a usable report; "
+        "1 workload ended without a usable ASan report." in page
+    )
+    assert "asan-card bad" in _card(page, "Memory errors in workloads")
+
+
+def test_an_unchecked_workload_alone_keeps_the_memory_error_card_green():
+    page = gen.asan_panel_html(_runs(_training()))
+    assert "asan-card ok" in _card(page, "Memory errors in workloads")
+    assert "no memory error in any workload." in page and "usable report" not in page
 
 
 def test_a_caught_bug_and_a_clean_check_get_their_own_badges():
