@@ -61,8 +61,8 @@ uv pip install -e .
 aorta --help
 ```
 
-Plain `pip` also works: `python -m pip install -e .`. Contributors who need
-the test and lint tools can use `uv pip install -e ".[dev]"`.
+Plain `pip` also works: `python -m pip install -e .`. To run the tests or the
+lint tools, follow the setup in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Optional dependencies
 
@@ -341,11 +341,7 @@ scripts/               # Launch, profiling, analysis tooling
 
 ## Development
 
-```bash
-uv pip install -e ".[dev]"
-pre-commit install
-pytest tests/
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, and pull requests.
 
 ---
 

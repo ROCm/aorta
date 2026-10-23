@@ -72,6 +72,9 @@ overlap_debug*/
 # generated corpus. The corpus rows next to them (*.jsonl) are output and stay
 # ignored; these labels are the input that survives a rebuild.
 !examples/rl/corpus/scenario_labels.json
+# Exception: the manual ASan results Pages adds to the sanitizer dashboard are
+# committed data, not run output -- there is no ASan nightly to write them.
+!docs/sanitizers/asan-manual-runs.json
 *_merged_enhanced.json
 nccl_thread_sweep_*.log
 nccl_thread_sweep_summary_*.txt

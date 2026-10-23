@@ -4,25 +4,26 @@
 Consumes the three daily recipe reports and the committed verdict baselines and
 emits, into ``--out-dir``:
 
-* ``index.html`` -- a self-contained (no CDN / no external JS) status page with two
-  tabs (a pure CSS ``:checked`` radio toggle -- switching needs no network):
-  **Expected behavior (guardrails)** -- the baseline-checked regression gate:
+* ``index.html`` -- a self-contained (no CDN / no external JS) status page whose
+  **Expected behavior (guardrails)** tab (a pure CSS ``:checked`` radio toggle --
+  switching needs no network) is the baseline-checked regression gate:
   baseline-health banner, latest per-recipe table, **per-kernel detail** (code
   object / SHA-256 / dispatch count / observed sanitizer verdict / finding count /
   the kernel's fail-closed reason, em dash when it has none),
-  and a cross-run history/trend table; and **Workload survey (observed-only)** --
-  kernels drawn from multiple workloads (including aorta-internal-sourced kernels
-  supplied via ``--survey`` and the caller-supplied ConSan cases from
-  ``--informational-results-dir``, #347) shown with the same kernel-detail shape
-  but **no expected/match column** (a fail / not_checked here is an observation,
-  never a regression). On both tabs a per-kernel-row ``Report`` column links the
+  and a cross-run history/trend table. A per-kernel-row ``Report`` column links the
   case's ``sanitizer_report.json`` (satisfying #367's per-row drill-down) and the
   card footer links its **run area** -- the published case *directory*, which also
   carries the sanitizer logs, the recipe as it ran and a REPRODUCE.md, so the
   reproduce command on the card is actionable (#384). Each case also carries a
   one-line observation summary.
 * ``summary.md`` -- a GitHub Actions job-summary fragment (append to
-  ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail.
+  ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail. When
+  survey cases are supplied (``--survey`` / ``--informational-results-dir``, #347)
+  it adds a **Workload survey (observed-only)** section with **no expected/match
+  column** (a fail / not_checked there is an observation, never a regression), and
+  their run areas are written under ``runs/<id>/survey/`` and listed on each run's
+  landing page. The survey is never rendered on ``index.html``, and the nightly
+  supplies no survey cases: its outputs are public.
 * ``data.json`` -- the aggregated structure for any richer consumer.
 * ``status.json`` -- a copy of the ``--status`` run manifest, when supplied, so
   Pages can distinguish a healthy snapshot from a stale one (a failed nightly).
@@ -30,6 +31,10 @@ emits, into ``--out-dir``:
 When ``--status`` points at an unhealthy manifest, an error-colored "stale" banner is
 rendered at the top of both ``index.html`` and ``summary.md`` so a failed nightly
 never leaves the previous healthy page looking current.
+
+The published page has a second tab, **AddressSanitizer (manual run)**, that this
+nightly never renders: ASan has no nightly lane, so Pages adds it at deploy time from
+committed results (``add_asan_tab`` / ``scripts/sanitizers/add_asan_tab.py``).
 
 Three input shapes are supported:
 
@@ -176,18 +181,15 @@ _CSS = """
     border:1px solid transparent; border-bottom:none; border-radius:10px 10px 0 0; margin-bottom:-1px;
     transition:color .15s ease, background .15s ease; }
   .tabbar label:hover { color:var(--text-2); }
-  #tab-guardrails:checked ~ .tabbar label[for="tab-guardrails"],
-  #tab-survey:checked ~ .tabbar label[for="tab-survey"] {
+  #tab-guardrails:checked ~ .tabbar label[for="tab-guardrails"] {
     color:var(--text-1); background:var(--panel);
     border-color:var(--border); border-bottom:1px solid var(--panel); }
   /* The radios are visually hidden (opacity:0) so they show no native focus ring;
      mirror :focus-visible onto the label so keyboard users can see the focused tab. */
-  #tab-guardrails:focus-visible ~ .tabbar label[for="tab-guardrails"],
-  #tab-survey:focus-visible ~ .tabbar label[for="tab-survey"] {
+  #tab-guardrails:focus-visible ~ .tabbar label[for="tab-guardrails"] {
     outline:2px solid var(--blue); outline-offset:-2px; }
   .tabpanel { display:none; }
   #tab-guardrails:checked ~ #panel-guardrails { display:block; }
-  #tab-survey:checked ~ #panel-survey { display:block; }
 
   .gate { display:flex; align-items:center; gap:13px; border-radius:var(--radius);
     padding:14px 16px; margin-bottom:12px; border:1px solid; border-left-width:3px; }
@@ -342,44 +344,6 @@ _CSS = """
   details.panel > summary .spacer { flex:1 1 auto; }
   .panel-body { padding:16px; }
 
-  .chips { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
-  .chip { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm);
-    padding:13px 15px; display:flex; gap:12px; align-items:center;
-    transition:border-color .16s ease, background .16s ease; }
-  .chip:hover { border-color:var(--border-hover); background:var(--raised); }
-  .chip .circle { width:34px; height:34px; flex:0 0 auto; border-radius:50%; display:grid; place-items:center; }
-  .chip .circle.blue   { background:rgba(59,130,246,.14); color:var(--blue);   box-shadow:0 0 0 1px rgba(59,130,246,.24) inset; }
-  .chip .circle.purple { background:rgba(139,92,246,.14); color:var(--purple); box-shadow:0 0 0 1px rgba(139,92,246,.24) inset; }
-  .chip .circle.green  { background:rgba(34,197,94,.14);  color:var(--green);  box-shadow:0 0 0 1px rgba(34,197,94,.24) inset; }
-  .chip .h { font-size:14px; font-weight:600; color:var(--text-1); display:block; }
-  .chip .d { font-size:13px; color:var(--text-3); display:block; margin-top:2px; line-height:1.4; }
-
-  .two-col { display:grid; grid-template-columns:1.85fr 1fr; gap:12px; align-items:start; margin-bottom:12px; }
-  .two-col > .panel { margin-bottom:0; }
-
-  /* Same reachability rule as .table-wrap: the five steps are fixed-width, so a
-     narrow viewport scrolls the band instead of spilling it out of its panel. */
-  .flow { display:flex; align-items:flex-start; justify-content:space-between; gap:4px;
-    padding:2px 0; overflow-x:auto; }
-  .step { display:flex; flex-direction:column; align-items:center; text-align:center; width:104px; }
-  /* Solid, deepened fills: white on the identity accents at 85% alpha measured
-     2.99:1 for green (WCAG AA needs 4.5:1 for this 11.5px bold text). These
-     opaque shades clear it -- blue 5.2:1, purple 5.7:1, green 5.0:1. */
-  .step-num { width:21px; height:21px; border-radius:50%; display:grid; place-items:center;
-    font-size:11.5px; font-weight:700; margin-bottom:7px; color:#fff; }
-  .step-num.blue { background:#2563EB; }
-  .step-num.purple { background:#7C3AED; }
-  .step-num.green { background:#15803D; }
-  .step .tile { width:46px; height:46px; border-radius:var(--radius-sm); }
-  .step .label { font-size:13px; font-weight:600; color:var(--text-1); margin-top:9px; line-height:1.25; }
-  .step .desc { font-size:12px; color:var(--text-3); margin-top:4px; line-height:1.35; }
-  .flow-arrow { color:rgba(148,163,184,.42); font-size:15px; margin-top:46px; flex:0 0 auto; }
-
-  .panel-note { margin-top:14px; display:flex; align-items:center; gap:10px; background:var(--inset);
-    border:1px solid var(--border); border-radius:var(--radius-sm); padding:11px 14px;
-    font-size:13px; color:var(--text-2); }
-  .panel-note svg { flex:0 0 auto; color:var(--text-3); }
-
   details.notes > summary { justify-content:space-between; }
   details.notes ul { list-style:none; margin:0; padding:0 16px 15px; display:flex; flex-direction:column; gap:11px; }
   details.notes li { display:flex; gap:9px; align-items:flex-start; font-size:13px; color:var(--text-2); line-height:1.45; }
@@ -387,17 +351,10 @@ _CSS = """
     margin-top:1px; background:rgba(34,197,94,.14); color:var(--green);
     box-shadow:0 0 0 1px rgba(34,197,94,.26) inset; }
 
-  .statline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:12px; }
-  .statline .lead { font-size:14px; color:var(--text-2); margin-right:4px; }
-  .kgroup-title .kname { font-family:var(--mono); font-size:16px; }
-  .survey-empty { font-size:14px; color:var(--text-2); margin:8px 0; }
-
   @media (max-width:1000px) {
     .topbar { flex-direction:column; } .runcard { width:100%; }
-    .two-col { grid-template-columns:1fr; }
-    .flow { flex-wrap:wrap; justify-content:center; gap:10px; }
   }
-  @media (max-width:720px) { .toolgrid, .chips { grid-template-columns:1fr; } }
+  @media (max-width:720px) { .toolgrid { grid-template-columns:1fr; } }
 """
 
 
@@ -418,24 +375,6 @@ _ICON_FILE = (
     '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
     '<polyline points="14 2 14 8 20 8"/>'
 )
-_ICON_FOLDER = '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>'
-_ICON_CODE = '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>'
-_ICON_LAYOUT = (
-    '<rect x="3" y="3" width="18" height="18" rx="2"/>'
-    '<line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/>'
-)
-_ICON_SEARCH = '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'
-_ICON_BUG = (
-    '<path d="m8 2 1.9 1.9M14.1 3.9 16 2"/><path d="M9 7.1v-1a3 3 0 1 1 6 0v1"/>'
-    '<path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/>'
-    '<path d="M12 20v-9M6 13H2M22 13h-4"/>'
-    '<path d="M6.5 9C4.6 8.8 3 7.1 3 5M21 5c0 2.1-1.6 3.8-3.5 4"/>'
-    '<path d="M3 21c0-2.1 1.7-3.9 3.8-4M17.2 17c2.1.1 3.8 1.9 3.8 4"/>'
-)
-_ICON_REPEAT = (
-    '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>'
-    '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'
-)
 
 
 def _svg(body: str, *, size: int = 18, width: float = 2, cls: str = "") -> str:
@@ -455,9 +394,8 @@ def _chevron_html() -> str:
 def _tool_cards_html() -> str:
     """WaitCheck / ConSan explainer cards.
 
-    Page level, above the tab bar: both tabs surface results from both
-    sanitizers, so the definitions are common context. Tab-specific framing
-    (the gate banner, the observed-only banner) lives inside each tab.
+    Page level, above the tab bar: they define the two sanitizers the page
+    reports on. Tab-specific framing (the gate banner) lives inside its tab.
     """
     return (
         '<section class="toolgrid">'
@@ -501,10 +439,10 @@ def _run_card_html(meta: dict[str, Any]) -> str:
 
 
 def _gate_hero_html(summary: dict[str, Any]) -> str:
-    """The Tab 1 gate banner: state on one line, detail on the next.
+    """The guardrails-tab gate banner: state on one line, detail on the next.
 
-    Lives inside Tab 1, not the page header -- baselines do not exist on the
-    survey tab, so a gate verdict is meaningless there.
+    Lives inside the guardrails tab, not the page header -- baselines do not
+    exist for the ASan tab, so a gate verdict is meaningless there.
     """
     cls = "ok" if summary["ok"] else "bad"
     icon = _ICON_CHECK if summary["ok"] else _ICON_INFO
@@ -1055,7 +993,7 @@ def _observation_text(
     """A one-line human summary of what a case observed.
 
     Combines the primary sanitizer + verdict + fail-closed reason + a finding
-    highlight into a compact string surfaced on both tabs (guardrail and survey).
+    highlight into a compact string surfaced for guardrail and survey cases alike.
     Observational only -- it never encodes a pass/fail health signal.
 
     ``kernel_reasons`` are the ``_kernel_reason_entries`` of the kernels that did not
@@ -1415,7 +1353,7 @@ def _run_record(
     *,
     rel: str | None = None,
 ) -> dict[str, Any]:
-    # Guardrail rows are the baseline-checked class (Tab 1). Tag them so data.json
+    # Guardrail rows are the baseline-checked class. Tag them so data.json
     # carries the guardrail/survey case-class split; survey cases live in a separate
     # ``survey`` list attached by ``main`` to the run each list describes.
     for r in rows.values():
@@ -1660,7 +1598,7 @@ def survey_cases_from_spec(
 ) -> list[dict[str, Any]]:
     """Build ordered observed-only *survey* case entries from a spec (pure-ish).
 
-    The survey tab shows kernels drawn from multiple workloads -- including kernels
+    The survey covers kernels drawn from multiple workloads -- including kernels
     extracted from aorta-internal workloads -- with no expected/baseline signal. To
     keep this public repo free of customer/NDA identifiers (CLAUDE.md rule #4), the
     survey *data* is supplied at run time via ``--survey`` (JSON), never hardcoded
@@ -1727,7 +1665,7 @@ def survey_cases_from_spec(
                 # Optional kernel-group key so a spec can render both sanitizers of
                 # one kernel under a single heading (defaults to the case name -> a
                 # standalone case). ``command`` is an optional copy-paste reproduce
-                # line surfaced on Tab 2 (#374 B/C).
+                # line surfaced with the case (#374 B/C).
                 "group": str(case.get("group", name)),
                 "group_label": case.get("group_label"),
                 "sanitizer": sanitizer,
@@ -1749,13 +1687,11 @@ def survey_cases_from_spec(
                 # only a name that is one plain path segment can be claimed, since
                 # the area link is built from it and `..` would traverse.
                 #
-                # The two renderers derive this link from different sources -- the
-                # run page builds ``survey/<name>/`` relative to the run it is
-                # rendering, the card footer takes the directory of ``report_rel``
-                # -- so they can only be trusted if the *whole* area is pinned to
-                # one run. Comparing only the case segment was not enough: a report
-                # under ``runs/other/survey/foo/`` matched ``name="foo"`` while the
-                # footer pointed into a different run. Require the complete path
+                # The run page builds ``survey/<name>/`` relative to the run it is
+                # rendering, so the link can only be trusted if ``report_rel`` pins
+                # the *whole* area to that run. Comparing only the case segment was
+                # not enough: a report under ``runs/other/survey/foo/`` matched
+                # ``name="foo"`` while it lived in a different run. Require the complete path
                 # for the run being rendered, which is exactly what the
                 # informational builder constructs, so the two agree by
                 # construction. Without a run context (``rel=None``) nothing can be
@@ -1776,10 +1712,10 @@ def survey_cases_from_spec(
 
 
 # The recipe that actually produces each best-effort survey case's report, so the
-# "reproduce this yourself" command on Tab 2 is the REAL recipe rather than a
+# "reproduce this yourself" command for a survey case is the REAL recipe rather than a
 # name-derived guess. Most case dirs (``<sanitizer>-<group>``) map to
 # ``daily-<case>.yaml``, but the gemm waitcheck survey uses a dedicated object recipe
-# (``daily-waitcheck-gemm.yaml`` is the *gated* Tab-1 guardrail and is never reused
+# (``daily-waitcheck-gemm.yaml`` is the *gated* guardrail and is never reused
 # for the survey). Recipe names are generic/public -- no customer/NDA identifiers.
 _SURVEY_RECIPE: dict[str, str] = {
     "waitcheck-gemm": "daily-waitcheck-gemm-object",
@@ -1824,7 +1760,7 @@ def survey_cases_from_informational_dir(
     """Build observed-only *survey* entries from a caller-supplied results dir.
 
     Enumerates ``root/<case>/sanitizer_report.json`` (the layout the nightly writes
-    for its best-effort survey recipes) and folds each case into the same Tab 2
+    for its best-effort survey recipes) and folds each case into the same
     workload-survey shape ``survey_cases_from_spec`` produces -- kernel name,
     dispatch, observed verdict, findings, code object / SHA, selection meta, and a
     one-line observation carrying any fail-closed reason. Each entry is observed-only
@@ -1989,9 +1925,9 @@ def _safe_case_segment(name: Any) -> str | None:
     The run page's area link is ``survey/<name>/``, and ``name`` on a ``--survey``
     entry is caller-supplied JSON. HTML-escaping that attribute does not neutralise
     path semantics, so a name like ``../../other`` would render a traversal link --
-    and would also disagree with the card footer, which derives its link from the
-    separately-validated ``report_rel``. Requiring a single segment makes the two
-    agree by construction, since ``report_rel`` is built as
+    and would also disagree with the separately-validated ``report_rel``.
+    Requiring a single segment makes the two agree by construction, since
+    ``report_rel`` is built as
     ``<rel>/survey/<name>/sanitizer_report.json`` from this same value.
     """
     if not isinstance(name, str) or not _CASE_SEGMENT_RE.fullmatch(name):
@@ -3119,7 +3055,7 @@ def case_dir_up(case_dir: Path, out_dir: Path) -> tuple[str, str]:
     """Relative paths from a case dir back to ``(dashboard root, its run dir)``.
 
     Derived from the published depth rather than hardcoded per caller, because
-    the two tabs sit at different depths -- ``runs/<id>/<case>/`` for a guardrail
+    the two case classes sit at different depths -- ``runs/<id>/<case>/`` for a guardrail
     case and ``runs/<id>/survey/<case>/`` for a survey one -- and an off-by-one
     here is a broken back-link on a page nothing else links to.
     """
@@ -3144,7 +3080,7 @@ def build_case_index_html(
     GitHub Pages does not auto-index a directory, so this page is what makes the
     card footer's directory link resolve at all. ``up`` / ``run_up`` are the
     relative paths back to the dashboard root and to this case's run area (case
-    dirs sit at different depths on the two tabs; see ``case_dir_up``).
+    dirs sit at different depths for guardrail and survey cases; see ``case_dir_up``).
     """
     observed = env.get("observed") or {}
     rows = "".join(
@@ -3460,7 +3396,7 @@ _VERDICT_CLASS: dict[str, str] = {
 def _verdict_html(verdict: Any) -> str:
     """Render an observed sanitizer verdict as a tinted badge.
 
-    Used by *both* tabs. Verdict colour is descriptive, never a health signal:
+    Verdict colour is descriptive, never a health signal:
     on the guardrail tab a red ``fail`` sitting beside a solid green "Expected
     outcome" pill is a positive control behaving as designed. The solid baseline
     pill is what carries regression health, and it outranks this badge visually.
@@ -3470,16 +3406,10 @@ def _verdict_html(verdict: Any) -> str:
     return f'<span class="v {cls}">{_esc(text)}</span>'
 
 
-def _execution_html(execution: Any, *, observed: bool = False) -> str:
-    """Execution status: plain when complete, otherwise flagged.
-
-    ``observed=True`` (the survey tab) renders a non-complete status as plain
-    text. Tab 2 promises observed-only rendering, and the committed ConSan
-    survey reports carry ``execution_status: "error"``; that is an observation,
-    not a regression, so it must not get the guardrail tab's red badge.
-    """
+def _execution_html(execution: Any) -> str:
+    """Execution status: plain when complete, otherwise flagged."""
     text = str(execution)
-    if text == "complete" or observed:
+    if text == "complete":
         return _esc(text)
     return f'<span class="v fail">{_esc(text)}</span>'
 
@@ -3601,7 +3531,6 @@ def _fact_html(label: str, value: str, *, mono: bool = False) -> str:
 def _facts_html(
     row: dict[str, Any],
     *,
-    observed: bool = False,
     extra: tuple[tuple[str, str], ...] = (),
 ) -> str:
     """Backend / selection / kernels / execution as a borderless label/value grid.
@@ -3609,7 +3538,7 @@ def _facts_html(
     Replaces the old middot-separated meta line. A row of bordered chips reads
     as a tab strip, so these are plain label-over-value pairs on a grid.
     ``extra`` prepends caller-supplied pairs (the guardrail tab leads with
-    observed/expected). ``observed=True`` keeps execution un-health-coloured.
+    observed/expected).
     """
     wl = row["worklist"]
     items = [_fact_html(label, value) for label, value in extra]
@@ -3622,7 +3551,7 @@ def _facts_html(
         )
     )
     items.append(_fact_html("Kernels", _esc(str(wl["kernel_count"]))))
-    items.append(_fact_html("Execution", _execution_html(row["execution"], observed=observed)))
+    items.append(_fact_html("Execution", _execution_html(row["execution"])))
     return f'<div class="kv">{"".join(items)}</div>'
 
 
@@ -3631,19 +3560,19 @@ def _kernel_tables_html(
     *,
     report_rel: str | None = None,
 ) -> str:
-    """The shared kernel-detail + findings tables (identical shape on both tabs).
+    """The kernel-detail + findings tables of a guardrail card.
 
     ``report_rel`` is the case's raw ``sanitizer_report.json`` link; when it is a
     safe relative path it is rendered in a per-row **Report** column so every
-    kernel row drills down to the report (#367's per-row acceptance criterion),
-    for both the guardrail and survey callers. It degrades to an em dash when the
+    kernel row drills down to the report (#367's per-row acceptance criterion).
+    It degrades to an em dash when the
     case carries no link -- an absent report, an unsafe caller value, or an input
     mode (results-dir / runs-root) that publishes no co-located reports -- so no
     dead or unsafe link is ever emitted. All kernel rows of one case share the
     single case-level report, so they all point at the same file.
 
-    Both tabs render the same tinted ``_verdict_html`` badge per kernel; verdict
-    colour is descriptive on either tab (see ``_verdict_html``).
+    Each kernel gets the tinted ``_verdict_html`` badge; verdict colour is
+    descriptive (see ``_verdict_html``).
 
     The **Detail** column carries the row's ``detail``: the kernel's own fail-closed
     reason, or -- for a kernel whose object was deduped into an earlier scan -- the
@@ -3690,7 +3619,7 @@ def _kernel_tables_html(
     )
 
 
-def _raw_link_html(report_rel: str | None, *, staged: bool = True) -> str:
+def _raw_link_html(report_rel: str | None) -> str:
     """The run-area link, as a card footer.
 
     Points at the case's published *directory*, not just its
@@ -3698,19 +3627,14 @@ def _raw_link_html(report_rel: str | None, *, staged: bool = True) -> str:
     verdict came from, the recipe as it ran, its source-level inputs and a
     REPRODUCE.md, which is what makes the card's reproduce command actionable
     (#384). The per-kernel-row ``Report`` column still links the JSON directly
-    for a schema drill-down.
-
-    ``staged=False`` emits nothing. A directory link needs an ``index.html`` that
-    only the publisher of the area can write, so a case whose *report* was staged
-    by someone else (a ``--survey`` spec supplying an inline report) has a
-    reachable JSON but no reachable directory. Guardrail rows default to ``True``:
-    their ``report_rel`` is generator-computed for present cases, and the same
-    loop publishes the area it names.
+    for a schema drill-down. A guardrail row's ``report_rel`` is
+    generator-computed for present cases, and the same loop publishes the area
+    it names, so the directory link always has an ``index.html`` behind it.
 
     Deliberately in the card body rather than the ``<summary>`` row: a link
     inside a summary competes with the disclosure toggle.
     """
-    rel = _case_dir_rel(report_rel) if staged else None
+    rel = _case_dir_rel(report_rel)
     if not rel:
         return ""
     return f'<div class="card-foot"><a href="{_esc(rel)}">run area</a></div>'
@@ -3786,7 +3710,7 @@ def _card_summary_html(
 
 
 def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
-    """Tab 1 (guardrails): expected-vs-observed kernel detail with baseline status.
+    """Guardrails tab: expected-vs-observed kernel detail with baseline status.
 
     One collapsed ``<details>`` card per recipe. Pure HTML disclosure -- no JS,
     matching the CSS-radio tabs.
@@ -3826,105 +3750,6 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
-_SURVEY_CHIPS: tuple[tuple[str, str, str, str], ...] = (
-    ("blue", _ICON_SEARCH, "Understand kernel behavior",
-     "See how real kernels behave under sanitizers."),
-    ("purple", _ICON_BUG, "Investigate sanitizer findings",
-     "Review issues detected by WaitCheck or ConSan."),
-    ("green", _ICON_REPEAT, "Reproduce issues locally",
-     "Use provided commands to reproduce runs."),
-)
-
-# Workload -> kernel -> waitcheck -> consan -> dashboard, as a horizontal band.
-# Numbered, with a one-line description per node so the diagram needs no legend.
-_SURVEY_FLOW: tuple[tuple[str, str, str, str], ...] = (
-    ("blue", _ICON_FOLDER, "Workload", "Run a workload or test recipe"),
-    ("blue", _ICON_CODE, "Kernel Generated", "GPU kernel is compiled / extracted"),
-    ("purple", _ICON_SHIELD, "WaitCheck Analysis", "Static scan for s_waitcnt hazards"),
-    ("green", _ICON_ACTIVITY, "ConSan Analysis", "Runtime data-race / concurrency check"),
-    ("blue", _ICON_LAYOUT, "Dashboard Results", "Reports shown under each sanitizer"),
-)
-
-_SURVEY_NOTES: tuple[str, ...] = (
-    "This tab is informational only and does not affect nightly pass/fail status.",
-    "Findings represent observed behavior, not regressions.",
-    "Where both sanitizers produced a report the kernel appears under each; "
-    "a skipped or missing scan still appears, marked report missing with no verdict.",
-    "Every case lists the recipe that produced the kernel and a reproducible command.",
-)
-
-
-def _survey_flow_html() -> str:
-    parts: list[str] = []
-    for index, (accent, icon, label, desc) in enumerate(_SURVEY_FLOW, start=1):
-        if parts:
-            parts.append('<span class="flow-arrow">&#8594;</span>')
-        parts.append(
-            f'<div class="step"><span class="step-num {accent}">{index}</span>'
-            f'<div class="tile {accent}">{_svg(icon, size=22, width=1.85)}</div>'
-            f'<div class="label">{_esc(label)}</div>'
-            f'<div class="desc">{_esc(desc)}</div></div>'
-        )
-    return f'<div class="flow">{"".join(parts)}</div>'
-
-
-def _survey_note_html() -> str:
-    """The workload-survey tab's orientation panel.
-
-    States plainly that Tab 2 is observed-only / non-gating, lists what the tab
-    is for, and shows how a result is produced. The WaitCheck / ConSan
-    definitions are *not* here -- they are page-level cards shown above the tab
-    bar, because Tab 1 reports the same two sanitizers and needs them too.
-    """
-    chips = "".join(
-        f'<div class="chip"><span class="circle {accent}">{_svg(icon, size=16, width=1.95)}</span>'
-        f'<span><span class="h">{_esc(head)}</span>'
-        f'<span class="d">{_esc(desc)}</span></span></div>'
-        for accent, icon, head, desc in _SURVEY_CHIPS
-    )
-    notes = "".join(
-        f'<li><span class="check">{_svg(_ICON_CHECK, size=10, width=3.5)}</span>{_esc(note)}</li>'
-        for note in _SURVEY_NOTES
-    )
-    return (
-        '<div class="info-banner">'
-        f"{_svg(_ICON_INFO, size=18, width=2)}"
-        "<p><strong>This tab is observational only.</strong> Results do not affect "
-        "nightly pass/fail status and should be interpreted independently.</p></div>"
-        f'<section class="panel"><h2>What You Can Do Here</h2>'
-        f'<div class="chips">{chips}</div></section>'
-        '<div class="two-col">'
-        '<div class="panel"><h2>How Results Are Produced</h2>'
-        f"{_survey_flow_html()}"
-        f'<div class="panel-note">{_svg(_ICON_FILE, size=16, width=1.8)}'
-        "Each result includes the workload/recipe and a copy-paste command to "
-        "reproduce the run.</div></div>"
-        '<details class="panel notes" open><summary>Important Notes'
-        f"{_chevron_html()}</summary><ul>{notes}</ul></details>"
-        "</div>"
-    )
-
-
-def _sanitizer_name(entry: dict[str, Any]) -> str:
-    """Card title: the sanitizer's product name."""
-    san = str(entry.get("sanitizer") or "").strip().lower()
-    if san == "waitcheck":
-        return "WaitCheck"
-    if san == "consan":
-        return "ConSan"
-    return str(entry.get("label") or san or "sanitizer")
-
-
-def _sanitizer_kind(entry: dict[str, Any]) -> str:
-    """Card subtitle: what the sanitizer does, in four words."""
-    san = str(entry.get("sanitizer") or "").strip().lower()
-    if san == "waitcheck":
-        return "static wait-count scan"
-    if san == "consan":
-        return "dynamic data-race check"
-    return ""
-
-
 def _survey_group_label(group: str, entries: list[dict[str, Any]]) -> str:
     """A readable kernel-group heading. Prefer an entry-supplied group label, else
     prettify the group key (``lds-dispatch`` -> ``lds dispatch``)."""
@@ -3933,33 +3758,6 @@ def _survey_group_label(group: str, entries: list[dict[str, Any]]) -> str:
         if gl:
             return str(gl)
     return group.replace("-", " ").replace("_", " ")
-
-
-def _survey_panel_title(group: str, entries: list[dict[str, Any]]) -> str:
-    """Heading for a kernel-group panel.
-
-    A lone ungrouped case leads with its own ``label``: the group key falls back
-    to its terser ``name``, so the label is the only human name it has. Grouped
-    kernels use the shared group label. Roll-up table rows keep using
-    ``_survey_group_label`` so the HTML and markdown mirrors stay in parity.
-    """
-    if len(entries) == 1 and entries[0].get("label"):
-        return str(entries[0]["label"])
-    return _survey_group_label(group, entries)
-
-
-def _survey_howto_html(entry: dict[str, Any]) -> str:
-    """A copy-pasteable "reproduce this run yourself" strip (empty when unknown)."""
-    command = entry.get("command")
-    if not command:
-        return ""
-    # Label outside the box, matching the run area: with it inside, the box read
-    # as a code block whose first token was "REPRODUCE", and selecting the box to
-    # copy the command picked the label up too.
-    return (
-        '<p class="cap">Reproduce</p>'
-        f'<div class="repro"><code>{_esc(str(command))}</code></div>'
-    )
 
 
 # The inline survey callout is one line, so its text is length-capped. When a
@@ -3979,8 +3777,7 @@ def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     a coverage-incomplete ConSan run), and surfacing a ``Finding:`` there would hide
     the reason the requirement says errored cases must show inline. warn/fail cases
     lead with the top finding example, falling back to a reason if present. Returns
-    ``("", "")`` when there is nothing to say. Single source of truth so the HTML and
-    MD twins stay in parity.
+    ``("", "")`` when there is nothing to say.
     """
     verdict = str(row.get("verdict") or "").strip().lower()
     reason = (row.get("primary") or {}).get("reason")
@@ -4021,36 +3818,15 @@ def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
-def _survey_message_html(row: dict[str, Any]) -> str:
-    """The human-readable outcome message shown INLINE on the page (#374 E).
-
-    Surfaces the actual finding / error text on Tab 2 itself, not only behind the
-    raw-report link, with error-reason-first precedence (see ``_survey_message_parts``).
-    Empty when there is nothing to say.
-    """
-    label, text = _survey_message_parts(row)
-    if not text:
-        return ""
-    tone = _tone_for(row.get("verdict"))
-    cls = f"observation {tone}".strip()
-    return (
-        f'<div class="{cls}"><span class="lbl">{_esc(label)}</span>'
-        f'<span class="msg">{_esc(text)}</span></div>'
-    )
-
-
-_SANITIZER_RANK = {"waitcheck": 0, "consan": 1}
-
-
 def _group_survey_entries(
     survey: list[dict[str, Any]],
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     """Group survey entries by kernel-group key, preserving first-seen order (pure).
 
-    The single source of truth for the Tab 2 kernel grouping: both the roll-up
-    summary table and the per-kernel detail blocks consume this same structure, so
-    a kernel scanned by both waitcheck and ConSan is one group with a sub-entry per
-    sanitizer. Returns an ordered ``[(group_key, entries), ...]`` list.
+    The single source of truth for the survey kernel grouping: the roll-up
+    summary table consumes this structure, so a kernel scanned by both waitcheck
+    and ConSan is one group with a sub-entry per sanitizer. Returns an ordered
+    ``[(group_key, entries), ...]`` list.
     """
     order: list[str] = []
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -4080,11 +3856,58 @@ def _survey_verdict_bucket(row: dict[str, Any]) -> str:
 def _survey_present_runs(entries: list[dict[str, Any]]) -> int:
     """Sanitizer runs in a kernel group that actually produced a report (pure).
 
-    Single source of truth for "how many runs", so the kernel-group heading and the
-    roll-up headline agree: an absent report still renders a card (with no verdict)
-    but it is not a run.
+    Single source of truth for "how many runs" in the roll-up headline: an absent
+    report still lists its case (with no verdict) but it is not a run.
     """
     return sum(1 for entry in entries if (entry.get("summary") or {}).get("present"))
+
+
+def _positive_kernel_count(raw: object) -> int:
+    """A declared ``kernel_count`` that is safe to add, else 0.
+
+    ``summarize_case`` forwards the field from untrusted ``--survey`` JSON without
+    coercing it. Only a positive ``int`` is a count. ``bool`` is an ``int``
+    subclass and is not one; a string, list, or object must not abort the render.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return 0
+    return raw
+
+
+def _survey_group_kernels(entries: list[dict[str, Any]]) -> int:
+    """Distinct kernels a group's present reports selected (pure).
+
+    A symbol compiled into two code objects is two kernels: multiplicity inside
+    one report is kept. Names are then matched across the group's sanitizers, and
+    each name contributes the larger of the two counts, so a kernel that both
+    waitcheck and ConSan checked counts once. A report that lists no kernels
+    contributes its declared ``kernel_count`` instead, when that field is a
+    positive int.
+    """
+    multiplicity: dict[str, int] = {}
+    declared = 0
+    for entry in entries:
+        row = entry.get("summary") or {}
+        if not row.get("present"):
+            continue
+        listed: dict[str, int] = {}
+        for kernel in row.get("kernels") or []:
+            if not isinstance(kernel, dict):
+                continue
+            name = kernel.get("name")
+            if not name:
+                continue
+            key = str(name)
+            listed[key] = listed.get(key, 0) + 1
+        if listed:
+            for name, count in listed.items():
+                multiplicity[name] = max(multiplicity.get(name, 0), count)
+        else:
+            declared = max(
+                declared,
+                _positive_kernel_count((row.get("worklist") or {}).get("kernel_count")),
+            )
+    return max(sum(multiplicity.values()), declared)
 
 
 def _survey_summary_stats(
@@ -4092,22 +3915,25 @@ def _survey_summary_stats(
 ) -> dict[str, Any]:
     """Aggregate grouped survey entries into observed-only roll-up counts (pure).
 
-    Returns ``{"kernels": K, "runs": M, "verdicts": {bucket: n}}`` where ``kernels``
-    is the number of kernel groups, ``runs`` is the number of sanitizer runs that
-    actually produced a report (absent sanitizer cells are not runs), and
-    ``verdicts`` sums exactly to ``runs``. These are observations of what the
-    sanitizers saw -- they never gate and carry no regression semantics.
+    Returns ``{"workloads": W, "kernels": K, "runs": M, "verdicts": {bucket: n}}``
+    where ``workloads`` is the number of groups, ``kernels`` sums each group's
+    distinct kernels (a model workload holds dozens), ``runs`` is the number of
+    sanitizer runs that actually produced a report (absent sanitizer cells are not
+    runs), and ``verdicts`` sums exactly to ``runs``. These are observations of
+    what the sanitizers saw -- they never gate and carry no regression semantics.
     """
     verdicts = dict.fromkeys(_SURVEY_VERDICT_BUCKETS, 0)
     runs = 0
+    kernels = 0
     for _key, entries in groups:
         runs += _survey_present_runs(entries)
+        kernels += _survey_group_kernels(entries)
         for entry in entries:
             row = entry.get("summary") or {}
             if not row.get("present"):
                 continue
             verdicts[_survey_verdict_bucket(row)] += 1
-    return {"kernels": len(groups), "runs": runs, "verdicts": verdicts}
+    return {"workloads": len(groups), "kernels": kernels, "runs": runs, "verdicts": verdicts}
 
 
 def _survey_headline(stats: dict[str, Any]) -> str:
@@ -4119,34 +3945,14 @@ def _survey_headline(stats: dict[str, Any]) -> str:
     verdicts = stats.get("verdicts", {})
     parts = [f"{n} {bucket}" for bucket in _SURVEY_VERDICT_BUCKETS if (n := verdicts.get(bucket, 0))]
     breakdown = " \u00b7 ".join(parts) if parts else "no sanitizer runs"
+    workloads = int(stats.get("workloads", 0))
     kernels = int(stats.get("kernels", 0))
     runs = int(stats.get("runs", 0))
     return (
-        f"Surveyed {kernels} kernel{'' if kernels == 1 else 's'} across "
+        f"Surveyed {workloads} workload{'' if workloads == 1 else 's'} "
+        f"({kernels} kernel{'' if kernels == 1 else 's'}) across "
         f"{runs} sanitizer run{'' if runs == 1 else 's'} \u2014 {breakdown}"
     )
-
-
-def _survey_headline_html(stats: dict[str, Any]) -> str:
-    """The roll-up stat strip: a lead sentence plus one badge per verdict bucket.
-
-    Same arithmetic as ``_survey_headline`` (which stays the MD twin); the
-    badges reuse the shared verdict colours so the strip matches the table.
-    """
-    verdicts = stats.get("verdicts", {})
-    kernels = int(stats.get("kernels", 0))
-    runs = int(stats.get("runs", 0))
-    lead = (
-        f'<span class="lead">Surveyed <b>{kernels} kernel'
-        f"{'' if kernels == 1 else 's'}</b> across <b>{runs} sanitizer run"
-        f"{'' if runs == 1 else 's'}</b></span>"
-    )
-    badges = "".join(
-        f'<span class="v {_VERDICT_CLASS.get(bucket, "neutral")}">{n} {_esc(bucket)}</span>'
-        for bucket in _SURVEY_VERDICT_BUCKETS
-        if (n := verdicts.get(bucket, 0))
-    )
-    return lead + (badges or '<span class="v neutral">no sanitizer runs</span>')
 
 
 def _survey_group_by_sanitizer(
@@ -4195,143 +4001,11 @@ def _survey_group_note(entries: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _survey_summary_cell_html(entry: dict[str, Any] | None) -> str:
-    """A verdict-badge roll-up cell, or an em dash when the sanitizer did not run."""
-    row = (entry or {}).get("summary") or {}
-    if entry is None or not row.get("present"):
-        return '<span class="dash">&mdash;</span>'
-    return _verdict_html(row.get("verdict"))
-
-
-def _survey_summary_table_html(
-    groups: list[tuple[str, list[dict[str, Any]]]],
-) -> str:
-    """The Tab 2 roll-up: a headline stat + one row per kernel (pure).
-
-    Columns: Kernel | waitcheck | ConSan | Findings | Note. Verdict cells reuse the
-    tinted ``_verdict_html`` badges; a sanitizer not run for a kernel shows
-    an em dash rather than a fabricated verdict. Observed-only: nothing here gates.
-    Empty groups render nothing (the caller shows the empty-state note).
-    """
-    if not groups:
-        return ""
-    stats = _survey_summary_stats(groups)
-    rows: list[str] = []
-    for key, entries in groups:
-        by_san = _survey_group_by_sanitizer(entries)
-        note = _survey_group_note(entries)
-        note_html = f"<td class=mono>{_esc(note)}</td>" if note else '<td class="dash">&mdash;</td>'
-        rows.append(
-            f"<tr><td class=mono>{_esc(_survey_group_label(key, entries))}</td>"
-            f"<td>{_survey_summary_cell_html(by_san.get('waitcheck'))}</td>"
-            f"<td>{_survey_summary_cell_html(by_san.get('consan'))}</td>"
-            f"<td class=num>{_survey_group_findings(entries)}</td>"
-            f"{note_html}</tr>"
-        )
-    return (
-        '<section class="panel survey-summary"><h2>Survey summary</h2>'
-        f'<div class="statline">{_survey_headline_html(stats)}</div>'
-        '<div class="table-wrap"><table><thead>'
-        "<tr><th>Kernel</th><th>WaitCheck</th><th>ConSan</th>"
-        "<th class=num>Findings</th><th>Note</th></tr></thead>"
-        f'<tbody>{"".join(rows)}</tbody></table></div></section>'
-    )
-
-
-def _survey_case_html(entry: dict[str, Any], *, heading: str, kind: str = "") -> str:
-    """One observed-only survey case as a collapsed ``<details>`` card.
-
-    The summary row carries the verdict badge and findings count so a reader can
-    triage every case without expanding any of them. The body holds the facts
-    grid, the inline finding/reason, the reproduce command and the tables. An
-    absent report keeps its originating workload but drops the facts that would
-    describe a report that was never produced.
-    """
-    row = entry["summary"]
-    san = str(entry.get("sanitizer") or "").strip().lower()
-    accent = {"waitcheck": "wc", "consan": "cs"}.get(san, "nu")
-    icon = _ICON_SHIELD if accent == "wc" else _ICON_ACTIVITY
-    trailing = f"{_verdict_html(row['verdict'])}{_findings_chip_html(row)}"
-    summary = _card_summary_html(
-        accent=accent, icon=icon, name=heading, kind=kind, trailing=trailing
-    )
-    workload = entry.get("workload")
-    extra: tuple[tuple[str, str], ...] = (
-        (("Source", _esc(str(workload))),) if workload else ()
-    )
-    if not row["present"]:
-        # Provenance only: the rest of the facts grid (backend, selection,
-        # execution) would describe a report that does not exist. The source
-        # still belongs here -- the MD twin names it on this branch too.
-        facts = "".join(_fact_html(label, value) for label, value in extra)
-        body = (
-            (f'<div class="kv">{facts}</div>' if facts else "")
-            + _observation_html(row, tone=_tone_for(row["verdict"]))
-            + _survey_message_html(row)
-            + _survey_howto_html(entry)
-        )
-    else:
-        body = (
-            _facts_html(row, observed=True, extra=extra)
-            + _observation_html(row, tone=_tone_for(row["verdict"]))
-            + _survey_message_html(row)
-            + _survey_howto_html(entry)
-            + _kernel_tables_html(row, report_rel=entry.get("report_rel"))
-            + _raw_link_html(entry.get("report_rel"), staged=bool(entry.get("staged")))
-        )
-    return (
-        f'<details class="kcard {accent}">{summary}'
-        f'<div class="kcard-body">{body}</div></details>'
-    )
-
-
-def _survey_detail_html(survey: list[dict[str, Any]]) -> str:
-    """Tab 2 (workload survey): observed-only kernel detail, no expected/match column.
-
-    Cases sharing a ``group`` key (e.g. the same kernel run under both waitcheck and
-    ConSan) render under one kernel-group heading with a sanitizer sub-block each
-    (waitcheck first, then ConSan). A lone case renders on its own. Verdicts are
-    solid color-coded chips and the actual message is shown inline (#374 C/D/E).
-    """
-    if not survey:
-        return (
-            f"{_survey_note_html()}"
-            '<p class="survey-empty">No workload-survey kernels in this run.</p>'
-        )
-    grouped = _group_survey_entries(survey)
-    # Roll-up summary (headline + one row per kernel) sits above the detail blocks
-    # so the reader sees coverage + outcomes at a glance without scrolling.
-    blocks: list[str] = [_survey_note_html(), _survey_summary_table_html(grouped)]
-    for key, entries in grouped:
-        ordered = sorted(
-            entries, key=lambda e: _SANITIZER_RANK.get(str(e.get("sanitizer")), 99)
-        )
-        # Counting spec entries instead would show "2 sanitizer runs" on a group
-        # whose second report is missing while the roll-up above it counts one.
-        runs = _survey_present_runs(ordered)
-        cards = "".join(
-            _survey_case_html(
-                entry,
-                heading=_sanitizer_name(entry),
-                kind=_sanitizer_kind(entry),
-            )
-            for entry in ordered
-        )
-        blocks.append(
-            '<section class="panel"><h2 class="kgroup-title">'
-            f'<span class="kname">{_esc(_survey_panel_title(key, entries))}</span>'
-            f'<span class="count">{runs} sanitizer run{"" if runs == 1 else "s"}</span>'
-            f"</h2>{cards}</section>"
-        )
-    return "".join(blocks)
-
-
 def build_html(
     runs: list[dict[str, Any]],
     *,
     title: str = "Sanitizers Nightly",
     status: dict[str, Any] | None = None,
-    survey: list[dict[str, Any]] | None = None,
 ) -> str:
     banner = _status_banner_html(status)
     if not runs:
@@ -4412,7 +4086,7 @@ def build_html(
       <div class="brand-tile">{_svg(_ICON_ACTIVITY, size=24, width=2)}</div>
       <div>
         <h1>{_esc(title)}</h1>
-        <p class="subtitle">GPU sanitizer guardrails and workload survey</p>
+        <p class="subtitle">GPU sanitizer guardrails</p>
       </div>
     </header>
     {_run_card_html(meta)}
@@ -4422,10 +4096,8 @@ def build_html(
 
   <div class=tabs>
   <input type=radio name=santab id=tab-guardrails class=tabradio checked>
-  <input type=radio name=santab id=tab-survey class=tabradio>
   <div class=tabbar>
     <label for="tab-guardrails">Expected behavior (guardrails)</label>
-    <label for="tab-survey">Workload survey (observed-only)</label>
   </div>
 
   <section class=tabpanel id=panel-guardrails>
@@ -4459,13 +4131,607 @@ def build_html(
     </table></div></div>
   </details>
   </section>
-
-  <section class=tabpanel id=panel-survey>
-  {_survey_detail_html(survey or [])}
-  </section>
   </div>
 </div></body></html>
 """
+
+
+# AddressSanitizer has no nightly lane: the CI GPU image ships no ASan runtime, so
+# its results come from manual runs and are committed to the repo rather than
+# written to sanitizer-results by this workflow. Pages adds them to the page it
+# copied from that branch (add_asan_tab), so the nightly's own page, history and
+# data.json stay exactly what the nightly measured.
+ASAN_RESULTS_SCHEMA = "aorta.asan_manual_runs/1"
+
+# Run-mode verdicts (asan_run.Verdict values) and how the tab spells them.
+_ASAN_VERDICTS: dict[str, str] = {
+    "pass": "pass",
+    "fail": "fail",
+    "error": "error",
+    "not_checked": "not checked",
+}
+
+_ASAN_TAB_LABEL = "AddressSanitizer (manual run)"
+
+_ASAN_TAB_CSS = """
+  #tab-asan:checked ~ .tabbar label[for="tab-asan"] {
+    color:var(--text-1); background:var(--panel);
+    border-color:var(--border); border-bottom:1px solid var(--panel); }
+  #tab-asan:focus-visible ~ .tabbar label[for="tab-asan"] {
+    outline:2px solid var(--blue); outline-offset:-2px; }
+  #tab-asan:checked ~ #panel-asan { display:block; }
+  .asan-desc { display:block; font-family:inherit; font-size:13px; color:var(--text-3); margin-top:2px; }
+  .asan-lead { font-size:14px; color:var(--text-2); margin:0 0 12px; line-height:1.5; }
+  .asan-heading { font-size:20px; font-weight:600; margin:24px 0 12px; }
+  .asan-headline { font-size:16px; color:var(--text-1); margin:4px 0 6px; line-height:1.5; }
+  .asan-prov { display:flex; flex-wrap:wrap; gap:4px 18px; font-size:13px; color:var(--text-3);
+    margin:0 0 14px; }
+  .asan-prov b { color:var(--text-2); font-weight:600; }
+  .asan-prov a { color:var(--blue); }
+  .asan-cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr));
+    gap:12px; margin-bottom:12px; }
+  .asan-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    border-top:3px solid var(--accent); padding:14px 16px; box-shadow:var(--shadow); --accent:var(--blue); }
+  .asan-card.ok { --accent:var(--green); }
+  .asan-card.bad { --accent:var(--v-fail); }
+  .asan-card .k { font-size:var(--fs-kvk); color:var(--text-3); text-transform:uppercase;
+    letter-spacing:.05em; font-weight:600; }
+  .asan-card .big { font-size:32px; font-weight:700; color:var(--text-1); line-height:1.15;
+    margin:6px 0 4px; font-variant-numeric:tabular-nums; }
+  .asan-card .big small { font-size:15px; font-weight:600; color:var(--text-3); margin-left:4px; }
+  .asan-card .sub { font-size:13px; color:var(--text-3); line-height:1.4; }
+  .asan-key { display:flex; flex-wrap:wrap; gap:6px 18px; font-size:12.5px; color:var(--text-3); margin:0 0 10px; }
+  .asan-key span { display:inline-flex; align-items:center; gap:6px; }
+  .asan-sw { display:inline-block; width:12px; height:12px; border-radius:3px; }
+  .asan-bar { display:flex; height:9px; border-radius:999px; overflow:hidden; background:var(--sunken);
+    min-width:160px; box-shadow:0 0 0 1px var(--border) inset; }
+  .asan-bar > span { display:block; height:100%; }
+  .asan-ok { background:var(--green); }
+  .asan-out { background:repeating-linear-gradient(45deg, rgba(148,163,184,.55) 0 3px, rgba(148,163,184,.22) 3px 6px); }
+  .asan-gap { background:var(--v-warn); }
+  .asan-cov-text { font-size:13px; color:var(--text-3); margin-top:6px; font-variant-numeric:tabular-nums; }
+  .asan-cov-text b { color:var(--text-1); font-weight:600; }
+  details.asan-more { margin-top:6px; }
+  details.asan-more > summary { cursor:pointer; font-size:13px; color:var(--blue); list-style:none;
+    user-select:none; display:inline-flex; align-items:center; gap:4px; }
+  details.asan-more > summary::-webkit-details-marker { display:none; }
+  details.asan-more > summary:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
+  details.asan-more .chevron { width:14px; height:14px; }
+  .asan-detail { margin-top:8px; padding:10px 12px; background:var(--inset); border:1px solid var(--border);
+    border-radius:var(--radius-sm); font-size:13px; color:var(--text-2); line-height:1.5; }
+  .asan-detail .k { color:var(--text-3); text-transform:uppercase; font-size:11.5px; font-weight:600;
+    letter-spacing:.05em; display:block; margin-top:6px; }
+  .asan-detail .k:first-child { margin-top:0; }
+  .asan-detail .mono { word-break:break-word; color:var(--text-1); }
+  .asan-finding { display:block; font-size:13px; color:#FCA5A5; margin-top:4px; word-break:break-word; }
+  .asan-report { display:block; font-family:var(--mono); font-size:12.5px; color:var(--text-1); word-break:break-word; }
+  .asan-scope { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .asan-scope h3 { font-size:var(--fs-kvk); text-transform:uppercase; letter-spacing:.05em; font-weight:600;
+    margin:0 0 10px; color:var(--text-3); }
+  .asan-scope ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:9px; }
+  .asan-scope li { display:flex; gap:9px; align-items:flex-start; font-size:13.5px; color:var(--text-2); line-height:1.45; }
+  .asan-scope > div { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px; }
+  .asan-mark { flex:0 0 auto; width:17px; height:17px; border-radius:50%; display:grid; place-items:center; margin-top:1px; }
+  .asan-mark.yes { background:rgba(34,197,94,.14); color:var(--green); box-shadow:0 0 0 1px rgba(34,197,94,.26) inset; }
+  .asan-mark.no { background:rgba(148,163,184,.12); color:var(--text-3); box-shadow:0 0 0 1px rgba(148,163,184,.26) inset; }
+  .asan-notes { margin:12px 0 0; padding:0; list-style:none; font-size:13px; color:var(--text-3); line-height:1.5; }
+  .asan-notes li + li { margin-top:6px; }
+  @media (max-width:760px) { .asan-scope { grid-template-columns:1fr; } }
+"""
+
+_ASAN_LEGEND: tuple[str, ...] = (
+    "pass: every kernel the workload dispatched ran from ASan-instrumented device code, "
+    "and ASan reported no memory error.",
+    "not checked: ASan reported no memory error, but some kernels ran from device code it "
+    "cannot instrument (striped in the coverage bar), so it cannot vouch for the whole run. "
+    "This is the run mode's own verdict, shown unchanged.",
+    "caught: a detection check planted a memory bug and ASan reported it, naming the kernel. "
+    "clean: a check with nothing planted, and ASan reported nothing. Either outcome is the "
+    "one the check expects.",
+    "memory error: ASan reported a memory error in a workload. error: the run ended without "
+    "a usable ASan report.",
+)
+
+_ASAN_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+
+
+def _asan_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _asan_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _check_asan_row(row: Any, where: str) -> None:
+    """Refuse a row whose fields contradict the run mode's verdict rules.
+
+    The page shows these rows as measurements, so a ``pass`` with an unchecked kernel,
+    a ``fail`` with no finding, or more kernels checked than dispatched is an error in
+    the committed file, not something to render.
+    """
+    if not isinstance(row, dict):
+        raise ValueError(f"{where} is not an object")
+    group = row.get("group")
+    if group not in ("workload", "control"):
+        raise ValueError(f"{where}.group must be 'workload' or 'control'")
+    for key in ("name", "description") + (("command",) if group == "workload" else ()):
+        if not _asan_text(row.get(key)):
+            raise ValueError(f"{where}.{key} must be a non-empty string")
+    verdict = row.get("verdict")
+    if verdict not in _ASAN_VERDICTS:
+        raise ValueError(f"{where}.verdict must be one of {sorted(_ASAN_VERDICTS)}")
+    expected = row.get("expected")
+    if group == "control" and expected not in _ASAN_VERDICTS:
+        raise ValueError(f"{where}: a control must name its expected verdict")
+    if group == "workload" and expected is not None:
+        raise ValueError(f"{where}: only a control has an expected verdict")
+    kernels = row.get("kernels")
+    if not isinstance(kernels, dict):
+        raise ValueError(f"{where}.kernels must be an object")
+    dispatched, checked = kernels.get("dispatched"), kernels.get("checked")
+    if not (_asan_count(dispatched) and _asan_count(checked) and checked <= dispatched):
+        raise ValueError(f"{where}.kernels needs counts with 0 <= checked <= dispatched")
+    unchecked = row.get("unchecked")
+    if checked < dispatched and not _asan_text(unchecked):
+        raise ValueError(f"{where}.unchecked must say why {dispatched - checked} kernel(s) were not checked")
+    if checked == dispatched and unchecked is not None:
+        raise ValueError(f"{where}.unchecked is set but every kernel was checked")
+    outside = row.get("unchecked_outside_asan", False)
+    if not isinstance(outside, bool):
+        raise ValueError(f"{where}.unchecked_outside_asan must be true or false")
+    if outside and checked == dispatched:
+        raise ValueError(f"{where}.unchecked_outside_asan is set but every kernel was checked")
+    findings = row.get("findings")
+    if not isinstance(findings, list) or not all(
+        isinstance(finding, dict) and _asan_text(finding.get("code")) for finding in findings
+    ):
+        raise ValueError(f"{where}.findings must be a list of objects with a 'code'")
+    if (verdict == "fail") != bool(findings):
+        raise ValueError(f"{where}: a fail verdict needs findings, and only a fail has them")
+    if verdict == "pass" and (dispatched == 0 or checked < dispatched):
+        raise ValueError(f"{where}: pass needs at least one kernel and every kernel checked")
+    if verdict == "not_checked" and checked == dispatched and dispatched > 0:
+        raise ValueError(f"{where}: not_checked with every kernel checked is a pass")
+
+
+def load_asan_runs(path: Path) -> list[dict[str, Any]]:
+    """The committed manual ASan runs, validated (raises ``ValueError``)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{path}: unreadable ({error})") from error
+    if not isinstance(data, dict) or data.get("schema") != ASAN_RESULTS_SCHEMA:
+        raise ValueError(f"{path}: schema is not {ASAN_RESULTS_SCHEMA!r}")
+    runs = data.get("runs")
+    if not isinstance(runs, list) or not runs:
+        raise ValueError(f"{path}: 'runs' must be a non-empty list")
+    for index, run in enumerate(runs):
+        where = f"{path}: runs[{index}]"
+        if not isinstance(run, dict):
+            raise ValueError(f"{where} is not an object")
+        for key in ("date", "gpu", "run_mode"):
+            if not _asan_text(run.get(key)):
+                raise ValueError(f"{where}.{key} must be a non-empty string")
+        if not _ASAN_DATE_RE.match(run["date"]):
+            raise ValueError(f"{where}.date must be YYYY-MM-DD")
+        if "kernel_scope" in run and not _asan_text(run["kernel_scope"]):
+            raise ValueError(f"{where}.kernel_scope must be a non-empty string")
+        for key in ("stack", "notes", "covered", "not_covered"):
+            items = run.get(key, [])
+            if not isinstance(items, list) or not all(_asan_text(item) for item in items):
+                raise ValueError(f"{where}.{key} must be a list of non-empty strings")
+        if not run.get("stack"):
+            raise ValueError(f"{where}.stack must name the software the run used")
+        url = run.get("run_mode_url")
+        if url is not None and not (isinstance(url, str) and url.startswith("https://")):
+            raise ValueError(f"{where}.run_mode_url must be an https:// URL")
+        rows = run.get("rows")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"{where}.rows must be a non-empty list")
+        for row_index, row in enumerate(rows):
+            _check_asan_row(row, f"{where}.rows[{row_index}]")
+    return runs
+
+
+# How the tab badges a row: (label, .v colour class). A workload keeps the run
+# mode's verdict; a detection check is judged against what it expects, so a planted
+# bug that ASan reports reads as the success it is.
+_ASAN_WORKLOAD_BADGES: dict[str, tuple[str, str]] = {
+    "pass": ("pass", "pass"),
+    "not_checked": ("not checked", "warn"),
+    "fail": ("memory error", "fail"),
+    "error": ("error", "fail"),
+}
+
+
+def _asan_badge(label: str, cls: str) -> str:
+    return f'<span class="v {cls}">{_esc(label)}</span>'
+
+
+def _asan_control_badge(row: Mapping[str, Any]) -> str:
+    verdict, expected = row["verdict"], row["expected"]
+    # Green only for the two outcomes that show ASan working; a check that ended without a
+    # usable verdict is never shown as a success, even when that is what it expected.
+    if verdict == "error":
+        return _asan_badge("error", "fail")
+    if verdict == "not_checked":
+        return _asan_badge("not checked", "warn")
+    if verdict == expected:
+        return _asan_badge("caught" if expected == "fail" else "clean", "pass")
+    if expected == "fail" and verdict == "pass":
+        return _asan_badge("missed", "fail")
+    if expected == "pass" and verdict == "fail":
+        return _asan_badge("false alarm", "fail")
+    return _asan_badge(f"expected {_ASAN_VERDICTS[expected]}, got {_ASAN_VERDICTS[verdict]}", "fail")
+
+
+def _asan_expected_html(expected: str) -> str:
+    text = {"fail": "ASan reports it", "pass": "nothing to report"}.get(expected, _ASAN_VERDICTS[expected])
+    return f'<span class="dash">{_esc(text)}</span>'
+
+
+def _asan_finding_text(finding: Mapping[str, Any]) -> str:
+    """One ASan finding as a sentence: what, how, where, in which kernel (pure)."""
+    parts = [str(finding["code"])]
+    access, size = finding.get("access"), finding.get("size")
+    if access:
+        parts.append(f"{access} of size {size}" if size is not None else str(access))
+    if finding.get("region"):
+        parts.append(str(finding["region"]))
+    text = ", ".join(parts)
+    if finding.get("kernel"):
+        text += f", in {finding['kernel']}"
+    if finding.get("location"):
+        text += f" at {finding['location']}"
+    return text
+
+
+def _asan_short_finding(finding: Mapping[str, Any]) -> str:
+    access, size = finding.get("access"), finding.get("size")
+    how = f" {access} of {size} bytes" if access and size is not None else (f" {access}" if access else "")
+    return f"{finding['code']}{how}"
+
+
+def _asan_outside(row: Mapping[str, Any]) -> int:
+    """Kernels the row dispatched that ASan cannot instrument at all."""
+    kernels = row["kernels"]
+    return kernels["dispatched"] - kernels["checked"] if row.get("unchecked_outside_asan") else 0
+
+
+def _asan_pct(part: int, whole: int) -> str:
+    return f"{100 * part / whole:.4g}%" if whole else "0%"
+
+
+def _asan_coverage_html(row: Mapping[str, Any]) -> str:
+    """A bar of checked kernels against the rest, and the exact counts under it (pure)."""
+    kernels = row["kernels"]
+    dispatched, checked = kernels["dispatched"], kernels["checked"]
+    outside = _asan_outside(row)
+    gap = dispatched - checked - outside
+    segments = "".join(
+        f'<span class="{cls}" style="width:{_asan_pct(count, dispatched)}" title="{_esc(title)}"></span>'
+        for cls, count, title in (
+            ("asan-ok", checked, f"{checked} checked"),
+            ("asan-out", outside, f"{outside} outside ASan's reach"),
+            ("asan-gap", gap, f"{gap} not checked"),
+        )
+        if count
+    )
+    text = f"<b>{checked}</b> of {dispatched} kernel{'' if dispatched == 1 else 's'} checked"
+    if outside:
+        text += f" &middot; {outside} outside ASan's reach"
+    if gap:
+        text += f" &middot; {gap} not checked"
+    label = f"{checked} of {dispatched} kernels checked"
+    return (
+        f'<div class="asan-bar" role="img" aria-label="{label}">{segments}</div>'
+        f'<div class="asan-cov-text">{text}</div>'
+    )
+
+
+def _asan_more_html(summary: str, items: list[tuple[str, str]]) -> str:
+    body = "".join(f'<span class="k">{_esc(label)}</span>{value}' for label, value in items)
+    return (
+        f'<details class="asan-more"><summary>{_esc(summary)}{_chevron_html()}</summary>'
+        f'<div class="asan-detail">{body}</div></details>'
+    )
+
+
+def _asan_name_cell(row: Mapping[str, Any], details: str) -> str:
+    # A workload's name is the identifier aorta knows it by; a control's is prose.
+    name = f"<span class=mono>{_esc(row['name'])}</span>" if row["group"] == "workload" else _esc(row["name"])
+    return f"<td>{name}<span class=asan-desc>{_esc(row['description'])}</span>{details}</td>"
+
+
+def _asan_findings_html(findings: list[dict[str, Any]], cls: str = "asan-finding") -> str:
+    return "".join(f'<span class="{cls}">{_esc(_asan_finding_text(item))}</span>' for item in findings)
+
+
+def _asan_no_findings_html(row: Mapping[str, Any], text: str) -> str:
+    if row["verdict"] == "error":
+        text = "no usable ASan report"
+    return f'<span class="dash">{_esc(text)}</span>'
+
+
+def _asan_workloads_html(rows: list[dict[str, Any]]) -> str:
+    body = []
+    for row in rows:
+        details = [("Command", f"<span class=mono>{_esc(row['command'])}</span>")]
+        if row.get("unchecked"):
+            details.append(("Not checked", _esc(row["unchecked"])))
+        label, cls = _ASAN_WORKLOAD_BADGES[row["verdict"]]
+        findings = row["findings"]
+        errors = (
+            f"<span class=num>{len(findings)}</span>{_asan_findings_html(findings)}"
+            if findings
+            else _asan_no_findings_html(row, "none")
+        )
+        body.append(
+            f"<tr>{_asan_name_cell(row, _asan_more_html('Command and details', details))}"
+            f"<td>{_asan_badge(label, cls)}</td>"
+            f"<td>{_asan_coverage_html(row)}</td>"
+            f"<td class=wrap-any>{errors}</td></tr>"
+        )
+    key = (
+        '<div class="asan-key">'
+        '<span><i class="asan-sw asan-ok"></i>checked by ASan</span>'
+        '<span><i class="asan-sw asan-out"></i>outside ASan&#39;s reach (why: under each workload&#39;s details)</span>'
+        "</div>"
+    )
+    return (
+        f'<section class="panel"><h2>Workloads <span class=count>{len(rows)} '
+        f'workload{"" if len(rows) == 1 else "s"}</span></h2>{key}'
+        '<div class="table-wrap"><table><thead><tr><th>Workload</th><th>Result</th>'
+        "<th>Kernel coverage</th><th>Memory errors</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table></div></section>"
+    )
+
+
+def _asan_controls_html(rows: list[dict[str, Any]]) -> str:
+    body = []
+    for row in rows:
+        kernels = row["kernels"]
+        findings = row["findings"]
+        details = [("Kernels checked", f"{kernels['checked']} of {kernels['dispatched']}")]
+        if findings:
+            details.append(("ASan report", _asan_findings_html(findings, "asan-report")))
+        reported = (
+            _esc("; ".join(_asan_short_finding(item) for item in findings))
+            if findings
+            else _asan_no_findings_html(row, "no memory error reported")
+        )
+        body.append(
+            f"<tr>{_asan_name_cell(row, _asan_more_html('Full report', details))}"
+            f"<td>{_asan_control_badge(row)}</td>"
+            f"<td>{_asan_expected_html(row['expected'])}</td>"
+            f"<td class=wrap-any>{reported}</td></tr>"
+        )
+    return (
+        f'<section class="panel"><h2>Detection checks (planted bugs) <span class=count>{len(rows)} '
+        f'check{"" if len(rows) == 1 else "s"}</span></h2>'
+        '<p class="asan-lead">Each check plants a known out-of-bounds access, or deliberately '
+        "none, in the same run, so it shows whether ASan catches memory errors on this stack.</p>"
+        '<div class="table-wrap"><table><thead><tr><th>Check</th><th>Result</th>'
+        "<th>Expected</th><th>What ASan reported</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table></div></section>"
+    )
+
+
+def _asan_card(title: str, value: str, sub: str, tone: str) -> str:
+    return (
+        f'<div class="asan-card {tone}"><div class="k">{_esc(title)}</div>'
+        f'<div class="big">{value}</div><div class="sub">{sub}</div></div>'
+    )
+
+
+def _asan_summary_html(run: Mapping[str, Any]) -> str:
+    """The run's headline sentence and summary cards, computed from its rows (pure)."""
+    workloads = [row for row in run["rows"] if row["group"] == "workload"]
+    controls = [row for row in run["rows"] if row["group"] == "control"]
+    planted = [row for row in controls if row["expected"] == "fail"]
+    clean = [row for row in controls if row["expected"] == "pass"]
+    other = [row for row in controls if row["expected"] not in ("fail", "pass")]
+    caught = sum(row["verdict"] == "fail" for row in planted)
+    stayed_clean = sum(row["verdict"] == "pass" for row in clean)
+    errors = sum(len(row["findings"]) for row in workloads)
+    no_report = sum(row["verdict"] == "error" for row in workloads)
+    checked = sum(row["kernels"]["checked"] for row in workloads)
+    reachable = sum(row["kernels"]["dispatched"] - _asan_outside(row) for row in workloads)
+    outside = sum(_asan_outside(row) for row in workloads)
+    # kernel_scope names the instrumentable kernels as an adjective, e.g. "PyTorch and HIP".
+    scope = run.get("kernel_scope", "instrumentable")
+
+    sentences = []
+    if workloads and reachable and checked == reachable:
+        sentences.append(f"Every {scope} kernel that ran was checked ({checked} of {reachable})")
+    if workloads:
+        if errors:
+            sentences.append(f"ASan reported {errors} memory error{'' if errors == 1 else 's'} in the workloads")
+        elif no_report < len(workloads):
+            sentences.append(
+                "ASan reported no memory error in any workload"
+                + (" with a usable report" if no_report else "")
+            )
+        if no_report:
+            sentences.append(
+                f"{no_report} workload{' ended' if no_report == 1 else 's ended'} without a usable ASan report"
+            )
+    if planted:
+        sentences.append(f"it caught {caught} of {len(planted)} planted bug{'' if len(planted) == 1 else 's'}")
+    headline = ""
+    if sentences:
+        text = "; ".join(sentences)
+        headline = f'<p class="asan-headline">{_esc(text[0].upper() + text[1:])}.</p>'
+
+    counts: dict[str, int] = {}
+    for row in workloads:
+        label = _ASAN_WORKLOAD_BADGES[row["verdict"]][0]
+        counts[label] = counts.get(label, 0) + 1
+    cards = []
+    if workloads:
+        cards.append(
+            _asan_card(
+                "Workloads run",
+                str(len(workloads)),
+                _esc(", ".join(f"{n} {label}" for label, n in counts.items())),
+                "info",
+            )
+        )
+        sub = f"across {len(workloads)} workload{'' if len(workloads) == 1 else 's'}"
+        if no_report:
+            sub += f"; {no_report} without a usable report"
+        cards.append(
+            _asan_card(
+                "Memory errors in workloads",
+                str(errors),
+                _esc(sub),
+                "ok" if errors == 0 and no_report == 0 else "bad",
+            )
+        )
+    if planted:
+        sub = "reported with the kernel named"
+        if clean:
+            sub += f"; {stayed_clean} of {len(clean)} clean check{'' if len(clean) == 1 else 's'} stayed clean"
+        if other:
+            sub += f"; {len(other)} check{'' if len(other) == 1 else 's'} without a usable result"
+        cards.append(
+            _asan_card(
+                "Planted bugs caught",
+                f"{caught}<small>of {len(planted)}</small>",
+                _esc(sub),
+                "ok" if caught == len(planted) and stayed_clean == len(clean) and not other else "bad",
+            )
+        )
+    if workloads and reachable:
+        sub = f"{checked} of {reachable}"
+        if outside:
+            sub += f"; {outside} library GEMM{'' if outside == 1 else 's'} outside ASan's reach"
+        cards.append(
+            _asan_card(
+                f"{scope[0].upper()}{scope[1:]} kernels checked",
+                _asan_pct(checked, reachable),
+                _esc(sub),
+                "ok" if checked == reachable else "bad",
+            )
+        )
+    return headline + (f'<div class="asan-cards">{"".join(cards)}</div>' if cards else "")
+
+
+_ICON_MINUS = '<line x1="6" y1="12" x2="18" y2="12"/>'
+
+
+def _asan_scope_html(run: Mapping[str, Any]) -> str:
+    covered, not_covered = run.get("covered", []), run.get("not_covered", [])
+    notes = run.get("notes", [])
+    if not (covered or not_covered or notes):
+        return ""
+    columns = []
+    for title, mark, icon, items in (
+        ("Checked on this stack", "yes", _ICON_CHECK, covered),
+        ("Not checked on this stack", "no", _ICON_MINUS, not_covered),
+    ):
+        if not items:
+            continue
+        badge = f'<span class="asan-mark {mark}">{_svg(icon, size=10, width=3.5)}</span>'
+        entries = "".join(f"<li>{badge}<span>{_esc(item)}</span></li>" for item in items)
+        columns.append(f"<div><h3>{title}</h3><ul>{entries}</ul></div>")
+    scope = f'<div class="asan-scope">{"".join(columns)}</div>' if columns else ""
+    notes_html = ""
+    if notes:
+        notes_html = '<ul class="asan-notes">' + "".join(f"<li>{_esc(note)}</li>" for note in notes) + "</ul>"
+    return f'<section class="panel"><h2>What ASan covers here</h2>{scope}{notes_html}</section>'
+
+
+def _asan_run_html(run: Mapping[str, Any]) -> str:
+    """One manual run: summary, provenance, workloads, detection checks, scope (pure)."""
+    mode = _esc(run["run_mode"])
+    if run.get("run_mode_url"):
+        mode = f'<a href="{_esc(run["run_mode_url"])}">{mode}</a>'
+    provenance = (
+        '<div class="asan-prov">'
+        f"<span><b>Manual run</b> {_esc(run['date'])}</span>"
+        f"<span><b>GPU</b> {_esc(run['gpu'])}</span>"
+        + "".join(f"<span>{_esc(item)}</span>" for item in run["stack"])
+        + f"<span><b>Run mode</b> {mode}</span></div>"
+    )
+    workloads = [row for row in run["rows"] if row["group"] == "workload"]
+    controls = [row for row in run["rows"] if row["group"] == "control"]
+    return (
+        _asan_summary_html(run)
+        + provenance
+        + (_asan_workloads_html(workloads) if workloads else "")
+        + (_asan_controls_html(controls) if controls else "")
+        + _asan_scope_html(run)
+    )
+
+
+def asan_panel_html(runs: list[dict[str, Any]]) -> str:
+    """The ASan tab's content for validated ``runs`` (pure)."""
+    dates = sorted({run["date"] for run in runs})
+    legend = "".join(
+        f'<li><span class="check">{_svg(_ICON_CHECK, size=10, width=3.5)}</span>{_esc(line)}</li>'
+        for line in _ASAN_LEGEND
+    )
+    return (
+        '<div class="info-banner">'
+        f"{_svg(_ICON_INFO, size=18, width=2)}"
+        "<p><strong>Manual runs, not a nightly lane.</strong> These results were "
+        f"produced by hand ({_esc(', '.join(dates))}) and committed to the repo. The CI "
+        "GPU image has no ASan runtime yet, so nothing on this tab is refreshed nightly "
+        "or affects nightly pass/fail.</p></div>"
+        + "".join(_asan_run_html(run) for run in runs)
+        + '<details class="panel notes"><summary>Reading the results'
+        f"{_chevron_html()}</summary><ul>{legend}</ul></details>"
+    )
+
+
+# Anchored on the guardrails tab: the one tab every nightly page has, including a
+# page an older generator rendered that Pages is still serving.
+_TAB_RADIO_RE = re.compile(r"<input type=radio name=santab id=tab-guardrails class=tabradio checked>")
+_TAB_LABEL_RE = re.compile(r'<label for="tab-guardrails">[^<]*</label>')
+_TABS_END_RE = re.compile(r"</section>\s*(</div>\s*</div></body></html>\s*)\Z")
+_PAGE_END = "</div></body></html>"
+
+
+def add_asan_tab(page: str, runs: list[dict[str, Any]]) -> str:
+    """``page`` with an ASan tab beside the nightly's guardrails tab (pure).
+
+    ``page`` is what ``build_html`` renders: the tabbed page, or the no-runs page,
+    which has no tabs to join and so gets the results as a section of its own.
+    Raises ``ValueError`` rather than guess where the tab belongs when the markup it
+    joins is not there, or when the page already has one.
+    """
+    if "id=tab-asan" in page or "id=panel-asan" in page:
+        raise ValueError("page already has an ASan tab")
+    if page.count("</head>") != 1:
+        raise ValueError("page has no single </head> to add the tab's style to")
+    panel = asan_panel_html(runs)
+    radio, label = _TAB_RADIO_RE.search(page), _TAB_LABEL_RE.search(page)
+    if radio and label:
+        end = _TABS_END_RE.search(page)
+        if end is None or not radio.end() <= label.start() < label.end() <= end.start():
+            raise ValueError("page does not end with the tab panels this tab joins")
+        page = (
+            page[: radio.end()]
+            + "\n  <input type=radio name=santab id=tab-asan class=tabradio>"
+            + page[radio.end() : label.end()]
+            + f'\n    <label for="tab-asan">{_esc(_ASAN_TAB_LABEL)}</label>'
+            + page[label.end() : end.start(1)]
+            + f"<section class=tabpanel id=panel-asan>\n  {panel}\n  </section>\n  "
+            + page[end.start(1) :]
+        )
+    elif radio is None and label is None and page.count(_PAGE_END) == 1:
+        at = page.index(_PAGE_END)
+        page = (
+            page[:at]
+            + f"<section id=panel-asan><h2 class=asan-heading>{_esc(_ASAN_TAB_LABEL)}</h2>\n"
+            + f"{panel}</section>\n"
+            + page[at:]
+        )
+    else:
+        raise ValueError("page has neither the nightly's tab bar nor the no-runs layout")
+    return page.replace("</head>", f"<style>{_ASAN_TAB_CSS}</style></head>", 1)
 
 
 def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
@@ -4487,8 +4753,8 @@ def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
 
     The link path itself goes through ``_safe_case_segment``, because ``name`` is
     caller-supplied on a spec entry: a staged spec naming ``../../other`` would
-    otherwise render a traversal link here while the card footer -- which derives
-    its link from the validated ``report_rel`` -- pointed somewhere else entirely.
+    otherwise render a traversal link here while the validated ``report_rel``
+    pointed somewhere else entirely.
     """
     if not survey:
         return ""
@@ -4560,7 +4826,7 @@ def build_run_index_html(
     Lives at ``runs/<id>/index.html`` alongside the run's raw reports, so the
     report links are case-local (``<case>/sanitizer_report.json``) rather than
     dashboard-root-relative. ``survey`` adds the observed-only cases published
-    under ``survey/<case>/`` for this run, so the page covers both tabs.
+    under ``survey/<case>/`` for this run, so the page covers both case classes.
     """
     meta = run["meta"]
     rows = run["rows"]
@@ -4621,16 +4887,16 @@ def build_run_index_html(
 
 
 def _survey_message_md(row: dict[str, Any]) -> str:
-    """The inline human-readable outcome message for the MD mirror (#374 E).
+    """The inline human-readable outcome message for a survey case (#374 E).
 
-    Same error-reason-first precedence as the HTML twin (``_survey_message_parts``).
+    Error-reason-first precedence; see ``_survey_message_parts``.
     """
     label, text = _survey_message_parts(row)
     return f"{label}: `{text}`" if text else ""
 
 
 def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[str]:
-    """Markdown mirror of the Tab 2 roll-up: headline stat + one row per kernel."""
+    """The survey roll-up: headline stat + one row per workload."""
     if not groups:
         return []
     stats = _survey_summary_stats(groups)
@@ -4644,18 +4910,19 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
     lines = [
         _survey_headline(stats),
         "",
-        "| Kernel | waitcheck | ConSan | Findings | Note |",
-        "|---|---|---|--:|---|",
+        "| Workload | Kernels | waitcheck | ConSan | Findings | Note |",
+        "|---|--:|---|---|--:|---|",
     ]
     for key, entries in groups:
         by_san = _survey_group_by_sanitizer(entries)
         # Same treatment as the sibling Detail and Example cells: a group note is a
         # backend reason (``waitcheck_analysis_failed: <parser output>``), so it can
         # carry newlines that end the row mid-table and pipes that shift every cell
-        # after it. The HTML twin renders inside a ``<td>`` and needs neither.
+        # after it.
         note = _clean_msg(_survey_group_note(entries), _MSG_LIMIT).replace("|", "\\|")
         lines.append(
-            f"| {_survey_group_label(key, entries)} | {cell(by_san.get('waitcheck'))} "
+            f"| {_survey_group_label(key, entries)} | {_survey_group_kernels(entries)} "
+            f"| {cell(by_san.get('waitcheck'))} "
             f"| {cell(by_san.get('consan'))} | {_survey_group_findings(entries)} "
             f"| {note or _DASH} |"
         )
@@ -4664,7 +4931,13 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
 
 
 def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
-    """Tab 2 mirror for the GitHub job summary: observed-only, non-gating."""
+    """The survey section of the GitHub job summary: observed-only, non-gating.
+
+    Empty when there are no survey cases. The nightly publishes none, and its job
+    summary is public, so the section must not even announce itself.
+    """
+    if not survey:
+        return []
     lines = [
         "## Workload survey (observed-only)",
         "",
@@ -4678,9 +4951,6 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
         "a copy-paste command to reproduce the run.",
         "",
     ]
-    if not survey:
-        lines += ["No workload-survey kernels in this run.", ""]
-        return lines
     lines += _survey_summary_md(_group_survey_entries(survey))
     for entry in survey:
         r = entry["summary"]
@@ -4754,11 +5024,14 @@ def build_summary_md(
             f"{_execution_md(r['execution'])} | {r['findings']} | {r['coverage'] or _DASH} |"
         )
 
+    lines.append("")
+    if survey:
+        lines += [
+            "Two views below: **Expected behavior (guardrails)** (baseline-checked, the "
+            "gate) and **Workload survey (observed-only)** (non-gating).",
+            "",
+        ]
     lines += [
-        "",
-        "Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate) "
-        "and **Workload survey (observed-only)** (non-gating).",
-        "",
         "## Expected behavior (guardrails) \u00b7 Kernel details",
         "",
     ]
@@ -4891,14 +5164,14 @@ def main() -> int:
         "--informational-results-dir",
         type=Path,
         help="dir of <case>/sanitizer_report.json (caller-supplied ConSan objects, #347) "
-        "folded into the observed-only workload-survey tab (Tab 2) as non-gating cases; "
-        "no longer a separate informational section. Absent dir => no cases.",
+        "published as observed-only, non-gating workload-survey cases (summary.md, "
+        "data.json and the run landing page). Absent dir => no cases.",
     )
     ap.add_argument(
         "--survey",
         type=Path,
-        help="JSON spec of observed-only workload-survey cases for the survey tab "
-        "(see survey_cases_from_spec). Data is supplied here at run time so this public "
+        help="JSON spec of observed-only workload-survey cases for summary.md, "
+        "data.json and the run landing page (see survey_cases_from_spec). Data is supplied here at run time so this public "
         "repo hardcodes no customer/NDA identifiers; a fail/not_checked never gates.",
     )
     args = ap.parse_args()
@@ -4953,8 +5226,8 @@ def main() -> int:
             current_index = 0
     current_rel = runs[current_index].get("rel") if current_index is not None else None
 
-    # Observed-only survey cases for Tab 2. A malformed/absent spec degrades to an
-    # empty survey (Tab 2 renders its empty-state note) rather than crashing render.
+    # Observed-only survey cases. A malformed/absent spec degrades to an empty
+    # survey (summary.md renders its empty-state note) rather than crashing render.
     survey: list[dict[str, Any]] = []
     if args.survey is not None:
         spec = _load(args.survey)
@@ -4962,8 +5235,8 @@ def main() -> int:
             survey = survey_cases_from_spec(
                 spec, base_dir=args.survey.parent, rel=current_rel
             )
-    # Caller-supplied ConSan cases (#347) now render as observed-only workload-survey
-    # (Tab 2) entries rather than a separate informational section. They are appended
+    # Caller-supplied ConSan cases (#347) render as observed-only workload-survey
+    # entries rather than a separate informational section. They are appended
     # after any explicit --survey spec cases so an explicit spec (if wired) leads, and
     # their report_rel is threaded to the latest run's published area so per-case /
     # per-kernel raw-report links resolve once the reports are co-published below.
@@ -4975,29 +5248,32 @@ def main() -> int:
         )
         survey += informational_survey
     # Mirror the two-class split into data.json: attach the survey list to the run
-    # this job produced (additive; existing per-run keys are untouched).
-    if current_index is not None:
+    # this job produced (additive; existing per-run keys are untouched). Only when
+    # there is one: data.json is published, and an empty key would still
+    # advertise a survey lane the nightly no longer publishes.
+    if current_index is not None and survey:
         runs[current_index]["survey"] = survey
-    # What the dashboard page and the job summary show on Tab 2. Both take their
-    # guardrail data from runs[0], so the survey rendered beside it has to describe
+    # What the job summary shows as the survey. It takes its guardrail data from
+    # runs[0], so the survey rendered beside it has to describe
     # that same run -- and the run this job staged is not always the newest one (see
     # --current-run). Passing this job's survey there would label the newer run
     # "Latest run" while showing an older re-run's observations under it, and would
     # drop the newer run's own published survey from data.json, which nothing else
     # reconstructs. A published ``survey/`` has the same <case>/sanitizer_report.json
     # layout an informational results dir does, so the newest run's list is rebuilt
-    # from the areas already published under it, at full card fidelity.
+    # from the areas already published under it, at full fidelity.
     displayed_survey = survey
     if runs and current_index != 0 and args.history_root is not None:
         displayed_survey = survey_cases_from_informational_dir(
             args.history_root / str(runs[0]["meta"].get("run", "")) / "survey",
             rel=runs[0].get("rel"),
         )
-        runs[0]["survey"] = displayed_survey
+        if displayed_survey:
+            runs[0]["survey"] = displayed_survey
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(
-        build_html(runs, status=status, survey=displayed_survey),
+        build_html(runs, status=status),
         encoding="utf-8",
     )
     # In published-history mode, write each retained run's tiny landing page next

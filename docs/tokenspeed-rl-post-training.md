@@ -1303,7 +1303,7 @@ namespaced — `waitcheck:wait_hazard`, not `wait_hazard` — so attribution rea
 like a detector ID and cannot be confused with one.
 
 This is the only part of the reward stack that runs on real archived data
-today, because the six committed survey reports are the only real labelled
+today, because the two committed survey reports are the only real labelled
 evidence in the tree ([4.6](#46-what-the-corpus-actually-contains)).
 
 [`examples/rl/triage_reward.py`](../examples/rl/triage_reward.py) scores two
@@ -1462,26 +1462,26 @@ and, more importantly, changes the outlook.
 | Report | Overall verdict | Findings |
 |---|---|---|
 | `gemm_f32_waitcheck` | `warn` | 64, all `wait_hazard`, severity `warning` |
-| `lds_reduce_waitcheck` | `pass` | 0 |
-| `tiny_vecadd_waitcheck` | `pass` | 0 |
 | `gemm_f32_consan` | `error` | 0 — ConSan did not run in that environment |
-| `lds_reduce_consan` | `error` | 0 |
-| `tiny_vecadd_consan` | `error` | 0 |
 
-So the revised count is **18 labelled runs, not 12** — and exactly **one of them
-evidences a real defect**: the 64 `wait_hazard` findings in
+So the revised count is **14 labelled runs, not 12** — the 12 probe
+`result.json` files plus these two committed survey reports. Exactly **one of
+them evidences a real defect**: the 64 `wait_hazard` findings in
 `gemm_f32_waitcheck`, which are 64 findings from one scenario rather than 64
-independent examples. Three of the six sanitizer reports are `error`, meaning
-the tool did not complete, which is the sanitizer analogue of a probe `error`
-verdict and is not a diagnosis. No committed report evidences a ConSan race.
-None of the findings carry a `kernel_name`, so the finest-grained attribution
-the schema allows is not populated in the data that exists.
+independent examples. One of the two sanitizer reports is `error`, meaning the
+tool did not complete, which is the sanitizer analogue of a probe `error`
+verdict and is not a diagnosis. The committed set has no `pass` row: the two
+`pass` fixtures were the synthetic `tiny_vecadd` and `lds_reduce` controls, and
+they are not survey reports. No committed report evidences a ConSan race. None
+of the findings carry a `kernel_name`, so the finest-grained attribution the
+schema allows is not populated in the data that exists.
 
 The headline conclusion therefore stands, slightly softened: **there is
-essentially no labelled failure corpus** — one scenario, not zero, across 18
-runs. Every other archived result is a passing smoke, timing or survey run,
-which is unsurprising in hindsight: these are runs made to validate a harness,
-and a harness is validated by making it succeed.
+essentially no labelled failure corpus** — one scenario, not zero, across 14
+runs. The other committed sanitizer report did not complete, and every other
+archived result is a passing smoke, timing or survey run, which is unsurprising
+in hindsight: these are runs made to validate a harness, and a harness is
+validated by making it succeed.
 
 **What genuinely improves is the generative story, and it improves a lot.** The
 sanitizer path ships deliberate known-bad reproducers and committed ground truth
@@ -1520,8 +1520,8 @@ workload classes that do exist are `gpu_smoke`, `hrx`, `hrx_perf`, `inference`,
 
 And the archive that exists covers fewer still. The 12 probe results are
 `training` (emulated DDP and timing) and `gpu_smoke`; the perf sweeps are
-`tokenspeed_serve`; the sanitizer reports are three synthetic HIP kernels
-(`gemm_f32`, `lds_reduce`, `tiny_vecadd`). **Not one archived artifact comes
+`tokenspeed_serve`; the committed sanitizer reports are the hipBLASLt GEMM
+(`gemm_f32`) under waitcheck and ConSan. **Not one archived artifact comes
 from a workload named in the diagram.**
 
 What that means for generalisation is worth stating rather than hoping about. A
@@ -1593,7 +1593,7 @@ finding:
    the synthetic generator, because it is nearly as cheap and not synthetic.
    The scoring half is already done: `triage_reward.py` labels from
    `sanitizer_report.json` today, and
-   `--runs recipes/sanitizers/survey` scores the six committed reports.
+   `--runs recipes/sanitizers/survey` scores the two committed reports.
 2. **Build the synthetic generator** for the categories the fixtures do not
    cover, stratified across at least two workload shapes per signature. This
    unblocks the reward end-to-end at essentially no cost and turns "no corpus"
@@ -1602,7 +1602,7 @@ finding:
    defensible, and for at least one workload family from the diagram.
 
 Do not wait for an archive to appear — nothing in the survey above suggests one
-is accumulating, and three of the six existing sanitizer reports are `error`
+is accumulating, and one of the two committed sanitizer reports is `error`
 because the tool was unavailable, which is itself a sign that these artifacts
 are not being produced under conditions anyone is curating for reuse.
 

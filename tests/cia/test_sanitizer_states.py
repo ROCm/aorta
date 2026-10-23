@@ -117,15 +117,17 @@ class TestAStateThatIsRan:
 
 
 class TestTheReportsCommittedToThisRepo:
-    """The finding cites these by name, so they are the test."""
+    """The committed survey fixtures are the cases this finding was about.
 
-    @pytest.mark.parametrize(
-        "name", ["gemm_f32_consan", "lds_reduce_consan", "tiny_vecadd_consan"]
-    )
-    def test_an_errored_survey_report_is_not_clean(self, name, tmp_path):
-        source = SURVEY / name / "sanitizer_report.json"
-        if not source.is_file():
-            pytest.skip(f"{name} is not in this tree")
+    Both committed GEMM reports are non-clean (ConSan ``error``, waitcheck
+    ``warn``). The clean polarity lives on the synthetic fixture in
+    ``TestAStateThatIsRan.test_a_genuine_pass_is_still_clean``; the ``pass``
+    survey fixtures that used to demonstrate it here were the synthetic
+    controls removed from this directory.
+    """
+
+    def test_the_errored_gemm_survey_report_is_not_clean(self, tmp_path):
+        source = SURVEY / "gemm_f32_consan" / "sanitizer_report.json"
         root = tmp_path / "bundle"
         (root / "aorta").mkdir(parents=True)
         shutil.copy(source, root / "aorta" / "sanitizer_report.json")
@@ -139,11 +141,8 @@ class TestTheReportsCommittedToThisRepo:
         assert SIGNAL_CLEAN not in art.signals
         assert art.tooling_gaps
 
-    @pytest.mark.parametrize("name", ["lds_reduce_waitcheck", "tiny_vecadd_waitcheck"])
-    def test_a_passing_survey_report_still_reads_clean(self, name, tmp_path):
-        source = SURVEY / name / "sanitizer_report.json"
-        if not source.is_file():
-            pytest.skip(f"{name} is not in this tree")
+    def test_the_warn_gemm_survey_report_is_not_clean(self, tmp_path):
+        source = SURVEY / "gemm_f32_waitcheck" / "sanitizer_report.json"
         root = tmp_path / "bundle"
         (root / "aorta").mkdir(parents=True)
         shutil.copy(source, root / "aorta" / "sanitizer_report.json")
@@ -154,4 +153,5 @@ class TestTheReportsCommittedToThisRepo:
         )
         art = SanitizerReportAdapter().collect(ctx)
 
-        assert SIGNAL_CLEAN in art.signals
+        assert SIGNAL_CLEAN not in art.signals
+        assert art.evidence
