@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 import sys
 import time
@@ -82,18 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
-    if a.epochs < 1 or a.batch < 1 or not a.lr > 0:
-        print("[refused] --epochs and --batch must be >= 1 and --lr > 0", file=sys.stderr)
+    if (a.epochs < 1 or a.batch < 1 or not (math.isfinite(a.lr) and a.lr > 0)
+            or not (math.isfinite(a.clip) and a.clip >= 0)):
+        print("[refused] --epochs and --batch must be >= 1, --lr finite and > 0, and --clip finite and >= 0 "
+              "(0 disables it)", file=sys.stderr)
         return tr.EXIT_REFUSED
     if a.out.exists() and any(a.out.iterdir()):
         print(f"[refused] {a.out} is not empty", file=sys.stderr)
         return tr.EXIT_REFUSED
-    a.out.mkdir(parents=True, exist_ok=True)
-    backend = blas_backend.apply()
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    torch.manual_seed(a.seed)
     system = rj.system_for(rj.load_corpus(a.corpus_root, split=a.split))
     system_sha = hashlib.sha256(system.encode()).hexdigest()
     stats_path = a.demos.with_suffix(".stats.json")
@@ -103,6 +100,15 @@ def main(argv: list[str] | None = None) -> int:
               f"{system_sha}", file=sys.stderr)
         return tr.EXIT_REFUSED
     rows = [json.loads(line) for line in a.demos.read_text().splitlines() if line.strip()]
+    if not rows:
+        print(f"[refused] {a.demos} holds no demonstration; nothing to train on", file=sys.stderr)
+        return tr.EXIT_REFUSED
+    a.out.mkdir(parents=True, exist_ok=True)
+    backend = blas_backend.apply()
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    torch.manual_seed(a.seed)
 
     tok = AutoTokenizer.from_pretrained(a.model, local_files_only=True)
     tok.padding_side = "left"
@@ -117,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         if p.requires_grad:
             trained[name] = p
     frozen_before = {n: p.detach().clone() for n, p in model.named_parameters() if not p.requires_grad}
+    if not frozen_before:
+        print(f"[refused] no parameter matches the frozen control {tr.FROZEN_PREFIXES}, so the weight audit "
+              "would check nothing", file=sys.stderr)
+        return tr.EXIT_REFUSED
     if a.grad_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()
@@ -144,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                 del loss
             sq = sum(float(p.grad.detach().double().pow(2).sum()) for p in trained.values() if p.grad is not None)
             norm = sq ** 0.5
-            if not norm == norm or norm == 0.0:
+            if not math.isfinite(norm) or norm == 0.0:
                 print(f"[refused] step {step + 1}: gradient norm {norm}", file=sys.stderr)
                 return tr.EXIT_FAILED
             if a.clip and norm > a.clip:
