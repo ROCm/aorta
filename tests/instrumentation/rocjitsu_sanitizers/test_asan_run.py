@@ -384,6 +384,17 @@ def test_a_cell_may_repeat_an_owned_setting_but_not_change_it():
     assert owned_setting_conflicts(overlay, environ) == ["ASAN_OPTIONS", "LD_PRELOAD"]
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"],
+)
+def test_a_cell_may_not_move_the_workload_off_the_gpus_the_canary_checked(name):
+    environ = {name: "0,1"}
+    assert owned_setting_conflicts({name: "0,1"}, environ) == []
+    assert owned_setting_conflicts({name: "1"}, environ) == [name]
+    assert owned_setting_conflicts({name: "3"}, {}) == [name]
+
+
 def test_an_asan_run_needs_the_marker_and_the_runtime_loaded(tmp_path, monkeypatch):
     marker = {ENV_ASAN_RUN: str(tmp_path)}
     monkeypatch.setattr(asan_run, "_asan_runtime_loaded", lambda: True)
@@ -676,6 +687,128 @@ def test_a_relative_program_path_is_not_resolved(tmp_path, monkeypatch):
     _process(evidence, 7, program="./probe", kernels=["store_index(int*, int)"])
 
     assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.NOT_CHECKED
+
+
+@pytest.mark.parametrize("relative", ["program", "object"])
+def test_a_relative_path_could_hold_the_copy_that_ran(tmp_path, monkeypatch, relative):
+    """A file aorta cannot locate is not a file that defined nothing."""
+
+    evidence = _evidence(tmp_path)
+    _plain_binary(tmp_path / "plain")
+    instrumented = _instrumented_binary(tmp_path / "instrumented")
+    monkeypatch.chdir(tmp_path)
+    if relative == "program":
+        program, objects = "./plain", [instrumented]
+    else:
+        program, objects = instrumented, ["./plain"]
+    _process(evidence, 7, program=program, kernels=["store_index(int*, int)"], objects=objects)
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    (kernel,) = report.kernels
+    assert not kernel.checked and "could define the copy that ran" in kernel.reason
+    assert report.opaque_device_code == ("./plain",)
+    assert "1 not an absolute path" in kernel.reason
+
+
+def test_an_unreadable_loaded_file_could_hold_the_copy_that_ran(tmp_path):
+    """The process loaded a plain library that is gone by the time the parent looks."""
+
+    evidence = _evidence(tmp_path)
+    plain = _plain_binary(tmp_path / "libplain.so")
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe"),
+        kernels=["store_index(int*, int)"],
+        objects=[plain],
+    )
+    plain.unlink()
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    (kernel,) = report.kernels
+    assert not kernel.checked and "could define the copy that ran" in kernel.reason
+    assert report.opaque_device_code == (str(plain),)
+    assert "1 unreadable" in kernel.reason
+
+
+def test_a_declaration_supplies_a_file_its_program_loaded_and_deleted(tmp_path, monkeypatch):
+    """The declaration was taken while the file existed, so it stands in for the file."""
+
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "probe")
+    library = _instrumented_binary(tmp_path / "libkernels.so")
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([library], loaded_by=probe)
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"], objects=[library])
+    library.unlink()
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.PASS, report.reason
+    assert report.opaque_device_code == ()
+
+
+def test_another_programs_declaration_does_not_describe_a_file_this_process_loaded(
+    tmp_path, monkeypatch
+):
+    """One program declares an instrumented library; it is rebuilt plain; another loads it."""
+
+    evidence = _evidence(tmp_path)
+    library = _instrumented_binary(tmp_path / "libkernels.so")
+    declaring = _plain_binary(tmp_path / "probe", kernels=())
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([library], loaded_by=declaring)
+    _plain_binary(library)
+    _process(
+        evidence,
+        8,
+        program=_plain_binary(tmp_path / "other", kernels=()),
+        kernels=["store_index(int*, int)"],
+        objects=[library],
+    )
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    (kernel,) = report.kernels
+    assert not kernel.checked and "built without ASan" in kernel.reason
+
+
+def test_a_declaration_made_through_a_link_holds_for_the_program_it_names(tmp_path, monkeypatch):
+    """The workload names its program through a link; the loader records where it leads."""
+
+    evidence = _evidence(tmp_path)
+    module = _write(
+        tmp_path / "add100.code", _bundle([(_GFX950_XNACK, _code_object(["add100"], asan=True))])
+    )
+    probe = _plain_binary(tmp_path / "probe", kernels=())
+    link = tmp_path / "probe-link"
+    link.symlink_to(probe)
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([module], loaded_by=link)
+    _process(evidence, 7, program=probe, kernels=["add100"])
+
+    assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.PASS
+
+
+def test_the_declaring_program_reads_its_own_declaration_of_a_rebuilt_file(tmp_path, monkeypatch):
+    """The snapshot, not the file as it is now, is what the declaring program loaded."""
+
+    evidence = _evidence(tmp_path)
+    library = _instrumented_binary(tmp_path / "libkernels.so")
+    declaring = _plain_binary(tmp_path / "probe", kernels=())
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([library], loaded_by=declaring)
+    _plain_binary(library)
+    _process(evidence, 7, program=declaring, kernels=["store_index(int*, int)"], objects=[library])
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.PASS, report.reason
 
 
 def test_a_declared_code_object_attributes_a_module_kernel(tmp_path, monkeypatch):
@@ -1656,7 +1789,25 @@ def test_an_asan_run_refuses_a_cell_that_changes_what_it_owns(
     )
     with (
         _registered(_ConfigRecordingWorkload),
-        pytest.raises(ValueError, match="sets LD_PRELOAD itself"),
+        pytest.raises(ValueError, match="owns LD_PRELOAD, "),
+    ):
+        run_trials(request)
+
+
+def test_an_asan_run_refuses_extra_env_that_selects_other_gpus(
+    tmp_path, inside_an_asan_run, monkeypatch
+):
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    request = RunRequest(
+        workload="recording",
+        trials=1,
+        results_dir=tmp_path,
+        extra_env={"HIP_VISIBLE_DEVICES": "3"},
+        sanitizer="asan",
+    )
+    with (
+        _registered(_ConfigRecordingWorkload),
+        pytest.raises(ValueError, match="owns HIP_VISIBLE_DEVICES, .*node-health canary"),
     ):
         run_trials(request)
 

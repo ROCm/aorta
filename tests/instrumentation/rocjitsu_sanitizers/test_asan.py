@@ -189,6 +189,35 @@ class TestParseRealReports:
         assert meta["location"] == "/work/src/asan_probe.hip:78:9"
         assert meta["allocated_at"] == "/work/src/asan_probe.hip:76:30"
 
+    def test_an_unsymbolized_fault_frame_does_not_blame_the_allocator(self):
+        text = _fixture("host_heap_buffer_overflow.txt").replace(
+            "    #0 0x0000002247d4 in host_oob() /work/src/asan_probe.hip:78:9\n",
+            "    #0 0x0000002247d4  (/work/bin/probe_asan_xnack+0x2247d4) (BuildId: 1a2b3c)\n",
+        )
+        (finding,) = parse_asan_output(text).findings
+        meta = _meta(finding)
+        assert "function" not in meta
+        assert meta["location"] == "/work/src/asan_probe.hip:78:9"
+        assert meta["allocated_at"] == "/work/src/asan_probe.hip:76:30"
+        assert "malloc" not in finding.message and "asan_malloc_linux" not in finding.message
+
+    def test_a_report_with_no_fault_stack_does_not_blame_the_allocator(self):
+        head, rest = _fixture("host_heap_buffer_overflow.txt").split("thread T0\n", 1)
+        text = head + "thread T0\n" + rest[rest.index("\n\n") :]
+        assert "#0" not in text.split("allocated by")[0]
+        (finding,) = parse_asan_output(text).findings
+        meta = _meta(finding)
+        assert "function" not in meta
+        assert meta["allocated_at"] == "/work/src/asan_probe.hip:76:30"
+
+    def test_only_the_first_frame_is_the_fault_site(self):
+        """The LDS report has a later #0 for the device-malloc buffer and one for pthread_create."""
+
+        (finding,) = parse_asan_output(_fixture("device_lds_overflow.txt")).findings
+        meta = _meta(finding)
+        assert meta["function"] == "lds_oob(int*, int)"
+        assert meta["location"] == "/work/src/asan_probe.hip:69:8"
+
     def test_stock_runtime_abort_is_a_lost_report_not_a_finding(self):
         parsed = parse_asan_output(_fixture("stock_runtime_hostcall_abort.txt"))
         assert parsed.findings == ()
