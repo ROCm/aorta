@@ -67,7 +67,7 @@ def episode_rows(column: dict[str, Any]) -> list[dict[str, Any]]:
 
 def entrenchment(rows: list[dict[str, Any]]) -> dict[str, Any]:
     faulty = [r for r in rows if not rj.is_clean_id(r["scenario_id"])]
-    answers = Counter((r["answer"] or {}).get("kernel", "?") + "@" + str((r["answer"] or {}).get("offset"))
+    answers = Counter(str((r["answer"] or {}).get("kernel") or "?") + "@" + str((r["answer"] or {}).get("offset"))
                       for r in faulty if r["answer"] and r["answer"].get("class") != "none")
     seq = rj.sequence_stats(Counter(r["sequence"] for r in rows))
     top_answer = answers.most_common(1)[0] if answers else (None, 0)
@@ -108,8 +108,13 @@ def column_config(args: argparse.Namespace, source: str, scenarios: list[rj.Scen
             "runtime": runtime}
 
 
+#: Settings a resumed column must share with the run resuming it, besides source, seed, prompt and top_k.
+RESUME_KEYS = ("split", "episodes", "temperature", "top_p", "max_new_tokens", "max_episode_steps", "param_dtype",
+               "seeding", "prompt_profile", "scenarios", "corpus")
+
+
 def check_resumable(path: Path, recorded: dict[str, Any], source: str, seed: int, system_sha256: str,
-                    top_k: int) -> None:
+                    top_k: int, proposed: dict[str, Any] | None = None) -> None:
     """Refuse to append to a column computed under other settings: the result would be two columns in one."""
     sha = recorded.get("system_sha256")
     if sha is not None and sha != system_sha256:
@@ -121,10 +126,13 @@ def check_resumable(path: Path, recorded: dict[str, Any], source: str, seed: int
     if recorded.get("top_k") != top_k:
         raise SystemExit(f"{path} was sampled with top_k {recorded.get('top_k')}; refusing to resume it "
                          f"with top_k {top_k}")
+    differ = [k for k in RESUME_KEYS if proposed is not None and recorded.get(k) != proposed.get(k)]
+    if differ:
+        raise SystemExit(f"{path} was computed with other {', '.join(differ)}; refusing to resume it")
 
 
 def run_column(checkpoint: Path | None, args: argparse.Namespace, scenarios: list[rj.Scenario],
-               path: Path) -> dict[str, Any]:
+               path: Path, system: str | None = None) -> dict[str, Any]:
     import blas_backend
 
     backend = blas_backend.apply()
@@ -134,17 +142,17 @@ def run_column(checkpoint: Path | None, args: argparse.Namespace, scenarios: lis
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     source = str(checkpoint) if checkpoint else args.model
-    system = rj.system_for(scenarios)
+    system = system if system is not None else rj.system_for(scenarios)
     system_sha256 = hashlib.sha256(system.encode()).hexdigest()
+    config = column_config(args, source, scenarios, system_sha256, backend, runtime_versions())
     done: dict[str, Any] = {"groups": [], "wire": []}
     if path.exists():
         if not args.reuse:
             raise SystemExit(f"{path} exists; pass --reuse to resume it or choose another --out")
         done = json.loads(path.read_text())
-        check_resumable(path, done["config"], source, args.seed, system_sha256, args.top_k)
+        check_resumable(path, done["config"], source, args.seed, system_sha256, args.top_k, proposed=config)
     finished = {g["scenario_id"] for g in done["groups"]}
     todo = [s for s in scenarios if s.scenario_id not in finished]
-    config = column_config(args, source, scenarios, system_sha256, backend, runtime_versions())
     print(f"[eval] {source}: {len(todo)} of {len(scenarios)} scenario(s) to run", flush=True)
     if todo:
         tok = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
@@ -260,7 +268,7 @@ def print_table(title: str, columns: dict[str, dict[str, Any] | None]) -> None:
 
 def report(out: Path, scenarios: list[rj.Scenario]) -> dict[str, Any]:
     cols = {c: json.loads((out / f"{c}.json").read_text()) for c in COLUMNS if (out / f"{c}.json").exists()}
-    base = baselines_for(scenarios)
+    base = baselines_for(scenarios) if scenarios else {"constant_best_answer": None, "policies": {}}
     result: dict[str, Any] = {"baselines": base, "columns": {c: v["metrics"] for c, v in cols.items()},
                               "sources": {c: v["config"]["source"] for c, v in cols.items()}}
     if len(cols) == 2:
@@ -349,15 +357,19 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
     scenarios = pick_scenarios(rj.load_corpus(args.corpus_root, split=args.split), args.max_faulty,
                                args.max_clean)
+    if not scenarios:
+        print(f"split {args.split} selects no scenario", file=sys.stderr)
+        return EXIT_REFUSED
+    system = rj.system_for(scenarios)
     if shard is not None:
         scenarios = scenarios[shard[0]::shard[1]]
     args.out.mkdir(parents=True, exist_ok=True)
     print(f"[eval] split {args.split}: {len(scenarios)} scenario(s), {args.episodes_per_scenario} episode(s) each",
           flush=True)
     if args.column in ("before", "both"):
-        run_column(args.before, args, scenarios, args.out / "before.json")
+        run_column(args.before, args, scenarios, args.out / "before.json", system=system)
     if args.column in ("after", "both") and args.after is not None:
-        run_column(args.after, args, scenarios, args.out / "after.json")
+        run_column(args.after, args, scenarios, args.out / "after.json", system=system)
     if args.compare or args.column == "both":
         report(args.out, scenarios)
     return 0
