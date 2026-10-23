@@ -580,3 +580,11 @@ pointed at them: `AORTA_RJ_TEST_PROTOTYPE` (a v1 campaign directory) and
   matches and pruning is oldest-first for every tool. It is kept because the
   released model was trained on exactly this history; it will be fixed in the
   next environment version.
+- **Near credit counts instructions in the kernel as built.** An answer is near
+  when it is within 2 instructions of an accepted offset, counted in the
+  original listing. A v2 edit that moves a wait past a longer instruction can
+  leave an accepted offset that is an instruction only of the served listing;
+  that offset earns exact credit but is skipped for near credit, so an answer 2
+  instructions after it can get kernel credit only. The corpus's reference
+  environment scores this way, and so does every recorded evaluation; it will be
+  fixed with a new reward version.

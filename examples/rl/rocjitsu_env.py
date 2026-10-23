@@ -1595,6 +1595,8 @@ class Episode:
             return False
         index = {o: i for i, o in enumerate(insns)}
         nearest = min(range(len(insns)), key=lambda j: abs(insns[j] - off))
+        # Distances are counted as built, so an accepted offset that only the served listing has is skipped;
+        # kept, as the reference environment and every recorded evaluation score it so (README, "Known limitations").
         return any(abs(nearest - index[t]) <= NEAR_INSTRUCTIONS for t in self.scenario.offsets if t in index)
 
     # -- the result ------------------------------------------------------------
