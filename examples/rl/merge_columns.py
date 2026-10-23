@@ -83,12 +83,17 @@ def main(argv: list[str] | None = None) -> int:
     if split != {a.split}:
         print(f"the shards were run on split(s) {sorted(map(str, split))}, not {a.split}", file=sys.stderr)
         return ev.EXIT_REFUSED
-    picked = [s.scenario_id for s in ev.pick_scenarios(rj.load_corpus(a.corpus_root, split=a.split),
-                                                      a.max_faulty, a.max_clean)]
+    chosen = ev.pick_scenarios(rj.load_corpus(a.corpus_root, split=a.split), a.max_faulty, a.max_clean)
+    picked = [s.scenario_id for s in chosen]
     try:
         doc = merge(docs, picked)
     except ValueError as exc:
         print(exc, file=sys.stderr)
+        return ev.EXIT_REFUSED
+    stale = sorted(s.scenario_id for s in chosen if doc["config"]["corpus"][s.scenario_id] != s.digest)
+    if stale:
+        print(f"{len(stale)} scenario(s) were computed on another revision of the corpus, e.g. {stale[:3]}",
+              file=sys.stderr)
         return ev.EXIT_REFUSED
     a.out.parent.mkdir(parents=True, exist_ok=True)
     ev.write(a.out, doc)

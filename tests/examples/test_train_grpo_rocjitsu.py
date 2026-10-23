@@ -379,3 +379,17 @@ def test_the_blas_backend_is_set_before_the_model_stack_is_imported(monkeypatch)
     with pytest.raises(ImportError):
         trainer._train(trainer.build_parser().parse_args(["--out", "x"]), None)
     assert applied == [True]
+
+def test_a_diagnostic_run_writes_no_checkpoint_of_any_kind():
+    parse = trainer.build_parser().parse_args
+    assert not trainer.writes_checkpoints(parse(["--out", "x", "--diag"]))
+    assert trainer.writes_checkpoints(parse(["--out", "x"]))
+    source = Path(trainer.__file__).read_text()
+    assert "if args.init_from is None and writes_checkpoints(args):" in source, "checkpoint-pre"
+    assert "if not writes_checkpoints(args):\n                log[\"best\"]" in source, "checkpoint-best"
+
+def test_the_run_config_records_the_sampling_and_objective_settings_it_adds():
+    source = Path(trainer.__file__).read_text()
+    for line in ('"top_k": args.top_k,', '"advantage_sd_floor": args.advantage_sd_floor,',
+                 '"reference_from": str(args.reference_from) if args.reference_from else None,'):
+        assert line in source, line

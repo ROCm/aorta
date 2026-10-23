@@ -6,6 +6,7 @@ two columns that differ in either would attribute a prompt or sampler change to 
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -13,8 +14,17 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "examples" / "rl"))
+sys.path.insert(0, str(ROOT / "tests" / "examples"))
 
 import eval_rocjitsu as ev  # noqa: E402
+import rocjitsu_env as rj  # noqa: E402
+from test_rocjitsu_env import build_corpus  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _default_reward_and_prompt(monkeypatch):
+    monkeypatch.delenv(rj.REWARD_ENV, raising=False)
+    monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
 
 
 def column(sha, scenarios=("s1",)):
@@ -95,3 +105,40 @@ def test_a_shard_is_k_of_n(text, expected):
 def test_a_shard_outside_its_range_is_refused(text):
     with pytest.raises(ValueError, match="--shard"):
         ev.parse_shard(text)
+
+
+def test_a_column_will_not_resume_under_any_other_sampling_or_selection():
+    args = ev.build_parser().parse_args(["--corpus-root", "x", "--out", "o"])
+    config = ev.column_config(args, "m", [], "s" * 64, None, {})
+    ev.check_resumable(Path("c.json"), config, "m", args.seed, "s" * 64, args.top_k, proposed=config)
+    for key, value in [("episodes", 4), ("temperature", 1.0), ("max_episode_steps", 4), ("split", "val"),
+                       ("scenarios", ["s9"]), ("corpus", {"s9": "d"}), ("param_dtype", "bfloat16")]:
+        with pytest.raises(SystemExit, match=f"other {key}; refusing"):
+            ev.check_resumable(Path("c.json"), config, "m", args.seed, "s" * 64, args.top_k,
+                               proposed=dict(config, **{key: value}))
+
+
+def test_an_answer_with_no_kernel_is_counted_not_a_crash():
+    rows = [{"scenario_id": "k_a+0x8.waitcnt_weaken", "sequence": "answer",
+             "answer": {"class": "waitcnt", "kernel": None, "offset": None}}]
+    assert ev.entrenchment(rows)["answer_top"] == "?@None"
+
+
+def test_an_empty_shard_gets_the_splits_system_prompt(tmp_path, monkeypatch):
+    corpus = build_corpus(tmp_path)
+    seen = []
+    monkeypatch.setattr(ev, "run_column", lambda checkpoint, args, scenarios, path, system=None:
+                        seen.append((scenarios, system)))
+    assert ev.main(["--corpus-root", str(corpus), "--split", "train", "--out", str(tmp_path / "o"),
+                    "--column", "before", "--shard", "7/8"]) == 0
+    assert seen == [([], rj.system_for(rj.load_corpus(corpus, split="train")))]
+
+
+def test_a_split_that_selects_no_scenario_is_refused(tmp_path, capsys):
+    corpus = build_corpus(tmp_path)
+    capsys.readouterr()
+    spec = json.loads((corpus / "split.json").read_text())
+    (corpus / "split.json").write_text(json.dumps(dict(spec, train=[])))
+    assert ev.main(["--corpus-root", str(corpus), "--split", "train", "--out", str(tmp_path / "o"),
+                    "--column", "none"]) == ev.EXIT_REFUSED
+    assert "selects no scenario" in capsys.readouterr().err

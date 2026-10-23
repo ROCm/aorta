@@ -143,3 +143,19 @@ def test_the_cli_checks_the_split_and_writes_the_column(case, tmp_path):
         relabelled.append(q)
     assert mc.main(["--corpus-root", str(corpus), "--split", split, "--out", str(tmp_path / "y.json"),
                     *map(str, relabelled)]) == ev.EXIT_REFUSED
+
+
+def test_the_cli_refuses_shards_from_another_revision_of_the_corpus(case, tmp_path):
+    column, corpus, split = case
+    paths = []
+    for k in range(2):
+        doc = shard(column, k, 2)
+        if k == 1:
+            sid = doc["config"]["scenarios"][0]
+            doc["config"]["corpus"][sid] = "0" * 64
+        p = tmp_path / f"shard-{k}.json"
+        p.write_text(json.dumps(doc))
+        paths.append(p)
+    assert mc.main(["--corpus-root", str(corpus), "--split", split, "--out", str(tmp_path / "m.json"),
+                    *map(str, paths)]) == ev.EXIT_REFUSED
+    assert not (tmp_path / "m.json").exists()
