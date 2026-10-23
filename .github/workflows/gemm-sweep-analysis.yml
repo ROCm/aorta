@@ -58,16 +58,24 @@ jobs:
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} build
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
 
+      # Dispatch inputs reach the container as environment variables, never as
+      # script text: `${{ }}` is substituted before any shell parses the body.
       - name: Run training sweep
         working-directory: aorta
+        env:
+          SWEEP_DIR: ${{ steps.setup.outputs.sweep_dir }}
+          SWEEP_CHANNELS: ${{ github.event.inputs.channels || '28,56' }}
+          SWEEP_THREADS: ${{ github.event.inputs.threads || '256,512' }}
+          SWEEP_CONFIG: ${{ github.event.inputs.config || 'config/single_node/gemm_overlap_comm.yaml' }}
         run: |
-          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+          docker exec -e SWEEP_DIR -e SWEEP_CHANNELS -e SWEEP_THREADS -e SWEEP_CONFIG \
+            ${{ env.CONTAINER_NAME }} bash -c '
             bash scripts/gemm_analysis/run_train_various_channels.sh \
-              --output-dir ${{ steps.setup.outputs.sweep_dir }} \
-              --channels ${{ github.event.inputs.channels || '28,56' }} \
-              --threads ${{ github.event.inputs.threads || '256,512' }} \
-              --config ${{ github.event.inputs.config || 'config/single_node/gemm_overlap_comm.yaml' }}
-          "
+              --output-dir "$SWEEP_DIR" \
+              --channels "$SWEEP_CHANNELS" \
+              --threads "$SWEEP_THREADS" \
+              --config "$SWEEP_CONFIG"
+          '
 
       - name: Generate TraceLens reports
         working-directory: aorta
@@ -79,19 +87,24 @@ jobs:
 
       - name: Extract top GEMM kernels
         working-directory: aorta
+        env:
+          SWEEP_DIR: ${{ steps.setup.outputs.sweep_dir }}
+          SWEEP_CHANNELS: ${{ github.event.inputs.channels || '28,56' }}
+          SWEEP_THREADS: ${{ github.event.inputs.threads || '256,512' }}
+          SWEEP_TOP_K: ${{ github.event.inputs.top_k || '5' }}
         run: |
-          # Parse channels and threads into space-separated format
-          CHANNELS=$(echo "${{ github.event.inputs.channels || '28,56' }}" | tr ',' ' ')
-          THREADS=$(echo "${{ github.event.inputs.threads || '256,512' }}" | tr ',' ' ')
-
-          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+          docker exec -e SWEEP_DIR -e SWEEP_CHANNELS -e SWEEP_THREADS -e SWEEP_TOP_K \
+            ${{ env.CONTAINER_NAME }} bash -c '
+            # Each comma-separated value becomes its own argument; set -f keeps
+            # the unquoted expansions below from globbing.
+            set -f
             python scripts/gemm_analysis/analyze_gemm_reports.py \
-              --base-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis \
-              --threads $THREADS \
-              --channels $CHANNELS \
+              --base-path "$SWEEP_DIR/tracelens_analysis" \
+              --threads ${SWEEP_THREADS//,/ } \
+              --channels ${SWEEP_CHANNELS//,/ } \
               --ranks 0 1 2 3 4 5 6 7 \
-              --top-k ${{ github.event.inputs.top_k || '5' }}
-          "
+              --top-k "$SWEEP_TOP_K"
+          '
 
       - name: Upload sweep results
         uses: actions/upload-artifact@v6
