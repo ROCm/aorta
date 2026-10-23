@@ -3463,8 +3463,7 @@ def test_survey_intro_qualifies_the_both_sanitizers_claim():
     # summary must qualify it. Review (#378): an absent report is still listed
     # (marked "report missing", no verdict), so copy claiming it "does not appear"
     # is wrong too.
-    survey = gen.survey_cases_from_spec({"cases": [{"name": "s", "label": "gone"}]})
-    md = gen.build_summary_md([_healthy_guardrail_run()], survey=survey)
+    md = gen.build_summary_md([_healthy_guardrail_run()], survey=[])
     assert "shown under both." not in md
     assert "only the sanitizer(s) that ran appear" not in md
     assert "still appears, marked report missing with no verdict" in md
@@ -3963,15 +3962,13 @@ def test_survey_summary_stats_absent_sanitizer_is_not_a_run():
     }
 
 
-def test_survey_summary_empty_survey_renders_no_survey_section():
-    # The nightly publishes no survey and its job summary is public, so an empty
-    # survey must leave no trace: no heading, no empty-state note, no "two views".
+def test_survey_summary_empty_survey_renders_gracefully():
+    # Empty survey: no roll-up table, the empty-state note instead, and the summary
+    # still renders healthy without a 0-row table.
     assert gen._survey_summary_md([]) == []
-    assert gen._survey_section_md([]) == []
     md = gen.build_summary_md([_healthy_guardrail_run()], survey=[])
-    assert "survey" not in md.lower()
-    assert "Two views below" not in md
-    assert "## Expected behavior (guardrails) \u00b7 Kernel details" in md
+    assert "No workload-survey kernels in this run." in md
+    assert "| Workload | Kernels |" not in md
     assert "**HEALTHY**" in md
 
 
@@ -4294,8 +4291,8 @@ def test_main_survey_flows_into_summary_and_data_json_not_the_page(tmp_path, mon
 
 
 def test_main_without_survey_omits_survey_rows(tmp_path, monkeypatch):
-    # The survey flag is additive: existing invocations (no --survey) still work,
-    # and neither the summary nor data.json mentions a survey at all.
+    # The survey flag is additive: existing invocations (no --survey) still work and
+    # render the summary's empty-state note; data.json carries an empty survey list.
     baselines = (
         _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
     )
@@ -4317,9 +4314,9 @@ def test_main_without_survey_omits_survey_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", argv)
     assert gen.main() == 0
     md = (out / "summary.md").read_text(encoding="utf-8")
-    assert "survey" not in md.lower()
+    assert "No workload-survey kernels in this run." in md
     data = json.loads((out / "data.json").read_text(encoding="utf-8"))
-    assert "survey" not in data[0]
+    assert data[0]["survey"] == []
 
 
 # --------------------------------------------------------------------------
@@ -6452,46 +6449,6 @@ def test_older_run_areas_keep_their_own_provenance_not_the_current_job(tmp_path,
     assert "rocm/pytorch@sha256:old" in (
         dashboard / "runs/2026-08-04-22/waitcheck/REPRODUCE.md"
     ).read_text(encoding="utf-8")
-
-
-def test_pruning_published_survey_areas_unpublishes_the_survey(tmp_path, monkeypatch):
-    # The nightly publish step deletes runs/*/survey before rendering and passes no
-    # survey input. Nothing it then publishes may still carry survey data: not the
-    # dashboard page, a run landing page, summary.md, data.json, or any file left
-    # under the output tree.
-    out = tmp_path / "dashboard"
-    out.mkdir()
-    baselines = str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json")
-    info = tmp_path / "informational"
-    (info / "consan-gemm").mkdir(parents=True)
-    (info / "consan-gemm" / "sanitizer_report.json").write_text(
-        json.dumps(_informational_report("combined_hook_timeout"))
-    )
-    _write_history_run(out / "runs", "2026-08-05-33")
-    monkeypatch.setattr(sys, "argv", [
-        "gen_sanitizer_dashboard", "--history-root", str(out / "runs"),
-        "--baselines", baselines, "--out-dir", str(out),
-        "--informational-results-dir", str(info),
-    ])
-    assert gen.main() == 0
-    assert (out / "runs/2026-08-05-33/survey/consan-gemm").is_dir()
-
-    _write_history_run(out / "runs", "2026-08-06-44")
-    for area in (out / "runs").glob("*/survey"):
-        shutil.rmtree(area)
-    monkeypatch.setattr(sys, "argv", [
-        "gen_sanitizer_dashboard", "--history-root", str(out / "runs"),
-        "--baselines", baselines, "--out-dir", str(out),
-    ])
-    assert gen.main() == 0
-
-    assert not list(out.rglob("survey"))
-    for published in out.rglob("*"):
-        if published.is_file() and published.suffix in {".html", ".md", ".json"}:
-            text = published.read_text(encoding="utf-8").lower()
-            assert "workload survey" not in text, published
-            assert "consan-gemm" not in text, published
-    assert all("survey" not in run for run in json.loads((out / "data.json").read_text()))
 
 
 def test_past_run_pages_still_list_the_survey_areas_published_under_them(

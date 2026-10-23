@@ -347,12 +347,10 @@ jobs:
   sanitizers-survey:
     name: gfx950 workload survey (non-gating)
     needs: sanitizers-gpu
-    # Disabled: survey results must not be published. This repo is public, so the
-    # survey artifact, logs and job summary of a run are all visible to anyone.
-    # To re-enable, restore the condition below and pass
-    # --informational-results-dir in the publish job again:
-    #   if: always() && needs.sanitizers-gpu.result != 'skipped'
-    if: false
+    # Always run, including when the gate failed: the survey is observed-only and
+    # its rows are still worth publishing next to a red gate. Skipped only when the
+    # gate job itself was skipped.
+    if: always() && needs.sanitizers-gpu.result != 'skipped'
     # Same runner label set as the gate job; `needs` serialises them, so the gate
     # verdict is recorded and uploaded before this job starts competing for the GPU.
     runs-on: [self-hosted, gpu]
@@ -662,8 +660,9 @@ jobs:
 
   publish:
     name: publish sanitizer dashboard
-    # Gated on the GATE job only. sanitizers-survey is disabled and its results are
-    # never published; it stays in `needs` so re-enabling it keeps the ordering.
+    # Both GPU jobs, so the gate and the survey are published from the same run.
+    # Gated on the GATE job only: the survey is non-gating and may legitimately be
+    # killed by the cap in #370, and publishing Tab 1 must not depend on it.
     needs: [sanitizers-gpu, sanitizers-survey]
     # Run even when the GPU job failed (to publish the failure, not a stale green
     # page) but NOT when it was skipped. Publish ONLY from main: a workflow_dispatch
@@ -680,12 +679,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
-        # The gate artifact lands as incoming/<case>/. A survey artifact (only if
-        # sanitizers-survey is re-enabled) would land as incoming/informational/,
-        # which the publish step below never stages.
+        # Merge the gate artifact and the survey artifact into one `incoming` tree:
+        # the gate writes <case>/ and the survey writes informational/<case>/, so
+        # they do not collide and the staging loop below sees the same layout it
+        # did when one job produced both.
         #
-        # A failed GPU job may leave no artifact at all; don't hard-fail the
-        # publish job -- we still want to record the failure on the public page.
+        # A failed GPU job may leave no artifact at all, and a survey killed by the
+        # cap in #370 leaves none either; don't hard-fail the publish job -- we
+        # still want to record the failure on the public page.
         continue-on-error: true
         with:
           pattern: sanitizer-*-${{ github.run_id }}
@@ -900,15 +901,18 @@ jobs:
             done
           fi
 
-          # Survey results are not published. Delete the survey areas earlier
-          # nightlies co-published under every retained run, so the regenerated
-          # landing pages, data.json and summary.md carry no survey rows, and
-          # never pass --informational-results-dir (even if a survey artifact were
-          # downloaded into incoming/informational, it stays out of the branch).
-          rm -rf "$runs_dir"/*/survey
-
           # Regenerate the rendered dashboard from the merged, pruned history. This
           # also writes each retained run's tiny runs/<id>/index.html landing page.
+          # THIS run's observed-only survey cases (ConSan + waitcheck over real
+          # kernels) go into summary.md and data.json as non-gating rows; the
+          # dashboard page does not render them. Their reports are co-published
+          # under runs/<id>/survey/<case>/ and listed on the run's landing page.
+          # Absent (e.g. GPU job failed) is handled gracefully by the
+          # generator -> no survey rows, gate unaffected.
+          info_arg=()
+          if [ -d incoming/informational ]; then
+            info_arg=(--informational-results-dir incoming/informational)
+          fi
           # Provenance the reports themselves cannot carry, recorded into each
           # run area's env.json / REPRODUCE.md (#384). Both are best-effort: an
           # absent value is omitted rather than published empty.
@@ -931,6 +935,7 @@ jobs:
             --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
             --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
             --status status.json \
+            "${info_arg[@]}" \
             --out-dir "$tmp/dashboard"
 
           # Mirror the rendered dashboard to the workspace and append the job
