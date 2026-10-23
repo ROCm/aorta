@@ -1007,27 +1007,39 @@ def _first_object(text: str) -> dict[str, Any] | None:
     for match in re.finditer(r"\{", text):
         try:
             obj, _ = decoder.raw_decode(text, match.start())
-        except json.JSONDecodeError:
+        except ValueError:  # a JSONDecodeError, or an integer literal past Python's conversion limit
             continue
         if isinstance(obj, dict):
             return obj
     return None
 
 
+#: An offset at least this large in magnitude is unusable rather than converted: no kernel is that long, and
+#: Python raises converting a decimal string of over 4,300 digits, or printing an integer that long.
+OFFSET_LIMIT = 1 << 64
+
+
 def parse_offset(value: Any) -> int | None:
-    """An answer offset: a JSON integer, or hex (``"0x1c"``) / decimal text."""
+    """An answer offset: a JSON integer, or hex (``"0x1c"``) / decimal text; None if unusable."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        value = int(value)
     if isinstance(value, str):
         text = value.strip().lower()
-        if re.fullmatch(r"0x[0-9a-f]+", text):
-            return int(text, 16)
-        if re.fullmatch(r"\d+", text):
-            return int(text, 10)
+        try:
+            if re.fullmatch(r"0x[0-9a-f]+", text):
+                value = int(text, 16)
+            elif re.fullmatch(r"\d+", text):
+                value = int(text, 10)
+            else:
+                return None
+        except ValueError:
+            return None
+    if isinstance(value, int):
+        return value if abs(value) < OFFSET_LIMIT else None
     return None
 
 
@@ -1059,7 +1071,7 @@ def parse_action(raw: str, kernels: Sequence[str]) -> Action:
     try:
         obj = json.loads(text)
         strict = isinstance(obj, dict)
-    except json.JSONDecodeError:
+    except ValueError:
         obj = None
     if not isinstance(obj, dict):
         obj = _first_object(text)
@@ -1112,7 +1124,7 @@ def _reply_object(raw: Any) -> tuple[dict[str, Any] | None, bool, str]:
     try:
         obj = json.loads(text)
         strict = isinstance(obj, dict)
-    except json.JSONDecodeError:
+    except ValueError:
         obj = None
     if not isinstance(obj, dict):
         obj = _first_object(text)
