@@ -667,9 +667,11 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                 "--sanitizer asan sets "
                 + ", ".join(conflicts)
                 + " itself, and this cell's environment, mitigations or extra_env "
-                "would change them -- which would replace the instrumented runtime "
-                "or hide its reports, so the run would check nothing while "
-                "appearing to. Drop those settings for an ASan run."
+                "would change them -- which would replace the instrumented runtime, "
+                "hide its reports, or run the workload on GPUs the node-health canary "
+                "did not check, so the run could check nothing while appearing to. "
+                "Drop those settings for an ASan run, and choose GPUs by setting their "
+                "visibility before `aorta run`."
             )
     startup_env: dict[str, str] = {}
     if effective_trial_isolation == "process":

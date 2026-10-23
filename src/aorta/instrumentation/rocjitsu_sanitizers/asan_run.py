@@ -37,6 +37,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -108,6 +109,12 @@ OWNED_SETTINGS = frozenset(
         "TRITON_ENABLE_ASAN",
         ENV_ASAN_RUN,
     }
+)
+
+# Which GPUs a process sees. The node-health canary checks every GPU the parent sees,
+# so a cell may not point its workload at others.
+GPU_SELECTION = frozenset(
+    {"CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"}
 )
 
 
@@ -227,11 +234,13 @@ def active_asan_run(environ: Mapping[str, str] | None = None) -> Path | None:
 def owned_setting_conflicts(
     overlay: Mapping[str, str], environ: Mapping[str, str] | None = None
 ) -> list[str]:
-    """Settings in ``overlay`` that would change what the run mode set."""
+    """Settings in ``overlay`` that would change what the run mode set or checked."""
 
     env = os.environ if environ is None else environ
     return sorted(
-        key for key, value in overlay.items() if key in OWNED_SETTINGS and env.get(key) != value
+        key
+        for key, value in overlay.items()
+        if (key in OWNED_SETTINGS or key in GPU_SELECTION) and env.get(key) != value
     )
 
 
@@ -374,25 +383,21 @@ def loaded_files(ld_log: str) -> LoadedFiles:
     return LoadedFiles(tuple(dict.fromkeys(programs)), tuple(dict.fromkeys(objects)))
 
 
-def _declared_inventories(
-    evidence_dir: Path,
-) -> tuple[dict[str, list[KernelInventory]], dict[str, list[str]]]:
-    """What each declared file defined when it was declared, and who declared it.
+def _declared_inventories(evidence_dir: Path) -> dict[str, dict[str, list[KernelInventory]]]:
+    """What each declared file defined when it was declared, by the program that loads it.
 
-    Returns the inventories by path, and the declared paths by the program that loads
-    them -- keyed both as the program was named and as it resolves, since the loader
-    records a program the way it was invoked.
+    Keyed both as the program was named and as it resolves, since the loader records a
+    program the way it was invoked.
     """
 
     manifest = evidence_dir / _DECLARED
     if manifest.is_symlink() or not manifest.is_file():
-        return {}, {}
+        return {}
     try:
         lines = manifest.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return {}, {}
-    declared: dict[str, list[KernelInventory]] = {}
-    declared_by: dict[str, list[str]] = {}
+        return {}
+    declared_by: dict[str, dict[str, list[KernelInventory]]] = {}
     for line in lines:
         try:
             record = json.loads(line)
@@ -403,12 +408,14 @@ def _declared_inventories(
         inventory = _inventory_from_record(record)
         if inventory is None:
             continue
-        declared.setdefault(inventory.path, []).append(inventory)
         for key in dict.fromkeys((program, os.path.realpath(program))):
-            paths = declared_by.setdefault(key, [])
-            if inventory.path not in paths:
-                paths.append(inventory.path)
-    return declared, declared_by
+            declared_by.setdefault(key, {}).setdefault(inventory.path, []).append(inventory)
+    return declared_by
+
+
+def _opaque_summary(opaque: Mapping[str, str]) -> str:
+    counts = Counter(opaque.values())
+    return f"{len(opaque)} file(s): " + ", ".join(f"{n} {why}" for why, n in counts.items())
 
 
 def _jit_objects(evidence_dir: Path) -> list[str]:
@@ -617,13 +624,13 @@ def evaluate_asan_run(
         # them, go to this log once AMD_LOG_LEVEL_FILE is set.
         lost |= parse_asan_output(text).device_report_lost
 
-    declared, declared_by = _declared_inventories(evidence_dir)
+    declared_by = _declared_inventories(evidence_dir)
     jit = _jit_objects(evidence_dir)
-    inventories: dict[str, list[KernelInventory]] = dict(declared)
+    inventories: dict[str, KernelInventory] = {}
 
-    def inventory(path: str) -> list[KernelInventory]:
+    def inventory(path: str) -> KernelInventory:
         if path not in inventories:
-            inventories[path] = [kernel_inventory(Path(path))]
+            inventories[path] = kernel_inventory(Path(path))
         return inventories[path]
 
     coverage: dict[str, KernelCoverage] = {}
@@ -642,26 +649,30 @@ def evaluate_asan_run(
         if not signatures:
             continue
         definitions: dict[str, list[tuple[str, bool, str]]] = {}
-        process_opaque: dict[str, None] = {}
+        process_opaque: dict[str, str] = {}
         # A declaration is evidence only for the program that declared it, and Triton's
         # cache only for a process that loaded Triton, so a kernel another process
         # declared or compiled is never taken as proof of what this one ran.
-        own = [
-            path
-            for program in loaded.programs
-            for key in dict.fromkeys((program, os.path.realpath(program)))
-            for path in declared_by.get(key, ())
-        ]
+        own: dict[str, list[KernelInventory]] = {}
+        for program in loaded.programs:
+            for key in dict.fromkeys((program, os.path.realpath(program))):
+                for path, found in declared_by.get(key, {}).items():
+                    snapshots = own.setdefault(path, [])
+                    snapshots.extend(item for item in found if item not in snapshots)
         if any(Path(path).name.startswith("libtriton") for path in loaded.objects):
-            own += jit
+            for path in jit:
+                own.setdefault(path, [inventory(path)])
         for path in dict.fromkeys((*loaded.programs, *loaded.objects, *own)):
-            # A relative program path names the executable from the process's
-            # own working directory, which the loader does not record.
+            # A relative path names a file from the process's own working directory,
+            # which the loader does not record, so aorta cannot tell what it defined.
             if not path.startswith("/"):
+                process_opaque.setdefault(path, "not an absolute path")
                 continue
-            for found in inventory(path):
+            for found in own.get(path) or [inventory(path)]:
+                if found.unreadable is not None:
+                    process_opaque.setdefault(path, "unreadable")
                 if found.compressed_bundles:
-                    process_opaque.setdefault(path, None)
+                    process_opaque.setdefault(path, "with compressed bundles")
                 for code_object in found.code_objects:
                     for kernel in code_object.kernels:
                         definitions.setdefault(normalized_signature(kernel), []).append(
@@ -675,17 +686,17 @@ def evaluate_asan_run(
                 reason = "defined in no device code aorta could read from this process's files"
                 if process_opaque:
                     reason += (
-                        f" (it also loaded device code aorta cannot open: "
-                        f"{len(process_opaque)} file(s) with compressed bundles)"
+                        " (it also loaded files aorta cannot open: "
+                        f"{_opaque_summary(process_opaque)})"
                     )
                 decision = KernelCoverage(signature, False, reason)
             elif process_opaque and all(checked for _, checked, _ in defined):
-                # Device code aorta cannot open could hold the copy that actually ran.
+                # A file aorta cannot open could hold the copy that actually ran.
                 decision = KernelCoverage(
                     signature,
                     False,
-                    "defined in ASan-instrumented code, but the process also loaded device "
-                    f"code aorta cannot open ({len(process_opaque)} file(s)), which could "
+                    "defined in ASan-instrumented code, but the process also loaded files "
+                    f"aorta cannot open ({_opaque_summary(process_opaque)}), which could "
                     "define the copy that ran",
                     tuple(dict.fromkeys(path for path, _, _ in defined)),
                 )

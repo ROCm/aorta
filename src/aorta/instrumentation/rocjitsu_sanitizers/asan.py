@@ -80,6 +80,7 @@ _DEVICE_HEADER = re.compile(
 _ACCESS = re.compile(r"^(?P<access>READ|WRITE) of size (?P<size>\d+)\s+(?P<where>.*?)\s*$")
 _WORKGROUP = re.compile(r"in workgroup id \((?P<wg>[^)]*)\)")
 _FRAME0 = re.compile(r"^\s*#0 0x[0-9a-fA-F]+ in (?P<body>.+?)\s*$")
+_ANY_FRAME0 = re.compile(r"^\s*#0 0x[0-9a-fA-F]+")
 _FRAME = re.compile(r"^\s*#\d+ 0x[0-9a-fA-F]+ in (?P<body>.+?)\s*$")
 # Any stack frame, including one with no symbol: "#1 0x7f46... (/lib/libamdhip64.so+0xa3b)".
 _ANY_FRAME = re.compile(r"^\s*#\d+ 0x[0-9a-fA-F]+")
@@ -262,6 +263,7 @@ def _finding_from_block(header: re.Match[str], body: list[str]) -> Finding:
     access = None
     function = None
     location = None
+    fault_frame_seen = False
     lanes = 0
     in_lanes = False
     stack: str | None = None
@@ -269,8 +271,12 @@ def _finding_from_block(header: re.Match[str], body: list[str]) -> Finding:
         if access is None and (match := _ACCESS.match(line)):
             access = match
             continue
-        if function is None and (match := _FRAME0.match(line)):
-            function, location = _split_frame(match.group("body"))
+        # The faulting frame is the first #0 outside an allocation or free stack, even
+        # when it has no symbol; that stack's own #0 is the allocator.
+        if not fault_frame_seen and stack is None and _ANY_FRAME0.match(line):
+            fault_frame_seen = True
+            if match := _FRAME0.match(line):
+                function, location = _split_frame(match.group("body"))
             continue
         if line.startswith("Thread ids and accessed addresses:"):
             in_lanes = True
