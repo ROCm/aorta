@@ -218,7 +218,7 @@ class Client:
         if self.extra_params:
             body["top_k"] = s["top_k"]
             body["min_p"] = 0.0
-        if self.flavor == "llamacpp":
+        if self.flavor == "llamacpp" and self.extra_params:
             body.update(LLAMACPP_NEUTRAL)
             body["samplers"] = list(LLAMACPP_SAMPLERS)
             body["cache_prompt"] = True
@@ -228,7 +228,7 @@ class Client:
         body["messages"] = messages(system, user)
         if self.extra_params:
             body["chat_template_kwargs"] = {"enable_thinking": False}
-        if self.flavor == "llamacpp":
+        if self.flavor == "llamacpp" and self.extra_params:
             body["reasoning_format"] = "none"
         if self.flavor == "ollama":
             # Ollama renders the GGUF's chat template and ignores chat_template_kwargs; "none" is its thinking-off
@@ -281,6 +281,31 @@ class Client:
         return Reply(text=text, finish_reason=choice.get("finish_reason"), prompt_tokens=usage.get("prompt_tokens"),
                      completion_tokens=usage.get("completion_tokens"), latency_s=round(latency, 3),
                      timings=doc.get("timings"), reasoning_split=split, prefill_echo=echo)
+
+
+def enforces_top_k(client: Any) -> bool:
+    """Whether the requests carry ``top_k``: not with ``--no-extra-params``, and not to Ollama, which takes it
+    from its Modelfile. A replay keeps the value its column recorded."""
+    if isinstance(client, ReplayClient):
+        return True
+    return client.extra_params and client.flavor != "ollama"
+
+
+def redacted_argv(argv: list[str]) -> list[str]:
+    """``argv`` with the value of ``--api-key``, or of any abbreviation argparse accepts for it, replaced."""
+    out, hide = [], False
+    for arg in argv:
+        if hide:
+            out.append("<redacted>")
+            hide = False
+            continue
+        name, eq, _ = arg.partition("=")
+        if len(name) >= 4 and "--api-key".startswith(name):
+            out.append(f"{name}=<redacted>" if eq else name)
+            hide = not eq
+            continue
+        out.append(arg)
+    return out
 
 
 class ReplayClient:
@@ -438,14 +463,15 @@ def column(scenarios: list[Any], results: list[EpisodeResult], client: Client | 
     config = {
         "source": f"{client.endpoint}#{client.model}", "seed": seed, "split": split, "episodes": episodes,
         "temperature": client.sampling["temperature"], "top_p": client.sampling["top_p"],
-        "top_k": client.sampling["top_k"], "max_new_tokens": client.sampling["max_tokens"],
+        "top_k": client.sampling["top_k"] if enforces_top_k(client) else None,
+        "max_new_tokens": client.sampling["max_tokens"],
         "max_episode_steps": max_turns, "param_dtype": None, "seeding": "per-episode-step (server-side seed)",
         "scenarios": [s.scenario_id for s in scenarios], "corpus": {s.scenario_id: s.digest for s in scenarios},
         "blas_backend": None, "system_sha256": hashlib.sha256(system.encode()).hexdigest(),
         "prompt_profile": rj.resolve_prompt(), "reward": scenarios[0].reward if scenarios else None,
         "runtime": {"python": sys.version.split()[0], "client": "rjdebug.py"},
         "client": {"mode": client.mode, "flavor": client.flavor, "server": client.server,
-                   "argv": argv},
+                   "argv": redacted_argv(argv)},
     }
     rows = eval_rocjitsu.episode_rows({"groups": groups})
     return {"config": config, "groups": groups, "wire": wire, "metrics": eval_rocjitsu.summarize(rows)}
@@ -631,6 +657,7 @@ def main(argv: list[str] | None = None) -> int:
         args.split = recorded["config"]["split"]
         args.episodes = recorded["config"]["episodes"]
         args.seed = recorded["config"]["seed"]
+        args.max_turns = args.max_turns or recorded["config"].get("max_episode_steps")
         only = list(args.scenario) or list(recorded["config"]["scenarios"])
     else:
         if not args.endpoint:

@@ -127,3 +127,46 @@ def test_a_column_it_writes_replays_to_the_same_episodes(archive, tmp_path):
                          "--out", str(replayed), "--quiet"]) == 0
     check = json.loads((replayed / "summary.json").read_text())["replay_check"]
     assert check["episodes"] == 6 and check["identical"] == 6 and not check["mismatches"]
+
+
+def _play(server, archive, out, *flags):
+    return rjdebug.main(["--endpoint", server.url, "--model", "m", "--archive", archive, "--split", "test",
+                         "--scenario", "ran@toy", "--episodes", "1", "--concurrency", "1", "--out", str(out),
+                         "--quiet", *flags])
+
+
+def test_the_api_key_never_reaches_the_column(archive, tmp_path):
+    assert rjdebug.redacted_argv(["--api-key", "S1", "--ap=S2", "--archive", "a"]) == [
+        "--api-key", "<redacted>", "--ap=<redacted>", "--archive", "a"]
+    with Scripted([ANSWER]) as server:
+        assert _play(server, archive, tmp_path / "o", "--api-key", "SECRET-ONE", "--api=SECRET-TWO") == 0
+    assert "SECRET" not in (tmp_path / "o" / "column.json").read_text()
+
+
+def test_no_extra_params_sends_only_openai_fields_even_to_llama_server(archive):
+    scenarios = rjdebug.load_scenarios(archive, "test", ["ran@toy"], "v2")
+    props = {"default_generation_settings": {"n_ctx": 4096}, "chat_template": "t", "total_slots": 1}
+    with Scripted([ANSWER], props=props) as server:
+        client = rjdebug.Client(server.url, "m", timeout=10, extra_params=False)
+        rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
+    assert client.flavor == "llamacpp"
+    assert set(server.bodies[0]) <= {"model", "max_tokens", "temperature", "top_p", "seed", "stream", "n", "messages"}
+
+
+def test_a_column_records_top_k_only_when_the_requests_carry_it(archive, tmp_path):
+    with Scripted([ANSWER, ANSWER]) as server:
+        assert _play(server, archive, tmp_path / "a") == 0
+        assert _play(server, archive, tmp_path / "b", "--no-extra-params") == 0
+    assert json.loads((tmp_path / "a" / "column.json").read_text())["config"]["top_k"] == 20
+    assert json.loads((tmp_path / "b" / "column.json").read_text())["config"]["top_k"] is None
+
+
+def test_a_column_played_under_a_shorter_budget_replays_under_it(archive, tmp_path):
+    with Scripted([TOOL, TOOL]) as server:
+        assert _play(server, archive, tmp_path / "played", "--max-turns", "2") == 0
+    column = json.loads((tmp_path / "played" / "column.json").read_text())
+    assert column["config"]["max_episode_steps"] == 2
+    assert rjdebug.main(["--replay", str(tmp_path / "played" / "column.json"), "--archive", archive,
+                         "--out", str(tmp_path / "replayed"), "--quiet"]) == 0
+    check = json.loads((tmp_path / "replayed" / "summary.json").read_text())["replay_check"]
+    assert check["episodes"] == 1 and check["identical"] == 1
