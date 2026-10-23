@@ -99,6 +99,14 @@ def test_non_root_instructions_also_select_a_writable_working_directory() -> Non
             assert re.search(r"(^|\s)-w\s+\S", line), f"{path.name}: --user without -w: {line!r}"
 
 
+def test_aorta_version_advice_is_pep440() -> None:
+    # AORTA_VERSION becomes SETUPTOOLS_SCM_PRETEND_VERSION, which must be PEP 440;
+    # `git describe` output (v0.3.0-340-gabc1234) fails the install with InvalidVersion.
+    text = _DOCKERFILE.read_text()
+    assert "AORTA_VERSION=$(python -m setuptools_scm)" in text
+    assert "(e.g. `git describe`)" not in text
+
+
 def test_overflow_example_keeps_the_backing_tensor_alive() -> None:
     # The run mode disables the caching allocator, so data_ptr() of a temporary points at
     # storage freed before the view is used: the run aborts with no ASan report.

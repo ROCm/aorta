@@ -104,7 +104,9 @@ RUN python3 -m venv /opt/venv && /opt/venv/bin/python -m pip install --no-cache-
 ENV PATH=/opt/venv/bin:${PATH}
 # Install aorta from the build context (the repo checkout), so the image matches the commit it was
 # built from, rather than a pinned remote ref. setuptools_scm reads the version from git, which the
-# context does not carry; pass AORTA_VERSION (e.g. `git describe`) to stamp it, else it falls back to
+# context does not carry; pass a PEP 440 AORTA_VERSION to stamp it, e.g.
+# `--build-arg AORTA_VERSION=$(python -m setuptools_scm)` from the checkout (raw `git describe`
+# output such as v0.3.0-340-gabc1234 is not PEP 440 and fails the install), else it falls back to
 # the pyproject default. The ASan run mode ships in the base package -- no extras are needed.
 COPY pyproject.toml README.md LICENSE /tmp/aorta-src/
 COPY src /tmp/aorta-src/src/
