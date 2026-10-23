@@ -38,7 +38,7 @@ _SUPPORTED_SOURCE_KINDS = frozenset(
     {"gemm_csv", "dispatch_csv", "rocprof_trace", "consan_repro", "kernel_list", "kernel"}
 )
 _SUPPORTED_REQUIREMENTS = frozenset({"top_time", "top_dispatch_count"})
-_SUPPORTED_SANITIZERS = frozenset({"waitcheck", "consan"})
+_SUPPORTED_SANITIZERS = frozenset({"waitcheck", "consan", "asan"})
 _SUPPORTED_SCOPES = frozenset({"kernel"})
 _SUPPORTED_CONSAN_POLICIES = frozenset({"strict", "lenient"})
 # Whether the ConSan command dispatches the kernel or only loads its code
@@ -82,9 +82,7 @@ class KernelSourceSpec:
         return entry
 
 
-def _resolve_kernel_object(
-    spec: KernelSourceSpec, *, recipe_path: Path
-) -> KernelSourceSpec:
+def _resolve_kernel_object(spec: KernelSourceSpec, *, recipe_path: Path) -> KernelSourceSpec:
     """Resolve a ``kind: kernel`` spec's ``code_object`` and auto-hash it at load.
 
     A ``kernel`` / ``kernel_list`` source names a code object by path rather than
@@ -187,6 +185,8 @@ class SanitizerRecipe:
     waitcheck_max_diagnostics: int | None = None
     consan_driver: str | None = None
     expected_error: str | None = None
+    asan_command: Path | None = None
+    asan_objects: tuple[Path, ...] = ()
 
     @property
     def recipe_dir(self) -> Path | None:
@@ -251,13 +251,9 @@ def _optional_timeout_seconds(block: Mapping[str, object]) -> float | None:
         return None
     value = block.get("timeout_seconds")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise RecipeSchemaError(
-            "sanitizer_plan.policy.timeout_seconds must be a positive number"
-        )
+        raise RecipeSchemaError("sanitizer_plan.policy.timeout_seconds must be a positive number")
     if value <= 0:
-        raise RecipeSchemaError(
-            "sanitizer_plan.policy.timeout_seconds must be a positive number"
-        )
+        raise RecipeSchemaError("sanitizer_plan.policy.timeout_seconds must be a positive number")
     return float(value)
 
 
@@ -300,9 +296,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
     source = _require_mapping(plan.get("source"), name="sanitizer_plan.source")
     source_kind = _require_str(source, "kind")
     if source_kind in _DEFERRED_SOURCE_KINDS:
-        raise RecipeSchemaError(
-            f"sanitizer_plan.source.kind={source_kind!r} is not supported yet"
-        )
+        raise RecipeSchemaError(f"sanitizer_plan.source.kind={source_kind!r} is not supported yet")
     if source_kind not in _SUPPORTED_SOURCE_KINDS:
         raise RecipeSchemaError(f"unsupported sanitizer_plan.source.kind={source_kind!r}")
 
@@ -404,6 +398,35 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
                 f"unsupported sanitizer_plan.source.consan_driver={consan_driver!r}"
             )
 
+    # ASan runs a program that was compiled with it, so unlike ConSan there is no
+    # source kind it can fall back to: the recipe names that build or the check
+    # is not_checked. Both fields resolve relative to the recipe file.
+    asan_command: Path | None = None
+    if "asan_command" in source:
+        if "asan" not in sanitizers:
+            raise RecipeSchemaError(
+                "sanitizer_plan.source.asan_command is set but asan is not in "
+                "sanitizer_plan.sanitizers, so it would never run"
+            )
+        asan_command = _resolve_path(_require_str(source, "asan_command"), recipe_path=path)
+    asan_objects: tuple[Path, ...] = ()
+    if "asan_objects" in source:
+        if asan_command is None:
+            raise RecipeSchemaError(
+                "sanitizer_plan.source.asan_objects lists binaries to verify for an "
+                "ASan run, but the source names no asan_command"
+            )
+        raw_objects = source.get("asan_objects")
+        if (
+            not isinstance(raw_objects, list)
+            or not raw_objects
+            or not all(isinstance(item, str) and item.strip() for item in raw_objects)
+        ):
+            raise RecipeSchemaError(
+                "sanitizer_plan.source.asan_objects must be a non-empty list of paths"
+            )
+        asan_objects = tuple(_resolve_path(item.strip(), recipe_path=path) for item in raw_objects)
+
     if "isa_dir" in source:
         isa_dir = _resolve_path(_require_str(source, "isa_dir"), recipe_path=path)
     if source_kind == "gemm_csv" and isa_dir is None:
@@ -447,6 +470,8 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         waitcheck_max_diagnostics=waitcheck_max_diagnostics,
         consan_driver=consan_driver,
         expected_error=expected_error,
+        asan_command=asan_command,
+        asan_objects=asan_objects,
     )
 
 
@@ -569,5 +594,7 @@ def execute_sanitizer_run(
             else DEFAULT_TIMEOUT_SECONDS
         ),
         waitcheck_max_diagnostics=recipe.waitcheck_max_diagnostics,
+        asan_command=recipe.asan_command,
+        asan_objects=recipe.asan_objects,
     )
     return report_path

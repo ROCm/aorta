@@ -1,0 +1,71 @@
+
+=================================================================
+==580==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 3584 byte(s) in 64 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+
+Direct leak of 1080 byte(s) in 15 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9b3b  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73b3b) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+
+Direct leak of 72 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813a374f  (/opt/rocm/lib/libhsa-runtime64.so.1+0x5d74f) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7fbe81398d92  (/opt/rocm/lib/libhsa-runtime64.so.1+0x52d92) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #3 0x7fbe81391ef0  (/opt/rocm/lib/libhsa-runtime64.so.1+0x4bef0) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+
+Direct leak of 72 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813a374f  (/opt/rocm/lib/libhsa-runtime64.so.1+0x5d74f) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7fbe81398d92  (/opt/rocm/lib/libhsa-runtime64.so.1+0x52d92) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #3 0x7fbe813af183  (/opt/rocm/lib/libhsa-runtime64.so.1+0x69183) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #4 0x7fbe8204f701  (/opt/rocm/lib/libamdhip64.so.7+0x3ac701) (BuildId: fa3598a4e465387f575c961df3a62e43bf2d41e2)
+    #5 0x7fbe82067780  (/opt/rocm/lib/libamdhip64.so.7+0x3c4780) (BuildId: fa3598a4e465387f575c961df3a62e43bf2d41e2)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7bfe809f940f  (<unknown module>)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7bfe809f970f  (<unknown module>)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7bfe809f948f  (<unknown module>)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7bfe809f978f  (<unknown module>)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7bfe809f97cf  (<unknown module>)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7bfe809f974f  (<unknown module>)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7bfe809f944f  (<unknown module>)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fbe8373934d in operator new(unsigned long) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_new_delete.cpp:86:3
+    #1 0x7fbe813b9973  (/opt/rocm/lib/libhsa-runtime64.so.1+0x73973) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+    #2 0x7bfe809f93cf  (<unknown module>)
+
+Indirect leak of 624 byte(s) in 13 object(s) allocated from:
+    #0 0x7fbe83727be9 in calloc /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:74:3
+    #1 0x7fbe81473922  (/opt/rocm/lib/libhsa-runtime64.so.1+0x12d922) (BuildId: 14ca064e416f33120d479696d6b0ffab67373f83)
+
+SUMMARY: AddressSanitizer: 5880 byte(s) leaked in 102 allocation(s).

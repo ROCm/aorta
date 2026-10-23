@@ -1,0 +1,55 @@
+=================================================================
+==203==ERROR: AddressSanitizer: heap-buffer-overflow on amdgpu device 0 at pc 0x7b8ccfc7a820
+WRITE of size 4 in workgroup id (3,0,4294967295)
+  #0 0x7b8ccfc7a820 in write_n_plus_one(int*, int) at /work/src/asan_probe.hip:51:20
+
+Thread ids and accessed addresses:
+232 : 0x7f8cd311dfa0
+
+0x7f8cd311dfa0 is located 0 bytes after 4000-byte region [0x7f8cd311d000,0x7f8cd311dfa0)
+allocated by thread T0 here:
+    #0 0x7f8ce08f7206 in hsa_amd_memory_pool_allocate /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:804:3
+    #1 0x7f8cdf241226  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3b226) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #2 0x7f8cdf25e1bc  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa581bc) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #3 0x7f8cdf23e242  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa38242) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #4 0x7f8cdf20b813  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa05813) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #5 0x7f8cdf20b028  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa05028) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #6 0x7f8cdf24192e  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3b92e) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #7 0x7f8cdf213447  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa0d447) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #8 0x7f8cded5f0de  (/opt/rocm/lib/asan/libamdhip64.so.7+0x5590de) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #9 0x0000002239a1 in hipError_t hipMalloc<int>(int**, unsigned long) /opt/rocm-7.0.2/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:9853:12
+    #10 0x0000002239a1 in main /work/src/asan_probe.hip:93:3
+    #11 0x7f8cde2cdd8f  (/lib/x86_64-linux-gnu/libc.so.6+0x29d8f) (BuildId: 4f7b0c955c3d81d7cac1501a2498b69d1d82bfe7)
+
+Shadow bytes around the buggy address:
+  0x7f8cd311dd00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7f8cd311dd80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7f8cd311de00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7f8cd311de80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7f8cd311df00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7f8cd311df80: 00 00 00 00[fa]fa fa fa fa fa fa fa fa fa fa fa
+  0x7f8cd311e000: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7f8cd311e080: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7f8cd311e100: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7f8cd311e180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7f8cd311e200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==203==ABORTING

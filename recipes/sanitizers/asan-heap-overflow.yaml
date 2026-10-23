@@ -1,0 +1,30 @@
+schema_version: 1
+mode: sanitizer
+ticket: ASAN-HEAP-OVERFLOW
+description: >
+  gfx950 device AddressSanitizer on a kernel that stores one int past its
+  hipMalloc'd buffer (expect FAIL: one heap-buffer-overflow finding in
+  store_index). Build fixtures/bin/asan_heap_overflow first -- the commands are
+  in fixtures/repro/asan_heap_overflow.hip -- and provide the ASan-instrumented
+  ROCm runtime; see "AddressSanitizer (ASan)" in
+  src/aorta/instrumentation/rocjitsu_sanitizers/README.md.
+
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: store_index
+    asan_command: fixtures/bin/asan_heap_overflow
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - asan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json

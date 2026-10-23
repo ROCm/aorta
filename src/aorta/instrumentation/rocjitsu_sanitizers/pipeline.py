@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from .asan import AsanRuntime, run_asan, scoped_asan_not_checked
 from .consan import run_consan, scoped_consan_not_checked
 from .models import CheckResult, KernelIdentity, KernelWorklist, SanitizerReport
 from .report import build_report, write_report
 from .waitcheck import run_waitcheck
 
-_KNOWN_SANITIZERS = frozenset({"waitcheck", "consan"})
+_KNOWN_SANITIZERS = frozenset({"waitcheck", "consan", "asan"})
 
 # Default wall-clock ceiling for a single sanitizer subprocess (waitcheck or
 # consan). ConSan's transform of large production code objects can be heavy,
@@ -34,6 +35,9 @@ def run_sanitizers(
     report_name: str = "sanitizer_report.json",
     consan_target: KernelIdentity | None = None,
     waitcheck_max_diagnostics: int | None = None,
+    asan_command: Path | None = None,
+    asan_objects: Sequence[Path] = (),
+    asan_runtime: AsanRuntime | None = None,
 ) -> SanitizerReport:
     """Run supported checks and persist one versioned report."""
 
@@ -83,6 +87,23 @@ def run_sanitizers(
                 # "fail" so a typo can't imply a (non-existent) softer policy.
                 _ = on_missing_backend
                 results.append(scoped_consan_not_checked(worklist))
+        elif sanitizer == "asan":
+            if asan_command is not None:
+                results.append(
+                    run_asan(
+                        worklist,
+                        command=asan_command,
+                        output_dir=output_dir / "asan",
+                        runtime=asan_runtime,
+                        objects=asan_objects,
+                        timeout_seconds=timeout_seconds,
+                        # The single-repro identity both dynamic backends check
+                        # their worklist against, despite the name.
+                        target=consan_target,
+                    )
+                )
+            else:
+                results.append(scoped_asan_not_checked(worklist))
 
     report = build_report(
         target=target,
