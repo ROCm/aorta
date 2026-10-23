@@ -302,6 +302,38 @@ def test_near_is_within_two_instructions_and_exclusive_with_exact(corpus, offset
     assert not ep.solved
 
 
+@pytest.mark.parametrize("value", ["1" * 5000, "0x" + "f" * 5000, "18446744073709551616", 1 << 64, -(1 << 64),
+                                   1e300, 1.5, "0x", "-4", "four", None, True],
+                         ids=["decimal-5000-digits", "hex-5000-digits", "2^64-text", "2^64", "-2^64", "1e300",
+                              "fraction", "bare-0x", "negative-text", "word", "none", "bool"])
+def test_an_offset_that_cannot_be_one_is_unusable_not_an_exception(value):
+    assert rj.parse_offset(value) is None
+
+
+@pytest.mark.parametrize("value, offset", [("0x1c", 28), (" 0X1C ", 28), ("28", 28), (28, 28), (-4, -4), (28.0, 28),
+                                           ((1 << 64) - 1, (1 << 64) - 1)])
+def test_an_offset_in_range_parses_as_before(value, offset):
+    assert rj.parse_offset(value) == offset
+
+
+@pytest.mark.parametrize("offset", ['"' + "1" * 5000 + '"', '"0x' + "f" * 5000 + '"'], ids=["decimal", "hex"])
+def test_an_oversized_answer_offset_gets_no_location_credit_and_the_episode_still_serialises(corpus, offset):
+    ep = play(rj.Episode(scenario(corpus, "k_a+0x8.waitcnt_weaken")),
+              '{"answer": {"class": "waitcnt", "kernel": "k_a", "offset": ' + offset + "}}")
+    assert events(ep) == ["kernel_correct", "class_correct"] and ep.outcome == "kernel_only"
+    json.dumps(ep.summary())
+
+
+def test_an_oversized_json_integer_or_disasm_range_is_a_reply_not_an_exception(corpus):
+    big = "1" * 5000
+    ep = play(rj.Episode(scenario(corpus, "k_a+0x8.waitcnt_weaken")),
+              '{"answer": {"class": "waitcnt", "kernel": "k_a", "offset": ' + big + "}}",
+              '{"tool": "disasm", "kernel": "k_a", "start": "' + big + '", "end": "0x' + "f" * 5000 + '"}')
+    assert ep.steps[0].action.kind == "malformed" and not ep.done
+    assert ep.steps[1].action.kind == "tool" and (ep.steps[1].action.start, ep.steps[1].action.end) == (None, None)
+    json.dumps(ep.summary())
+
+
 @pytest.mark.parametrize("sid, offset", [
     ("k_a+0x10.waitcnt_late", 32),  # one instruction past k_a's last (0x1c), two from the target 0x14
     ("k_a+0x8.waitcnt_weaken", -4),  # one before k_a's first (0x0), two from the target 0x8
