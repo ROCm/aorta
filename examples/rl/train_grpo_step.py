@@ -917,6 +917,11 @@ def publish_snapshot(model: Any, tok: Any, dest: Path) -> None:
     shutil.rmtree(previous, ignore_errors=True)
 
 
+def writes_checkpoints(args: argparse.Namespace) -> bool:
+    """Whether the run publishes model trees: a ``--diag`` run writes none of them."""
+    return not getattr(args, "diag", False)
+
+
 def update_best(best: dict[str, Any], reward_mean: float, iteration: int,
                 model: Any, tok: Any, dest: Path) -> bool:
     """Publish ``model`` as ``checkpoint-best`` if its rollouts scored best so far.
@@ -1235,7 +1240,7 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
         for rp in reference.parameters():
             rp.requires_grad_(False)
 
-    if args.init_from is None:
+    if args.init_from is None and writes_checkpoints(args):
         pre_dir = args.out / "checkpoint-pre"
         print(f"[ckpt] writing PRE -> {pre_dir}", flush=True)
         model.save_pretrained(pre_dir, safe_serialization=True)
@@ -1257,14 +1262,17 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
         "betas": list(betas),
         "clip": args.clip,
         "kl_beta": args.kl_beta,
+        "advantage_sd_floor": args.advantage_sd_floor,
         "group": args.group,
         "max_episode_steps": args.max_episode_steps,
         "temperature": args.temperature,
         "top_p": args.top_p,
+        "top_k": args.top_k,
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
         "iteration_offset": args.iteration_offset,
         "init_from": str(args.init_from) if args.init_from else None,
+        "reference_from": str(args.reference_from) if args.reference_from else None,
         "env": args.env,
         "split": args.split,
         "scenarios_per_iteration": args.scenarios_per_iteration,
@@ -1346,7 +1354,9 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
             # sampled these rollouts, so those are the weights to keep. Not
             # when iterations roll out different slices: their means do not
             # rank weights, and each save is a model's size.
-            if args.scenarios_per_iteration:
+            if not writes_checkpoints(args):
+                log["best"] = {"disabled": "--diag writes no checkpoint"}
+            elif args.scenarios_per_iteration:
                 log["best"] = {"disabled": "--scenarios-per-iteration: iterations score "
                                            "different scenarios"}
             else:

@@ -192,3 +192,26 @@ def test_best_first_keeps_the_cheaper_of_two_solved_episodes(tmp_path, corpus_ro
         picked[bool(flag)] = [json.loads(line)["completion"] for line in out.read_text().splitlines()]
     assert picked[False] == TOOLS + SIM + NONE
     assert picked[True] == TOOLS + NONE
+
+
+@pytest.mark.parametrize("flags", [["--clip", "-1"], ["--clip", "nan"], ["--lr", "inf"], ["--lr", "0"],
+                                   ["--epochs", "0"]])
+def test_sft_refuses_settings_that_cannot_train(tmp_path, flags):
+    pytest.importorskip("torch")
+    import sft_rocjitsu
+
+    rc = sft_rocjitsu.main(["--demos", str(tmp_path / "d.jsonl"), "--corpus-root", str(tmp_path / "absent"),
+                            "--out", str(tmp_path / "o"), *flags])
+    assert rc == sft_rocjitsu.tr.EXIT_REFUSED and not (tmp_path / "o").exists()
+
+
+def test_sft_refuses_an_empty_harvest_before_loading_a_model(tmp_path, corpus_root, capsys):
+    pytest.importorskip("torch")
+    import sft_rocjitsu
+
+    path = tmp_path / "d.jsonl"
+    path.write_text("")
+    path.with_suffix(".stats.json").write_text(json.dumps({"system_sha256": _sha(corpus_root)}))
+    rc = sft_rocjitsu.main(["--demos", str(path), "--corpus-root", str(corpus_root), "--out", str(tmp_path / "o")])
+    assert rc == sft_rocjitsu.tr.EXIT_REFUSED and "holds no demonstration" in capsys.readouterr().err
+    assert not (tmp_path / "o").exists()
