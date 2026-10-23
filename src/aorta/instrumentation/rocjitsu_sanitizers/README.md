@@ -413,7 +413,10 @@ record does not list them, and a workload may delete its build before the run en
 so a declaration records what each file defines when it is declared. A declaration is
 evidence only for the program that made it. A loaded file aorta cannot read, or that
 the loader recorded by a relative path, could hold the copy of a kernel that ran, so it
-leaves that process's kernels unchecked, as compressed device code does. A cell whose
+leaves that process's kernels unchecked, as compressed device code does. An evidence
+file aorta cannot read (an ASan report, HIP log or loader log that is unreadable or a
+link) makes the run an error, since it could hold a report; a memory error read from the
+other files still fails it. A cell whose
 environment, mitigations or `extra_env` would change a setting the mode owns
 (`LD_PRELOAD`, `ASAN_OPTIONS`, `HSA_XNACK`, ...) or which GPUs the workload sees
 (`HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, ...) is refused rather than run with the

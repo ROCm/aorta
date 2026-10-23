@@ -325,22 +325,31 @@ def declare_code_objects(paths: Iterable[Path | str], *, loaded_by: Path | str) 
 # --------------------------------------------------------------------------- #
 
 
-def _per_process(evidence_dir: Path, stem: str) -> dict[int, str]:
-    """The files ``<stem>.<pid>`` / ``<stem>_<pid>`` in ``evidence_dir``, by pid."""
+def _per_process(evidence_dir: Path, stem: str, unread: dict[str, str]) -> dict[int, str]:
+    """The files ``<stem>.<pid>`` / ``<stem>_<pid>`` in ``evidence_dir``, by pid.
+
+    A file that is there but cannot be read goes into ``unread`` with the reason: it
+    could hold the evidence that decides the run, so it is not the same as no file.
+    """
 
     pattern = re.compile(re.escape(stem) + r"[._](\d+)")
     found: dict[int, str] = {}
     try:
         entries = sorted(evidence_dir.iterdir())
-    except OSError:
+    except OSError as error:
+        unread.setdefault(str(evidence_dir), error.strerror or type(error).__name__)
         return found
     for entry in entries:
         match = pattern.fullmatch(entry.name)
-        if match is None or entry.is_symlink() or not entry.is_file():
+        if match is None:
+            continue
+        if entry.is_symlink() or not entry.is_file():
+            unread[entry.name] = "a link" if entry.is_symlink() else "not a regular file"
             continue
         try:
             text = entry.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as error:
+            unread[entry.name] = error.strerror or type(error).__name__
             continue
         pid = int(match.group(1))
         found[pid] = f"{found[pid]}\n{text}" if pid in found else text
@@ -607,9 +616,10 @@ def evaluate_asan_run(
     could verify, a run that would pass is not checked instead.
     """
 
-    reports = _per_process(evidence_dir, _ASAN_LOG)
-    hip_logs = _per_process(evidence_dir, DISPATCH_LOG_NAME)
-    ld_logs = _per_process(evidence_dir, _LD_LOG)
+    unread: dict[str, str] = {}
+    reports = _per_process(evidence_dir, _ASAN_LOG, unread)
+    hip_logs = _per_process(evidence_dir, DISPATCH_LOG_NAME, unread)
+    ld_logs = _per_process(evidence_dir, _LD_LOG, unread)
 
     findings: list[Finding] = []
     lost = not_first = incompatible = init_failed = False
@@ -725,6 +735,11 @@ def evaluate_asan_run(
     if findings:
         verdict = Verdict.FAIL
         reason = f"{len(findings)} memory error(s); first: {_finding_summary(findings[0])}"
+    elif unread:
+        verdict = Verdict.ERROR
+        reason = "aorta could not read the run's evidence, which could hold a report: " + ", ".join(
+            f"{name} ({why})" for name, why in unread.items()
+        )
     elif lost:
         verdict = Verdict.ERROR
         reason = (

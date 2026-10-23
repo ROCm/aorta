@@ -939,6 +939,96 @@ def test_a_memory_error_fails_the_run(tmp_path):
     )
 
 
+def _unreadable(monkeypatch, *names: str) -> None:
+    read_text = Path.read_text
+
+    def refuse(self, *args, **kwargs):
+        if self.name in names:
+            raise PermissionError(13, "Permission denied", str(self))
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+
+
+def test_an_asan_report_aorta_cannot_read_is_an_error(tmp_path, monkeypatch):
+    """The workload survived its child's failure, so only the report could show it."""
+
+    evidence = _evidence(tmp_path)
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe"),
+        kernels=["store_index(int*, int)"],
+    )
+    (evidence / "asan.8").write_text((FIXTURES / "device_heap_buffer_overflow_read.txt").read_text())
+    _unreadable(monkeypatch, "asan.8")
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.ERROR
+    assert "could not read the run's evidence" in report.reason and "asan.8" in report.reason
+
+
+def test_a_hip_log_aorta_cannot_read_is_an_error(tmp_path, monkeypatch):
+    """Its process's kernels would otherwise be missing from the count, not unchecked."""
+
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "probe")
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
+    _process(evidence, 8, program=_plain_binary(tmp_path / "plain"), kernels=["other(int*)"])
+    _unreadable(monkeypatch, "hip_dispatch.log_8")
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.ERROR
+    assert "hip_dispatch.log_8" in report.reason
+
+
+def test_a_loader_log_aorta_cannot_read_is_an_error(tmp_path, monkeypatch):
+    evidence = _evidence(tmp_path)
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe"),
+        kernels=["store_index(int*, int)"],
+    )
+    _unreadable(monkeypatch, "ld.7")
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.ERROR
+    assert "ld.7 (Permission denied)" in report.reason
+
+
+def test_an_evidence_directory_aorta_cannot_list_is_an_error(tmp_path, monkeypatch):
+    evidence = _evidence(tmp_path)
+
+    def refuse(self):
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.ERROR
+    assert f"{evidence} (Permission denied)" in report.reason
+
+
+def test_a_memory_error_still_fails_beside_an_unreadable_report(tmp_path, monkeypatch):
+    evidence = _evidence(tmp_path)
+    _process(
+        evidence, 7, program=_plain_binary(tmp_path / "probe"), kernels=["store_index(int*, int)"]
+    )
+    (evidence / "asan.7").write_text((FIXTURES / "device_heap_buffer_overflow_read.txt").read_text())
+    (evidence / "asan.8").write_text("")
+    _unreadable(monkeypatch, "asan.8")
+
+    report = evaluate_asan_run(evidence, returncode=1)
+
+    assert report.verdict is Verdict.FAIL
+    assert [finding.code for finding in report.findings] == ["heap-buffer-overflow"]
+
+
 def test_a_lost_device_report_is_an_error(tmp_path):
     evidence = _evidence(tmp_path)
     _process(
@@ -995,7 +1085,11 @@ def test_a_symlinked_evidence_file_is_not_read(tmp_path):
     )
     (evidence / "asan.7").symlink_to(elsewhere)
 
-    assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.PASS
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.findings == ()
+    assert report.verdict is Verdict.ERROR
+    assert "asan.7 (a link)" in report.reason
 
 
 def test_the_report_is_written_once_and_round_trips(tmp_path):
