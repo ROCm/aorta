@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Emit the workload-survey ``--survey`` spec for the sanitizer dashboard generator.
+"""Emit the workload-survey ``--survey`` spec for the sanitizer dashboard (Tab 2).
 
-The survey (``gen_sanitizer_dashboard.py --survey``) renders the observed-only
+The survey tab (``gen_sanitizer_dashboard.py --survey``) renders the observed-only
 hipBLASLt GEMM lane with *no* baseline/expected comparison: a
 ``warn``/``error``/``not_checked`` here is an observation, never a regression.
 
@@ -37,9 +37,10 @@ from pathlib import Path
 # (report case dir, stable name, display label, workload, backend, group, group label, sanitizer).
 # Both sanitizers (waitcheck static + ConSan dynamic) are represented for the
 # kernel, so the survey shows it under each tool it was observed with. The
-# ``group`` key pairs the two sanitizer cases of one kernel into a single
-# summary-table row; ``sanitizer`` selects the summary-table column. Without them
-# the summary would render each case as its own standalone kernel. Synthetic tiny_vecadd and lds_reduce controls are omitted.
+# ``group`` key pairs the two sanitizer cases of one kernel under a single kernel
+# heading (and a single summary-table row) on Tab 2; ``sanitizer`` selects the
+# summary-table column. Without them the dashboard would render each case as its own
+# standalone kernel. Synthetic tiny_vecadd and lds_reduce controls are omitted.
 CASES: tuple[tuple[str, str, str, str, str, str, str, str], ...] = (
     (
         "gemm_f32_waitcheck",

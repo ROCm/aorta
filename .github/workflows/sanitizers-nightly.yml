@@ -365,10 +365,10 @@ jobs:
 
 
   sanitizers-survey:
-    name: gfx950 workload survey (non-gating)
+    name: gfx950 workload survey (Tab 2, non-gating)
     needs: sanitizers-gpu
-    # Always run, including when the gate failed: the survey is observed-only and
-    # its rows are still worth publishing next to a red gate. Skipped only when the
+    # Always run, including when the gate failed: Tab 2 is observed-only and its
+    # rows are still worth publishing next to a red Tab 1. Skipped only when the
     # gate job itself was skipped.
     if: always() && needs.sanitizers-gpu.result != 'skipped'
     # Same runner label set as the gate job; `needs` serialises them, so the gate
@@ -417,7 +417,7 @@ jobs:
       # rocjitsu bundle and rebuilds its own fixtures rather than inheriting them,
       # so it stays independent of whether the gate job succeeded or was killed.
       # Workspace-relative paths keep artifacts visible on the host for upload.
-      - name: Run workload survey
+      - name: Run workload survey (Tab 2)
         env:
           # Downloading GitHub Actions artifacts requires a token with
           # `actions:read` -- even for a public repo. The default GITHUB_TOKEN is
@@ -486,10 +486,10 @@ jobs:
             unset GH_TOKEN GITHUB_TOKEN
 
             # Observed-only (non-gating) sanitizer survey over real GPU kernels,
-            # published in the job summary, data.json and the landing page of each
-            # run (not on the dashboard page itself). Each kernel is scanned by BOTH
-            # sanitizers (waitcheck static + ConSan dynamic) so the survey shows
-            # both outcomes per kernel.
+            # rendered on the dashboard Workload survey tab (Tab 2), NOT a separate
+            # informational section (#374). Each kernel is scanned by BOTH sanitizers
+            # (waitcheck static + ConSan dynamic) so Tab 2 shows both outcomes per
+            # kernel.
             #
             # This used to run inside the gate job, wrapped in one guarded subshell so a
             # bad genco/bundler/compile could not abort the gate. The job boundary now
@@ -509,7 +509,7 @@ jobs:
             # The fixture build above is deliberately NOT guarded: a broken
             # genco/bundler/compile is infrastructure breakage, not an observation, and
             # should fail this job loudly.
-            echo "[$(date +%T)] survey: ConSan + waitcheck over real GPU kernels (non-gating) …"
+            echo "[$(date +%T)] survey: ConSan + waitcheck over real GPU kernels (Tab 2; non-gating) …"
 
             # Same PATH fix the gate job needs: hipcc shells out to
             # clang-offload-bundler, which lives in the ROCm LLVM bindir and is not on
@@ -707,7 +707,7 @@ jobs:
   # recorded ref is not refs/heads/main.
   render:
     name: render sanitizer dashboard
-    # Both GPU jobs, so the gate and the survey are published from the same run.
+    # Both GPU jobs, so the dashboard renders Tab 1 and Tab 2 from the same run.
     # Gated on the GATE job only: the survey is non-gating and may legitimately be
     # killed by the cap in #370, and rendering Tab 1 must not depend on it.
     needs: [sanitizers-gpu, sanitizers-survey]
@@ -962,10 +962,10 @@ jobs:
           # Regenerate the rendered dashboard from the merged, pruned history. This
           # also writes each retained run's tiny runs/<id>/index.html landing page.
           # THIS run's observed-only survey cases (ConSan + waitcheck over real
-          # kernels) go into summary.md and data.json as non-gating rows; the
-          # dashboard page does not render them. Their reports are co-published
-          # under runs/<id>/survey/<case>/ and listed on the run's landing page.
-          # Absent (e.g. GPU job failed) is handled gracefully by the
+          # kernels) are folded into the Workload survey tab (Tab 2) as non-gating
+          # rows -- no longer a separate informational section (#374). Their reports
+          # are co-published under runs/<id>/survey/<case>/ so the raw-report links
+          # resolve. Absent (e.g. GPU job failed) is handled gracefully by the
           # generator -> no survey rows, gate unaffected.
           info_arg=()
           if [ -d incoming/informational ]; then
