@@ -2,12 +2,12 @@
   "checks": [
     {
       "backend": {
-        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_lds_race",
-        "command_sha256": "6a418d14a630011b94fae38a5acac5cfda2258b58c8627af27d60df7dad78660",
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_lds_race_2wave",
+        "command_sha256": "169a27c22fc6a799c14ab717b82171172ab8325fb0aa9e103b822db344ffbeec",
         "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
-        "hook_sha256": "c2d24d4bb379690659630fe05f6ca27ff2b00ab8c979a6ed1d80c5df814cabd1",
-        "selected_identity_sha256": "c309b9bffe94b6e47f08114af5391a49a508c70461bbd6d90b40356298da06f0",
-        "selected_kernel": "consan_lds_race"
+        "hook_sha256": "e933343155d0e049b683c5f589987b01c2f2ac44f725f3fa814fb2a62bcf11fe",
+        "selected_identity_sha256": "1452dfe001bd4d91c933990dac33f91555d78b4ddc919ba7cb35ae2a691eacde",
+        "selected_kernel": "consan_lds_race_2wave"
       },
       "coverage": [
         {
@@ -52,10 +52,10 @@
             "fence_unsupported": "0",
             "flavor": "moi",
             "load": "1",
-            "reader": "109487585468544"
+            "reader": "101013794430800"
           },
           "incomplete_code_objects": 0,
-          "object_id": "reader=109487585468544,load=1",
+          "object_id": "reader=101013794430800,load=1",
           "static_complete": true,
           "unsupported": 0
         },
@@ -101,39 +101,101 @@
             "fence_unsupported": "0",
             "flavor": "moi",
             "load": "2",
-            "reader": "109487592287648"
+            "reader": "101013795347888"
           },
           "incomplete_code_objects": 0,
-          "object_id": "reader=109487592287648,load=2",
+          "object_id": "reader=101013795347888,load=2",
           "static_complete": true,
           "unsupported": 0
         }
       ],
       "diagnostics_truncated": false,
-      "findings": [],
+      "findings": [
+        {
+          "code": "sampled_conflict",
+          "code_object": "fnv1a64:3deb93883c6c6fa8",
+          "entry_offset": null,
+          "kernel_name": "_Z14lds_race_2wavePj",
+          "message": "[rocjitsu-dbi-hooks] ConSan conflict reader=101013795347888 first_index=7 second_index=12 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 generation=1 first_bytes=[0,4) second_bytes=[0,4) code_object=fnv1a64:3deb93883c6c6fa8 first_instruction=0x8 second_instruction=0x28 dispatch=0x7b974d022002 workgroup=(0,0,0) cluster_workgroup=0 first_lanes=unavailable second_lanes=unavailable",
+          "metadata": {
+            "cluster_workgroup": "0",
+            "code_object": "fnv1a64:3deb93883c6c6fa8",
+            "dispatch": "0x7b974d022002",
+            "epoch": "0",
+            "first_bytes": "[0,4)",
+            "first_index": "7",
+            "first_instruction": "0x8",
+            "first_kind": "2",
+            "first_lanes": "unavailable",
+            "first_owner": "0",
+            "generation": "1",
+            "reader": "101013795347888",
+            "second_bytes": "[0,4)",
+            "second_index": "12",
+            "second_instruction": "0x28",
+            "second_kind": "1",
+            "second_lanes": "unavailable",
+            "second_owner": "1",
+            "workgroup": "(0,0,0)"
+          },
+          "sanitizer": "consan",
+          "severity": "race"
+        }
+      ],
       "kernel_results": [
         {
           "diagnostics_truncated": false,
-          "findings": [],
+          "findings": [
+            {
+              "code": "sampled_conflict",
+              "code_object": "fnv1a64:3deb93883c6c6fa8",
+              "entry_offset": null,
+              "kernel_name": "_Z14lds_race_2wavePj",
+              "message": "[rocjitsu-dbi-hooks] ConSan conflict reader=101013795347888 first_index=7 second_index=12 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 generation=1 first_bytes=[0,4) second_bytes=[0,4) code_object=fnv1a64:3deb93883c6c6fa8 first_instruction=0x8 second_instruction=0x28 dispatch=0x7b974d022002 workgroup=(0,0,0) cluster_workgroup=0 first_lanes=unavailable second_lanes=unavailable",
+              "metadata": {
+                "cluster_workgroup": "0",
+                "code_object": "fnv1a64:3deb93883c6c6fa8",
+                "dispatch": "0x7b974d022002",
+                "epoch": "0",
+                "first_bytes": "[0,4)",
+                "first_index": "7",
+                "first_instruction": "0x8",
+                "first_kind": "2",
+                "first_lanes": "unavailable",
+                "first_owner": "0",
+                "generation": "1",
+                "reader": "101013795347888",
+                "second_bytes": "[0,4)",
+                "second_index": "12",
+                "second_instruction": "0x28",
+                "second_kind": "1",
+                "second_lanes": "unavailable",
+                "second_owner": "1",
+                "workgroup": "(0,0,0)"
+              },
+              "sanitizer": "consan",
+              "severity": "race"
+            }
+          ],
           "identity": {
             "code_object": null,
             "code_object_index": null,
             "code_object_sha256": null,
             "entry_offset": null,
-            "name": "consan_lds_race",
+            "name": "consan_lds_race_2wave",
             "target": "gfx950"
           },
           "reason": null,
           "returncode": 0,
           "state": "ran",
-          "verdict": "pass"
+          "verdict": "fail"
         }
       ],
       "reason": null,
       "returncode": 0,
       "sanitizer": "consan",
       "state": "ran",
-      "verdict": "pass"
+      "verdict": "fail"
     },
     {
       "backend": {},
@@ -149,7 +211,7 @@
     }
   ],
   "execution_status": "complete",
-  "overall_verdict": "pass",
+  "overall_verdict": "fail",
   "schema": "aorta.sanitizer_report/0.1",
   "target": "gfx950",
   "worklist": {
@@ -162,11 +224,11 @@
           "code_object_index": null,
           "code_object_sha256": null,
           "entry_offset": null,
-          "name": "consan_lds_race",
+          "name": "consan_lds_race_2wave",
           "target": "gfx950"
         },
         "sources": [
-          "consan_repro:clean"
+          "consan_repro:racy"
         ],
         "total_time_ms": 0.0
       }
