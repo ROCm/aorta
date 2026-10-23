@@ -29,6 +29,8 @@ The multi-step episode path, its predictions and one paired evaluation:
 | [`rocjitsu_baselines.py`](rocjitsu_baselines.py) | Scripted and constant policies for those episodes, scored by the same parser and reward as a model | a recorded corpus |
 | [`prepare_rocjitsu_corpus.py`](prepare_rocjitsu_corpus.py) | A v1-layout corpus directory and its by-kernel split, from a recorded campaign | a recorded campaign |
 | [`blas_backend.py`](blas_backend.py) | Opt-in choice of PyTorch's BLAS library before the first GEMM, recorded in the run's config | `torch` |
+| [`eval_rocjitsu.py`](eval_rocjitsu.py) | A fixed checkpoint over a rocjitsu split, paired episode for episode with a control and with the CPU baselines | one GPU, `transformers` |
+| [`merge_columns.py`](merge_columns.py) | The shards of one evaluation column put back into the column an unsharded run writes | the shards and the corpus |
 
 ## `probe_weight_transfer.py`
 
@@ -635,3 +637,45 @@ generated the rollouts. `blas_backend.py` is opt-in: with
 `AORTA_PREFERRED_BLAS` set (`cublas` also needs `ROCBLAS_USE_HIPBLASLT=0`) it
 sets PyTorch's preferred BLAS library before the first GEMM, and the run's
 config records the choice; unset, it changes nothing.
+
+## `eval_rocjitsu.py` and `merge_columns.py`
+
+One checkpoint rolled out over a split, with no optimiser step, is a *column*:
+`--before` (the base `--model` by default) and `--after` give one each. Every
+reply is seeded from `(--seed, scenario, episode, step)` and generated on its
+own, so two columns on the same scenarios are paired episode for episode and
+their difference is the weights. A column records the system prompt's sha256
+and every sampler setting it was drawn with.
+
+- `--compare` writes `comparison.json`: each column's metrics over all, faulty
+  and clean scenarios, the paired score difference by scenario with a bootstrap
+  95% interval, McNemar counts for solved episodes and for exact locations, and
+  the CPU baselines (the scripted policies and the best constant answer) on the
+  same scenarios.
+- It refuses to pair columns that ran different scenarios or corpus digests,
+  that differ in seed, episodes, temperature, top-p, token limit or turn budget,
+  or that were drawn under different or unrecorded system prompts, or under two
+  recorded `top_k` values. `--reuse` resumes a partial column only under the same
+  source, seed, system prompt and `top_k`.
+- `--shard K/N` runs scenarios K, K+N, ... of the split, so one column can be
+  spread over N devices. Each reply's seed depends only on its scenario, episode
+  and step, so `merge_columns.py` can put the shards back into exactly the
+  column an unsharded run writes; it refuses shards that disagree on a setting,
+  overlap, are unfinished, or do not cover the split.
+
+```bash
+for k in 0 1 2 3; do
+  python examples/rl/eval_rocjitsu.py --corpus-root <corpus> --split val --out <dir>/shard-$k \
+      --after <checkpoint> --column after --shard $k/4 --device cuda:$k &
+done; wait
+python examples/rl/merge_columns.py --corpus-root <corpus> --split val --out <dir>/after.json \
+    <dir>/shard-*/after.json
+python examples/rl/eval_rocjitsu.py --corpus-root <corpus> --split val --out <dir> --column none --compare
+```
+
+`before.json` is computed the same way with `--column before`. Computing a
+column needs a GPU and `transformers`, as `eval_episodes.py` does;
+the tests cover the pairing rules, the resume refusals, `--shard` and the merge.
+The merge tests run on a synthetic column and, where `$AORTA_RJ_TEST_COLUMN`
+names a recorded one (with `$AORTA_RJ_TEST_CORPUS_V2` for its corpus), on that
+too.
