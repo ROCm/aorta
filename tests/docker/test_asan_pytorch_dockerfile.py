@@ -80,10 +80,21 @@ def test_aorta_is_installed_from_the_build_context_not_a_git_url() -> None:
     assert "/tmp/aorta-src" in text and "pip install" in text
 
 
+def _env_value(text: str, name: str) -> list[str]:
+    # The ENV/ARG assignment itself, not any mention: the compile and link flag
+    # variables share options, so a whole-file search cannot tell them apart.
+    match = re.search(rf'^\s*(?:ENV\s+)?{name}="([^"]*)"', text, re.MULTILINE)
+    assert match, f"no {name}=\"...\" assignment in {_DOCKERFILE.name}"
+    return match.group(1).split()
+
+
 def test_device_build_is_xnack_plus_with_asan() -> None:
     text = _DOCKERFILE.read_text()
-    assert "gfx950:xnack+" in text
-    assert "-fsanitize=address" in text
+    assert _env_value(text, "PYTORCH_ROCM_ARCH") == ["gfx950:xnack+"]
+    compile_flags = _env_value(text, "HIPCC_COMPILE_FLAGS_APPEND")
+    assert "-fsanitize=address" in compile_flags, "device code would be built uninstrumented"
+    assert "-fno-gpu-sanitize" not in compile_flags
+    assert "-fsanitize=address" in _env_value(text, "HIPCC_LINK_FLAGS_APPEND")
 
 
 _CAPABILITY_DOC = _DOCKER_DIR.parent / "docs" / "sanitizers" / "asan-gpu-capability.md"
