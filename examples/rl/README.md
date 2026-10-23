@@ -616,8 +616,9 @@ to compare with this one's:
 - **The off-policy gate.** Each sample's loss forward is compared token by token
   with the log-probabilities generation recorded. A sample whose largest gap is
   over 2 nats is left out of the gradient; the step is refused if more than 2%
-  of its samples are, or if the loss forward scores any sampled token below
-  exp(-30). `--diag` records the comparison without stopping.
+  of its samples are, or if a sample that takes a gradient has a token its loss
+  forward scores below exp(-30), whose KL term would own the gradient. `--diag`
+  records the comparison without stopping and writes no checkpoint.
 - **Sampling:** 8 scenarios × 8 episodes per iteration
   (`--scenarios-per-iteration 8 --group 8`) at temperature 1.0, top-p 0.95 and
   top-k 20, 8 turns of at most 192 tokens. `--top-k` is passed to `generate`, so
