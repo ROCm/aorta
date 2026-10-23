@@ -22,12 +22,13 @@ The multi-step episode path, its predictions and one paired evaluation:
 | [`event_reward.py`](event_reward.py) | A discrete per-step event reward for a probe episode, every event decidable from the reply, the log and an archived matrix | nothing — no GPU, no container |
 | [`episode_env.py`](episode_env.py) | Multi-step probe episodes run offline against archived matrices, through the agent loop's own decision functions | the archived matrices (`--corpus-root`) |
 | [`rescore_episodes.py`](rescore_episodes.py) | Constant policies against the corpus, a run's wire reduced, and a replay of recorded episodes | the archived matrices |
-| [`train_grpo_step.py`](train_grpo_step.py) | GRPO over episodes with in-process `transformers`, every weight update checked before a checkpoint is written | one GPU (two with `--kl-beta`), `transformers` |
+| [`train_grpo_step.py`](train_grpo_step.py) | GRPO over episodes with in-process `transformers`, every weight update checked before a checkpoint is written; `--env rocjitsu` trains on `rocjitsu_env` episodes | one GPU (two with `--kl-beta`), `transformers` |
 | [`eval_episodes.py`](eval_episodes.py) | A fixed checkpoint against a control, paired per scenario, no optimiser step | one GPU, `transformers` |
 | [`verify_checkpoint_delta.py`](verify_checkpoint_delta.py) | A checkpoint pair on disk: every trained tensor moved, the control did not, nothing past Adam's ceiling | `numpy` only |
 | [`rocjitsu_env.py`](rocjitsu_env.py) | Multi-turn GPU-debugging episodes: find the one synchronization fault injected into a workload's machine code, with every tool output replayed from a recorded archive | a recorded corpus (`--corpus-root` or `$AORTA_RJ_CORPUS_ROOT`) |
 | [`rocjitsu_baselines.py`](rocjitsu_baselines.py) | Scripted and constant policies for those episodes, scored by the same parser and reward as a model | a recorded corpus |
 | [`prepare_rocjitsu_corpus.py`](prepare_rocjitsu_corpus.py) | A v1-layout corpus directory and its by-kernel split, from a recorded campaign | a recorded campaign |
+| [`blas_backend.py`](blas_backend.py) | Opt-in choice of PyTorch's BLAS library before the first GEMM, recorded in the run's config | `torch` |
 
 ## `probe_weight_transfer.py`
 
@@ -588,3 +589,49 @@ pointed at them: `AORTA_RJ_TEST_PROTOTYPE` (a v1 campaign directory) and
   instructions after it can get kernel credit only. The corpus's reference
   environment scores this way, and so does every recorded evaluation; it will be
   fixed with a new reward version.
+
+## `train_grpo_step.py --env rocjitsu`
+
+`--env rocjitsu` trains on `rocjitsu_env` episodes instead of probe episodes,
+from a corpus split (`--corpus-root`, `--split`). Each turn of an episode is one
+`(prompt, completion)` sample; generation and both loss forwards template it
+under the environment's system prompt, and the loss forward keeps only the
+completion's logits. What a port to another trainer has to keep for its numbers
+to compare with this one's:
+
+- **One advantage per episode**, shared by all of its turns and normalised within
+  the group of episodes on one scenario: `A = (r - mean) / max(sd, 1.0)`
+  (`--advantage-sd-floor 1.0`). Without the floor, a group whose episodes all
+  failed differs only in tool costs, and dividing by that small spread scales
+  the noise up to unit size.
+- **KL to a frozen bf16 reference**, `--kl-beta 1e-3` with the k3 estimator, on
+  its own device. `--reference-from` anchors it to a warm start (`--init-from`)
+  rather than to the base model.
+- **Adam** at `--lr 1e-6` with moments kept across iterations, no gradient clip,
+  fp32 parameters.
+- **One numerics for sampling and both loss forwards** (`policy_numerics()`, a
+  single bf16 autocast).
+- **The off-policy gate.** Each sample's loss forward is compared token by token
+  with the log-probabilities generation recorded. A sample whose largest gap is
+  over 2 nats is left out of the gradient; the step is refused if more than 2%
+  of its samples are, or if the loss forward scores any sampled token below
+  exp(-30). `--diag` records the comparison without stopping.
+- **Sampling:** 8 scenarios × 8 episodes per iteration
+  (`--scenarios-per-iteration 8 --group 8`) at temperature 1.0, top-p 0.95 and
+  top-k 20, 8 turns of at most 192 tokens. `--top-k` is passed to `generate`, so
+  a model directory's own generation config cannot change it.
+
+```bash
+python examples/rl/train_grpo_step.py --env rocjitsu --corpus-root <corpus> --split train \
+    --out <run> --model Qwen/Qwen3-8B --iterations 40 --scenarios-per-iteration 8 --group 8 \
+    --temperature 1.0 --top-p 0.95 --top-k 20 --max-episode-steps 8 --max-new-tokens 192 \
+    --lr 1e-6 --kl-beta 1e-3 --param-dtype float32 --advantage-sd-floor 1.0 --snapshot-every 10
+```
+
+`--snapshot-every N` also writes `snapshot-itNNN` every N verified iterations:
+the sampler's weights (linear layers in bf16, everything else as trained) with
+the tokenizer and the generation config, so an evaluation loads exactly what
+generated the rollouts. `blas_backend.py` is opt-in: with
+`AORTA_PREFERRED_BLAS` set (`cublas` also needs `ROCBLAS_USE_HIPBLASLT=0`) it
+sets PyTorch's preferred BLAS library before the first GEMM, and the run's
+config records the choice; unset, it changes nothing.
