@@ -84,3 +84,24 @@ def test_device_build_is_xnack_plus_with_asan() -> None:
     text = _DOCKERFILE.read_text()
     assert "gfx950:xnack+" in text
     assert "-fsanitize=address" in text
+
+
+_CAPABILITY_DOC = _DOCKER_DIR.parent / "docs" / "sanitizers" / "asan-gpu-capability.md"
+
+
+def test_non_root_instructions_also_select_a_writable_working_directory() -> None:
+    # `aorta run` writes ./results and the image's working directory is the root-owned /,
+    # so `--user` without `-w` fails with PermissionError: '/results'.
+    for path in (_DOCKERFILE, _CAPABILITY_DOC):
+        lines = [ln for ln in path.read_text().splitlines() if "--user $(id -u)" in ln]
+        assert lines, f"{path.name} no longer documents the non-root invocation"
+        for line in lines:
+            assert re.search(r"(^|\s)-w\s+\S", line), f"{path.name}: --user without -w: {line!r}"
+
+
+def test_overflow_example_keeps_the_backing_tensor_alive() -> None:
+    # The run mode disables the caching allocator, so data_ptr() of a temporary points at
+    # storage freed before the view is used: the run aborts with no ASan report.
+    text = _DOCKERFILE.read_text()
+    assert not re.search(r"torch\.\w+\([^)]*\)\.data_ptr\(", text)
+    assert "base.data_ptr()" in text and "torch.cuda.synchronize()" in text

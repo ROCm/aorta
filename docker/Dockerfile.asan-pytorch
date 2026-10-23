@@ -21,7 +21,8 @@
 # a checksum mismatch fails the build.
 #   # from the repo root:
 #   docker build -f docker/Dockerfile.asan-pytorch -t aorta-asan-pytorch:2.10.0-rocm7.0.2-gfx950 .
-# Use (root, or add --user $(id -u):$(id -g) -e HOME=/writable -- both work):
+# Use (as root; for any other UID add --user $(id -u):$(id -g) -e HOME=/tmp -w /tmp, because aorta
+# writes ./results under the working directory and the image's default one is the root-owned /):
 #   docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
 #       --security-opt seccomp=unconfined aorta-asan-pytorch:2.10.0-rocm7.0.2-gfx950 \
 #       aorta run --workload gpu_smoke --sanitizer asan
@@ -34,10 +35,14 @@
 # trusting any run -- an in-bounds kernel under ASan must stay silent:
 #   docker run ... aorta run --workload gpu_smoke --sanitizer asan   # must PASS, 3/3 checked
 # Demonstrate a caught overflow with a __cuda_array_interface__ view claiming more elements than the
-# allocation holds (torch's own as_strided/set_ are bounds-checked and cannot express it):
+# allocation holds (torch's own as_strided/set_ are bounds-checked and cannot express it). Keep the
+# backing tensor alive through the kernel: the run mode disables the caching allocator, so a
+# temporary's storage is freed before the view is used and the run aborts without a report:
+#   base = torch.arange(10, device="cuda", dtype=torch.float32)
 #   v = type("V",(),{})(); v.__cuda_array_interface__={"shape":(16,),"typestr":"<f4",
-#     "data":(torch.arange(10,device="cuda",dtype=torch.float32).data_ptr(),False),"version":2}
-#   (torch.as_tensor(v, device="cuda")*2)   # -> device heap-buffer-overflow in vectorized_elementwise_kernel
+#     "data":(base.data_ptr(),False),"version":2}
+#   out = torch.as_tensor(v, device="cuda")*2; torch.cuda.synchronize()
+#   # -> device heap-buffer-overflow in vectorized_elementwise_kernel
 
 FROM rocm/dev-ubuntu-22.04:7.0.2 AS base
 ENV DEBIAN_FRONTEND=noninteractive

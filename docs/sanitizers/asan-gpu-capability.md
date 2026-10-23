@@ -291,7 +291,10 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
     aorta run --workload gpu_smoke --sanitizer asan
 ```
 
-`--user $(id -u):$(id -g) -e HOME=/writable` also works. A plain `import torch` fails outside the run
+To run as a non-root UID, also pass `--user $(id -u):$(id -g) -e HOME=/tmp -w /tmp` (or bind-mount a
+writable directory and point `-w` at it): `aorta run` writes `./results` under the working directory,
+and the image's default working directory is the root-owned `/`, so `--user` alone fails with
+`PermissionError: '/results'`. A plain `import torch` fails outside the run
 mode (`undefined symbol: __asan_...`); it works only under `aorta run --sanitizer asan`, which preloads
 the ASan runtime. Device ASan depends on sound GPU<->host page migration, so run it only on a healthy
 node -- the run mode's canary checks this first (see "Node health" above), and `gpu_smoke` must come back
