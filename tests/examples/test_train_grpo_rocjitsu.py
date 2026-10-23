@@ -34,6 +34,13 @@ from test_train_grpo_step import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_reward_and_prompt(monkeypatch):
+    """The synthetic corpus is v1-layout, which takes reward v1 only; an exported choice must not change that."""
+    monkeypatch.delenv(rj.REWARD_ENV, raising=False)
+    monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
+
+
 class RecordingTokenizer(CharTokenizer):
     """Records the system message of every template call."""
 
