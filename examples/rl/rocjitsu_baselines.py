@@ -54,9 +54,20 @@ def answer(ep: rj.Episode, cls: str, kernel: str | None = None, offset: int | No
 
 
 def window(ep: rj.Episode, kernel: str, lo: int, hi: int) -> list[tuple[int, str]]:
-    """The listing of ``[lo - 0x40, hi]``: enough for every choice below."""
-    _act(ep, {"tool": "disasm", "kernel": kernel, "start": rj.hexoff(max(0, lo - 0x40)), "end": rj.hexoff(hi)})
-    return list(ep.last_result["lines"])
+    """The listing of ``[lo - 0x40, hi]``: enough for every choice below.
+
+    A range longer than one call's cap comes back cut short at its end, which is
+    where every choice below looks, so the rest is fetched a page at a time while
+    a turn is left for the answer.
+    """
+    start, lines = max(0, lo - 0x40), []
+    while True:
+        _act(ep, {"tool": "disasm", "kernel": kernel, "start": rj.hexoff(start), "end": rj.hexoff(hi)})
+        page = ep.last_result
+        lines += page["lines"]
+        if not page.get("omitted") or not page["lines"] or ep.budget - ep.turns_used <= 1:
+            return lines
+        start = page["lines"][-1][0] + 1
 
 
 def pick_in_window(lst: Sequence[tuple[int, str]], lo: int, hi: int) -> int:

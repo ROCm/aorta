@@ -803,6 +803,26 @@ def test_the_scripted_policies_play_through_the_same_parser(corpus):
     assert const["class"] in rj.CLASSES and value <= 7.0
 
 
+def test_a_window_longer_than_one_disasm_call_is_fetched_to_its_end(corpus, monkeypatch):
+    s = scenario(corpus, "k_a+0x8.waitcnt_weaken")
+    whole = rb.window(rj.Episode(s), "k_a", 4, 12)
+    assert [o for o, _ in whole] == [0, 4, 8, 12]
+    monkeypatch.setattr(rj, "DISASM_MAX_LINES", 2)
+    ep = rj.Episode(s)
+    assert rb.window(ep, "k_a", 4, 12) == whole and ep.turns_used == 2
+    # The weakened wait at 8 is in the second page; the first alone would answer the ds_read at 4.
+    ep = rj.Episode(s)
+    rb.SCRIPTED["waitcheck_only"](ep, random.Random(0))
+    assert ep.outcome == "exact"
+
+
+def test_a_window_stops_paging_while_a_turn_is_left_for_the_answer(corpus, monkeypatch):
+    monkeypatch.setattr(rj, "DISASM_MAX_LINES", 2)
+    s = scenario(corpus, "k_a+0x8.waitcnt_weaken")
+    ep = rj.Episode(s, budget=2)
+    assert [o for o, _ in rb.window(ep, "k_a", 4, 12)] == [0, 4] and ep.turns_used == 1
+
+
 # ---------------------------------------------------------------------------
 # replay against the prototype's archive (skipped where it is absent)
 # ---------------------------------------------------------------------------
