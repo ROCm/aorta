@@ -727,6 +727,25 @@ def test_a_split_json_link_onto_the_given_split_file_is_refused(tmp_path):
     assert split.read_bytes() == before and sorted(p.name for p in out.iterdir()) == ["split.json"]
 
 
+def test_a_split_json_link_redirected_by_an_archive_link_cannot_reach_a_source(tmp_path):
+    src = build_corpus(tmp_path).parent / "src"
+    out = tmp_path / "c9"
+    out.mkdir()
+    (out / "results.jsonl").write_text("stale\n")
+    (out / "split.json").symlink_to(out / "results.jsonl")
+    before = _tree(src)
+    prep.main(["--source", str(src), "--out", str(out), "--test-kernels", "k_b"])
+    assert _tree(src) == before
+    assert not (out / "split.json").is_symlink()
+    assert json.loads((out / "split.json").read_text())["test_kernels"] == ["k_b"]
+    assert (out / "results.jsonl").resolve() == (src / "results.jsonl").resolve()
+    assert sorted(p.name for p in out.iterdir()) == ["analysis.json", "results.jsonl", "sites.json",
+                                                     "split.json", "suite.dis"]
+    umask = os.umask(0)
+    os.umask(umask)
+    assert (out / "split.json").stat().st_mode & 0o777 == 0o666 & ~umask
+
+
 def test_a_rerun_into_the_same_out_replaces_its_links_and_writes_the_same_split(tmp_path):
     out = build_corpus(tmp_path)
     src = tmp_path / "src"

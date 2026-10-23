@@ -26,7 +26,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -75,8 +77,10 @@ def check_destinations(out: Path, files: dict[str, Path], args: argparse.Namespa
     is replaced in place, so its entry must not be a source's own entry or
     real file (``--out`` equal to, or holding, the source's files); an
     existing link to a source is fine and is what a rerun replaces.
-    ``split.json`` is written through any link, so its real path must not be
-    an input either.
+    ``split.json`` replaces its entry too (``write_split``), and is refused
+    while its real path is an input. The check alone would not be enough:
+    the archive links are replaced after it runs, so a ``split.json`` link
+    to an archive entry would point at a source by the time it is written.
     """
     targets = {name: path.resolve(strict=True) for name, path in files.items()}
     entry = lambda p: p.parent.resolve() / p.name  # noqa: E731 -- the directory entry, final link not followed
@@ -90,6 +94,25 @@ def check_destinations(out: Path, files: dict[str, Path], args: argparse.Namespa
         raise SystemExit(f"--out {out} would overwrite input file(s) {clashes}; choose an --out "
                          f"outside --source {args.source}")
     return targets
+
+
+def write_split(out: Path, text: str) -> None:
+    """Write ``out/split.json`` by renaming a new file over its entry, so a link there is never followed.
+
+    The file gets the mode a plain write would (``0o666`` less the umask), not
+    ``mkstemp``'s ``0o600``, so a corpus others read stays readable.
+    """
+    fd, temporary = tempfile.mkstemp(dir=out, prefix=".split.json.", suffix=".partial")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            umask = os.umask(0)
+            os.umask(umask)
+            os.fchmod(handle.fileno(), 0o666 & ~umask)
+            handle.write(text)
+        os.replace(temporary, out / "split.json")
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def read_split_file(path: Path) -> dict[str, str]:
@@ -251,7 +274,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "train": train_ids,
         "test": test_ids,
     }
-    (out / "split.json").write_text(json.dumps(spec, indent=1) + "\n")
+    write_split(out, json.dumps(spec, indent=1) + "\n")
     return spec
 
 
