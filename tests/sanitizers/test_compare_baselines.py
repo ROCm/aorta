@@ -169,8 +169,8 @@ def test_sweep_rejects_vacuous_error_in_full_mode(tmp_path, monkeypatch) -> None
 
 def test_sweep_accepts_declared_expected_error(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
-    # consan_tiny declares expected_error reason combined_hook_exit_86 in the
-    # committed baselines: an intended negative control, so it must not fire.
+    _declare_tiny(monkeypatch, tmp_path)
+    # An intended negative control signed off at exit 86 must not fire.
     _write_case(tmp_path, "informational/consan-tiny", _errored("consan", "combined_hook_exit_86"))
     assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 0
 
@@ -179,6 +179,7 @@ def test_sweep_rejects_declared_case_erroring_for_another_reason(
     tmp_path, monkeypatch, capsys
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
+    _declare_tiny(monkeypatch, tmp_path)
     # The declaration names a reason, so consan_tiny is allowed to fail closed for
     # exit 86 and nothing else. A timeout there is a new failure.
     _write_case(tmp_path, "informational/consan-tiny", _errored("consan", "combined_hook_timeout"))
@@ -260,6 +261,11 @@ def _declaration(**overrides) -> dict:
     return declared
 
 
+def _declare_tiny(monkeypatch, tmp_path: Path) -> None:
+    """Sign off consan-tiny's exit 86 in a throwaway baselines file."""
+    _use_baselines(monkeypatch, tmp_path, {"consan_tiny": {"expected_error": _declaration()}})
+
+
 def test_malformed_expected_error_fails_even_when_the_case_did_not_run(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -328,6 +334,7 @@ def test_sweep_rejects_a_reason_that_merely_contains_the_declared_token(
     tmp_path, monkeypatch, capsys
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
+    _declare_tiny(monkeypatch, tmp_path)
     # combined_hook_exit_860 is a different exit code, not the signed-off one.
     _write_case(tmp_path, "informational/consan-tiny", _errored("consan", "combined_hook_exit_860"))
     assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 1
@@ -336,6 +343,7 @@ def test_sweep_rejects_a_reason_that_merely_contains_the_declared_token(
 
 def test_sweep_rejects_an_extra_undeclared_reason(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
+    _declare_tiny(monkeypatch, tmp_path)
     # The declared failure happened, and so did something else nobody signed off.
     _write_case(
         tmp_path,
@@ -348,6 +356,7 @@ def test_sweep_rejects_an_extra_undeclared_reason(tmp_path, monkeypatch) -> None
 
 def test_sweep_accepts_the_declared_reason_repeated_across_checks(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
+    _declare_tiny(monkeypatch, tmp_path)
     # The real shape: the combined hook fails both checks with one reason, which
     # is one distinct reason and must still match.
     _write_case(
@@ -361,6 +370,7 @@ def test_sweep_accepts_the_declared_reason_repeated_across_checks(tmp_path, monk
 
 def test_sweep_rejects_a_declared_case_that_was_never_checked(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
+    _declare_tiny(monkeypatch, tmp_path)
     # Same reason token, but the sanitizer never ran. `error` was reviewed;
     # `not_checked` was not.
     never_ran = CheckResult(
@@ -482,6 +492,7 @@ def test_sweep_rejects_an_entirely_empty_survey(tmp_path, monkeypatch, capsys) -
 
 def test_sweep_accepts_required_cases_that_all_reported(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
+    _declare_tiny(monkeypatch, tmp_path)
     _write_case(tmp_path, "informational/consan-lds-dispatch", _check("consan", Verdict.PASS))
     _write_case(tmp_path, "informational/consan-tiny", _errored("consan", "combined_hook_exit_86"))
     argv = [
@@ -572,8 +583,9 @@ def test_known_vacuous_fails_when_the_row_has_no_report(tmp_path, monkeypatch, c
 
 def test_known_vacuous_conflicts_with_a_declaration(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.chdir(_REPO_ROOT)
-    # consan_tiny is declared in the committed baselines, so calling it
-    # known-vacuous asserts the opposite of what the file says.
+    _declare_tiny(monkeypatch, tmp_path)
+    # consan_tiny is declared, so calling it known-vacuous asserts the
+    # opposite of what the baselines file says.
     argv = [
         "prog",
         "--vacuous-only",
@@ -606,6 +618,7 @@ def test_known_vacuous_conflict_is_caught_in_the_gate_mode_too(
     tmp_path, monkeypatch, capsys
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
+    _declare_tiny(monkeypatch, tmp_path)
     # The conflict check sits ahead of the mode branch, so forwarding the list
     # must not open a path on which a contradictory row is accepted.
     _write_all_matching(tmp_path)
