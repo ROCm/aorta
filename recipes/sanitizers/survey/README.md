@@ -1,20 +1,15 @@
 # Workload survey (Tab 2) — public-safe generic-GEMM survey
 
-This directory populates the **Workload survey (observed-only)** section (Tab 2)
-rendered by `scripts/sanitizers/gen_sanitizer_dashboard.py --survey`. It realizes
-the #367 scope update ("populate aorta-internal kernels on Tab 2") in a strictly
+This directory populates the **Workload survey (observed-only)** tab (Tab 2) of
+the sanitizer dashboard rendered by
+`scripts/sanitizers/gen_sanitizer_dashboard.py --survey`. It realizes the #367
+scope update ("populate aorta-internal kernels on Tab 2") in a strictly
 de-branded, public-safe form.
 
-> **The survey is not published.** The `sanitizers-survey` nightly job is
-> disabled and the publish job deletes any `runs/<id>/survey/` area, so neither
-> the dashboard, the run landing pages, `summary.md`, `data.json` nor the job
-> summary carries survey results. The generator still renders a survey when one
-> is passed locally (`--survey` / `--informational-results-dir`). "Tab 2" below
-> refers to that local survey output.
-
-> **These fixtures are local-only.** When it was enabled, the nightly rendered
-> Tab 2 from `--informational-results-dir`, i.e. live output of the
-> `daily-consan-*` / `daily-waitcheck-*` recipes, and never passed `--survey`. This directory is the
+> **These fixtures are not what the published dashboard shows.** The nightly
+> (`.github/workflows/sanitizers-nightly.yml`) renders Tab 2 from
+> `--informational-results-dir`, i.e. live output of the `daily-consan-*` /
+> `daily-waitcheck-*` recipes, and never passes `--survey`. This directory is the
 > `--survey` path: local rendering, unit tests, and the de-branded reproduction
 > recipes. Read the verdicts below as *recorded fixtures*, not as current CI
 > state — and see the staleness note under the table.

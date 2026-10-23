@@ -76,17 +76,15 @@ it (#486).
 
    Each nightly's per-case results are co-located on the `sanitizer-results` data
    branch under `dashboard/runs/<YYYY-MM-DD>T<HHMMSS>-<run_id>/` (one directory per
-   guardrail recipe, plus a `meta.json` with commit / date / gpu / run_url / gate, where `date` is an
+   guardrail recipe, one under `survey/` per observed-only case, plus a
+   `meta.json` with commit / date / gpu / run_url / gate, where `date` is an
    ISO-8601 instant -- runs published before the directory carried a time keep
    their date-only names and manifests, and are never renamed), and the rendered page
    links to them: the latest run table has a per-recipe **Report** link, each
    kernel-detail card carries a **run area** link to the case's directory, and
    each **Run** row in the history table links to its `runs/<id>/` area. A
-   `runs/<id>/index.html` landing page lists that run's guardrail reports. The
-   observed-only workload survey is not published: the `sanitizers-survey` job is
-   disabled and the publish job deletes any `runs/<id>/survey/` area before it
-   renders, because everything on this branch and in the job summary is public.
-   Because `pages.yml` copies `dashboard/*` recursively into
+   `runs/<id>/index.html` landing page lists that run's guardrail reports and its
+   survey cases. Because `pages.yml` copies `dashboard/*` recursively into
    `_site/sanitizers/`, everything under `runs/` is served at
    `/sanitizers/runs/...` with relative links and no change to `pages.yml`. The
    publish job keeps a rolling window of the newest **30** run directories
@@ -277,13 +275,13 @@ The **sanitizer** nightly keeps its own rolling window on the `sanitizer-results
 data branch, and it has **two** bounds rather than one:
 
 - **Reports: newest 30 runs.** `dashboard/runs/<id>/` holds one directory per
-  guardrail recipe and a `meta.json`.
+  guardrail recipe, one under `survey/` per observed-only case, and a `meta.json`.
   Each case directory is a *run area* (report, gzipped logs, `recipe.yaml`,
   `inputs/`, `REPRODUCE.md`, `env.json`, `index.html`) — see the run-area table
   earlier in this document. The publish job prunes older runs and re-renders with
   `gen_sanitizer_dashboard.py --history-root dashboard/runs --keep 30`.
 - **Bulk: newest 7 runs.** `--keep-logs 7` bounds the logs, the recipe copy and
-  the copied inputs. An older run keeps its
+  the copied inputs, for guardrail and survey areas alike. An older run keeps its
   report, manifests and landing page; its bulk is pruned and the area is
   re-rendered so the page lists only what is still there. Pruning is one-way —
   raising `--keep-logs` later does not bring deleted logs back.
