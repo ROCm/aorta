@@ -1,0 +1,86 @@
+"""Pin ``docker/Dockerfile.asan-pytorch`` to its checksum file.
+
+The image fetches the four ROCm 7.0.2 ASan runtime .deb packages over the network
+(they are not in the base image and cannot be committed to the build context), so
+the only thing standing between the build and an arbitrary payload is the
+``sha256sum -c`` against ``docker/asan-pytorch/SHA256SUMS``. Two ways that gate
+rots silently: a deb version is bumped in the Dockerfile without updating the
+checksums (then every build fails closed -- annoying but safe), or the
+verification is reordered after extraction (then it fails *open* -- a bad deb is
+unpacked before anyone checks it). This test is CPU-only and catches both without
+building the image.
+
+It also guards the two properties the PR exists for: aorta is installed from the
+build context (so the image matches the commit), not a pinned git URL; and the
+device build stays xnack+ with ASan flags (a plain gfx950 build links fine and
+checks nothing).
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+_DOCKER_DIR = Path(__file__).resolve().parents[2] / "docker"
+_DOCKERFILE = _DOCKER_DIR / "Dockerfile.asan-pytorch"
+_SHA256SUMS = _DOCKER_DIR / "asan-pytorch" / "SHA256SUMS"
+
+_EXPECTED_DEBS = {
+    "comgr-asan",
+    "hip-runtime-amd-asan",
+    "hsa-rocr-asan",
+    "rocm-core-asan",
+}
+
+
+def _checksums() -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for line in _SHA256SUMS.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        digest, name = line.split()
+        entries[name] = digest
+    return entries
+
+
+def test_sha256sums_lists_exactly_the_four_pinned_asan_debs() -> None:
+    entries = _checksums()
+    pkgs = {name.split("_", 1)[0] for name in entries}
+    assert pkgs == _EXPECTED_DEBS
+    for name, digest in entries.items():
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), f"not a sha256: {name}"
+        # Pinned to the ROCm 7.0.2 (-56~22.04) -asan build for jammy/amd64.
+        assert "70002-56~22.04_amd64.deb" in name, f"not a pinned 7.0.2 deb: {name}"
+
+
+def test_dockerfile_fetches_exactly_the_checksummed_filenames() -> None:
+    text = _DOCKERFILE.read_text()
+    deb_args = dict(re.findall(r"^ARG\s+(\w*_DEB)=(\S+)\s*$", text, re.MULTILINE))
+    fetched = set(deb_args.values())
+    assert fetched == set(_checksums()), (
+        "the deb filenames the Dockerfile downloads must match SHA256SUMS exactly; "
+        "bumping a version in one place without the other breaks the build"
+    )
+
+
+def test_checksum_is_verified_before_any_deb_is_extracted() -> None:
+    # Fail-closed: the verification must precede extraction, or a tampered deb is
+    # unpacked before it is checked.
+    text = _DOCKERFILE.read_text()
+    verify = text.index("sha256sum -c SHA256SUMS")
+    extract = text.index("dpkg -x")
+    assert verify < extract, "sha256sum -c must run before dpkg -x"
+
+
+def test_aorta_is_installed_from_the_build_context_not_a_git_url() -> None:
+    text = _DOCKERFILE.read_text()
+    assert "git+https://github.com/ROCm/aorta" not in text
+    assert "COPY src /tmp/aorta-src/src/" in text
+    assert "/tmp/aorta-src" in text and "pip install" in text
+
+
+def test_device_build_is_xnack_plus_with_asan() -> None:
+    text = _DOCKERFILE.read_text()
+    assert "gfx950:xnack+" in text
+    assert "-fsanitize=address" in text
