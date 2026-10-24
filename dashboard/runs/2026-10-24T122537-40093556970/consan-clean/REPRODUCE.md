@@ -1,16 +1,16 @@
 # Reproduce `consan-clean`
 
-Sanitizer case `consan-clean` from run `2026-09-26T141847-36241711085` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. Its logs, recipe copy and inputs were pruned for falling outside the nightly's log-retention window. See `index.html` for every file actually published here.
+Sanitizer case `consan-clean` from run `2026-10-24T122537-40093556970` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. See `index.html` for every file actually published here.
 
 ## Run
 
-- Commit: `f32e64cf324fdae8fb6f49d3135888c4646b5104`
-- Date: 2026-09-26 14:18:47 UTC
+- Commit: `a347a262ea5115fac28d66b0f25b3efa3b6a4a4b`
+- Date: 2026-10-24 12:25:37 UTC
 - Target: `gfx950`
 - Class: guardrail (gated guardrail)
-- Workflow run: https://github.com/ROCm/aorta/actions/runs/36241711085
+- Workflow run: https://github.com/ROCm/aorta/actions/runs/40093556970
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
-- rocjitsu bundle: `11f077a2c928aa2096903e8d793b1c487a479c15` (https://github.com/ROCm/rocm-systems/actions/runs/36089010895)
+- rocjitsu bundle: `d03c6fe410eed62b211d56bb7878dd1f494269fe` (https://github.com/ROCm/rocm-systems/actions/runs/37841600188)
 
 ## Observed
 
@@ -24,7 +24,7 @@ First, the checkout this run used:
 
 ```
 git clone https://github.com/ROCm/aorta && cd aorta
-git checkout f32e64cf324fdae8fb6f49d3135888c4646b5104
+git checkout a347a262ea5115fac28d66b0f25b3efa3b6a4a4b
 pip install -e .
 ```
 
@@ -57,10 +57,10 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 | `command` | `/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_lds_race` |
 | `command_sha256` | `6a418d14a630011b94fae38a5acac5cfda2258b58c8627af27d60df7dad78660` |
 | `hook` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so` |
-| `hook_sha256` | `c2d24d4bb379690659630fe05f6ca27ff2b00ab8c979a6ed1d80c5df814cabd1` |
+| `hook_sha256` | `e933343155d0e049b683c5f589987b01c2f2ac44f725f3fa814fb2a62bcf11fe` |
 | `selected_identity_sha256` | `c309b9bffe94b6e47f08114af5391a49a508c70461bbd6d90b40356298da06f0` |
 | `selected_kernel` | `consan_lds_race` |
 
 ## Files here
 
-See `index.html` for the browsable list. `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
+See `index.html` for the browsable list. Logs are gzipped; `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
