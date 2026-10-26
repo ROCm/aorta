@@ -95,10 +95,34 @@ def gen_args(args: argparse.Namespace) -> _GenArgs:
                     log_episodes=0)
 
 
+#: The settings ``train_grpo_step.generate`` passes to ``model.generate``; the rest are the checkpoint's own.
+EXPLICIT_GENERATION = ("do_sample", "temperature", "top_p", "top_k", "use_cache", "max_new_tokens", "pad_token_id",
+                       "output_logits", "return_dict_in_generate")
+
+
+def inherited_generation(settings: dict[str, Any]) -> dict[str, Any]:
+    """A generation config's settings that ``generate`` does not override, without its bookkeeping fields."""
+    return {k: v for k, v in sorted(settings.items())
+            if k not in EXPLICIT_GENERATION and k != "transformers_version" and not k.startswith("_")}
+
+
+def generation_settings(source: str) -> dict[str, Any] | None:
+    """:func:`inherited_generation` of ``source``'s generation config; ``None`` if it ships none."""
+    from transformers import GenerationConfig
+
+    try:
+        config = GenerationConfig.from_pretrained(source, local_files_only=True)
+    except OSError:
+        return None
+    return inherited_generation(config.to_dict())
+
+
 def column_config(args: argparse.Namespace, source: str, scenarios: list[rj.Scenario], system_sha256: str,
-                  backend: Any, runtime: dict[str, Any]) -> dict[str, Any]:
+                  backend: Any, runtime: dict[str, Any], checkpoint: dict[str, Any] | None = None,
+                  generation: dict[str, Any] | None = None) -> dict[str, Any]:
     """Everything a column was sampled under, so two columns can be checked before they are paired."""
-    return {"source": source, "seed": args.seed, "split": args.split, "episodes": args.episodes_per_scenario,
+    return {"source": source, "checkpoint": checkpoint, "generation": generation,
+            "seed": args.seed, "split": args.split, "episodes": args.episodes_per_scenario,
             "temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
             "max_new_tokens": args.max_new_tokens,
             "max_episode_steps": args.max_episode_steps, "param_dtype": args.param_dtype,
@@ -109,8 +133,10 @@ def column_config(args: argparse.Namespace, source: str, scenarios: list[rj.Scen
 
 
 #: Settings a resumed column must share with the run resuming it, besides source, seed, prompt and top_k.
+#: ``checkpoint`` is by content: the trainer rewrites ``checkpoint-last`` in place.
 RESUME_KEYS = ("split", "episodes", "temperature", "top_p", "max_new_tokens", "max_episode_steps", "param_dtype",
-               "seeding", "prompt_profile", "scenarios", "corpus")
+               "seeding", "prompt_profile", "scenarios", "corpus", "blas_backend", "runtime", "checkpoint",
+               "generation")
 
 
 def check_resumable(path: Path, recorded: dict[str, Any], source: str, seed: int, system_sha256: str,
@@ -131,6 +157,16 @@ def check_resumable(path: Path, recorded: dict[str, Any], source: str, seed: int
         raise SystemExit(f"{path} was computed with other {', '.join(differ)}; refusing to resume it")
 
 
+def remaining(done: dict[str, Any], scenarios: list[rj.Scenario]) -> list[rj.Scenario]:
+    """The scenarios a resumed column still lacks; with any left, its old metrics are dropped."""
+    finished = {g["scenario_id"] for g in done["groups"]}
+    todo = [s for s in scenarios if s.scenario_id not in finished]
+    if todo:
+        # Until the new scenarios are in, the old metrics describe a different column.
+        done.pop("metrics", None)
+    return todo
+
+
 def run_column(checkpoint: Path | None, args: argparse.Namespace, scenarios: list[rj.Scenario],
                path: Path, system: str | None = None) -> dict[str, Any]:
     import blas_backend
@@ -138,21 +174,22 @@ def run_column(checkpoint: Path | None, args: argparse.Namespace, scenarios: lis
     backend = blas_backend.apply()
     import torch
     import train_grpo_step
-    from eval_episodes import episode_seed, runtime_versions
+    from eval_episodes import checkpoint_identity, episode_seed, runtime_versions
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     source = str(checkpoint) if checkpoint else args.model
     system = system if system is not None else rj.system_for(scenarios)
     system_sha256 = hashlib.sha256(system.encode()).hexdigest()
-    config = column_config(args, source, scenarios, system_sha256, backend, runtime_versions())
+    config = column_config(args, source, scenarios, system_sha256, backend, runtime_versions(),
+                           checkpoint=checkpoint_identity(checkpoint, args),
+                           generation=generation_settings(source))
     done: dict[str, Any] = {"groups": [], "wire": []}
     if path.exists():
         if not args.reuse:
             raise SystemExit(f"{path} exists; pass --reuse to resume it or choose another --out")
         done = json.loads(path.read_text())
         check_resumable(path, done["config"], source, args.seed, system_sha256, args.top_k, proposed=config)
-    finished = {g["scenario_id"] for g in done["groups"]}
-    todo = [s for s in scenarios if s.scenario_id not in finished]
+    todo = remaining(done, scenarios)
     print(f"[eval] {source}: {len(todo)} of {len(scenarios)} scenario(s) to run", flush=True)
     if todo:
         tok = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
@@ -207,12 +244,36 @@ def bootstrap_mean_diff(diffs: list[float], draws: int = 4000, seed: int = 0) ->
             "ci95": [round(means[int(0.025 * draws)], 4), round(means[int(0.975 * draws) - 1], 4)]}
 
 
+def check_complete(column: dict[str, Any], name: str) -> None:
+    """Refuse a column that does not hold exactly one row per configured (scenario, episode)."""
+    config = column["config"]
+    if column.get("incomplete") or "metrics" not in column:
+        raise SystemExit(f"the {name} column is incomplete; it does not pair")
+    want = {(sid, i) for sid in config["scenarios"] for i in range(config["episodes"])}
+    rows = Counter((r["scenario_id"], r["index"]) for r in episode_rows(column))
+    missing, extra = want - set(rows), set(rows) - want
+    repeated = sorted(k for k, n in rows.items() if n > 1)
+    if missing or extra or repeated:
+        raise SystemExit(f"the {name} column does not hold one row per configured episode "
+                         f"({len(missing)} missing, {len(extra)} not configured, {len(repeated)} repeated); "
+                         "it does not pair")
+
+
 def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     if before["config"]["scenarios"] != after["config"]["scenarios"]:
         raise SystemExit("the two columns ran different scenarios; they do not pair")
     for key in ("seed", "episodes", "temperature", "top_p", "max_new_tokens", "max_episode_steps", "corpus"):
         if before["config"][key] != after["config"][key]:
             raise SystemExit(f"the two columns differ in {key}; they do not pair")
+    # Read with .get so a column without a field pairs only with another without it.
+    for key in ("seeding", "param_dtype", "blas_backend", "runtime", "generation"):
+        if before["config"].get(key) != after["config"].get(key):
+            raise SystemExit(f"the two columns differ in {key}; they do not pair")
+    tokenizers = [(c["config"].get("checkpoint") or {}).get("tokenizer") for c in (before, after)]
+    if tokenizers[0] != tokenizers[1]:
+        raise SystemExit("the two columns were tokenized from different trees; they do not pair")
+    check_complete(before, "before")
+    check_complete(after, "after")
     top_k = (before["config"].get("top_k"), after["config"].get("top_k"))
     if None not in top_k and top_k[0] != top_k[1]:
         raise SystemExit(f"the two columns were sampled with top_k {top_k[0]} and {top_k[1]}; they do not pair")
@@ -266,8 +327,22 @@ def print_table(title: str, columns: dict[str, dict[str, Any] | None]) -> None:
     print(f"  {'n':<11}" + "".join(f"{(columns[n] or {}).get('n', '-'):>17}" for n in names))
 
 
-def report(out: Path, scenarios: list[rj.Scenario]) -> dict[str, Any]:
+def check_selection(cols: dict[str, dict[str, Any]], scenarios: list[rj.Scenario], system: str) -> None:
+    """Refuse columns computed on another selection than the one the baselines are about to be scored on."""
+    ids = [s.scenario_id for s in scenarios]
+    corpus = {s.scenario_id: s.digest for s in scenarios}
+    system_sha256 = hashlib.sha256(system.encode()).hexdigest()
+    for name, col in cols.items():
+        config = col["config"]
+        for key, want in (("scenarios", ids), ("corpus", corpus), ("system_sha256", system_sha256)):
+            if config.get(key) != want:
+                raise SystemExit(f"{name}.json was computed with other {key} than this selection; "
+                                 "pass the --split, --max-faulty, --max-clean and --shard it was run with")
+
+
+def report(out: Path, scenarios: list[rj.Scenario], system: str | None = None) -> dict[str, Any]:
     cols = {c: json.loads((out / f"{c}.json").read_text()) for c in COLUMNS if (out / f"{c}.json").exists()}
+    check_selection(cols, scenarios, rj.system_for(scenarios) if system is None else system)
     base = baselines_for(scenarios) if scenarios else {"constant_best_answer": None, "policies": {}}
     result: dict[str, Any] = {"baselines": base, "columns": {c: v["metrics"] for c, v in cols.items()},
                               "sources": {c: v["config"]["source"] for c, v in cols.items()}}
@@ -343,6 +418,10 @@ def main(argv: list[str] | None = None) -> int:
         print("--episodes-per-scenario, --max-episode-steps and --max-new-tokens must be >= 1",
               file=sys.stderr)
         return EXIT_REFUSED
+    if args.max_episode_steps != rj.MAX_TURNS:
+        # The system prompt states MAX_TURNS whatever the budget is.
+        print(f"--max-episode-steps must be {rj.MAX_TURNS}: the system prompt states that budget", file=sys.stderr)
+        return EXIT_REFUSED
     if args.column in ("after", "both") and args.after is None and not args.compare:
         if args.column == "after":
             print("--column after needs --after", file=sys.stderr)
@@ -371,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.column in ("after", "both") and args.after is not None:
         run_column(args.after, args, scenarios, args.out / "after.json", system=system)
     if args.compare or args.column == "both":
-        report(args.out, scenarios)
+        report(args.out, scenarios, system=system)
     return 0
 
 
