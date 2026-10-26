@@ -1868,7 +1868,7 @@ def survey_cases_from_informational_dir(
 # that recipe's source-level inputs, and REPRODUCE.md / env.json recording the
 # CI-built artifacts that are deliberately NOT published, by digest.
 #
-# Everything here is stdlib-only on purpose: the publish job runs this script
+# Everything here is stdlib-only on purpose: the render job runs this script
 # from a bare checkout with no ``pip install``, so PyYAML is not importable.
 # ---------------------------------------------------------------------------
 
@@ -1910,7 +1910,7 @@ _RUN_AREA_ENV_VARS: tuple[tuple[str, str], ...] = (
 
 
 def provenance_from_environ() -> dict[str, str]:
-    """The publish job's environment-derived provenance for the run it just staged.
+    """The render job's environment-derived provenance for the run it just staged.
 
     These describe *this* job's GPU run -- the container image it ran in and the
     rocjitsu bundle its sanitizer backends came from -- so they are only valid
@@ -3337,7 +3337,7 @@ def _status_banner_html(status: dict[str, Any] | None) -> str:
     """Staleness banner shown when the latest nightly did not publish healthily.
 
     A failed nightly skips its snapshot push, so Pages would otherwise republish
-    the previous healthy page as if it were current. When the publish job records an
+    the previous healthy page as if it were current. When the render job records an
     unhealthy run status, surface it prominently with a link to the failed run.
     """
     if not status or status.get("healthy", True):

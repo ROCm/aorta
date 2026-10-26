@@ -159,7 +159,7 @@ jobs:
               print(\"ROCJITSU bundle commit:\", m.get(\"commit\"), \
               \"run:\", m.get(\"run_url\"))" \
               "${ROCJITSU_PREBUILT}/MANIFEST.json"
-            # Carry that provenance into the uploaded results so the publish job
+            # Carry that provenance into the uploaded results so the render job
             # (a different runner, which never sees the bundle) can record which
             # sanitizer build produced each report in its run area (#384).
             mkdir -p "${SANITIZER_OUT}"
@@ -170,7 +170,7 @@ jobs:
               "${ROCJITSU_PREBUILT}/MANIFEST.json" "${SANITIZER_OUT}/rocjitsu.json"
             # Surface the resolved run id to the host so sanitizers-survey can pin the
             # SAME bundle instead of re-resolving `--run latest`. Two serialized
-            # downloads can otherwise straddle a new rocjitsu build, and the publish job
+            # downloads can otherwise straddle a new rocjitsu build, and the render job
             # would then stamp the gate bundle commit onto survey run areas built from a
             # different one -- exactly the provenance ambiguity this PR documents.
             # Written outside SANITIZER_OUT so it does not enter the uploaded artifact.
@@ -321,16 +321,36 @@ jobs:
           echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
           echo "selected rocjitsu run: ${run_id:-<unresolved>}"
 
+      - name: Mark this attempt's sanitizer results
+        # upload-artifact@v4 deletes the previous artifact only when the upload
+        # below has at least one file (deleteArtifactIfExists sits in the
+        # filesToUpload.length > 0 branch). overwrite: true does not close that:
+        # a re-run that dies before .sanitizer-nightly/out exists leaves
+        # sanitizer-nightly-<run_id> in place, and render's sanitizer-*-<run_id>
+        # download publishes the old reports under this attempt. The marker is
+        # not a dotfile -- v4 drops those unless include-hidden-files is set --
+        # and render copies only incoming/<case>/, so it is not published.
+        if: always()
+        run: |
+          mkdir -p .sanitizer-nightly/out
+          echo "$GITHUB_RUN_ATTEMPT" > .sanitizer-nightly/out/attempt.txt
+
       - name: Upload sanitizer results
         # Always upload whatever ran, even when an earlier step (e.g. the baseline
-        # comparison) failed, so the publish job can render the failure with any
+        # comparison) failed, so the render job can render the failure with any
         # partial evidence instead of the run silently producing nothing.
+        # overwrite: a re-run keeps github.run_id. Without it a non-empty upload
+        # collides with the previous attempt, which stays in place, and render
+        # then publishes the OLD attempt reports as if they were this one. An
+        # attempt with no reports still replaces that artifact because the marker
+        # step above gives the upload a file.
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sanitizer-nightly-${{ github.run_id }}
           path: .sanitizer-nightly/out
           if-no-files-found: warn
+          overwrite: true
 
       - name: Clean up build/temp state
         if: always()
@@ -350,7 +370,7 @@ jobs:
     # Disabled: survey results must not be published. This repo is public, so the
     # survey artifact, logs and job summary of a run are all visible to anyone.
     # To re-enable, restore the condition below and pass
-    # --informational-results-dir in the publish job again:
+    # --informational-results-dir in the render job again:
     #   if: always() && needs.sanitizers-gpu.result != 'skipped'
     if: false
     # Same runner label set as the gate job; `needs` serialises them, so the gate
@@ -636,8 +656,16 @@ jobs:
             sudo chown -R "$uidgid" "$ws" || true
           fi
 
+      - name: Mark this attempt's survey results
+        # Same empty-upload hole as the gate job's marker step: v4 will not
+        # delete sanitizer-survey-<run_id> unless this attempt uploads a file.
+        if: always()
+        run: |
+          mkdir -p .sanitizer-nightly/out
+          echo "$GITHUB_RUN_ATTEMPT" > .sanitizer-nightly/out/attempt.txt
+
       - name: Upload sanitizer survey results
-        # Separate artifact from the gate job so the publish job can merge them.
+        # Separate artifact from the gate job so the render job can merge them.
         # `if: always()` for the same reason as the gate job: a partial survey is
         # still worth publishing. Note the #370 caveat on the job timeout above --
         # an abrupt runner kill skips this step, and the survey rows are simply
@@ -648,6 +676,7 @@ jobs:
           name: sanitizer-survey-${{ github.run_id }}
           path: .sanitizer-nightly/out
           if-no-files-found: warn
+          overwrite: true   # same re-run collision as the gate artifact
 
       - name: Clean up build/temp state
         if: always()
@@ -660,32 +689,55 @@ jobs:
         working-directory: docker
         run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
 
-  publish:
-    name: publish sanitizer dashboard
+  # Publishing is split in two so that rendering and writing never share a token.
+  #
+  #   render  runs on ANY ref, holds only `contents: read`, and does everything
+  #           the old single publish job did short of the commit: clone the data
+  #           branch, stage this run next to the history, prune, regenerate, and
+  #           upload the result as sanitizer-dashboard-<run_id>. Because it is not
+  #           main-only, a workflow_dispatch of this workflow on a PR branch shows
+  #           reviewers the exact page that branch would publish (plus screenshots)
+  #           without merging.
+  #   push    runs on main ONLY, holds the one `contents: write` in this file, and
+  #           does nothing but swap that artifact in for dashboard/ on
+  #           sanitizer-results and push. It never runs repo code.
+  #
+  # So a branch run still never puts branch output on the public sanitizer-results
+  # branch (which would bypass branch protection), and now it never even holds a
+  # token that could. Pages is guarded independently: pages.yml deploys only for a
+  # workflow_run whose head_branch is main, and refuses a status.json whose
+  # recorded ref is not refs/heads/main.
+  render:
+    name: render sanitizer dashboard
     # Gated on the GATE job only. sanitizers-survey is disabled and its results are
     # never published; it stays in `needs` so re-enabling it keeps the ordering.
     needs: [sanitizers-gpu, sanitizers-survey]
-    # Run even when the GPU job failed (to publish the failure, not a stale green
-    # page) but NOT when it was skipped. Publish ONLY from main: a workflow_dispatch
-    # branch run still executes sanitizers-gpu and uploads its artifact, but must
-    # never push branch output onto the public sanitizer-results branch (that would
-    # bypass branch protection). Branch runs therefore produce artifacts only.
-    if: >-
-      always() &&
-      needs.sanitizers-gpu.result != 'skipped' &&
-      github.ref == 'refs/heads/main'
+    # Run even when the GPU job failed (to render the failure, not a stale green
+    # page) but NOT when it was skipped. Deliberately NO main-only guard here --
+    # that guard lives on `push`, the only job that can write.
+    if: always() && needs.sanitizers-gpu.result != 'skipped'
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # push dashboard to the sanitizer-results branch
+      contents: read   # clone sanitizer-results; nothing in this job pushes
+    outputs:
+      # The push job re-clones the data branch and needs these for its commit
+      # subject (see the comment there). base_sha is the sanitizer-results commit
+      # this render started from, empty when the branch did not exist yet.
+      run_dir_id: ${{ steps.render.outputs.run_dir_id }}
+      started_iso: ${{ steps.render.outputs.started_iso }}
+      base_sha: ${{ steps.render.outputs.base_sha }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         # The gate artifact lands as incoming/<case>/. A survey artifact (only if
         # sanitizers-survey is re-enabled) would land as incoming/informational/,
-        # which the publish step below never stages.
+        # which the render step below never stages. On a re-run the pattern also
+        # matches this run's own sanitizer-dashboard[-screenshots]-<run_id> from the
+        # earlier attempt; that is inert, because the step below reads only
+        # incoming/<case>/sanitizer_report.json and incoming/rocjitsu.json.
         #
         # A failed GPU job may leave no artifact at all; don't hard-fail the
-        # publish job -- we still want to record the failure on the public page.
+        # render job -- we still want to record the failure on the public page.
         continue-on-error: true
         with:
           pattern: sanitizer-*-${{ github.run_id }}
@@ -721,12 +773,15 @@ jobs:
           PY
           cat status.json
 
-      - name: Publish sanitizer dashboard to sanitizer-results branch
+      - name: Render sanitizer dashboard from the sanitizer-results history
         # Preserve the accumulated per-run history on the data branch: clone it,
         # co-locate THIS run's raw reports under dashboard/runs/<date>-<run_id>/,
         # prune to a rolling window, then regenerate the rendered dashboard from
-        # the merged history and push. The old "wipe dashboard/ and re-copy" flow
-        # destroyed every prior run's raw reports, so it is deliberately gone.
+        # the merged history. The result is the whole of the next sanitizer-results
+        # tree; the push job commits it verbatim. The old "wipe dashboard/ and
+        # re-copy" flow destroyed every prior run's raw reports, so it is
+        # deliberately gone.
+        id: render
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPU_RESULT: ${{ needs.sanitizers-gpu.result }}
@@ -750,12 +805,14 @@ jobs:
           git ls-remote --exit-code --heads "$repo_url" sanitizer-results >/dev/null 2>&1
           lsr=$?
           set -e
+          base_sha=""
           if [ "$lsr" -eq 0 ]; then
             git clone --depth 1 --branch sanitizer-results "$repo_url" "$tmp"
+            base_sha="$(git -C "$tmp" rev-parse HEAD)"
           elif [ "$lsr" -eq 2 ]; then
-            echo "sanitizer-results branch absent; creating it"
-            git clone --depth 1 "$repo_url" "$tmp"
-            ( cd "$tmp" && git checkout --orphan sanitizer-results && git rm -rf . >/dev/null 2>&1 || true )
+            # Rendered into an empty tree; the push job makes the orphan branch.
+            echo "sanitizer-results branch absent; rendering a fresh history"
+            mkdir -p "$tmp/dashboard"
           else
             echo "::error::cannot reach sanitizer-results (git ls-remote exit ${lsr}); failing closed"
             exit 1
@@ -933,15 +990,157 @@ jobs:
             --status status.json \
             --out-dir "$tmp/dashboard"
 
-          # Mirror the rendered dashboard to the workspace and append the job
-          # summary BEFORE pushing, so both survive even if the push later fails.
+          # Copy the rendered tree to the workspace for the upload below, and
+          # append the job summary here rather than in push: a branch run never
+          # pushes, and on main this keeps the summary even if the push fails.
           rm -rf dashboard
           cp -a "$tmp/dashboard" dashboard
           cat dashboard/summary.md >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "run_dir_id=${run_dir_id}"
+            echo "started_iso=${started_iso}"
+            echo "base_sha=${base_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      # The handoff to the push job: dashboard/ here is the complete next
+      # content of sanitizer-results/dashboard/, not a delta. Hidden files are
+      # included so the round trip cannot silently drop a dotfile the generator
+      # ever writes (push would then delete it from the branch). The zip does
+      # not carry file modes or empty directories; neither matters to git here,
+      # since every blob on the branch is 100644 and git tracks no directories.
+      # overwrite: a re-run keeps github.run_id, so without it this upload
+      # collides with the previous attempt and the re-rendered tree never ships.
+      - name: Upload sanitizer dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-dashboard-${{ github.run_id }}
+          path: dashboard
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+
+      # Branch runs only: a picture of what the branch would publish, so a
+      # reviewer can see the page without downloading and opening the artifact.
+      # Kept off main so a Playwright or Chromium install hiccup can never become
+      # a new way for the production publish to fail, and continue-on-error so it
+      # cannot fail a branch run either. Its own Python, set up after the render
+      # so the generator above keeps running on the runner default.
+      - name: Set up Python for dashboard screenshots
+        if: github.ref != 'refs/heads/main'
+        continue-on-error: true
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Screenshot the rendered dashboard
+        if: github.ref != 'refs/heads/main'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m pip install "playwright==1.64.1"
+          python -m playwright install --with-deps --only-shell chromium
+          python scripts/sanitizers/screenshot_dashboard.py \
+            --dashboard-dir dashboard --out dashboard-screenshots
+
+      - name: Upload dashboard screenshots
+        if: github.ref != 'refs/heads/main'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-dashboard-screenshots-${{ github.run_id }}
+          path: dashboard-screenshots
+          if-no-files-found: warn
+          overwrite: true
+
+  push:
+    name: push sanitizer dashboard
+    needs: render
+    # Main ONLY, and only a fully successful render: a half-rendered tree must
+    # never replace the published one. This is the sole job in the file with
+    # write access, and the branch guard is what keeps a workflow_dispatch on a
+    # PR branch from publishing (see the comment above render).
+    #
+    # always() is load-bearing. Without a status function GitHub applies an
+    # implicit success() over the WHOLE needs chain, not just render: the
+    # disabled sanitizers-survey is always skipped and a red gate job is failed,
+    # so push would be skipped every night and the stale banner a failed night
+    # renders would never reach the page. needs.render.result is the real gate.
+    if: always() && github.ref == 'refs/heads/main' && needs.render.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push dashboard to the sanitizer-results branch
+    steps:
+      # No checkout: this job runs no repo code, it only moves the rendered tree.
+      - name: Download the rendered dashboard
+        uses: actions/download-artifact@v4
+        with:
+          name: sanitizer-dashboard-${{ github.run_id }}
+          path: dashboard
+
+      - name: Push sanitizer dashboard to sanitizer-results branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_DIR_ID: ${{ needs.render.outputs.run_dir_id }}
+          STARTED_ISO: ${{ needs.render.outputs.started_iso }}
+          BASE_SHA: ${{ needs.render.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          tmp="$(mktemp -d)"
+          # Same fail-closed contract as the render clone: ls-remote exit 0 is
+          # present, 2 is absent (create the orphan), anything else is an error
+          # that must NOT be read as "absent".
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" sanitizer-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          head_sha=""
+          if [ "$lsr" -eq 0 ]; then
+            git clone --depth 1 --branch sanitizer-results "$repo_url" "$tmp"
+            head_sha="$(git -C "$tmp" rev-parse HEAD)"
+          elif [ "$lsr" -eq 2 ]; then
+            echo "sanitizer-results branch absent; creating it"
+            git clone --depth 1 "$repo_url" "$tmp"
+            ( cd "$tmp" && git checkout --orphan sanitizer-results && git rm -rf . >/dev/null 2>&1 || true )
+          else
+            echo "::error::cannot reach sanitizer-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          fi
+          # The artifact is a whole tree rendered from BASE_SHA, so committing it
+          # on top of anything else would silently revert whatever landed in
+          # between. The concurrency group serializes runs of this workflow on
+          # main, so only an outside push can trip this. Re-run the render job
+          # to publish on top of the new tip: that re-runs the dependent push,
+          # and render reads the gate artifact already uploaded. Re-running
+          # push alone would commit the stale render. Re-running every job also
+          # re-runs the GPU job, which takes the shared runner and produces a
+          # different publish.
+          if [ "$head_sha" != "${BASE_SHA}" ]; then
+            echo "::error::sanitizer-results moved since render (rendered from '${BASE_SHA}', now '${head_sha}'); refusing to overwrite it. Re-run the render job so push retries against this tip"
+            exit 1
+          fi
+
+          # Commit only the tree this run rendered: the run area it names has to
+          # be in it, or the artifact is not what render produced.
+          run_dir_id="${RUN_DIR_ID:?render exposed no run_dir_id}"
+          started_iso="${STARTED_ISO:?render exposed no started_iso}"
+          for f in dashboard/index.html "dashboard/runs/${run_dir_id}/meta.json"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::rendered artifact has no ${f}; refusing to publish it"
+              exit 1
+            fi
+          done
+
+          # Mirror the rendered dashboard over the clone. Removed first, not
+          # copied over, so runs the render pruned (and any file it stopped
+          # writing) are deleted on the branch too; `git add -A` stages those.
+          rm -rf "$tmp/dashboard"
+          cp -a dashboard "$tmp/dashboard"
 
           # Two identifiers because they answer different questions and a re-run
           # moves only one: run_dir_id is the area this commit published (reused
-          # from the first attempt), started_iso is when this publish ran. A
+          # from the first attempt), started_iso is when this publish ran (the
+          # render job read the clock; both arrive as its outputs). A
           # date-only title gave two same-day runs the same subject; run_dir_id
           # alone would give a re-run the same subject as the attempt it
           # replaces. Reading git log, equal instants mean a first attempt and
@@ -955,10 +1154,3 @@ jobs:
             else
               echo "no changes to commit"
             fi )
-
-      - name: Upload sanitizer dashboard
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sanitizer-dashboard-${{ github.run_id }}
-          path: dashboard
