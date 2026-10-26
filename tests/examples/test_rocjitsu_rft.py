@@ -25,7 +25,7 @@ import eval_rocjitsu as ev  # noqa: E402
 import rocjitsu_demos as demos  # noqa: E402
 import rocjitsu_env as rj  # noqa: E402
 from test_rocjitsu_env import build_corpus  # noqa: E402
-from test_rocjitsu_env_v2 import _toy_corpus  # noqa: E402
+from test_rocjitsu_env_v2 import SIMQ, _toy_corpus  # noqa: E402
 
 CORPUS_V2 = Path(os.environ.get("AORTA_RJ_TEST_CORPUS_V2") or Path(__file__).with_name("no-corpus-v2"))
 ARCHIVE = CORPUS_V2 / "archive"
@@ -83,7 +83,7 @@ def toy_corpus(root: Path) -> Path:
     """The v2 toy corpus with a clean control added, and a train split holding it and one fault."""
     _toy_corpus(root)
     clean = {"sid": "CLEAN@toy#0", "workload": "toy", "kid": None, "op": "none", "cls": "none", "offsets": [],
-             "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": {}, "native": [],
+             "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": SIMQ, "native": [],
              "waitcheck_view": []}
     with open(root / "scenarios.jsonl", "a", encoding="utf-8") as handle:
         handle.write(json.dumps(clean) + "\n")
@@ -237,6 +237,25 @@ def test_sft_refuses_an_empty_harvest_before_loading_a_model(tmp_path, corpus_ro
     rc = sft_rocjitsu.main(["--demos", str(path), "--corpus-root", str(corpus_root), "--out", str(tmp_path / "o")])
     assert rc == sft_rocjitsu.tr.EXIT_REFUSED and "holds no demonstration" in capsys.readouterr().err
     assert not (tmp_path / "o").exists()
+
+
+@pytest.mark.parametrize("rows, refused", [(6912, True), (6896, False)])
+def test_sft_refuses_a_run_the_weight_audit_cannot_bound_before_loading_a_model(tmp_path, corpus_root, capsys,
+                                                                               monkeypatch, rows, refused):
+    pytest.importorskip("torch")
+    import sft_rocjitsu
+
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    path = tmp_path / "d.jsonl"
+    path.write_text("{}\n" * rows)
+    path.with_suffix(".stats.json").write_text(json.dumps({"system_sha256": _sha(corpus_root)}))
+    argv = ["--demos", str(path), "--corpus-root", str(corpus_root), "--out", str(tmp_path / "o")]
+    if refused:
+        assert sft_rocjitsu.main(argv) == sft_rocjitsu.tr.EXIT_REFUSED
+        assert "864 optimiser steps" in capsys.readouterr().err and not (tmp_path / "o").exists()
+    else:
+        with pytest.raises(ImportError):  # past the check, at the model stack
+            sft_rocjitsu.main(argv)
 
 
 def test_two_cycles_of_the_documented_layout_mix(tmp_path, corpus_root, clean_scenario, monkeypatch):

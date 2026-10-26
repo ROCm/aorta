@@ -40,6 +40,9 @@ def end_of_turn_id(tok: Any) -> int:
     return int(tok.eos_token_id)
 
 
+ADAM_BETAS = (0.9, 0.999)
+
+
 def demo_samples(rows: list[dict[str, Any]], tok: Any) -> list[Sample]:
     """Each demonstration step as a :class:`Sample` whose completion carries its token IDs and the end of turn."""
     stop = end_of_turn_id(tok)
@@ -103,6 +106,13 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         print(f"[refused] {a.demos} holds no demonstration; nothing to train on", file=sys.stderr)
         return tr.EXIT_REFUSED
+    steps = a.epochs * math.ceil(len(rows) / a.batch)
+    try:
+        tr.optimiser_bound(a.lr, steps, *ADAM_BETAS)
+    except ValueError as exc:
+        print(f"[refused] {steps} optimiser steps ({a.epochs} epoch(s) of {len(rows)} rows in batches of {a.batch}) "
+              f"is a run verify_checkpoint_delta.py cannot bound: {exc}", file=sys.stderr)
+        return tr.EXIT_REFUSED
     a.out.mkdir(parents=True, exist_ok=True)
     backend = blas_backend.apply()
     import torch
@@ -132,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         model.enable_input_require_grads()
     model.config.use_cache = False
     model.train()
-    opt = torch.optim.Adam(list(trained.values()), lr=a.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
+    opt = torch.optim.Adam(list(trained.values()), lr=a.lr, betas=ADAM_BETAS, eps=1e-8, weight_decay=0.0)
 
     samples = demo_samples(rows, tok)
     rng = random.Random(a.seed)
