@@ -18,7 +18,9 @@ The nightly ``sanitizers-model-survey`` job runs this once per model inventory i
 
 One time budget covers every launch and ConSan case of every model: each is
 started only while it could still finish at its own timeout, so the run ends
-within the budget whatever hangs.
+within the budget whatever hangs. Each later model keeps one launch wave and
+one ConSan wave of that budget, so an earlier model running to its case
+timeouts cannot leave the later one with no ConSan report.
 
 Each output directory also gets ``model_survey.json``: what was launched, what
 failed to launch, which ConSan cases ran, were excluded, or did not fit tonight.
@@ -328,8 +330,10 @@ def cached_object(cache: Path) -> tuple[Path, str]:
     return objects[0], name
 
 
-def warm_one(item: Warmed, *, model_dir: Path, python: str, gpu: str, budget: Budget) -> Warmed:
-    if not budget.admit(WARM_TIMEOUT_SECONDS):
+def warm_one(
+    item: Warmed, *, model_dir: Path, python: str, gpu: str, budget: Budget, reserve: float = 0.0
+) -> Warmed:
+    if not budget.admit(WARM_TIMEOUT_SECONDS, reserve=reserve):
         item.reason = "not launched: the survey time budget is spent"
         return item
     case = item.case_dir
@@ -469,9 +473,15 @@ class Budget:
     def __post_init__(self) -> None:
         self._start = self.clock()
 
-    def admit(self, case_seconds: float) -> bool:
+    def admit(self, case_seconds: float, *, reserve: float = 0.0) -> bool:
+        """True when this case can finish and still leave ``reserve`` seconds.
+
+        ``reserve`` is wall-clock held for models that have not run yet. Cases
+        in one wave share the clock, so the hold is one case timeout, not the
+        sum across GPUs.
+        """
         with self._lock:
-            return self.clock() - self._start + case_seconds <= self.seconds
+            return self.clock() - self._start + case_seconds + reserve <= self.seconds
 
     def remaining(self) -> float:
         with self._lock:
@@ -631,6 +641,17 @@ def merge_consan(reports: Sequence[dict]) -> dict:
     return merged.to_dict()
 
 
+def _later_reserve(later: Sequence[Inventory]) -> float:
+    """Seconds held so each later model can still launch and run ConSan.
+
+    One launch wave plus one ConSan wave per later inventory. On the nightly's
+    eight GPUs that is all of Qwen3; on fewer devices it is still one case,
+    which is what writes the report ``--require`` checks for.
+    """
+
+    return float(sum(WARM_TIMEOUT_SECONDS + inv.consan_timeout for inv in later))
+
+
 def run_model(
     inv: Inventory,
     *,
@@ -641,6 +662,7 @@ def run_model(
     budget: Budget,
     night: dt.date,
     python: str,
+    reserve: float = 0.0,
 ) -> dict:
     model_dir = check_asset(asset_dir, inv)
     pairs = model_pairs(inv, model_dir)
@@ -649,7 +671,9 @@ def run_model(
     warmed = on_gpus(
         gpus,
         [Warmed(pair, root / "cases" / pair.stem) for pair in pairs],
-        lambda item, gpu: warm_one(item, model_dir=model_dir, python=python, gpu=gpu, budget=budget),
+        lambda item, gpu: warm_one(
+            item, model_dir=model_dir, python=python, gpu=gpu, budget=budget, reserve=reserve
+        ),
     )
     launched = [w for w in warmed if w.ok]
     if not launched:
@@ -682,7 +706,7 @@ def run_model(
     lock = threading.Lock()
 
     def consan_one(item: Warmed, gpu: str) -> dict | None:
-        if not budget.admit(inv.consan_timeout):
+        if not budget.admit(inv.consan_timeout, reserve=reserve):
             with lock:
                 skipped.append(item.pair.kernel)
             return None
@@ -773,7 +797,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                      help="comma-separated device ids, or auto for every visible device")
     run.add_argument("--budget-seconds", type=float, default=3600.0,
                      help="for every launch and ConSan case of every model; each is started "
-                     "only if it can still finish at its own timeout")
+                     "only if it can still finish at its own timeout, and each later model "
+                     "keeps one launch wave and one ConSan wave")
     run.add_argument("--night", type=dt.date.fromisoformat, default=dt.datetime.now(dt.timezone.utc).date())
     args = parser.parse_args(argv)
 
@@ -790,7 +815,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SurveyError("no GPU is visible to this process")
         inventories = [load_inventory(path.resolve()) for path in args.inventory]
         asset_dir = args.asset_dir.resolve() if args.asset_dir else fetch_asset(work)
-        for inv in inventories:
+        for index, inv in enumerate(inventories):
             run_model(
                 inv,
                 asset_dir=asset_dir,
@@ -800,6 +825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 budget=budget,
                 night=args.night,
                 python=sys.executable,
+                reserve=_later_reserve(inventories[index + 1 :]),
             )
     except SurveyError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -300,6 +300,10 @@ def test_budget_admits_a_case_only_while_its_timeout_still_fits():
     assert budget.admit(60)
     now[0] = 41.0
     assert not budget.admit(60)
+    # Time held for a model that has not run yet counts against the same clock.
+    now[0] = 0.0
+    assert budget.admit(60, reserve=40)
+    assert not budget.admit(60, reserve=41)
 
 
 # ------------------------------------------------------------------- merge
@@ -556,3 +560,75 @@ def test_launches_and_consan_cases_share_one_budget(tmp_path, monkeypatch):
     selection = json.loads((other / "results/informational/consan-toy/model_survey.json").read_text())
     assert selection["not_scheduled_tonight"] == ["a", "b", "c"]
     assert not (other / "results/informational/consan-toy/sanitizer_report.json").exists()
+
+
+def _plant_model(root: Path, name: str, kernels: list[str]) -> None:
+    model = root / name
+    (model / "roofline" / "harness").mkdir(parents=True)
+    (model / "roofline" / "specs").mkdir(parents=True)
+    (model / "pkg_src").mkdir()
+    (model / "kernels").mkdir()
+    (model / "roofline" / "harness" / "launch.py").write_text(_STUB_LAUNCH, encoding="utf-8")
+    (model / "roofline" / "specs" / f"{name}.json").write_text(
+        json.dumps(
+            [{"kernel": kernel, "role": "launched", "scenarios": {"S0": {}}} for kernel in kernels]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_later_model_keeps_a_consan_wave_when_earlier_cases_hang(tmp_path, monkeypatch):
+    # One shared budget, and every admitted case hangs until its own timeout.
+    # Without a hold for the later model its ConSan report is never written and
+    # the nightly --require check fails; the hold gives that wave back.
+    root = tmp_path / "asset" / "aorta-model-kernels"
+    _plant_model(root, "early", ["e"])
+    _plant_model(root, "late", ["l"])
+    _manifest(root)
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    for name in ("early", "late"):
+        _write_inventory(
+            recipes,
+            name=name,
+            specs=[f"{name}.json"],
+            expected_pairs=1,
+            consan={"timeout_seconds": 900, "exclude": {}},
+        )
+
+    original = ms.Budget
+
+    class _Hung(original):
+        def admit(self, case_seconds: float, *, reserve: float = 0.0) -> bool:
+            admitted = original.admit(self, case_seconds, reserve=reserve)
+            if admitted:
+                with self._lock:
+                    self._start -= case_seconds
+            return admitted
+
+    monkeypatch.setattr(ms, "Budget", _Hung)
+    monkeypatch.setattr(ms, "sweep", _fake_sweep)
+    monkeypatch.chdir(tmp_path)
+    # Fits early's launch, exactly one 900s ConSan case, late's launch, and not
+    # a second 900s case. The hold is what makes the one ConSan case be late's.
+    budget = ms.WARM_TIMEOUT_SECONDS * 2 + 900 + 100
+    code = ms.main(
+        [
+            "run",
+            "--inventory", "recipes/early.yaml",
+            "--inventory", "recipes/late.yaml",
+            "--out", "results/informational",
+            "--work", "work",
+            "--asset-dir", "asset/aorta-model-kernels",
+            "--gpus", "0",
+            "--budget-seconds", str(budget),
+        ]
+    )
+    informational = tmp_path / "results" / "informational"
+    assert code == 0
+    assert not (informational / "consan-early" / "sanitizer_report.json").exists()
+    assert (informational / "consan-late" / "sanitizer_report.json").is_file()
+    monkeypatch.chdir(_REPO)
+    assert comparator.main(
+        ["prog", "--vacuous-only", "--require", "informational/consan-late", str(tmp_path / "results")]
+    ) == 0
