@@ -706,7 +706,13 @@ def _place_baselines(recipe_dir: Path, text: str | None = None) -> None:
 
 
 def test_loader_accepts_strict_load_only_driver_with_declared_outcome(tmp_path: Path) -> None:
-    _place_baselines(tmp_path)
+    declaration = {
+        "execution_status": "error",
+        "overall_verdict": "error",
+        "reasons": ["combined_hook_exit_86"],
+        "why": "intended negative control",
+    }
+    _place_baselines(tmp_path, json.dumps({"consan_tiny": {"expected_error": declaration}}))
     recipe = _write_kernel_consan_recipe(
         tmp_path, consan_driver="load", expected_error="consan_tiny"
     )
@@ -820,15 +826,15 @@ _NIGHTLY_SWEEP = re.compile(
 def test_daily_expected_error_names_the_declaration_the_nightly_reads() -> None:
     """An expected_error the nightly still runs must name that case's baseline.
 
-    daily-consan-tiny keeps ``expected_error: consan_tiny`` so a strict
-    load-only recipe can load. The survey job does not run it: tiny_vecadd is
-    a synthetic control and is not a Tab 2 row. Putting the invocation back
-    without updating this test is the regression.
+    No daily recipe declares an expected_error any more: daily-consan-tiny's
+    no-site outcome is not_checked, not an error to sign off. The survey job
+    does not run it either: tiny_vecadd is a synthetic control and is not a
+    Tab 2 row. Putting the invocation back without updating this test is the
+    regression.
 
-    ``declared == {"daily-consan-tiny.yaml": "consan_tiny"}`` is load-bearing.
-    The loop skips the output-dir key check for any expected_error recipe the
-    nightly does not invoke, so a second such recipe is caught only by that
-    equality. Loosening it to a subset check would let the new recipe through.
+    ``declared == {}`` is load-bearing. The loop skips the output-dir key check
+    for any expected_error recipe the nightly does not invoke, so a new such
+    recipe is caught only by that equality.
     """
     comparator = _load_comparator()
     baselines = comparator._load_baselines(_REPO / comparator._BASELINES)
@@ -846,7 +852,7 @@ def test_daily_expected_error_names_the_declaration_the_nightly_reads() -> None:
         if path.name not in case_dirs:
             continue
         assert comparator._case_key_for_dir(case_dirs[path.name]) == key
-    assert declared == {"daily-consan-tiny.yaml": "consan_tiny"}
+    assert declared == {}
     assert "daily-consan-tiny.yaml" not in case_dirs
 
 
@@ -870,21 +876,12 @@ def test_flipping_daily_consan_gemm_to_strict_is_rejected(tmp_path: Path) -> Non
         load_sanitizer_recipe(recipe)
 
 
-def test_daily_consan_tiny_loads_only_through_its_declared_outcome(tmp_path: Path) -> None:
-    recipe = _committed_recipe_variant(
-        tmp_path, "daily-consan-tiny.yaml", "    expected_error: consan_tiny\n", ""
-    )
-    with pytest.raises(RecipeSchemaError, match="ROCm/aorta#450"):
-        load_sanitizer_recipe(recipe)
-
-
-def test_daily_consan_tiny_with_a_mistyped_key_is_rejected(tmp_path: Path) -> None:
-    _place_baselines(tmp_path)
+def test_flipping_daily_consan_tiny_to_strict_is_rejected(tmp_path: Path) -> None:
     recipe = _committed_recipe_variant(
         tmp_path,
         "daily-consan-tiny.yaml",
-        "    expected_error: consan_tiny\n",
-        "    expected_error: consan_tiyn\n",
+        "    consan_policy: lenient\n",
+        "    consan_policy: strict\n",
     )
-    with pytest.raises(RecipeSchemaError, match="'consan_tiyn' names no expected_error"):
+    with pytest.raises(RecipeSchemaError, match="ROCm/aorta#450"):
         load_sanitizer_recipe(recipe)
