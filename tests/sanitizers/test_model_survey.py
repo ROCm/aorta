@@ -428,3 +428,131 @@ def test_merged_model_reports_render_one_tab_2_row_per_model(tmp_path):
     assert all("model_survey.py run" in e["command"] for e in entries)
     stats = gen._survey_summary_stats(gen._group_survey_entries(entries))
     assert (stats["workloads"], stats["kernels"], stats["runs"]) == (2, 3, 2)
+
+
+# ------------------------------------------------------------ end to end
+#
+# These drive the real main() -> run_model() -> warm_one() -> consan_one() path.
+# Only two things are stood in for: the asset's launch.py (a stub that refuses any
+# path it cannot resolve from the directory the shim cds into, then writes one
+# object into TRITON_CACHE_DIR the way Triton does) and the `aorta sweep run`
+# boundary, which needs rj_waitcheck and the ConSan hook.
+
+_STUB_LAUNCH = '''
+import json, os, sys
+from pathlib import Path
+spec, rest = Path(sys.argv[1]), sys.argv[2:]
+opts = dict(zip(rest[0::2], rest[1::2]))
+for path in (spec, Path(opts["--flat-dir"]), Path(os.environ["PYTHONPATH"])):
+    if not path.exists():
+        print(f"not found from {os.getcwd()}: {path}", file=sys.stderr)
+        sys.exit(3)
+entry = Path(os.environ["TRITON_CACHE_DIR"]) / "HASH"
+entry.mkdir(parents=True, exist_ok=True)
+kernel = opts["--kernel"]
+(entry / f"{kernel}.hsaco").write_bytes(kernel.encode())
+(entry / f"{kernel}.json").write_text(json.dumps({"name": f"{kernel}_sym"}))
+'''
+
+
+def _toy_asset(tmp_path: Path, *, consan_timeout: int = 60) -> None:
+    root = tmp_path / "asset" / "aorta-model-kernels"
+    model = root / "toy"
+    (model / "roofline" / "harness").mkdir(parents=True)
+    (model / "roofline" / "specs").mkdir(parents=True)
+    (model / "pkg_src").mkdir()
+    (model / "kernels").mkdir()
+    (model / "roofline" / "harness" / "launch.py").write_text(_STUB_LAUNCH, encoding="utf-8")
+    (model / "roofline" / "specs" / "toy.json").write_text(json.dumps([
+        {"kernel": "a", "role": "launched", "scenarios": {"S0": {}, "S1": {}}},
+        {"kernel": "b", "role": "launched", "scenarios": {"S0": {}}},
+        {"kernel": "c", "role": "launched", "scenarios": {"S0": {}}},
+    ]), encoding="utf-8")
+    _manifest(root)
+    (tmp_path / "recipes").mkdir()
+    _write_inventory(tmp_path / "recipes", expected_pairs=4,
+                     consan={"timeout_seconds": consan_timeout, "exclude": {}})
+
+
+def _fake_sweep(recipe: Path, out_dir: Path, *, env=None) -> int:
+    """Stand-in for `aorta sweep run`: a, pass; b, writes nothing; c, swaps its object."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plan = yaml.safe_load(recipe.read_text())["sanitizer_plan"]
+    source = plan["source"]
+    if plan["sanitizers"] == ["waitcheck"]:
+        # aorta dedups identical objects (both `a` scenarios compile to the same bytes).
+        unique = {k["code_object_sha256"]: k for k in source["kernels"]}.values()
+        kernels = [{"identity": {**k, "target": "gfx950", "entry_offset": None},
+                    "total_time_ms": 0.0, "dispatch_count": 1, "sources": ["kernel"]}
+                   for k in unique]
+        report = SanitizerReport.from_dict({
+            "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+            "worklist": {"schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+                         "top_n": len(kernels), "kernel_count": len(kernels), "kernels": kernels},
+            "checks": [{"sanitizer": "waitcheck", "state": "ran", "verdict": "pass", "reason": None,
+                        "returncode": 0, "findings": [], "kernel_results": [], "coverage": [],
+                        "backend": {}}],
+            "overall_verdict": "pass", "execution_status": "complete",
+        })
+        (out_dir / "sanitizer_report.json").write_text(json.dumps(report.to_dict()))
+        return 0
+    name = source["kernel"]["name"]
+    if name == "b_sym":
+        return 1
+    if name == "c_sym":
+        Path(source["kernel"]["code_object"]).parent.joinpath("triton-cache", "HASH", "c.hsaco").write_bytes(b"recompiled")
+    (out_dir / "sanitizer_report.json").write_text(json.dumps(_case_report(name, "ran", "pass")))
+    return 0
+
+
+def _run_toy(tmp_path: Path, monkeypatch, *extra: str) -> int:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ms, "sweep", _fake_sweep)
+    return ms.main(["run", "--inventory", "recipes/toy.yaml", "--out", "results/informational",
+                    "--work", "work", "--asset-dir", "asset/aorta-model-kernels", "--gpus", "0",
+                    *extra])
+
+
+def test_relative_cli_paths_still_reach_the_harness_and_cache(tmp_path, monkeypatch):
+    # The shim cds into the asset before using any path it was given, so every
+    # path must already be absolute. Relative ones made the nightly compile nothing.
+    _toy_asset(tmp_path)
+    assert _run_toy(tmp_path, monkeypatch) == 0
+    record = json.loads((tmp_path / "results/informational/waitcheck-toy/model_survey.json").read_text())
+    assert [p["ok"] for p in record["pairs"]] == [True, True, True, True]
+    shim = (tmp_path / "work/toy/cases/a__S0/launch.sh").read_text()
+    assert f"TRITON_CACHE_DIR={tmp_path / 'work/toy/cases/a__S0/triton-cache'}" in shim
+
+
+def test_a_case_without_a_report_or_with_a_swapped_object_stays_on_the_row_as_an_error(
+    tmp_path, monkeypatch
+):
+    _toy_asset(tmp_path)
+    assert _run_toy(tmp_path, monkeypatch) == 0
+    merged = json.loads((tmp_path / "results/informational/consan-toy/sanitizer_report.json").read_text())
+    results = {kr["identity"]["name"]: kr for kr in merged["checks"][0]["kernel_results"]}
+    assert set(results) == {"a_sym", "b_sym", "c_sym"}
+    assert results["a_sym"]["verdict"] == "pass"
+    assert results["b_sym"]["verdict"] == "error"
+    assert results["b_sym"]["reason"] == "consan_case_produced_no_report: aorta sweep exited 1"
+    assert results["c_sym"]["verdict"] == "error"
+    assert results["c_sym"]["reason"].startswith("consan_object_mismatch:")
+    assert merged["overall_verdict"] == "error"
+    assert merged["worklist"]["kernel_count"] == 3
+
+
+def test_launches_and_consan_cases_share_one_budget(tmp_path, monkeypatch):
+    # A launch is admitted only if its timeout fits; with less than one launch
+    # timeout of budget nothing compiles, which is an infrastructure fault.
+    _toy_asset(tmp_path)
+    assert _run_toy(tmp_path, monkeypatch, "--budget-seconds", str(ms.WARM_TIMEOUT_SECONDS - 1)) == 2
+
+    # Enough for the launches but not for one 900 s ConSan case: every kernel is
+    # recorded as not scheduled, and no ConSan row is written to pass for it.
+    other = tmp_path / "second"
+    other.mkdir()
+    _toy_asset(other, consan_timeout=900)
+    assert _run_toy(other, monkeypatch, "--budget-seconds", str(ms.WARM_TIMEOUT_SECONDS + 60)) == 0
+    selection = json.loads((other / "results/informational/consan-toy/model_survey.json").read_text())
+    assert selection["not_scheduled_tonight"] == ["a", "b", "c"]
+    assert not (other / "results/informational/consan-toy/sanitizer_report.json").exists()

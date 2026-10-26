@@ -12,8 +12,13 @@ The nightly ``sanitizers-model-survey`` job runs this once per model inventory i
    written to ``<out>/waitcheck-<model>/``;
 3. re-runs one scenario per kernel under ConSan against the same cache, so the
    hook instruments the bytes waitcheck scanned. Kernels are taken in a nightly
-   rotation and scheduled only while the time budget can still fit a case at
-   its timeout. The per-case reports are merged into ``<out>/consan-<model>/``.
+   rotation. The per-case reports are merged into ``<out>/consan-<model>/``; a
+   case that wrote no report, or whose dispatched object is no longer the one
+   waitcheck scanned, is merged as an ``error`` for its kernel.
+
+One time budget covers every launch and ConSan case of every model: each is
+started only while it could still finish at its own timeout, so the run ends
+within the budget whatever hangs.
 
 Each output directory also gets ``model_survey.json``: what was launched, what
 failed to launch, which ConSan cases ran, were excluded, or did not fit tonight.
@@ -68,7 +73,7 @@ ASSET_SHA256 = "130d63c0636bcbc4ea8321be6dd45df82c951aa1c56ab35002ea4c043b5ea709
 INVENTORY_SCHEMA_VERSION = 1
 TARGET = "gfx950"
 WARP_SIZE = 64
-WARM_TIMEOUT_SECONDS = 600
+WARM_TIMEOUT_SECONDS = 300
 _STEM_RE = re.compile(r"[^A-Za-z0-9._-]")
 _INVENTORY_KEYS = {
     "schema_version",
@@ -323,7 +328,10 @@ def cached_object(cache: Path) -> tuple[Path, str]:
     return objects[0], name
 
 
-def warm_one(item: Warmed, *, model_dir: Path, python: str, gpu: str) -> Warmed:
+def warm_one(item: Warmed, *, model_dir: Path, python: str, gpu: str, budget: Budget) -> Warmed:
+    if not budget.admit(WARM_TIMEOUT_SECONDS):
+        item.reason = "not launched: the survey time budget is spent"
+        return item
     case = item.case_dir
     shutil.rmtree(case, ignore_errors=True)
     case.mkdir(parents=True)
@@ -465,6 +473,10 @@ class Budget:
         with self._lock:
             return self.clock() - self._start + case_seconds <= self.seconds
 
+    def remaining(self) -> float:
+        with self._lock:
+            return max(0.0, self.seconds - (self.clock() - self._start))
+
 
 def sweep(recipe: Path, out_dir: Path, *, env: dict[str, str] | None = None) -> int:
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -477,6 +489,45 @@ def sweep(recipe: Path, out_dir: Path, *, env: dict[str, str] | None = None) -> 
             stderr=subprocess.STDOUT,
             env={**os.environ, **(env or {})},
         ).returncode
+
+
+def error_case_report(item: Warmed, reason: str) -> dict:
+    """A per-case ConSan report recording ``reason`` as an error for ``item``'s kernel.
+
+    Used when a case cannot be read as a valid observation, so its kernel stays in
+    the merged row as an error instead of silently leaving it.
+    """
+    from aorta.instrumentation.rocjitsu_sanitizers.models import SanitizerReport
+
+    identity = {
+        "name": item.symbol,
+        "target": TARGET,
+        "code_object": str(item.code_object),
+        "code_object_sha256": item.sha256,
+        "code_object_index": 0,
+        "entry_offset": None,
+    }
+    check = {
+        "sanitizer": "consan", "state": "error", "verdict": "error", "reason": reason,
+        "returncode": None, "findings": [], "coverage": [], "backend": {},
+        "kernel_results": [{
+            "identity": identity, "state": "error", "verdict": "error", "findings": [],
+            "reason": reason, "returncode": None, "diagnostics_truncated": False,
+        }],
+    }
+    return SanitizerReport.from_dict({
+        "schema": "aorta.sanitizer_report/0.1",
+        "target": TARGET,
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": identity, "total_time_ms": 0.0, "dispatch_count": 1,
+                         "sources": ["kernel"]}],
+        },
+        "checks": [check],
+        "overall_verdict": "error",
+        "execution_status": "error",
+    }).to_dict()
 
 
 def _with_kernel_result(check: dict, identity: dict) -> dict:
@@ -587,7 +638,7 @@ def run_model(
     work: Path,
     out: Path,
     gpus: Sequence[str],
-    consan_budget: float,
+    budget: Budget,
     night: dt.date,
     python: str,
 ) -> dict:
@@ -598,7 +649,7 @@ def run_model(
     warmed = on_gpus(
         gpus,
         [Warmed(pair, root / "cases" / pair.stem) for pair in pairs],
-        lambda item, gpu: warm_one(item, model_dir=model_dir, python=python, gpu=gpu),
+        lambda item, gpu: warm_one(item, model_dir=model_dir, python=python, gpu=gpu, budget=budget),
     )
     launched = [w for w in warmed if w.ok]
     if not launched:
@@ -626,7 +677,6 @@ def run_model(
     not_launched = {k: w.reason for k, w in first_by_kernel.items() if not w.ok and k not in excluded}
     candidates = [w for k, w in first_by_kernel.items() if w.ok and k not in excluded]
     order = rotation(candidates, night)
-    budget = Budget(consan_budget)
     consan_root = root / "consan"
     skipped: list[str] = []
     lock = threading.Lock()
@@ -641,24 +691,33 @@ def run_model(
         case_out = consan_root / item.pair.stem
         before = item.sha256
         rc = sweep(recipe, case_out, env={"HIP_VISIBLE_DEVICES": gpu})
-        report_path = case_out / "sanitizer_report.json"
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {"kernel": item.pair.kernel, "scenario": item.pair.scenario, "returncode": rc,
-                    "report": None}
         try:
             obj, _ = cached_object(item.case_dir / "triton-cache")
             same = hashlib.sha256(obj.read_bytes()).hexdigest() == before
         except SurveyError:
             same = False
+        report_path = case_out / "sanitizer_report.json"
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            report = error_case_report(
+                item, f"consan_case_produced_no_report: aorta sweep exited {rc}"
+            )
+        else:
+            if not same:
+                # The row would compare ConSan on one object with waitcheck on
+                # another, which is the one thing this survey promises not to do.
+                report = error_case_report(
+                    item,
+                    "consan_object_mismatch: the object ConSan dispatched is not the "
+                    "one waitcheck scanned",
+                )
         return {"kernel": item.pair.kernel, "scenario": item.pair.scenario, "returncode": rc,
                 "report": report, "same_object_as_waitcheck": same}
 
     print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: ConSan over up to {len(order)} kernels "
-          f"({len(excluded)} excluded, budget {int(consan_budget)}s)", flush=True)
-    results = [r for r in on_gpus(gpus, order, consan_one) if r is not None]
-    ran = [r for r in results if r["report"] is not None]
+          f"({len(excluded)} excluded, {int(budget.remaining())}s of budget left)", flush=True)
+    ran = [r for r in on_gpus(gpus, order, consan_one) if r is not None]
     cs_out = out / f"consan-{inv.model}"
     shutil.rmtree(cs_out, ignore_errors=True)
     cs_out.mkdir(parents=True)
@@ -675,12 +734,12 @@ def run_model(
         "model": inv.model,
         "inventory": inv.path.name,
         "night": night.isoformat(),
-        "budget_seconds": int(consan_budget),
+        "budget_seconds": int(budget.seconds),
         "case_timeout_seconds": inv.consan_timeout,
         "ran": [
             {k: r.get(k) for k in ("kernel", "scenario", "returncode", "same_object_as_waitcheck")}
-            | {"verdict": (r["report"] or {}).get("overall_verdict")}
-            for r in results
+            | {"verdict": r["report"].get("overall_verdict")}
+            for r in ran
         ],
         "not_scheduled_tonight": sorted(skipped),
         "excluded": excluded,
@@ -712,28 +771,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                      help="an already-extracted aorta-model-kernels root (default: download the pinned asset)")
     run.add_argument("--gpus", default="auto",
                      help="comma-separated device ids, or auto for every visible device")
-    run.add_argument("--consan-budget-seconds", type=float, default=1500.0,
-                     help="per model; a case is started only if it can finish at its timeout")
+    run.add_argument("--budget-seconds", type=float, default=3600.0,
+                     help="for every launch and ConSan case of every model; each is started "
+                     "only if it can still finish at its own timeout")
     run.add_argument("--night", type=dt.date.fromisoformat, default=dt.datetime.now(dt.timezone.utc).date())
     args = parser.parse_args(argv)
 
-    work = args.work or args.out.parent / "model-survey-work"
+    # The launch shim changes directory before using any of these, so a relative
+    # path would resolve against the asset rather than the caller.
+    out = args.out.resolve()
+    work = (args.work or out.parent / "model-survey-work").resolve()
+    budget = Budget(args.budget_seconds)
     try:
         gpus = visible_gpus() if args.gpus == "auto" else [
             g.strip() for g in args.gpus.split(",") if g.strip()
         ]
         if not gpus:
             raise SurveyError("no GPU is visible to this process")
-        inventories = [load_inventory(path) for path in args.inventory]
-        asset_dir = args.asset_dir or fetch_asset(work)
+        inventories = [load_inventory(path.resolve()) for path in args.inventory]
+        asset_dir = args.asset_dir.resolve() if args.asset_dir else fetch_asset(work)
         for inv in inventories:
             run_model(
                 inv,
                 asset_dir=asset_dir,
                 work=work,
-                out=args.out,
+                out=out,
                 gpus=gpus,
-                consan_budget=args.consan_budget_seconds,
+                budget=budget,
                 night=args.night,
                 python=sys.executable,
             )

@@ -4798,8 +4798,20 @@ def asan_panel_html(runs: list[dict[str, Any]]) -> str:
     return "".join(_asan_run_html(run) for run in runs)
 
 
-_TAB_RADIO_RE = re.compile(r"<input type=radio name=santab id=tab-survey class=tabradio>")
-_TAB_LABEL_RE = re.compile(r'<label for="tab-survey">[^<]*</label>')
+# The ASan tab goes after the last nightly tab. That is the survey tab on a page
+# this generator renders, and the guardrails tab on a page rendered while the
+# survey tab was dropped (#570) -- which Pages keeps serving until the next
+# nightly publish replaces it, so both shapes must be joinable.
+_TAB_ANCHORS = (
+    (
+        re.compile(r"<input type=radio name=santab id=tab-survey class=tabradio>"),
+        re.compile(r'<label for="tab-survey">[^<]*</label>'),
+    ),
+    (
+        re.compile(r"<input type=radio name=santab id=tab-guardrails class=tabradio checked>"),
+        re.compile(r'<label for="tab-guardrails">[^<]*</label>'),
+    ),
+)
 _TABS_END_RE = re.compile(r"</section>\s*(</div>\s*</div></body></html>\s*)\Z")
 _PAGE_END = "</div></body></html>"
 
@@ -4817,7 +4829,11 @@ def add_asan_tab(page: str, runs: list[dict[str, Any]]) -> str:
     if page.count("</head>") != 1:
         raise ValueError("page has no single </head> to add the tab's style to")
     panel = asan_panel_html(runs)
-    radio, label = _TAB_RADIO_RE.search(page), _TAB_LABEL_RE.search(page)
+    radio = label = None
+    for radio_re, label_re in _TAB_ANCHORS:
+        radio, label = radio_re.search(page), label_re.search(page)
+        if radio or label:
+            break
     if radio and label:
         end = _TABS_END_RE.search(page)
         if end is None or not radio.end() <= label.start() < label.end() <= end.start():

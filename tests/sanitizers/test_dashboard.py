@@ -4554,6 +4554,9 @@ def test_build_html_renders_two_self_contained_tabs():
     assert "id=tab-survey class=tabradio" in html
     assert "Expected behavior (guardrails)" in html
     assert "Workload survey (observed-only)" in html
+    # The tabs are a pure-CSS :checked toggle, so these rules are the mechanism.
+    assert "#tab-guardrails:checked ~ #panel-guardrails { display:block; }" in html
+    assert "#tab-survey:checked ~ #panel-survey { display:block; }" in html
     # self-contained: no external JS/CSS, no CDN, no protocol-absolute links
     assert "<script" not in html.lower()
     assert "cdn" not in html.lower()

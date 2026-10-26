@@ -615,9 +615,9 @@ jobs:
             #                   docs/sanitizers/consan-gemm-patched-image-growth-cap.md.
             #
             # waitcheck-gemm was on this list for the #453 CFG non-convergence.
-            # It has produced signal on every night since 2026-10-05, and the
-            # comparator failed this job for the stale entry, so it is checked
-            # for real again.
+            # It has produced signal every night since at least 2026-10-01, and
+            # the comparator failed this job for the stale entry, so it is
+            # checked for real again.
             #
             # This is NOT a blessing and is deliberately not spelled as an
             # expected_error: it says the outcome is wrong and being worked, not
@@ -694,10 +694,12 @@ jobs:
     needs: [sanitizers-gpu, sanitizers-survey]
     if: always() && needs.sanitizers-gpu.result != 'skipped'
     runs-on: [self-hosted, gpu]
-    # Measured on gfx950 with 8 GPUs: 189 launches, two waitcheck sweeps and 25
-    # ConSan cases took 2 min 20 s. The ceiling is for a night where kernels hang:
-    # model_survey.py starts a ConSan case only while its 900 s timeout still fits
-    # in a 1500 s per-model budget, so two models end well inside 90 minutes.
+    # Measured in the pinned CI image on 8 gfx950 GPUs: 189 launches, two
+    # waitcheck sweeps and 25 ConSan cases took 77 s. The ceiling is for a night
+    # where kernels hang: model_survey.py starts a launch (300 s timeout) or a
+    # ConSan case (900 s) only while it can still finish inside one 3600 s budget
+    # shared by both models, so with setup and the two waitcheck sweeps the job
+    # ends inside 90 minutes.
     timeout-minutes: 90
     steps:
       - name: Reclaim workspace ownership
@@ -781,7 +783,7 @@ jobs:
             python scripts/sanitizers/model_survey.py run ${INVENTORIES} \
               --work "${SANITIZER_ROOT}/model-survey-work" \
               --out "${SANITIZER_OUT}/informational" \
-              --consan-budget-seconds 1500
+              --budget-seconds 3600
 
             # Same vacuity check as the GEMM survey, over the four model rows. A
             # model whose ConSan had nothing to instrument on some kernels reads

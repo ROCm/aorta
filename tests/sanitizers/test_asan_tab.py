@@ -120,6 +120,36 @@ def test_tab_joins_the_nightly_tabs():
     assert "id=tab-asan class=tabradio>" in page
 
 
+def _guardrails_only_page() -> str:
+    """The nightly page as rendered while the survey tab was dropped (#570).
+
+    This is the page on sanitizer-results until the next nightly publish, and
+    Pages adds the ASan tab to whatever that branch holds.
+    """
+    page = _nightly_page()
+    survey = page.index("<section class=tabpanel id=panel-survey>")
+    end = gen._TABS_END_RE.search(page)
+    assert end is not None
+    page = page[:survey] + page[end.start(1) :]
+    page = page.replace("\n  <input type=radio name=santab id=tab-survey class=tabradio>", "")
+    page = page.replace('\n    <label for="tab-survey">Workload survey (observed-only)</label>', "")
+    assert "tab-survey" not in page.split("<style>", 1)[1].split("</style>", 1)[1]
+    return page
+
+
+def test_tab_joins_a_guardrails_only_page():
+    joined = gen.add_asan_tab(_guardrails_only_page(), _runs(_row(), _control()))
+    at = joined.index
+    assert at("id=tab-guardrails") < at("id=tab-asan") < at("<div class=tabbar>")
+    tabbar = joined[at("<div class=tabbar>") :]
+    tabbar = tabbar[: tabbar.index("</div>")]
+    assert '<label for="tab-asan">AddressSanitizer (manual run)</label>' in tabbar
+    assert at("id=panel-guardrails") < at("<section class=tabpanel id=panel-asan>")
+    assert joined.endswith("</details>\n  </section>\n  </div>\n</div></body></html>\n")
+    # A tab, not the always-visible section the no-runs page gets.
+    assert "<section id=panel-asan>" not in joined
+
+
 def test_tab_only_adds_to_the_nightly_page():
     original = _nightly_page()
     runs = _runs(_row(), _control())
