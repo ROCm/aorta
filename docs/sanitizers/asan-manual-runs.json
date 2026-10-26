@@ -10,12 +10,6 @@
       ],
       "run_mode": "aorta run --sanitizer asan, proposed in PR #567 (in review, not yet merged)",
       "run_mode_url": "https://github.com/ROCm/aorta/pull/567",
-      "kernel_scope": "PyTorch and HIP",
-      "covered": [
-        "Global-memory reads and writes in PyTorch's own kernels, because this PyTorch is built with ASan",
-        "Global-memory reads and writes in HIP kernels built with ASan",
-        "Each error is reported with the kernel, the access, and how far it fell outside which allocation"
-      ],
       "not_covered": [
         "hipBLASLt GEMM kernels: generated assembly that ASan can't instrument, even in an ASan build of hipBLASLt",
         "Stores made with buffer instructions",

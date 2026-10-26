@@ -1,0 +1,184 @@
+name: Sanitizer dashboard preview
+
+# Shows a reviewer the sanitizer dashboard a branch WOULD publish, without
+# publishing it. The selected ref's generator re-renders the real published
+# history from the sanitizer-results data branch, and the result is uploaded as
+# an artifact (HTML + screenshots) and linked from the job summary.
+#
+# This is a CPU-only re-render: it covers changes to the generator, the ASan tab
+# and the baselines, but not to what the GPU jobs produce. For a PR that changes
+# recipes, fixtures or the GPU jobs, dispatch "Sanitizers Nightly" on the branch
+# instead; its render job uploads the same artifacts and only pushes from main.
+#
+# Manual only, by design: no pull_request / push trigger, so no PR ever starts it
+# on its own. Actions -> "Sanitizer dashboard preview" -> "Use workflow from"
+# <branch> -> Run, or `gh workflow run sanitizer-dashboard-preview.yml --ref
+# <branch>`. GitHub can only dispatch a workflow file that exists on main.
+# See docs/ci-nightly-eval.md, "Previewing dashboard changes before merge".
+on:
+  workflow_dispatch:
+
+# Read-only. This workflow must never write sanitizer-results or deploy Pages --
+# both are owned by sanitizers-nightly.yml's push job and pages.yml, which only
+# ever publish main's output.
+permissions:
+  contents: read
+
+concurrency:
+  group: sanitizer-dashboard-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    name: render sanitizer dashboard preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the selected ref
+        uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Same fail-closed ls-remote contract as pages.yml's sanitizer step: a
+      # genuinely-absent branch (exit 2) renders the generator's empty state, but a
+      # transport/auth error must not be mistaken for "no history" -- that would
+      # preview an empty page while real history exists.
+      - name: Render the dashboard over the published history
+        id: render
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          tmp="$(mktemp -d)"
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" sanitizer-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          if [ "$lsr" -eq 2 ]; then
+            echo "sanitizer-results branch absent; previewing the empty state"
+            mkdir -p "$tmp/dashboard/runs"
+          elif [ "$lsr" -ne 0 ]; then
+            echo "::error::cannot reach sanitizer-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          else
+            git clone --depth 1 --branch sanitizer-results "$repo_url" "$tmp"
+            mkdir -p "$tmp/dashboard/runs"
+          fi
+          # The nightly deletes these before it renders, because survey results
+          # are not published; mirror that so the preview matches what it would push.
+          rm -rf "$tmp"/dashboard/runs/*/survey
+
+          # No --current-run: the generator then treats the newest retained run as
+          # this job's, and rewrites its run area (env.json, REPRODUCE.md, recipe
+          # copies) from this checkout. That is what exposes the branch's changes
+          # to the run area, and it is why the summary labels this a preview. The
+          # temp clone is discarded, so nothing on the branch is touched.
+          #
+          # That rewrite also stamps the provenance the nightly exports for the run
+          # it staged (container image, rocjitsu bundle). This job has no GPU run,
+          # so carry over what the newest run recorded; otherwise those lines drop
+          # out of its area and the preview shows a difference the branch did not
+          # cause. Newest is picked with the generator's own id filter and sort key.
+          provenance="$(python - "$tmp/dashboard/runs" <<'PY'
+          import importlib.util, json, shlex, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location(
+              "gen", "scripts/sanitizers/gen_sanitizer_dashboard.py")
+          gen = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gen)
+          runs = [p for p in Path(sys.argv[1]).iterdir() if p.is_dir() and gen._is_run_id(p.name)]
+          recorded = {}
+          if runs:
+              newest = max(runs, key=lambda p: gen._history_sort_key(p.name))
+              for env in sorted(newest.glob("*/env.json")):
+                  data = json.loads(env.read_text(encoding="utf-8"))
+                  recorded.update({k: data[k] for k, _ in gen._RUN_AREA_ENV_VARS if data.get(k)})
+          for key, var in gen._RUN_AREA_ENV_VARS:
+              if key in recorded:
+                  print(f"export {var}={shlex.quote(str(recorded[key]))}")
+          PY
+          )"
+          eval "$provenance"
+
+          # --status is the last real nightly's manifest (a missing file is
+          # tolerated), so a stale banner shows exactly when production shows one.
+          # --commit / --run-label only label a --results-dir render; in history
+          # mode the page shows each run's own meta.json, so the "preview" label
+          # lives in the job summary below, not on the page.
+          python scripts/sanitizers/gen_sanitizer_dashboard.py \
+            --history-root "$tmp/dashboard/runs" --keep 30 --keep-logs 7 \
+            --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
+            --status "$tmp/dashboard/status.json" \
+            --commit "${GITHUB_SHA}" \
+            --run-label "preview of ${GITHUB_REF_NAME}" \
+            --out-dir preview/dashboard
+
+      # pages.yml adds the manual ASan tab at deploy time, so the published page
+      # has it; add it here too so the preview is the page a reader would see.
+      # Best-effort for the same reason as there.
+      - name: Add the manual ASan results
+        run: |
+          set -uo pipefail
+          if ! python scripts/sanitizers/add_asan_tab.py \
+                 --results docs/sanitizers/asan-manual-runs.json \
+                 --page preview/dashboard/index.html; then
+            echo "::warning::could not add the ASan tab; the preview is shown without it"
+          fi
+
+      # Pinned so a Playwright release cannot change what a preview looks like
+      # between two dispatches of the same branch. --only-shell: headless
+      # Chromium is all the screenshot helper launches.
+      - name: Install Playwright
+        run: |
+          set -euo pipefail
+          python -m pip install "playwright==1.64.1"
+          python -m playwright install --with-deps --only-shell chromium
+
+      - name: Screenshot the dashboard
+        run: |
+          python scripts/sanitizers/screenshot_dashboard.py \
+            --dashboard-dir preview/dashboard --out preview/screenshots
+
+      # Upload whatever rendered, even if the screenshots failed: the HTML alone
+      # is still the preview.
+      - name: Upload the preview
+        id: upload
+        if: always() && steps.render.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-dashboard-preview-${{ github.run_id }}
+          path: preview
+          if-no-files-found: error
+          retention-days: 14
+          # A re-run keeps github.run_id; replace the earlier attempt's preview.
+          overwrite: true
+
+      - name: Write the job summary
+        if: always() && steps.render.outcome == 'success'
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## PREVIEW -- not published"
+            echo
+            echo "Rendered by \`${GITHUB_REF_NAME}\` at \`${GITHUB_SHA}\` over the published"
+            echo "\`sanitizer-results\` history. Nothing was pushed and Pages was not deployed."
+            echo "The page itself is not marked as a preview. The newest run's area is"
+            echo "re-rendered from this ref (recipe copies, REPRODUCE.md, env.json), so it can"
+            echo "differ from what that run actually published."
+            echo
+            if [ -n "${ARTIFACT_URL}" ]; then
+              echo "Artifact: [sanitizer-dashboard-preview-${GITHUB_RUN_ID}](${ARTIFACT_URL})"
+            else
+              echo "Artifact: upload failed; see the \"Upload the preview\" step."
+            fi
+            echo "(\`dashboard/index.html\` opens locally; \`screenshots/\` has the PNGs)."
+            echo
+            echo "---"
+            echo
+            cat preview/dashboard/summary.md
+          } >> "$GITHUB_STEP_SUMMARY"
