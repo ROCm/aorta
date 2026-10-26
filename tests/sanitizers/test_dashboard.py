@@ -4094,6 +4094,68 @@ def test_survey_cases_from_spec_degrades_on_malformed_specs():
     assert entries[0]["report_rel"] is None
 
 
+def test_survey_cases_from_spec_isolates_list_valued_worklist(tmp_path, monkeypatch):
+    # A --survey report whose worklist is a JSON list used to raise AttributeError
+    # inside summarize_case (worklist.get) and abort the whole render, guardrail
+    # page included, because the spec path had no isolation. The informational
+    # path already catches that class of nested malformation. Render the named
+    # case absent -- the same degradation as a missing report -- and keep going
+    # so a sibling case and index.html / summary.md still land (#582).
+    bad = {
+        "name": "x",
+        "label": "list worklist",
+        "report_rel": "runs/x/survey/x/sanitizer_report.json",
+        "report": {
+            "schema": "aorta.sanitizer_report/0.1",
+            "target": "gfx950",
+            "overall_verdict": "pass",
+            "execution_status": "complete",
+            "worklist": [],
+            "checks": [],
+        },
+    }
+    entries = gen.survey_cases_from_spec(
+        {"cases": [bad, {"name": "ok", "label": "good", "report": _waitcheck_report()}]}
+    )
+    assert [entry["name"] for entry in entries] == ["x", "ok"]
+    assert entries[0]["summary"]["present"] is False
+    assert entries[0]["summary"]["observation"] == "report missing"
+    assert entries[0]["report_rel"] is None
+    assert entries[1]["summary"]["present"] is True
+
+    baselines = (
+        _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    )
+    incoming = tmp_path / "incoming"
+    for case, report in (
+        ("waitcheck", _waitcheck_report()),
+        ("consan-clean", _consan_clean_report()),
+        ("consan-racy", _consan_racy_report()),
+    ):
+        (incoming / case).mkdir(parents=True)
+        (incoming / case / "sanitizer_report.json").write_text(json.dumps(report))
+    survey_spec = tmp_path / "survey.json"
+    survey_spec.write_text(json.dumps({"cases": [bad]}))
+    out = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--results-dir", str(incoming),
+        "--baselines", str(baselines),
+        "--survey", str(survey_spec),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "HEALTHY" in html
+    md = (out / "summary.md").read_text(encoding="utf-8")
+    assert "**HEALTHY**" in md
+    assert "list worklist" in md
+    data = json.loads((out / "data.json").read_text(encoding="utf-8"))
+    published = data[0]["survey"]
+    assert len(published) == 1
+    assert published[0]["summary"]["present"] is False
+
+
 def test_survey_report_rel_rejects_unsafe_links():
     # report_rel is untrusted caller JSON: a URL scheme, an absolute path, or a
     # protocol-relative link must be dropped (HTML-escaping does not make a URL
