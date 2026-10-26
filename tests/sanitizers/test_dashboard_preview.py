@@ -166,6 +166,24 @@ def test_main_explains_a_broken_playwright_install(tmp_path, capsys, monkeypatch
 
 
 @pytest.mark.parametrize("workflow", [_PREVIEW_WORKFLOW, _NIGHTLY_WORKFLOW])
+def test_every_artifact_upload_survives_a_rerun(workflow):
+    # A re-run keeps github.run_id, and upload-artifact@v4 refuses to replace an
+    # existing name by default. The nightly gate artifact is the sharp case: the
+    # failed upload leaves the previous attempt in place and render publishes it.
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    uploads = [
+        (name, step.get("name", ""), step.get("with", {}))
+        for name, job in doc["jobs"].items()
+        for step in job.get("steps", [])
+        if "actions/upload-artifact" in step.get("uses", "")
+    ]
+    assert uploads
+    for job, step, args in uploads:
+        assert args.get("overwrite") is True, f"{job}: {step!r} lacks overwrite: true"
+
+
+@pytest.mark.parametrize("workflow", [_PREVIEW_WORKFLOW, _NIGHTLY_WORKFLOW])
 def test_both_workflows_install_the_playwright_the_hint_names(workflow):
     # The helper's hint, the preview workflow and the nightly render job all name
     # one Playwright pin and one browser install; a bump to one has to reach all.

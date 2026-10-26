@@ -325,12 +325,16 @@ jobs:
         # Always upload whatever ran, even when an earlier step (e.g. the baseline
         # comparison) failed, so the render job can render the failure with any
         # partial evidence instead of the run silently producing nothing.
+        # overwrite: a re-run keeps github.run_id. Without it this upload fails
+        # against the previous attempt, which stays in place, and render then
+        # publishes the OLD attempt reports as if they were this one.
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sanitizer-nightly-${{ github.run_id }}
           path: .sanitizer-nightly/out
           if-no-files-found: warn
+          overwrite: true
 
       - name: Clean up build/temp state
         if: always()
@@ -648,6 +652,7 @@ jobs:
           name: sanitizer-survey-${{ github.run_id }}
           path: .sanitizer-nightly/out
           if-no-files-found: warn
+          overwrite: true   # same re-run collision as the gate artifact
 
       - name: Clean up build/temp state
         if: always()
@@ -979,6 +984,8 @@ jobs:
       # ever writes (push would then delete it from the branch). The zip does
       # not carry file modes or empty directories; neither matters to git here,
       # since every blob on the branch is 100644 and git tracks no directories.
+      # overwrite: a re-run keeps github.run_id, so without it this upload
+      # collides with the previous attempt and the re-rendered tree never ships.
       - name: Upload sanitizer dashboard
         uses: actions/upload-artifact@v4
         with:
@@ -986,6 +993,7 @@ jobs:
           path: dashboard
           include-hidden-files: true
           if-no-files-found: error
+          overwrite: true
 
       # Branch runs only: a picture of what the branch would publish, so a
       # reviewer can see the page without downloading and opening the artifact.
@@ -1018,6 +1026,7 @@ jobs:
           name: sanitizer-dashboard-screenshots-${{ github.run_id }}
           path: dashboard-screenshots
           if-no-files-found: warn
+          overwrite: true
 
   push:
     name: push sanitizer dashboard
@@ -1026,7 +1035,13 @@ jobs:
     # never replace the published one. This is the sole job in the file with
     # write access, and the branch guard is what keeps a workflow_dispatch on a
     # PR branch from publishing (see the comment above render).
-    if: github.ref == 'refs/heads/main' && needs.render.result == 'success'
+    #
+    # always() is load-bearing. Without a status function GitHub applies an
+    # implicit success() over the WHOLE needs chain, not just render: the
+    # disabled sanitizers-survey is always skipped and a red gate job is failed,
+    # so push would be skipped every night and the stale banner a failed night
+    # renders would never reach the page. needs.render.result is the real gate.
+    if: always() && github.ref == 'refs/heads/main' && needs.render.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # push dashboard to the sanitizer-results branch

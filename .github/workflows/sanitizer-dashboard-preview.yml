@@ -153,6 +153,8 @@ jobs:
           path: preview
           if-no-files-found: error
           retention-days: 14
+          # A re-run keeps github.run_id; replace the earlier attempt's preview.
+          overwrite: true
 
       - name: Write the job summary
         if: always() && steps.render.outcome == 'success'
