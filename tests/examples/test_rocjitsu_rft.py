@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "tests" / "examples"))
 import eval_rocjitsu as ev  # noqa: E402
 import rocjitsu_demos as demos  # noqa: E402
 import rocjitsu_env as rj  # noqa: E402
+from test_rocjitsu_env import build_corpus  # noqa: E402
 from test_rocjitsu_env_v2 import _toy_corpus  # noqa: E402
 
 CORPUS_V2 = Path(os.environ.get("AORTA_RJ_TEST_CORPUS_V2") or Path(__file__).with_name("no-corpus-v2"))
@@ -106,20 +107,23 @@ def clean_scenario(corpus_root):
     return random.Random(11).choice([s for s in scenarios if s.clean])
 
 
-def _column(tmp_path, scenario, rows, sha, budget=rj.MAX_TURNS, name="shard-0"):
+def _column(tmp_path, scenario, rows, sha, budget=rj.MAX_TURNS, name="shard-0", corpus=None):
     path = tmp_path / name / "before.json"
     path.parent.mkdir(parents=True)
-    config = {"system_sha256": sha}
+    config = {"system_sha256": sha,
+              "corpus": {scenario.scenario_id: scenario.digest} if corpus is None else corpus}
     if budget is not None:
         config["max_episode_steps"] = budget
     path.write_text(json.dumps({"config": config, "groups": [], "wire": rows}))
     return path
 
 
-def _wire(run, rows, sha, budget=rj.MAX_TURNS):
+def _wire(run, rows, sha, budget=rj.MAX_TURNS, scenario=None):
     run.mkdir(parents=True)
     (run / "wire.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     log = {"max_episode_steps": budget}
+    if scenario is not None:
+        log["corpus"] = {scenario.scenario_id: scenario.digest}
     if sha is not None:
         log["system_prompt_sha256"] = sha
     (run / "train-log.json").write_text(json.dumps(log))
@@ -259,7 +263,7 @@ def test_two_iterations_of_one_wire_episode_stay_two_episodes(tmp_path, corpus_r
     monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
     rows = ([dict(r, iteration=1) for r in _scripted(clean_scenario, TOOLS + NONE, 0)]
             + [dict(r, iteration=2) for r in _scripted(clean_scenario, TOOLS + SIM + NONE, 0)])
-    wire = _wire(tmp_path / "run", rows, _sha(corpus_root))
+    wire = _wire(tmp_path / "run", rows, _sha(corpus_root), scenario=clean_scenario)
     out = tmp_path / "d.jsonl"
     assert _harvest(corpus_root, out, "--wire", wire) == 0
     kept = [json.loads(line) for line in out.read_text().splitlines()]
@@ -279,7 +283,8 @@ def test_a_wire_log_is_harvested_only_under_its_own_system_prompt(tmp_path, corp
                                                                   monkeypatch, sha, log, fragment):
     monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
     rows = [dict(r, iteration=1) for r in _scripted(clean_scenario, TOOLS + NONE, 0)]
-    wire = _wire(tmp_path / "run", rows, _sha(corpus_root) if sha == "right" else ("0" * 64 if sha else None))
+    wire = _wire(tmp_path / "run", rows, _sha(corpus_root) if sha == "right" else ("0" * 64 if sha else None),
+                 scenario=clean_scenario)
     if not log:
         (tmp_path / "run" / "train-log.json").unlink()
     with pytest.raises(SystemExit, match=fragment):
@@ -294,9 +299,40 @@ def test_an_input_is_replayed_under_the_turn_budget_it_recorded(tmp_path, corpus
     assert _harvest(corpus_root, out, "--column", col) == 0
     prompts = [json.loads(line)["prompt"] for line in out.read_text().splitlines()]
     assert prompts and all("of 4." in p and "of 8." not in p for p in prompts)
-    wire = _wire(tmp_path / "run", [dict(r, iteration=1) for r in rows], _sha(corpus_root), budget=4)
+    wire = _wire(tmp_path / "run", [dict(r, iteration=1) for r in rows], _sha(corpus_root), budget=4,
+                 scenario=clean_scenario)
     assert _harvest(corpus_root, tmp_path / "w.jsonl", "--wire", wire) == 0
     assert [json.loads(line)["prompt"] for line in (tmp_path / "w.jsonl").read_text().splitlines()] == prompts
     unrecorded = _column(tmp_path / "u", clean_scenario, rows, _sha(corpus_root), budget=None)
     with pytest.raises(SystemExit, match="no usable max_episode_steps"):
         _harvest(corpus_root, tmp_path / "u.jsonl", "--column", unrecorded)
+
+
+@pytest.mark.parametrize("kind", ["column", "wire"])
+@pytest.mark.parametrize("recorded", ["other", "missing", "absent"])
+def test_an_input_from_another_archive_is_not_harvested(tmp_path, corpus_root, clean_scenario, monkeypatch,
+                                                        kind, recorded):
+    monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
+    rows = _scripted(clean_scenario, TOOLS + NONE, 0)
+    corpus = {"other": {clean_scenario.scenario_id: "0" * 64}, "missing": {}, "absent": None}[recorded]
+    if kind == "column":
+        path = _column(tmp_path, clean_scenario, rows, _sha(corpus_root), corpus=corpus or {})
+        if corpus is None:
+            doc = json.loads(path.read_text())
+            del doc["config"]["corpus"]
+            path.write_text(json.dumps(doc))
+    else:
+        path = _wire(tmp_path / "run", [dict(r, iteration=1) for r in rows], _sha(corpus_root))
+        log = json.loads((tmp_path / "run" / "train-log.json").read_text())
+        if corpus is not None:
+            log["corpus"] = corpus
+        (tmp_path / "run" / "train-log.json").write_text(json.dumps(log))
+    with pytest.raises(SystemExit, match="archive"):
+        _harvest(corpus_root, tmp_path / "out.jsonl", f"--{kind}", path)
+
+
+@pytest.mark.parametrize("flag", [["--recipe"], ["--quirk-demos", "1"]])
+def test_scripted_demos_are_refused_on_a_v1_corpus(tmp_path, flag):
+    root = build_corpus(tmp_path)
+    with pytest.raises(SystemExit, match="v1-layout"):
+        _harvest(root, tmp_path / "out.jsonl", *flag)
