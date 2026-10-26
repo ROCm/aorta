@@ -165,15 +165,56 @@ def test_a_column_records_top_k_only_when_the_requests_carry_it(archive, tmp_pat
     assert json.loads((tmp_path / "b" / "column.json").read_text())["config"]["top_k"] is None
 
 
-def test_a_column_played_under_a_shorter_budget_replays_under_it(archive, tmp_path):
+def test_a_budget_the_system_prompt_does_not_state_is_refused(archive, tmp_path):
     with Scripted([TOOL, TOOL]) as server:
-        assert _play(server, archive, tmp_path / "played", "--max-turns", "2") == 0
-    column = json.loads((tmp_path / "played" / "column.json").read_text())
-    assert column["config"]["max_episode_steps"] == 2
-    assert rjdebug.main(["--replay", str(tmp_path / "played" / "column.json"), "--archive", archive,
-                         "--out", str(tmp_path / "replayed"), "--quiet"]) == 0
-    check = json.loads((tmp_path / "replayed" / "summary.json").read_text())["replay_check"]
-    assert check["episodes"] == 1 and check["identical"] == 1
+        assert _play(server, archive, tmp_path / "short", "--max-turns", "2") == 2
+        assert server.bodies == []
+        assert _play(server, archive, tmp_path / "played", "--max-turns", str(rj.MAX_TURNS)) == 0
+    path = tmp_path / "played" / "column.json"
+    column = json.loads(path.read_text())
+    assert column["config"]["max_episode_steps"] == rj.MAX_TURNS
+    column["config"]["max_episode_steps"] = 2
+    path.write_text(json.dumps(column))
+    assert rjdebug.main(["--replay", str(path), "--archive", archive, "--out", str(tmp_path / "r"), "--quiet"]) == 2
+
+
+@pytest.mark.parametrize("flags", [["--scenario", "ran@toy"], ["--limit", "1"]])
+def test_a_replay_of_some_scenarios_is_held_only_to_those(archive, tmp_path, flags):
+    with Scripted([TOOL, ANSWER, ANSWER, TOOL, TOOL, ANSWER]) as server:
+        played = tmp_path / "played"
+        assert rjdebug.main(["--endpoint", server.url, "--model", "m", "--archive", archive, "--split", "test",
+                             "--episodes", "2", "--concurrency", "1", "--out", str(played), "--quiet"]) == 0
+    assert len(json.loads((played / "column.json").read_text())["config"]["scenarios"]) > 1
+    assert rjdebug.main(["--replay", str(played / "column.json"), "--archive", archive, "--out",
+                         str(tmp_path / "r"), "--quiet", *flags]) == 0
+    check = json.loads((tmp_path / "r" / "summary.json").read_text())["replay_check"]
+    assert check["episodes"] == 2 and check["identical"] == 2 and not check["mismatches"]
+
+
+def _llamacpp(template):
+    return {"default_generation_settings": {"n_ctx": 4096}, "chat_template": template, "total_slots": 1}
+
+
+@pytest.mark.parametrize("change", ["template", "extra_params"])
+def test_columns_drawn_under_different_protocols_do_not_pair(archive, tmp_path, change):
+    import eval_rocjitsu
+
+    with Scripted([ANSWER, ANSWER], props=_llamacpp("t")) as server:
+        assert _play(server, archive, tmp_path / "a") == 0
+        if change == "template":
+            server.props = _llamacpp("u")
+        assert _play(server, archive, tmp_path / "b", *(["--no-extra-params"] if change == "extra_params" else [])) == 0
+    with Scripted([ANSWER], props=_llamacpp("t")) as server:
+        assert _play(server, archive, tmp_path / "c") == 0
+    a, b, c = (json.loads((tmp_path / d / "column.json").read_text()) for d in "abc")
+    assert a["config"]["generation"]["flavor"] == "llamacpp"
+    eval_rocjitsu.compare(a, c)
+    with pytest.raises(SystemExit, match="generation"):
+        eval_rocjitsu.compare(a, b)
+    assert rjdebug.main(["--replay", str(tmp_path / "a" / "column.json"), "--archive", archive,
+                         "--out", str(tmp_path / "ra"), "--quiet"]) == 0
+    replayed = json.loads((tmp_path / "ra" / "column.json").read_text())
+    assert replayed["config"]["generation"] == a["config"]["generation"]
 
 
 @pytest.mark.parametrize("status", [200, 400, 503])

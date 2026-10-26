@@ -297,6 +297,16 @@ def enforces_top_k(client: Any) -> bool:
     return client.extra_params and client.flavor != "ollama"
 
 
+def generation_record(client: Any) -> dict[str, Any]:
+    """How the replies were drawn, beyond the sampling fields: ``config.generation``, which ``compare`` checks.
+    A replay keeps the record of the column it replays."""
+    if isinstance(client, ReplayClient):
+        return client.generation
+    return {"client": "rjdebug", "mode": client.mode, "flavor": client.flavor, "extra_params": client.extra_params,
+            "chat_template_sha256": client.server.get("chat_template_sha256"),
+            "server_version": client.server.get("version")}
+
+
 def redacted_argv(argv: list[str]) -> list[str]:
     """``argv`` with the value of ``--api-key``, or of any abbreviation argparse accepts for it, replaced."""
     out, hide = [], False
@@ -325,6 +335,7 @@ class ReplayClient:
     def __init__(self, column: dict[str, Any]) -> None:
         self.column = column
         self.model = column["config"]["source"]
+        self.generation = column["config"].get("generation")
         self.raw = {(w["scenario_id"], w["episode"], w["step"]): w["raw"] for w in column["wire"]}
         self.sampling = {k: column["config"].get(k2) for k, k2 in
                          (("temperature", "temperature"), ("top_p", "top_p"), ("top_k", "top_k"),
@@ -470,7 +481,7 @@ def column(scenarios: list[Any], results: list[EpisodeResult], client: Client | 
         "source": f"{client.endpoint}#{client.model}", "seed": seed, "split": split, "episodes": episodes,
         "temperature": client.sampling["temperature"], "top_p": client.sampling["top_p"],
         "top_k": client.sampling["top_k"] if enforces_top_k(client) else None,
-        "max_new_tokens": client.sampling["max_tokens"],
+        "max_new_tokens": client.sampling["max_tokens"], "generation": generation_record(client),
         "max_episode_steps": max_turns, "param_dtype": None, "seeding": "per-episode-step (server-side seed)",
         "scenarios": [s.scenario_id for s in scenarios], "corpus": {s.scenario_id: s.digest for s in scenarios},
         "blas_backend": None, "system_sha256": hashlib.sha256(system.encode()).hexdigest(),
@@ -599,9 +610,10 @@ def write_transcripts(root: Path, results: list[EpisodeResult]) -> None:
                                  "error": r.error}) + "\n")
 
 
-def check_replay(col: dict[str, Any], recorded: dict[str, Any]) -> dict[str, Any]:
-    """Hold every replayed episode to the column it was replayed from."""
-    want = {(e["scenario_id"], e["index"]): e for g in recorded["groups"] for e in g["episodes"]}
+def check_replay(col: dict[str, Any], recorded: dict[str, Any], selected: set[str]) -> dict[str, Any]:
+    """Hold every replayed episode to the column it was replayed from, over the scenarios ``selected``."""
+    want = {(e["scenario_id"], e["index"]): e for g in recorded["groups"] for e in g["episodes"]
+            if e["scenario_id"] in selected}
     got = {(e["scenario_id"], e["index"]): e for g in col["groups"] for e in g["episodes"]}
     keys = ("outcome", "steps", "solved", "tool_cost", "answer", "sequence", "total")
     bad = [k for k in want if k not in got or any(got[k][f] != want[k][f] for f in keys)]
@@ -641,7 +653,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-p", type=float, default=EVAL_SAMPLING["top_p"])
     p.add_argument("--top-k", type=int, default=EVAL_SAMPLING["top_k"])
     p.add_argument("--max-tokens", type=int, default=EVAL_SAMPLING["max_tokens"])
-    p.add_argument("--max-turns", type=int, default=None, help="turn budget (default the environment's 8)")
+    p.add_argument("--max-turns", type=int, default=None,
+                   help="turn budget; only the environment's 8, which the system prompt states")
     p.add_argument("--prompt", default="procedure", help="prompt profile the model was trained under: procedure")
     p.add_argument("--reward", default="v2", help="reward version the model was trained under: v2")
     p.add_argument("--env-code", default=None, help=f"code snapshot with examples/rl/rocjitsu_env.py "
@@ -688,6 +701,11 @@ def main(argv: list[str] | None = None) -> int:
                         sampling={"temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
                                   "max_tokens": args.max_tokens})
         only = list(args.scenario)
+    if args.max_turns not in (None, rj.MAX_TURNS):
+        # The system prompt states the environment's budget; the training and HF evaluator refuse others too.
+        print(f"a turn budget of {args.max_turns} is not supported: the system prompt states {rj.MAX_TURNS}",
+              file=sys.stderr)
+        return 2
     scenarios = load_scenarios(args.archive, args.split, only, args.reward, args.limit)
     if not scenarios:
         print("no scenarios selected", file=sys.stderr)
@@ -717,7 +735,7 @@ def main(argv: list[str] | None = None) -> int:
                  max_turns=max_turns, argv=argv)
     summ = summary(col, results, wall)
     if recorded is not None:
-        summ["replay_check"] = check_replay(col, recorded)
+        summ["replay_check"] = check_replay(col, recorded, {s.scenario_id for s in scenarios})
     (out / "column.json").write_text(json.dumps(col, indent=1))
     (out / "summary.json").write_text(json.dumps(summ, indent=1))
     text = format_summary(summ, col)
