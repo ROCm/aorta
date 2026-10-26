@@ -48,6 +48,10 @@ def test_reprice_keeps_every_other_terminal_and_every_cost():
     assert rj.reprice([("cost_run_sim_all", -0.35)], "v2") == [("cost_run_sim_all", -0.35)]
 
 
+#: A recorded run for each schedule seed run_sim accepts, none of them failing.
+SIMQ = {str(seed): {"ops": {}} for seed in rj.SEEDS_V2 if seed}
+
+
 def _toy_corpus(root: Path) -> Path:
     """One two-kernel workload and three faulty records that differ only in their native half."""
     (root / "listings").mkdir(parents=True)
@@ -63,7 +67,7 @@ def _toy_corpus(root: Path) -> Path:
     for k in kernels:
         (root / "listings" / f"{k}.json").write_text(json.dumps([[0, "s_waitcnt vmcnt(0)"], [4, "s_endpgm"]]))
     base = {"workload": "toy", "kid": "k000", "op": "waitcnt_weaken_vm", "cls": "waitcnt", "offsets": [0],
-            "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": {}, "waitcheck_view": []}
+            "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": SIMQ, "waitcheck_view": []}
     recs = [dict(base, sid="notrun@toy", native=[], native_source="not_run"),
             dict(base, sid="legacy@toy", native=[]),
             dict(base, sid="ran@toy", native=[{"rc": 0, "ops": {"0": [False, 1.0, 3], "1": [True, 0.0, 0]}, "ok": False}])]
@@ -155,7 +159,7 @@ def test_v2_location_credit_takes_an_instruction_of_either_listing(tmp_path, off
     root = _toy_corpus(tmp_path)
     (root / "listings" / "k000.json").write_text(json.dumps([[o, "s_nop 0"] for o in range(0, 28, 4)]))
     rec = {"workload": "toy", "kid": "k000", "op": "waitcnt_weaken_vm", "cls": "waitcnt", "offsets": [4],
-           "native": [], "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": {}, "waitcheck_view": [],
+           "native": [], "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": SIMQ, "waitcheck_view": [],
            "sid": "edit@toy", "mutation": {"range_off": 8, "old": "00" * 8, "new": "11" * 8,
                                            "window": [[8, "s_nop 1"], [10, "s_nop 2"], [14, "s_nop 3"]]}}
     (root / "scenarios.jsonl").write_text(json.dumps(rec) + "\n")
@@ -213,7 +217,7 @@ def _constant_corpus(root: Path) -> Path:
     _toy_corpus(root)
     (root / "listings" / "k000.json").write_text(json.dumps([[o, "s_nop 0"] for o in range(0, 20, 4)]))
     base = {"workload": "toy", "kid": "k000", "op": "waitcnt_weaken_vm", "cls": "waitcnt", "native": [],
-            "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": {}, "waitcheck_view": []}
+            "sim": {"rc": 0, "ops": {}, "races": [], "memwait": []}, "simq": SIMQ, "waitcheck_view": []}
     recs = [dict(base, sid=f"s{i}@toy", offsets=[o]) for i, o in enumerate([0, 0, 4, 12, 16, 16])]
     (root / "scenarios.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
     (root / "splits" / "test.txt").write_text("".join(r["sid"] + "\n" for r in recs))
@@ -271,3 +275,26 @@ def test_the_reward_version_is_chosen_by_argument_then_environment_then_v1(monke
     assert rj.resolve_reward("v1") == "v1"
     with pytest.raises(SystemExit):
         rj.resolve_reward("v3")
+
+
+@pytest.mark.parametrize("simq", [{}, {"1": {"ops": {}}, "3": {"ops": {}}}], ids=["none", "seed-2-missing"])
+def test_a_corpus_without_a_schedule_seeds_run_is_refused_rather_than_served_as_a_pass(tmp_path, simq):
+    root = _toy_corpus(tmp_path)
+    recs = [json.loads(line) for line in (root / "scenarios.jsonl").read_text().splitlines()]
+    recs[0]["simq"] = simq
+    (root / "scenarios.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+    with pytest.raises(SystemExit, match="schedule seed"):
+        rj.load_corpus(root, split="test", reward="v2")
+
+
+def test_a_schedule_seed_run_reports_the_recorded_check(tmp_path):
+    root = _toy_corpus(tmp_path)
+    recs = [json.loads(line) for line in (root / "scenarios.jsonl").read_text().splitlines()]
+    for r in recs:
+        r["simq"] = dict(SIMQ, **{"2": {"ops": {"0": [False, 1.0, 3]}}})
+    (root / "scenarios.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+    scenario = {s.scenario_id: s for s in rj.load_corpus(root, split="test", reward="v2")}["ran@toy"]
+    episode = rj.Episode(scenario, seed=0)
+    episode.observe()
+    episode.act('{"tool": "run_sim", "kernel": "all", "seed": 2}')
+    assert [r["status"] for r in episode.last_result] == ["FAIL", "PASS"]
