@@ -117,6 +117,10 @@ def test_the_merge_refuses_what_is_not_one_column(case):
     del unfinished[2]["metrics"]
     with pytest.raises(ValueError, match="unfinished"):
         mc.merge(unfinished, picked)
+    marked = copy.deepcopy(shards)
+    marked[1]["incomplete"] = True
+    with pytest.raises(ValueError, match="unfinished"):
+        mc.merge(marked, picked)
 
 
 def test_the_cli_checks_the_split_and_writes_the_column(case, tmp_path):

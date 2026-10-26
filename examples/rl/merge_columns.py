@@ -33,8 +33,8 @@ def merge(shards: list[dict[str, Any]], picked: list[str]) -> dict[str, Any]:
         raise ValueError("no shards to merge")
     common = {k: v for k, v in shards[0]["config"].items() if k not in PER_SHARD}
     for i, shard in enumerate(shards):
-        if "metrics" not in shard:
-            raise ValueError(f"shard {i} is unfinished (it has no metrics)")
+        if shard.get("incomplete") or "metrics" not in shard:
+            raise ValueError(f"shard {i} is unfinished (marked incomplete, or it has no metrics)")
         config = {k: v for k, v in shard["config"].items() if k not in PER_SHARD}
         if config != common:
             keys = sorted(k for k in set(config) | set(common) if config.get(k) != common.get(k))

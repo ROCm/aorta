@@ -8,9 +8,12 @@ device. Skipped where torch is absent; CI's CPU lane installs a CPU wheel.
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import sys
+import types
+import weakref
 from pathlib import Path
 
 import pytest
@@ -780,6 +783,63 @@ def test_top_k_and_the_kv_cache_are_passed_to_generate_never_inherited():
     trainer.generate(model, _PadTokenizer(), ["ab"], args)
     assert model.kwargs["top_k"] == 5
     assert trainer.build_parser().parse_args(["--out", "x"]).top_k == 20
+
+
+class _MaskedPadTokenizer(_PadTokenizer):
+    """Left-pads like a real tokenizer, attention mask included."""
+
+    def __call__(self, texts, return_tensors="pt", padding=True):
+        batch = super().__call__(texts, return_tensors, padding)
+        batch["attention_mask"] = (batch["input_ids"] != 0).long()
+        return batch
+
+
+class _LogitsGenerator(_SeedRecorder):
+    """``model.generate`` returning sequences plus known per-step logits, as transformers does.
+
+    Row r of each call stops after ``stops[r]`` drawn tokens (EOS is 0); the rest is padding.
+    Keeps a weak reference to every logits tensor it hands out.
+    """
+
+    VOCAB = 10
+
+    def __init__(self, tails):
+        super().__init__()
+        self.tails, self.handed_out, self.alive_at_call = tails, [], []
+
+    def generate(self, input_ids, **_kw):
+        gc.collect()
+        self.alive_at_call.append(sum(ref() is not None for ref in self.handed_out))
+        tails = torch.tensor(self.tails[len(self.calls)][: input_ids.shape[0]])
+        self.calls.append((input_ids.shape[0], None))
+        logits = tuple(torch.arange(self.VOCAB, dtype=torch.float32).repeat(input_ids.shape[0], 1)
+                       * (t + 1) + torch.arange(input_ids.shape[0]).unsqueeze(1)
+                       for t in range(tails.shape[1]))
+        self.handed_out += [weakref.ref(step) for step in logits]
+        return types.SimpleNamespace(sequences=torch.cat([input_ids, tails], dim=1), logits=logits)
+
+
+def test_generation_logprobs_are_read_from_the_drawn_tokens_of_a_ragged_batch():
+    tails = [[[5, 0, 0], [6, 7, 8]]]
+    out = trainer.generate(_LogitsGenerator(tails), _MaskedPadTokenizer(), ["ab", "abcd"], _GenArgs())
+    steps = [torch.arange(10, dtype=torch.float32).repeat(2, 1) * (t + 1) + torch.arange(2).unsqueeze(1)
+             for t in range(3)]
+    lp = [torch.log_softmax(step, dim=-1) for step in steps]
+    assert out[0].token_ids == (5, 0) and out[1].token_ids == (6, 7, 8)
+    assert out[0].logprobs == pytest.approx([lp[0][0, 5].item(), lp[1][0, 0].item()])
+    assert out[1].logprobs == pytest.approx([lp[t][1, tok].item() for t, tok in enumerate([6, 7, 8])])
+    tok = _MaskedPadTokenizer()
+    assert out[0].prompt_ids == tuple(tok(["ab"])["input_ids"][0].tolist()), "the left padding is not in the prompt"
+    assert out[1].prompt_ids == tuple(tok(["abcd"])["input_ids"][0].tolist())
+
+
+def test_a_batchs_logits_are_released_before_the_next_batch_is_generated():
+    tails = [[[5, 0]], [[6, 0]], [[7, 0]]]
+    args = _GenArgs()
+    args.gen_batch = 1
+    model = _LogitsGenerator(tails)
+    trainer.generate(model, _MaskedPadTokenizer(), ["a", "b", "c"], args)
+    assert model.alive_at_call == [0, 0, 0]
 
 
 def test_a_seed_count_that_does_not_match_the_prompts_is_an_error():
