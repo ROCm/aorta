@@ -633,11 +633,30 @@ def test_a_later_model_keeps_a_consan_wave_when_earlier_cases_hang(tmp_path, mon
     early_scan = json.loads((informational / "waitcheck-early" / "model_survey.json").read_text())
     assert early_scan.get("sweep_timed_out") is True
     assert "not started" in (informational / "waitcheck-early" / "sweep.log").read_text()
+    early_report = json.loads((informational / "waitcheck-early" / "sanitizer_report.json").read_text())
+    SanitizerReport.from_dict(early_report)
+    early_check = (early_report.get("checks") or [{}])[0]
+    assert early_check.get("state") == "timed_out"
+    assert str(early_check.get("reason") or "").startswith("waitcheck_not_started:")
+    assert (early_report.get("worklist") or {}).get("kernel_count") == 1
+    late_report = json.loads((informational / "waitcheck-late" / "sanitizer_report.json").read_text())
+    assert late_report.get("overall_verdict") == "pass"
     assert not (informational / "consan-early" / "sanitizer_report.json").exists()
     assert (informational / "consan-late" / "sanitizer_report.json").is_file()
     monkeypatch.chdir(_REPO)
+    results = str(tmp_path / "results")
+    # The timeout report is published, and it is vacuous, so the nightly check
+    # still fails until that case is named.
     assert comparator.main(
-        ["prog", "--vacuous-only", "--require", "informational/consan-late", str(tmp_path / "results")]
+        ["prog", "--vacuous-only", "--require", "informational/consan-late", results]
+    ) == 1
+    assert comparator.main(
+        [
+            "prog", "--vacuous-only",
+            "--require", "informational/consan-late",
+            "--known-vacuous", "informational/waitcheck-early",
+            results,
+        ]
     ) == 0
 
 
@@ -690,5 +709,15 @@ def test_a_timed_out_waitcheck_is_reported_and_consan_still_runs(tmp_path, monke
     record = json.loads((tmp_path / "results/informational/waitcheck-toy/model_survey.json").read_text())
     assert record.get("sweep_timed_out") is True
     assert record.get("sweep_returncode") == ms.SWEEP_TIMED_OUT
+    scan = json.loads((tmp_path / "results/informational/waitcheck-toy/sanitizer_report.json").read_text())
+    SanitizerReport.from_dict(scan)
+    scan_check = (scan.get("checks") or [{}])[0]
+    assert scan_check.get("sanitizer") == "waitcheck"
+    assert scan_check.get("state") == "timed_out"
+    assert scan.get("overall_verdict") == "error"
+    assert scan.get("execution_status") == "error"
+    assert str(scan_check.get("reason") or "").startswith("waitcheck_timed_out:")
+    assert (scan.get("worklist") or {}).get("kernel_count") == 3
+    assert "sweep timed out" in (tmp_path / "results/informational/waitcheck-toy/sweep.log").read_text()
     merged = json.loads((tmp_path / "results/informational/consan-toy/sanitizer_report.json").read_text())
     assert merged["checks"][0]["kernel_results"]

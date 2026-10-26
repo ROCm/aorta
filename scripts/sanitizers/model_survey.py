@@ -622,6 +622,100 @@ def error_case_report(item: Warmed, reason: str) -> dict:
     }).to_dict()
 
 
+def _usable_sanitizer_report(path: Path) -> bool:
+    """True when ``path`` is a report the dashboard publisher will keep."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    from aorta.instrumentation.rocjitsu_sanitizers.models import SanitizerReport
+
+    try:
+        SanitizerReport.from_dict(data)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def waitcheck_failure_report(items: Sequence[Warmed], reason: str, *, timed_out: bool) -> dict:
+    """A WaitCheck report for a scan that never wrote one.
+
+    The dashboard publishes a survey case only when ``sanitizer_report.json``
+    loads, and it copies the whole case directory with that report, so the
+    sweep log beside it is published as the scan's evidence.
+    """
+    from aorta.instrumentation.rocjitsu_sanitizers.models import SanitizerReport
+
+    state = "timed_out" if timed_out else "error"
+    # Two scenarios of one kernel compile the same object. The worklist rejects
+    # that repeated identity; a real WaitCheck sweep dedups it the same way.
+    identities = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        if not item.ok or not item.symbol or not item.sha256 or item.code_object is None:
+            continue
+        key = (item.sha256, item.symbol)
+        if key in seen:
+            continue
+        seen.add(key)
+        identities.append({
+            "name": item.symbol,
+            "target": TARGET,
+            "code_object": str(item.code_object),
+            "code_object_sha256": item.sha256,
+            "code_object_index": 0,
+            "entry_offset": None,
+        })
+    if not identities:
+        raise SurveyError("waitcheck failure report has no launched kernel")
+    check = {
+        "sanitizer": "waitcheck",
+        "state": state,
+        "verdict": "error",
+        "reason": reason,
+        "returncode": None,
+        "findings": [],
+        "coverage": [],
+        "backend": {},
+        "kernel_results": [
+            {
+                "identity": identity,
+                "state": state,
+                "verdict": "error",
+                "findings": [],
+                "reason": reason,
+                "returncode": None,
+                "diagnostics_truncated": False,
+            }
+            for identity in identities
+        ],
+    }
+    return SanitizerReport.from_dict({
+        "schema": "aorta.sanitizer_report/0.1",
+        "target": TARGET,
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1",
+            "requirement": "top_dispatch_count",
+            "top_n": len(identities),
+            "kernel_count": len(identities),
+            "kernels": [
+                {
+                    "identity": identity,
+                    "total_time_ms": 0.0,
+                    "dispatch_count": 1,
+                    "sources": ["kernel"],
+                }
+                for identity in identities
+            ],
+        },
+        "checks": [check],
+        "overall_verdict": "error",
+        "execution_status": "error",
+    }).to_dict()
+
+
 def _with_kernel_result(check: dict, identity: dict) -> dict:
     """A ConSan check, with a per-kernel result even when the hook wrote none."""
     if check.get("kernel_results"):
@@ -793,6 +887,28 @@ def run_model(
                    indent=2) + "\n",
         encoding="utf-8",
     )
+    # A scan that dies before writing a report would otherwise vanish from Tab 2:
+    # the publisher keeps a case only when this file loads, and it copies the
+    # directory, log included. A report the sweep did write is left alone.
+    if not _usable_sanitizer_report(wc_out / "sanitizer_report.json"):
+        if wc_rc == SWEEP_TIMED_OUT and deadline <= 0:
+            reason = (
+                "waitcheck_not_started: running it would spend the ConSan time held "
+                f"for this model ({inv.consan_timeout}s) or a later one"
+            )
+        elif wc_rc == SWEEP_TIMED_OUT:
+            reason = (
+                f"waitcheck_timed_out: aorta sweep exceeded {deadline:.1f}s "
+                "and its process group was stopped"
+            )
+        else:
+            reason = f"waitcheck_produced_no_report: aorta sweep exited {wc_rc}"
+        report = waitcheck_failure_report(
+            launched, reason, timed_out=wc_rc == SWEEP_TIMED_OUT
+        )
+        (wc_out / "sanitizer_report.json").write_text(
+            json.dumps(report, indent=2) + "\n", encoding="utf-8"
+        )
 
     first_by_kernel: dict[str, Warmed] = {}
     for item in warmed:
