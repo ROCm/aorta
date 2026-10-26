@@ -508,6 +508,10 @@ class Budget:
 def _stop_process_group(proc: subprocess.Popen[str]) -> None:
     """Kill ``proc`` and anything it spawned, then reap it.
 
+    The nightly runner is Linux. A new session lets one signal stop the
+    process and the hook children it spawned; this path has no Windows
+    process-group equivalent.
+
     ``ProcessLookupError`` is the race where the group is already gone. Any
     other failure to signal the group is reported, and the direct child is
     stopped on its own.

@@ -631,7 +631,7 @@ def test_a_later_model_keeps_a_consan_wave_when_earlier_cases_hang(tmp_path, mon
     informational = tmp_path / "results" / "informational"
     assert code == 0
     early_scan = json.loads((informational / "waitcheck-early" / "model_survey.json").read_text())
-    assert early_scan["sweep_timed_out"] is True
+    assert early_scan.get("sweep_timed_out") is True
     assert "not started" in (informational / "waitcheck-early" / "sweep.log").read_text()
     assert not (informational / "consan-early" / "sanitizer_report.json").exists()
     assert (informational / "consan-late" / "sanitizer_report.json").is_file()
@@ -665,7 +665,7 @@ def test_a_sweep_timeout_stops_the_process_group(tmp_path, monkeypatch):
     monkeypatch.setattr(ms.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     rc = ms.sweep(tmp_path / "recipe.yaml", tmp_path / "out", timeout=3)
     assert rc == ms.SWEEP_TIMED_OUT
-    assert opened["start_new_session"] is True
+    assert opened.get("start_new_session") is True
     assert killed == [(4321, signal.SIGKILL)]
     assert "process group was stopped" in (tmp_path / "out" / "sweep.log").read_text()
 
@@ -688,7 +688,7 @@ def test_a_timed_out_waitcheck_is_reported_and_consan_still_runs(tmp_path, monke
         "--work", "work", "--asset-dir", "asset/aorta-model-kernels", "--gpus", "0",
     ]) == 0
     record = json.loads((tmp_path / "results/informational/waitcheck-toy/model_survey.json").read_text())
-    assert record["sweep_timed_out"] is True
-    assert record["sweep_returncode"] == ms.SWEEP_TIMED_OUT
+    assert record.get("sweep_timed_out") is True
+    assert record.get("sweep_returncode") == ms.SWEEP_TIMED_OUT
     merged = json.loads((tmp_path / "results/informational/consan-toy/sanitizer_report.json").read_text())
     assert merged["checks"][0]["kernel_results"]
