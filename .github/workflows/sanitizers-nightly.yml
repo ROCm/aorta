@@ -699,10 +699,7 @@ jobs:
     # where kernels hang: model_survey.py starts a launch (300 s timeout) or a
     # ConSan case (900 s) only while it can still finish inside one 3600 s budget
     # shared by both models, so with setup and the two waitcheck sweeps the job
-    # ends inside 90 minutes. Each later model keeps one launch wave and one
-    # ConSan wave of that budget, so gpt-oss ConSan cases stop before they
-    # consume the time Qwen3 needs for its report. On 8 GPUs that wave is all
-    # of Qwen3.
+    # ends inside 90 minutes.
     timeout-minutes: 90
     steps:
       - name: Reclaim workspace ownership
