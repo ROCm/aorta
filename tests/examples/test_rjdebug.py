@@ -31,8 +31,10 @@ ANSWER = '{"answer": {"class": "waitcnt", "kernel": "k000", "offset": "0x0"}}'
 class Scripted:
     """An endpoint that answers chat requests from a script and keeps every request body."""
 
-    def __init__(self, replies: list[str], props: dict | None = None, status: int = 200) -> None:
+    def __init__(self, replies: list[str], props: dict | None = None, status: int = 200,
+                 truncate: bool = False) -> None:
         self.replies, self.props, self.status, self.bodies = list(replies), props, status, []
+        self.truncate = truncate
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -43,9 +45,11 @@ class Scripted:
                 data = json.dumps(doc).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Length", str(len(data) + (100 if outer.truncate else 0)))
                 self.end_headers()
                 self.wfile.write(data)
+                if outer.truncate:  # the connection closes short of Content-Length
+                    self.close_connection = True
 
             def do_GET(self):
                 if self.path == "/props" and outer.props is not None:
@@ -170,3 +174,50 @@ def test_a_column_played_under_a_shorter_budget_replays_under_it(archive, tmp_pa
                          "--out", str(tmp_path / "replayed"), "--quiet"]) == 0
     check = json.loads((tmp_path / "replayed" / "summary.json").read_text())["replay_check"]
     assert check["episodes"] == 1 and check["identical"] == 1
+
+
+@pytest.mark.parametrize("status", [200, 400, 503])
+def test_a_body_cut_short_is_an_episode_error_not_a_crash(archive, status):
+    scenarios = rjdebug.load_scenarios(archive, "test", ["ran@toy"], "v2")
+    with Scripted([ANSWER], status=status, truncate=True) as server:
+        client = rjdebug.Client(server.url, "m", timeout=10, retries=0)
+        _, [result] = rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
+    assert result.error is not None and result.steps == []
+
+
+def test_a_run_with_a_failed_request_writes_an_incomplete_column_that_does_not_pair(archive, tmp_path):
+    import eval_rocjitsu
+
+    with Scripted([], status=400) as server:
+        assert _play(server, archive, tmp_path / "o") == 1
+    column = json.loads((tmp_path / "o" / "column.json").read_text())
+    assert column["incomplete"] is True and column["errors"] == 1 and "metrics" not in column
+    assert json.loads((tmp_path / "o" / "summary.json").read_text())["incomplete"] is True
+    with pytest.raises(SystemExit, match="incomplete"):
+        eval_rocjitsu.compare(column, column)
+
+
+def test_the_default_seed_is_the_evaluations(archive):
+    import eval_rocjitsu
+
+    args = eval_rocjitsu.build_parser().parse_args(["--corpus-root", "c", "--out", "o"])
+    assert rjdebug.EVAL_SEED == args.seed
+
+
+def test_a_replay_scores_under_the_reward_the_column_was_played_under(archive, tmp_path):
+    with Scripted([TOOL, ANSWER]) as server:
+        assert _play(server, archive, tmp_path / "played", "--reward", "v1") == 0
+    assert rjdebug.main(["--replay", str(tmp_path / "played" / "column.json"), "--archive", archive,
+                         "--out", str(tmp_path / "replayed"), "--quiet"]) == 0
+    check = json.loads((tmp_path / "replayed" / "summary.json").read_text())["replay_check"]
+    assert check["episodes"] == 1 and check["identical"] == 1
+
+
+def test_a_replay_refuses_a_column_played_under_another_system_prompt(archive, tmp_path):
+    with Scripted([ANSWER]) as server:
+        assert _play(server, archive, tmp_path / "played") == 0
+    path = tmp_path / "played" / "column.json"
+    column = json.loads(path.read_text())
+    column["config"]["system_sha256"] = "0" * 64
+    path.write_text(json.dumps(column))
+    assert rjdebug.main(["--replay", str(path), "--archive", archive, "--out", str(tmp_path / "r"), "--quiet"]) == 2

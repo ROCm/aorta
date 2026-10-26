@@ -762,12 +762,14 @@ python examples/rl/rjdebug.py --endpoint http://127.0.0.1:8080/v1 --model <name>
   top-n-sigma, and it removes llama-server's echo of the template's empty think
   block from the reply. For Ollama (`GET /api/version`) it turns thinking off with
   `reasoning_effort: "none"`. `--no-extra-params` sends only OpenAI-spec fields.
-- **Output:** `column.json` in the evaluation's column format, so a run pairs
-  with `eval_rocjitsu.py --compare`; `summary.txt` and `summary.json` (mean score
+- **Output:** `column.json` in the evaluation's column format, so two runs on
+  one server pair with `eval_rocjitsu.py --compare` (which refuses a run beside an
+  HF column: their seeding differs); `summary.txt` and `summary.json` (mean score
   with a bootstrap interval, solved and exact rates, missed bugs, false alarms,
   malformed replies, turns, tool cost, tokens); and per-episode transcripts with
   `--transcript`. A failed request is reported and never scored as the model's
-  reply, and makes the exit status 1.
+  reply, makes the exit status 1, and marks the column incomplete: it carries no
+  metrics and does not pair.
 - **`--replay COLUMN.json`** feeds an evaluation column's recorded replies through
   the same loop instead of an endpoint, and fails unless every episode reproduces
   its recorded outcome and score.

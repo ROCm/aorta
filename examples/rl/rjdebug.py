@@ -39,7 +39,8 @@ What is reproduced exactly, and how it is checked
   with the recorded outcome and score.
 
 Output (``--out``): ``column.json`` in the harness's column format (``groups``,
-``wire``, ``config``, ``metrics``; pairs with ``eval_rocjitsu.py --compare``),
+``wire``, ``config``, ``metrics``; two runs on one server pair with ``eval_rocjitsu.py --compare``;
+a run with a failed request is marked ``incomplete`` and has no ``metrics``),
 ``summary.json`` / ``summary.txt``, and with ``--transcript`` one readable
 transcript per episode under ``transcripts/``.
 
@@ -52,6 +53,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import http.client
 import json
 import os
 import random
@@ -73,7 +75,7 @@ ENV_CODE_VAR = "RJDEBUG_ENV_CODE"
 TRAINED_SYSTEM_SHA256 = {("procedure", "v2"): "a0a084cbaef3bdff39fef234e6967f68269958c4a2e6c252cc680decb52d7aec"}
 #: The evaluation protocol's sampling (eval_rocjitsu defaults, run with --top-k 20 --max-new-tokens 192).
 EVAL_SAMPLING = {"temperature": 0.7, "top_p": 0.95, "top_k": 20, "max_tokens": 192}
-EVAL_SEED = 20261006
+EVAL_SEED = 20261005
 #: What Qwen3's template appends after ``<|im_start|>assistant\n`` when ``enable_thinking`` is false.
 THINK_OFF = "<think>\n\n</think>\n\n"
 #: llama.cpp's sampler chain in HF ``generate`` order: top-k and temperature commute, top-p sees scaled logits.
@@ -179,7 +181,7 @@ class Client:
     def _llamacpp_props(self) -> bool:
         try:
             props = self._request(self.root + "/props", timeout=10)
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
             return False
         if not isinstance(props, dict) or "default_generation_settings" not in props:
             return False
@@ -196,7 +198,7 @@ class Client:
     def _ollama_version(self) -> bool:
         try:
             doc = self._request(self.root + "/api/version", timeout=10)
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
             return False
         if not isinstance(doc, dict) or "version" not in doc:
             return False
@@ -206,7 +208,7 @@ class Client:
     def models(self) -> list[str]:
         try:
             doc = self._request(self.endpoint + "/models", timeout=30)
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             raise EndpointError(f"GET {self.endpoint}/models failed: {exc}") from exc
         return [m.get("id") for m in doc.get("data", [])]
 
@@ -244,11 +246,15 @@ class Client:
             try:
                 doc = self._request(url, body)
             except urllib.error.HTTPError as exc:
-                detail = exc.read().decode(errors="replace")[:500]
+                try:
+                    detail = exc.read().decode(errors="replace")[:500]
+                except (http.client.HTTPException, OSError) as body_exc:
+                    detail = f"(error body unreadable: {body_exc!r})"
                 last = EndpointError(f"HTTP {exc.code} from {url}: {detail}")
                 if exc.code < 500:  # a 4xx will not get better on retry (e.g. the prompt exceeds the context)
                     raise last from exc
-            except (urllib.error.URLError, OSError, ValueError) as exc:
+            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
+                # http.client.IncompleteRead (a body cut short) is an HTTPException, not an OSError.
                 last = EndpointError(f"{url}: {exc}")
             else:
                 return self._reply(doc, time.time() - t0)
@@ -473,13 +479,23 @@ def column(scenarios: list[Any], results: list[EpisodeResult], client: Client | 
         "client": {"mode": client.mode, "flavor": client.flavor, "server": client.server,
                    "argv": redacted_argv(argv)},
     }
-    rows = eval_rocjitsu.episode_rows({"groups": groups})
-    return {"config": config, "groups": groups, "wire": wire, "metrics": eval_rocjitsu.summarize(rows)}
+    doc: dict[str, Any] = {"config": config, "groups": groups, "wire": wire}
+    errors = sum(1 for r in results if r.error is not None)
+    if errors:
+        # Failed episodes are not in the groups, so metrics over the rest would not describe config.scenarios.
+        doc.update(incomplete=True, errors=errors)
+    else:
+        doc["metrics"] = eval_rocjitsu.summarize(eval_rocjitsu.episode_rows({"groups": groups}))
+    return doc
 
 
 def summary(col: dict[str, Any], results: list[EpisodeResult], wall: float) -> dict[str, Any]:
+    """The run's numbers; for an incomplete column they are over the episodes that finished."""
     rj = load_env()
+    import eval_rocjitsu  # noqa: PLC0415
+
     rows = [e for g in col["groups"] for e in g["episodes"]]
+    metrics = col["metrics"] if "metrics" in col else eval_rocjitsu.summarize(rows)
     clean = [r for r in rows if rj.is_clean_id(r["scenario_id"])]
     faulty = [r for r in rows if not rj.is_clean_id(r["scenario_id"])]
     per_scn: dict[str, list[float]] = {}
@@ -497,7 +513,7 @@ def summary(col: dict[str, Any], results: list[EpisodeResult], wall: float) -> d
         "mean_score": bootstrap_mean([statistics.mean(v) for v in per_scn.values()]),
         "mean_score_faulty": bootstrap_mean([statistics.mean(v) for k, v in per_scn.items() if not rj.is_clean_id(k)]),
         "mean_score_clean": bootstrap_mean([statistics.mean(v) for k, v in per_scn.items() if rj.is_clean_id(k)]),
-        "solved_rate": col["metrics"]["all"]["solved_rate"] if col["metrics"]["all"] else None,
+        "solved_rate": metrics["all"]["solved_rate"] if metrics["all"] else None,
         "exact_rate_faulty": round(sum(r["outcome"] == "exact" for r in faulty) / len(faulty), 4) if faulty else None,
         "near_rate_faulty": round(sum(r["outcome"] == "near" for r in faulty) / len(faulty), 4) if faulty else None,
         "missed_bug_rate_faulty": round(outcomes["missed_bug"] / len(faulty), 4) if faulty else None,
@@ -510,8 +526,8 @@ def summary(col: dict[str, Any], results: list[EpisodeResult], wall: float) -> d
         "truncated_replies": sum(1 for st in steps if st["finish_reason"] == "length"),
         "reasoning_split_replies": sum(1 for st in steps if st.get("reasoning_split")),
         "prefill_echo_stripped": sum(1 for st in steps if st.get("prefill_echo")),
-        "mean_turns": col["metrics"]["all"]["mean_turns"] if col["metrics"]["all"] else None,
-        "mean_tool_cost": col["metrics"]["all"]["mean_tool_cost"] if col["metrics"]["all"] else None,
+        "mean_turns": metrics["all"]["mean_turns"] if metrics["all"] else None,
+        "mean_tool_cost": metrics["all"]["mean_tool_cost"] if metrics["all"] else None,
         "outcomes": dict(outcomes),
         "tokens": {"prompt_total": sum(ptok), "completion_total": sum(ctok),
                    "prompt_max": max(ptok) if ptok else None,
@@ -519,7 +535,8 @@ def summary(col: dict[str, Any], results: list[EpisodeResult], wall: float) -> d
                    "completion_mean": round(statistics.mean(ctok), 1) if ctok else None},
         "wall_seconds": round(wall, 1),
         "completion_tokens_per_second": round(sum(ctok) / wall, 1) if wall and ctok else None,
-        "metrics": col["metrics"],
+        "incomplete": bool(col.get("incomplete")),
+        "metrics": metrics,
     }
     return out
 
@@ -641,6 +658,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.episodes < 1:
         print("--episodes must be >= 1", file=sys.stderr)
         return 2
+    recorded = json.loads(args.replay.read_text()) if args.replay else None
+    if recorded is not None:
+        # Score the replay under the prompt and reward the column was played under.
+        args.prompt = recorded["config"].get("prompt_profile") or args.prompt
+        args.reward = recorded["config"].get("reward") or args.reward
     os.environ["AORTA_RJ_PROMPT"] = args.prompt
     os.environ["AORTA_RJ_REWARD"] = args.reward
     rj = load_env(args.env_code)
@@ -650,9 +672,7 @@ def main(argv: list[str] | None = None) -> int:
         harness_seed = None
     if harness_seed is not None and harness_seed(EVAL_SEED, "x/y", 1, 2) != episode_seed(EVAL_SEED, "x/y", 1, 2):
         raise SystemExit("episode_seed here differs from eval_episodes.episode_seed")
-    recorded = None
-    if args.replay:
-        recorded = json.loads(args.replay.read_text())
+    if recorded is not None:
         client: Client | ReplayClient = ReplayClient(recorded)
         args.split = recorded["config"]["split"]
         args.episodes = recorded["config"]["episodes"]
@@ -674,6 +694,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     system = rj.system_for(scenarios)
     sha = hashlib.sha256(system.encode()).hexdigest()
+    if recorded is not None and recorded["config"].get("system_sha256") not in (None, sha):
+        print(f"{args.replay} was played under system prompt {recorded['config']['system_sha256'][:12]}; this run "
+              f"renders {sha[:12]} (pass the --prompt and --reward it was played under)", file=sys.stderr)
+        return 2
     trained = TRAINED_SYSTEM_SHA256.get((args.prompt, args.reward))
     if not args.quiet:
         print(f"[rjdebug] {len(scenarios)} scenario(s) x {args.episodes} episode(s); system prompt sha256 {sha[:12]}"
