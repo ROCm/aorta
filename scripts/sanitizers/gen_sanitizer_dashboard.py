@@ -4163,6 +4163,10 @@ _ASAN_TAB_CSS = """
   .asan-intro { font-size:14px; color:var(--text-2); margin:0 0 12px; line-height:1.55; }
   .asan-intro a { color:var(--blue); }
   .asan-heading { font-size:20px; font-weight:600; margin:24px 0 12px; }
+  .asan-row > summary { cursor:pointer; }
+  .asan-row > span { display:block; max-width:60ch; font-size:13px; color:var(--text-3); margin-top:4px;
+    word-break:break-word; }
+  .table-wrap + .asan-intro { margin:12px 0 0; }
   .asan-r { font-weight:600; white-space:nowrap; }
   .asan-r.pass { color:#86EFAC; }
   .asan-r.warn { color:#FCD34D; }
@@ -4252,9 +4256,7 @@ def load_asan_runs(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"{where}.{key} must be a non-empty string")
         if not _ASAN_DATE_RE.match(run["date"]):
             raise ValueError(f"{where}.date must be YYYY-MM-DD")
-        if "kernel_scope" in run and not _asan_text(run["kernel_scope"]):
-            raise ValueError(f"{where}.kernel_scope must be a non-empty string")
-        for key in ("stack", "notes", "covered", "not_covered"):
+        for key in ("stack", "notes", "not_covered"):
             items = run.get(key, [])
             if not isinstance(items, list) or not all(_asan_text(item) for item in items):
                 raise ValueError(f"{where}.{key} must be a list of non-empty strings")
@@ -4330,7 +4332,7 @@ def _asan_clause(item: str) -> str:
 
 
 def _asan_run_html(run: Mapping[str, Any]) -> str:
-    """One manual run: two or three plain sentences and one table of every row (pure)."""
+    """One manual run: two or three plain sentences, one table of every row, and its notes (pure)."""
     mode = _esc(run["run_mode"])
     if run.get("run_mode_url"):
         mode = f'<a href="{_esc(run["run_mode_url"])}">{mode}</a>'
@@ -4346,14 +4348,15 @@ def _asan_run_html(run: Mapping[str, Any]) -> str:
         word, cls = _asan_result(row)
         name = f"<span class=mono>{_esc(row['name'])}</span>" if row["group"] == "workload" else _esc(row["name"])
         kernels = row["kernels"]
-        title = " | ".join(
-            [row["description"]]
+        report = "".join(
+            f"<span>{_esc(line)}</span>"
+            for line in [row["description"]]
             + ([row["command"]] if row.get("command") else [])
             + [_asan_finding_text(item) for item in row["findings"]]
             + ([row["unchecked"]] if row.get("unchecked") else [])
         )
         body.append(
-            f'<tr title="{_esc(title)}"><td>{name}</td>'
+            f'<tr><td><details class="asan-row"><summary>{name}</summary>{report}</details></td>'
             f'<td><span class="asan-r {cls}">{_esc(word)}</span></td>'
             f"<td class=num>{kernels['checked']} of {kernels['dispatched']}</td>"
             f"<td>{_esc(_asan_note(row))}</td></tr>"
@@ -4364,7 +4367,9 @@ def _asan_run_html(run: Mapping[str, Any]) -> str:
         f'<p class="asan-intro">{intro}</p>'
         '<div class="table-wrap"><table><thead><tr><th>What ran</th><th>Result</th>'
         "<th>Kernels checked</th><th>Note</th></tr></thead>"
-        f"<tbody>{''.join(body)}</tbody></table></div></section>"
+        f"<tbody>{''.join(body)}</tbody></table></div>"
+        + (f'<p class="asan-intro">{_esc(" ".join(run["notes"]))}</p>' if run.get("notes") else "")
+        + "</section>"
     )
 
 

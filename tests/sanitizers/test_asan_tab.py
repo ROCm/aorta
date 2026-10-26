@@ -206,7 +206,8 @@ def _training(**overrides) -> dict:
 def _table(page: str) -> list[tuple[str, str, str, str, str]]:
     """The tab's rows as (what ran, result, result colour, kernels checked, note)."""
     rows = re.findall(
-        r'<tr title="[^"]*"><td>(.*?)</td><td><span class="asan-r (\w+)">(.*?)</span></td>'
+        r'<tr><td><details class="asan-row"><summary>(.*?)</summary>.*?</details></td>'
+        r'<td><span class="asan-r (\w+)">(.*?)</span></td>'
         r"<td class=num>(.*?)</td><td>(.*?)</td></tr>",
         page,
     )
@@ -231,15 +232,42 @@ def test_one_table_holds_workloads_and_checks_in_file_order():
         ("in-bounds view", "clean", "pass", "1 of 1", "nothing planted, nothing reported"),
         ("HIP kernel, planted off-by-one", "caught", "pass", "1 of 1", "heap-buffer-overflow READ"),
     ]
-    for removed in ("asan-card", "asan-bar", 'class="v ', "<details", "What ASan covers here"):
+    for removed in ("asan-card", "asan-bar", 'class="v ', "asan-more", "What ASan covers here"):
         assert removed not in page
 
 
-def test_the_full_report_stays_in_the_row_title():
+def _reports(page: str) -> list[list[str]]:
+    """Each row's full report: the lines inside its name's <details> disclosure."""
+    return [
+        [html.unescape(line) for line in re.findall(r"<span>(.*?)</span>", body)]
+        for body in re.findall(r'<details class="asan-row"><summary>.*?</summary>(.*?)</details>', page)
+    ]
+
+
+def test_the_full_report_opens_from_a_keyboard_reachable_disclosure():
     page = gen.asan_panel_html(_runs(_training(), _control()))
-    assert gen._esc(_GEMMS) in page
-    assert "aorta run --workload gpu_smoke --sanitizer asan" in page
-    assert "heap-buffer-overflow, READ of size 4, in add100" in page
+    # A native <details>/<summary> is focusable and opens on Enter, Space or a tap; a
+    # title attribute does none of those.
+    assert " title=" not in page
+    assert page.count('<details class="asan-row"><summary>') == page.count("<tr><td>") == 2
+    assert _reports(page) == [
+        [
+            "Minimal single-process PyTorch GPU check",
+            "aorta run --workload gpu_smoke --sanitizer asan",
+            _GEMMS,
+        ],
+        ["Minimal single-process PyTorch GPU check", "heap-buffer-overflow, READ of size 4, in add100"],
+    ]
+
+
+def test_notes_are_one_plain_line_under_the_table():
+    runs = _runs()
+    runs[0]["notes"] = ["A pass covers what ASan instruments.", "a <b> note"]
+    page = gen.asan_panel_html(runs)
+    assert page.endswith(
+        '</table></div><p class="asan-intro">A pass covers what ASan instruments. a &lt;b&gt; note</p></section>'
+    )
+    assert gen.asan_panel_html(_runs()).endswith("</table></div></section>")
 
 
 def test_an_unchecked_kernel_asan_could_have_checked_is_not_called_out_of_reach():
@@ -381,8 +409,6 @@ def _run_with(**overrides) -> list[dict]:
         pytest.param(_run_with(run_mode_url="javascript:alert(1)"), None, id="url-not-https"),
         pytest.param(_run_with(rows=[]), None, id="no-rows"),
         pytest.param(_run_with(gpu=" "), None, id="blank-gpu"),
-        pytest.param(_run_with(kernel_scope=""), None, id="blank-kernel-scope"),
-        pytest.param(_run_with(covered="all"), None, id="covered-not-a-list"),
         pytest.param(_run_with(not_covered=[""]), None, id="empty-not-covered"),
     ],
 )
@@ -403,8 +429,6 @@ def test_rejects_an_unreadable_file(tmp_path):
 def test_a_valid_file_round_trips(tmp_path):
     runs = _runs(_row(), _training(), _control())
     runs[0]["notes"] = ["a note"]
-    runs[0]["kernel_scope"] = "PyTorch and HIP"
-    runs[0]["covered"] = ["global memory"]
     runs[0]["not_covered"] = ["library GEMMs"]
     runs[0]["run_mode_url"] = "https://github.com/ROCm/aorta/pull/567"
     loaded = gen.load_asan_runs(_write(tmp_path, copy.deepcopy(runs)))
