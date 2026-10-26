@@ -145,7 +145,7 @@ def test_tab_joins_a_guardrails_only_page():
     tabbar = tabbar[: tabbar.index("</div>")]
     assert '<label for="tab-asan">AddressSanitizer (manual run)</label>' in tabbar
     assert at("id=panel-guardrails") < at("<section class=tabpanel id=panel-asan>")
-    assert joined.endswith("</details>\n  </section>\n  </div>\n</div></body></html>\n")
+    assert joined.endswith("</table></div></section>\n  </section>\n  </div>\n</div></body></html>\n")
     # A tab, not the always-visible section the no-runs page gets.
     assert "<section id=panel-asan>" not in joined
 
