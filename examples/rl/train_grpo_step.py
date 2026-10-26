@@ -496,7 +496,8 @@ def generate(model: Any, tok: Any, prompts: list[str], args: Any,
             out_texts.append(Completion(
                 tok.decode(ids, skip_special_tokens=True), ids, prompt_ids=prompt,
                 logprobs=None if gen_lp is None else gen_lp[row, : len(ids)].tolist()))
-        del out
+        # The full-vocabulary logits would otherwise stay alive through the next batch's generate.
+        del out, sequences, step_logits
     if guard.nan_steps or guard.dead_rows:
         # Printed, never swallowed: a repaired row is partly the guard's text
         # rather than the policy's, so the count travels with any number
