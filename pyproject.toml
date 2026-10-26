@@ -238,7 +238,16 @@ chat = [
 # chat-cli plus the Chainlit web UI (`aorta chat ui`).
 chat-ui = [
     "amd-aorta[chat-cli]",
-    "chainlit>=1.3.0; python_version >= '3.11' and python_version < '3.14'",
+    # >=2.6.0 is load-bearing twice over:
+    #   - aorta/chat/ui/app.py:utc_now copies chainlit.utils.utc_now, which
+    #     2.6.0 added, so step timestamps match what Chainlit itself writes.
+    #   - every chainlit >=2.4 caps mcp<2, while langchain-litellm>=0.11.2
+    #     (chat-all) needs mcp>=2.2. With a low floor, pip resolves that clash
+    #     by silently falling back to chainlit 2.3.0 rather than holding
+    #     langchain-litellm back. This floor makes pip choose the other way.
+    #     Verified: chat-all,cia,tests on py3.13 gave chainlit 2.3.0 under the
+    #     old 1.3.0 floor.
+    "chainlit>=2.6.0; python_version >= '3.11' and python_version < '3.14'",
 ]
 
 # For hosts whose Python links sqlite3 older than sqlite-vec's floor (CentOS

@@ -177,7 +177,7 @@ jobs:
           fi
 
       # History lives on the sanitizer-results data branch (written by
-      # sanitizers-nightly's publish job); it may not exist until the first
+      # sanitizers-nightly's push job); it may not exist until the first
       # sanitizer nightly runs. Same fail-closed ls-remote contract as ci-results.
       # The /sanitizers/ route must NEVER 404: the root nav and docs link to it
       # unconditionally, so when there is no (trusted) snapshot yet we publish the
@@ -229,6 +229,19 @@ jobs:
             fi
           fi
           test -s _site/sanitizers/index.html
+
+      # ASan has no nightly lane yet (the CI GPU image ships no ASan runtime), so its
+      # results are committed from manual runs rather than written to
+      # sanitizer-results. Add them to whichever page the step above published.
+      # Losing the ASan tab must not cost the nightly page, so a failure only warns.
+      - name: Add the manual ASan results to /sanitizers/
+        run: |
+          set -uo pipefail
+          if ! python3 scripts/sanitizers/add_asan_tab.py \
+                 --results docs/sanitizers/asan-manual-runs.json \
+                 --page _site/sanitizers/index.html; then
+            echo "::warning::could not add the ASan tab; /sanitizers/ is published without it"
+          fi
 
       # The dashboard used to live at /ci/, the docs advertised that URL, and
       # /ci/data.json is a machine-readable endpoint something may already poll.
