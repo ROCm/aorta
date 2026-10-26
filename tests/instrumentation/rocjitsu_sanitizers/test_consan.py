@@ -1483,6 +1483,62 @@ def test_a_no_site_run_with_another_coverage_failure_stays_an_error(
         assert rejection in str(consan.reason) or consan.reason == "combined_hook_exit_86"
 
 
+@pytest.mark.parametrize(
+    ("conflicts", "pairs_without_example"),
+    [(1, 1), (0, 0)],
+)
+def test_a_no_site_run_with_a_report_for_an_uncovered_reader_is_not_downgraded(
+    conflicts: int, pairs_without_example: int
+) -> None:
+    # parse_consan_output keeps an auto report only when its reader is in the
+    # coverage records. A summary for any other reader used to disappear, and
+    # the no-site downgrade then read the log as nothing to check -- including
+    # when that summary counted conflicts.
+    body, require = _no_site_evidence().rsplit("\n", 1)
+    summary = _current_report(
+        reader=3, conflicts=conflicts, pairs_without_example=pairs_without_example
+    )
+    streamed = {
+        86: f"{body}\n{summary}\n{require}",
+        0: f"{body}\n{summary}",
+    }
+
+    for code, strict in ((86, True), (0, False)):
+        _waitcheck, consan = evaluate_consan_output(
+            ProcessResult(("app",), code, streamed[code], ""),
+            strict=strict,
+            expected_mode=ConSanMode.DEFAULT,
+        )
+        assert consan.state is ExecutionState.ERROR, (code, consan.reason)
+        assert consan.verdict is not Verdict.NOT_CHECKED
+        if code == 0:
+            assert "missing from coverage" in str(consan.reason)
+        else:
+            assert consan.reason == "combined_hook_exit_86"
+
+
+def test_legacy_require_records_line_with_no_sites_is_not_checked() -> None:
+    # The pre-simplification hook spells the same exit 86 with an MOI_ infix.
+    # A no-site log that carries it is the same "nothing to check" as the
+    # current spelling; without this it stays combined_hook_exit_86.
+    output = _no_site_evidence().replace(
+        "RJ_CONSAN_REQUIRE_RECORDS requested",
+        "RJ_CONSAN_MOI_REQUIRE_RECORDS requested",
+    )
+
+    waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 86, output, ""),
+        strict=True,
+        expected_mode=ConSanMode.DEFAULT,
+    )
+
+    assert consan.state is ExecutionState.NOT_CHECKED
+    assert consan.verdict is Verdict.NOT_CHECKED
+    assert str(consan.reason).startswith("consan_not_applicable:")
+    assert waitcheck.state is ExecutionState.RAN
+    assert waitcheck.verdict is Verdict.PASS
+
+
 def test_a_no_site_run_that_reports_a_conflict_is_not_downgraded() -> None:
     # A reported race is evidence ConSan observed something, sites or not.
     output = f"{_no_site_evidence()}\n{_current_conflict(reader=1)}"

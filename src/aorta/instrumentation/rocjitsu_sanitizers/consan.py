@@ -513,6 +513,22 @@ def parse_consan_output(
 
     decision = parse_coverage_decision(output)
     _require_expected_engine(decision.coverage, expected_mode)
+    # A summary whose reader never appears in coverage was not reconciled with a
+    # loaded object. Dropping it would let a conflict count vanish, and the
+    # no-site downgrade would then read the log as nothing to check.
+    coverage_readers = {str(record.reader) for record in decision.coverage}
+    unmatched = sorted(
+        {
+            report["reader"]
+            for report in auto_reports
+            if report["reader"] not in coverage_readers
+        }
+    )
+    if unmatched:
+        raise ValueError(
+            "ConSan report summary is for reader(s) missing from coverage: "
+            + ", ".join(unmatched)
+        )
     sampled_readers = {
         str(record.reader)
         for record in decision.coverage
@@ -726,9 +742,14 @@ def _launch_diagnostic(process: ProcessResult) -> str:
 
 
 _STRICT_REQUIRE_RECORDS_EXIT = 86
-# The hook's own line for a strict require-records exit. Exit 86 without it is
-# not that exit, so it is never read as "nothing to check".
-_REQUIRE_RECORDS_DIAGNOSTIC = "RJ_CONSAN_REQUIRE_RECORDS requested"
+# The hook's own line for a strict require-records exit. Exit 86 without one of
+# these is not that exit, so it is never read as "nothing to check". The second
+# spelling is the pre-simplification Sampled/Record-Replay hook; this evaluator
+# still reads those logs.
+_REQUIRE_RECORDS_DIAGNOSTICS = (
+    "RJ_CONSAN_REQUIRE_RECORDS requested",
+    "RJ_CONSAN_MOI_REQUIRE_RECORDS requested",
+)
 _NO_SITES_REASON = (
     "consan_not_applicable: no LDS access, barrier, atomic or fence sites in any "
     "loaded code object"
@@ -805,7 +826,8 @@ def _no_instrumentable_sites(
     :func:`_has_no_sites` holds; anything else returns None and stays an error.
     """
 
-    if _REQUIRE_RECORDS_DIAGNOSTIC not in f"{process.stdout}\n{process.stderr}":
+    text = f"{process.stdout}\n{process.stderr}"
+    if not any(diagnostic in text for diagnostic in _REQUIRE_RECORDS_DIAGNOSTICS):
         return None
     try:
         parsed = parse_consan_output(
