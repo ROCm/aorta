@@ -321,13 +321,29 @@ jobs:
           echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
           echo "selected rocjitsu run: ${run_id:-<unresolved>}"
 
+      - name: Mark this attempt's sanitizer results
+        # upload-artifact@v4 deletes the previous artifact only when the upload
+        # below has at least one file (deleteArtifactIfExists sits in the
+        # filesToUpload.length > 0 branch). overwrite: true does not close that:
+        # a re-run that dies before .sanitizer-nightly/out exists leaves
+        # sanitizer-nightly-<run_id> in place, and render's sanitizer-*-<run_id>
+        # download publishes the old reports under this attempt. The marker is
+        # not a dotfile -- v4 drops those unless include-hidden-files is set --
+        # and render copies only incoming/<case>/, so it is not published.
+        if: always()
+        run: |
+          mkdir -p .sanitizer-nightly/out
+          echo "$GITHUB_RUN_ATTEMPT" > .sanitizer-nightly/out/attempt.txt
+
       - name: Upload sanitizer results
         # Always upload whatever ran, even when an earlier step (e.g. the baseline
         # comparison) failed, so the render job can render the failure with any
         # partial evidence instead of the run silently producing nothing.
-        # overwrite: a re-run keeps github.run_id. Without it this upload fails
-        # against the previous attempt, which stays in place, and render then
-        # publishes the OLD attempt reports as if they were this one.
+        # overwrite: a re-run keeps github.run_id. Without it a non-empty upload
+        # collides with the previous attempt, which stays in place, and render
+        # then publishes the OLD attempt reports as if they were this one. An
+        # attempt with no reports still replaces that artifact because the marker
+        # step above gives the upload a file.
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -639,6 +655,14 @@ jobs:
           else
             sudo chown -R "$uidgid" "$ws" || true
           fi
+
+      - name: Mark this attempt's survey results
+        # Same empty-upload hole as the gate job's marker step: v4 will not
+        # delete sanitizer-survey-<run_id> unless this attempt uploads a file.
+        if: always()
+        run: |
+          mkdir -p .sanitizer-nightly/out
+          echo "$GITHUB_RUN_ATTEMPT" > .sanitizer-nightly/out/attempt.txt
 
       - name: Upload sanitizer survey results
         # Separate artifact from the gate job so the render job can merge them.
@@ -1085,10 +1109,14 @@ jobs:
           # The artifact is a whole tree rendered from BASE_SHA, so committing it
           # on top of anything else would silently revert whatever landed in
           # between. The concurrency group serializes runs of this workflow on
-          # main, so only an outside push can trip this; re-run ALL jobs (a
-          # re-run of push alone reuses the stale render) to render on top of it.
+          # main, so only an outside push can trip this. Re-run the render job
+          # to publish on top of the new tip: that re-runs the dependent push,
+          # and render reads the gate artifact already uploaded. Re-running
+          # push alone would commit the stale render. Re-running every job also
+          # re-runs the GPU job, which takes the shared runner and produces a
+          # different publish.
           if [ "$head_sha" != "${BASE_SHA}" ]; then
-            echo "::error::sanitizer-results moved since render (rendered from '${BASE_SHA}', now '${head_sha}'); refusing to overwrite it"
+            echo "::error::sanitizer-results moved since render (rendered from '${BASE_SHA}', now '${head_sha}'); refusing to overwrite it. Re-run the render job so push retries against this tip"
             exit 1
           fi
 

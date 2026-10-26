@@ -344,6 +344,12 @@ job holds only `contents: read`. It uploads the rendered tree as
 `sanitizer-results`, and it runs on `main` alone. The GPU runner is shared, so
 use this path only when the CPU preview cannot show the change.
 
+On main, that push refuses when `sanitizer-results` has moved since the render
+job recorded its base. Recover by re-running the render job: that re-runs the
+dependent push, and render reads the gate artifact already uploaded. Re-running
+push alone would commit the stale render. Re-running every job also re-runs the
+GPU job on the shared runner and publishes different reports.
+
 **Locally**, the same steps the preview workflow runs, from a checkout of the
 branch:
 

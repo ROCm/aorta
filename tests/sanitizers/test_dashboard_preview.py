@@ -183,6 +183,48 @@ def test_every_artifact_upload_survives_a_rerun(workflow):
         assert args.get("overwrite") is True, f"{job}: {step!r} lacks overwrite: true"
 
 
+def test_an_empty_rerun_replaces_the_results_artifact():
+    # overwrite: true is not enough. upload-artifact@v4 deletes the previous
+    # name only when filesToUpload is non-empty, and both results uploads use
+    # if-no-files-found: warn, so an attempt that dies before .sanitizer-nightly/out
+    # exists leaves the old artifact for render's sanitizer-*-<run_id> download.
+    # The marker has to be a non-hidden file in that directory, written by an
+    # always() step immediately before the upload. render copies incoming/<case>/
+    # only, so the marker name must not be a path that step reads.
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load(_NIGHTLY_WORKFLOW.read_text(encoding="utf-8"))
+    marked = []
+    for job, body in doc["jobs"].items():
+        steps = body.get("steps") or []
+        for index, step in enumerate(steps):
+            uses = step.get("uses", "")
+            args = step.get("with") or {}
+            if "upload-artifact" not in uses or args.get("path") != ".sanitizer-nightly/out":
+                continue
+            # warn, not error: the job must still finish so render can publish
+            # the failure. The marker is what makes that upload non-empty.
+            assert args.get("if-no-files-found") == "warn", job
+            assert args.get("overwrite") is True, job
+            assert step.get("if") == "always()", job
+            assert index > 0, job
+            marker = steps[index - 1]
+            assert marker.get("if") == "always()", job
+            run = marker.get("run") or ""
+            match = re.search(r">\s*\.sanitizer-nightly/out/(\S+)", run)
+            assert match, f"{job}: marker does not write into .sanitizer-nightly/out"
+            name = match.group(1)
+            assert not name.startswith("."), f"{job}: {name} is hidden and v4 would drop it"
+            assert "mkdir -p .sanitizer-nightly/out" in run
+            marked.append((job, name))
+    assert [job for job, _name in marked] == ["sanitizers-gpu", "sanitizers-survey"]
+    render = next(
+        step for step in doc["jobs"]["render"]["steps"] if step.get("id") == "render"
+    )["run"]
+    for _job, name in marked:
+        assert name not in render
+        assert name != "rocjitsu.json"
+
+
 @pytest.mark.parametrize("workflow", [_PREVIEW_WORKFLOW, _NIGHTLY_WORKFLOW])
 def test_both_workflows_install_the_playwright_the_hint_names(workflow):
     # The helper's hint, the preview workflow and the nightly render job all name

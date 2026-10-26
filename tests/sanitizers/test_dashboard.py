@@ -3013,12 +3013,15 @@ def test_only_the_main_only_push_job_can_write():
     assert writers == ["push"]
     push = jobs["push"]
     assert push.get("permissions") == {"contents": "write"}
-    assert "github.ref == 'refs/heads/main'" in push.get("if", "")
-    assert "needs.render.result == 'success'" in push.get("if", "")
-    # Without a status function GitHub applies an implicit success() over the
-    # whole needs chain, and the disabled sanitizers-survey is always skipped, so
-    # push would never run at all. always() hands the gate to render's result.
-    assert push.get("if", "").startswith("always() &&")
+    # The whole expression is the boundary. A substring check still passes if a
+    # later edit drops the parentheses and lets `||` outrank `&&`, or adds
+    # workflow_dispatch / a failed render to the writers. Without a status
+    # function GitHub applies an implicit success() over the whole needs chain,
+    # and the disabled sanitizers-survey is always skipped, so push would never
+    # run at all. always() hands the gate to render's result.
+    assert push.get("if") == (
+        "always() && github.ref == 'refs/heads/main' && needs.render.result == 'success'"
+    )
     assert push.get("needs") == "render"
     # It moves a rendered tree and runs no repo code.
     assert not any("checkout" in s.get("uses", "") for s in push["steps"])
