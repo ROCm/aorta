@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -248,3 +249,39 @@ def test_a_split_that_selects_no_scenario_is_refused(tmp_path, capsys):
     assert ev.main(["--corpus-root", str(corpus), "--split", "train", "--out", str(tmp_path / "o"),
                     "--column", "none"]) == ev.EXIT_REFUSED
     assert "selects no scenario" in capsys.readouterr().err
+
+
+def test_a_column_with_no_recorded_system_prompt_is_not_resumed():
+    recorded = {"source": "m", "seed": 1, "top_k": 20}
+    with pytest.raises(SystemExit, match="unrecorded system prompt"):
+        ev.check_resumable(Path("c.json"), recorded, "m", 1, "s" * 64, 20)
+
+
+def test_a_checkpoint_without_a_generation_config_records_the_one_derived_from_its_model_config(monkeypatch):
+    class GenerationConfig:
+        def __init__(self, **settings):
+            self.settings = settings
+
+        @classmethod
+        def from_pretrained(cls, source, local_files_only):
+            raise OSError("no generation_config.json")
+
+        @classmethod
+        def from_model_config(cls, model_config):
+            return cls(eos_token_id=model_config["eos"], transformers_version="x")
+
+        def to_dict(self):
+            return dict(self.settings)
+
+    class AutoConfig:
+        @staticmethod
+        def from_pretrained(source, local_files_only):
+            if source == "missing":
+                raise OSError("no config.json")
+            return {"eos": int(source)}
+
+    monkeypatch.setitem(sys.modules, "transformers",
+                        types.SimpleNamespace(GenerationConfig=GenerationConfig, AutoConfig=AutoConfig))
+    assert ev.generation_settings("7") == {"eos_token_id": 7}
+    assert ev.generation_settings("7") != ev.generation_settings("8")
+    assert ev.generation_settings("missing") is None

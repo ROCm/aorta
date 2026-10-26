@@ -458,6 +458,12 @@ class CorpusV2:
                 if line.strip():
                     rec = json.loads(line)
                     self.recs[rec["sid"]] = rec
+        # run_sim with a seed reads the seed's recorded run; a missing one would be served as a pass.
+        unseeded = [s for s, r in self.recs.items()
+                    if any(str(seed) not in (r.get("simq") or {}) for seed in SEEDS_V2 if seed)]
+        if unseeded:
+            raise SystemExit(f"corpus {self.root}: {len(unseeded)} scenario(s) have no recorded run for some "
+                             f"schedule seed: {unseeded[:5]}")
         # A kernel with no instructions has an empty ``[]`` file; an absent file is a broken archive,
         # which would otherwise load and serve ``disasm`` and near-location scoring nothing.
         reachable = {k for w in self.workloads.values() for k in w.get("kernels", [])}

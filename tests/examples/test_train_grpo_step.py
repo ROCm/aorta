@@ -890,3 +890,13 @@ def test_an_episode_is_the_same_draw_whatever_the_other_episodes_do(tmp_path, mo
 
     small, large = episodes(2), episodes(5)
     assert {k: v for k, v in large.items() if k[0] < 2} == small
+
+
+def test_cuda_memory_is_tracked_only_on_the_selected_cuda_device(monkeypatch):
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert not trainer.tracks_cuda_memory("cpu")
+    assert trainer.tracks_cuda_memory("cuda:0")
+    source = Path(trainer.__file__).read_text()
+    body = source[source.index("def _train("):]
+    assert "torch.cuda.is_available()" not in body, "memory statistics are guarded by the selected device"
