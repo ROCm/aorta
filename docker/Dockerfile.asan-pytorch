@@ -94,13 +94,15 @@ ENV PYTORCH_ROCM_ARCH="gfx950:xnack+" \
 RUN python3 tools/amd_build/build_amd.py && python3 setup.py bdist_wheel
 
 FROM base
-COPY --from=build /opt/pytorch/dist/ /tmp/dist/
+# The wheel is bind-mounted from the build stage (BuildKit, the default builder since Docker 23), not
+# COPY'd: a COPY layer keeps the ~240 MB wheel in the image even after the install deletes it.
 # A venv, because Ubuntu's system setuptools leaks into pip's isolated builds and cannot build aorta.
 # numpy is a runtime dependency, not an extra: without it torch prints "Failed to initialize NumPy"
 # on every run, and torch.as_tensor() on a __cuda_array_interface__ object (how the planted-overflow
 # check builds an out-of-bounds view) raises "Numpy is not available" before any kernel runs.
-RUN python3 -m venv /opt/venv && /opt/venv/bin/python -m pip install --no-cache-dir --upgrade pip \
-    && /opt/venv/bin/python -m pip install --no-cache-dir numpy /tmp/dist/torch-*.whl && rm -rf /tmp/dist
+RUN --mount=type=bind,from=build,source=/opt/pytorch/dist,target=/tmp/dist \
+    python3 -m venv /opt/venv && /opt/venv/bin/python -m pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/python -m pip install --no-cache-dir numpy /tmp/dist/torch-*.whl
 ENV PATH=/opt/venv/bin:${PATH}
 # Install aorta from the build context (the repo checkout), so the image matches the commit it was
 # built from, rather than a pinned remote ref. setuptools_scm reads the version from git, which the

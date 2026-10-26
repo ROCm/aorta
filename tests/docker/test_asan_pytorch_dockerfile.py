@@ -110,6 +110,21 @@ def test_non_root_instructions_also_select_a_writable_working_directory() -> Non
             assert re.search(r"(^|\s)-w\s+\S", line), f"{path.name}: --user without -w: {line!r}"
 
 
+def test_torch_wheel_is_bind_mounted_not_copied_into_a_layer() -> None:
+    # A COPY layer keeps the ~240 MB wheel in the image even after the install deletes it.
+    text = _DOCKERFILE.read_text()
+    assert not re.search(r"^\s*COPY\s+--from=build\b", text, re.MULTILINE)
+    mount = re.search(
+        r"^RUN --mount=type=bind,from=build,source=/opt/pytorch/dist,target=(\S+)\s*\\$(.*?)(?=^\S)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert mount, "the torch wheel must be installed from a bind mount of the build stage"
+    assert f"{mount.group(1)}/torch-*.whl" in mount.group(2)
+    # Unquoted, so the shell expands it; pip rejects a literal 'torch-*.whl'.
+    assert "'" not in mount.group(2) and '"' not in mount.group(2)
+
+
 def test_aorta_version_advice_is_pep440() -> None:
     # AORTA_VERSION becomes SETUPTOOLS_SCM_PRETEND_VERSION, which must be PEP 440;
     # `git describe` output (v0.3.0-340-gabc1234) fails the install with InvalidVersion.
