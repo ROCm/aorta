@@ -107,13 +107,17 @@ def inherited_generation(settings: dict[str, Any]) -> dict[str, Any]:
 
 
 def generation_settings(source: str) -> dict[str, Any] | None:
-    """:func:`inherited_generation` of ``source``'s generation config; ``None`` if it ships none."""
-    from transformers import GenerationConfig
+    """:func:`inherited_generation` of the generation config ``generate`` uses for ``source``: its
+    ``generation_config.json``, else the one transformers derives from its model config; ``None`` if neither."""
+    from transformers import AutoConfig, GenerationConfig
 
     try:
         config = GenerationConfig.from_pretrained(source, local_files_only=True)
     except OSError:
-        return None
+        try:
+            config = GenerationConfig.from_model_config(AutoConfig.from_pretrained(source, local_files_only=True))
+        except OSError:
+            return None
     return inherited_generation(config.to_dict())
 
 
@@ -143,9 +147,9 @@ def check_resumable(path: Path, recorded: dict[str, Any], source: str, seed: int
                     top_k: int, proposed: dict[str, Any] | None = None) -> None:
     """Refuse to append to a column computed under other settings: the result would be two columns in one."""
     sha = recorded.get("system_sha256")
-    if sha is not None and sha != system_sha256:
-        raise SystemExit(f"{path} was computed under another system prompt ({sha[:12]}, now "
-                         f"{system_sha256[:12]}); refusing to resume it")
+    if sha != system_sha256:
+        raise SystemExit(f"{path} was computed under another or an unrecorded system prompt "
+                         f"({(sha or 'none')[:12]}, now {system_sha256[:12]}); refusing to resume it")
     if recorded["source"] != source or recorded["seed"] != seed:
         raise SystemExit(f"{path} was computed from {recorded['source']} seed {recorded['seed']}; "
                          f"refusing to resume it as {source} seed {seed}")

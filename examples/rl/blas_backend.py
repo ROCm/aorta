@@ -1,6 +1,6 @@
 """Opt-in: set PyTorch's preferred BLAS library from ``AORTA_PREFERRED_BLAS`` before the first GEMM.
 
-``cublas`` (rocBLAS on ROCm) also needs ``ROCBLAS_USE_HIPBLASLT=0``; unset, nothing changes.
+On ROCm ``cublas`` (rocBLAS) also needs ``ROCBLAS_USE_HIPBLASLT=0``; unset, nothing changes.
 """
 from __future__ import annotations
 
@@ -13,13 +13,14 @@ def apply() -> str | None:
     want = os.environ.get(ENV, "")
     if not want:
         return None
-    if want == "cublas" and os.environ.get("ROCBLAS_USE_HIPBLASLT") != "0":
+    import torch
+
+    hip = getattr(torch.version, "hip", None)
+    if want == "cublas" and hip and os.environ.get("ROCBLAS_USE_HIPBLASLT") != "0":
         raise SystemExit(
             f"{ENV}=cublas without ROCBLAS_USE_HIPBLASLT=0 still routes bf16 "
             "GEMMs to hipBLASLt; set both or neither"
         )
-    import torch
-
     torch.backends.cuda.preferred_blas_library(want)
     got = str(torch.backends.cuda.preferred_blas_library())
     if got.rsplit(".", 1)[-1].lower() != want.lower():
