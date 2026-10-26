@@ -76,18 +76,20 @@ it (#486).
 
    Each nightly's per-case results are co-located on the `sanitizer-results` data
    branch under `dashboard/runs/<YYYY-MM-DD>T<HHMMSS>-<run_id>/` (one directory per
-   guardrail recipe, one under `survey/` per observed-only case, plus a
-   `meta.json` with commit / date / gpu / run_url / gate, where `date` is an
+   guardrail recipe, plus a `meta.json` with commit / date / gpu / run_url / gate, where `date` is an
    ISO-8601 instant -- runs published before the directory carried a time keep
    their date-only names and manifests, and are never renamed), and the rendered page
    links to them: the latest run table has a per-recipe **Report** link, each
    kernel-detail card carries a **run area** link to the case's directory, and
    each **Run** row in the history table links to its `runs/<id>/` area. A
-   `runs/<id>/index.html` landing page lists that run's guardrail reports and its
-   survey cases. Because `pages.yml` copies `dashboard/*` recursively into
+   `runs/<id>/index.html` landing page lists that run's guardrail reports. The
+   observed-only workload survey is not published: the `sanitizers-survey` job is
+   disabled and the render job deletes any `runs/<id>/survey/` area before it
+   renders, because everything on this branch and in the job summary is public.
+   Because `pages.yml` copies `dashboard/*` recursively into
    `_site/sanitizers/`, everything under `runs/` is served at
    `/sanitizers/runs/...` with relative links and no change to `pages.yml`. The
-   publish job keeps a rolling window of the newest **30** run directories
+   render job keeps a rolling window of the newest **30** run directories
    (`gen_sanitizer_dashboard.py --history-root <dir> --keep 30`); older ones are
    pruned. Previously these raw reports lived only in an expiring Actions
    artifact and were never linked; the rolling window makes them durable and
@@ -275,13 +277,13 @@ The **sanitizer** nightly keeps its own rolling window on the `sanitizer-results
 data branch, and it has **two** bounds rather than one:
 
 - **Reports: newest 30 runs.** `dashboard/runs/<id>/` holds one directory per
-  guardrail recipe, one under `survey/` per observed-only case, and a `meta.json`.
+  guardrail recipe and a `meta.json`.
   Each case directory is a *run area* (report, gzipped logs, `recipe.yaml`,
   `inputs/`, `REPRODUCE.md`, `env.json`, `index.html`) — see the run-area table
-  earlier in this document. The publish job prunes older runs and re-renders with
+  earlier in this document. The render job prunes older runs and re-renders with
   `gen_sanitizer_dashboard.py --history-root dashboard/runs --keep 30`.
 - **Bulk: newest 7 runs.** `--keep-logs 7` bounds the logs, the recipe copy and
-  the copied inputs, for guardrail and survey areas alike. An older run keeps its
+  the copied inputs. An older run keeps its
   report, manifests and landing page; its bulk is pruned and the area is
   re-rendered so the page lists only what is still there. Pruning is one-way —
   raising `--keep-logs` later does not bring deleted logs back.
@@ -293,12 +295,84 @@ Both windows bound the **checkout**, not the branch history. Pruning deletes a
 file from the working tree, but the blob stays reachable from the commit that
 added it, so every log ever published remains in `.git` even after its area is
 pruned — `sanitizer-results` accumulates ordinary commits indefinitely. Day to
-day that costs nothing (the publish job clones `--depth 1` and Pages deploys from
+day that costs nothing (the render and push jobs clone `--depth 1` and Pages deploys from
 the workspace copy), so the exposure is remote repository size. It does change the
 deadline for one decision, though: if real ConSan logs turn out large, capping
 their size is a code change *before* the first publish and a history rewrite
 afterwards. Measure them on the first nightly (`du -sh` the staged case dirs in
-the publish job) rather than waiting for the branch to grow.
+the render job) rather than waiting for the branch to grow.
+
+## Previewing dashboard changes before merge
+
+The sanitizer dashboard is only ever published from `main`, so a PR that changes
+how it renders would otherwise be seen for the first time after merge. Two
+manual paths show it first. Neither runs on its own, and neither writes
+`sanitizer-results` or deploys Pages.
+
+**Rendering changes: "Sanitizer dashboard preview"** (`sanitizer-dashboard-preview.yml`).
+A few minutes, CPU only. Push the branch, then either Actions -> *Sanitizer
+dashboard preview* -> *Use workflow from* `<branch>` -> *Run workflow*, or:
+
+```bash
+gh workflow run sanitizer-dashboard-preview.yml --ref <branch>
+```
+
+It clones `sanitizer-results` read-only and re-renders the published history
+with the **branch's** generator and baselines, adds the ASan tab the way
+`pages.yml` does, and screenshots the result. The run's summary page starts with
+a *PREVIEW -- not published* header, links the artifact
+`sanitizer-dashboard-preview-<run_id>`, and then shows the rendered
+`summary.md`. The artifact holds `dashboard/` (open `dashboard/index.html`
+locally) and `screenshots/`: `dashboard.png`, one `dashboard-<tab>.png` per
+further tab, and `latest_run.png` for the newest run's landing page. The page
+itself carries no preview marking, because history mode shows each run's own
+`meta.json`. Treat the newest run's area as approximate: it is re-rendered from
+the branch (recipe copies, `REPRODUCE.md`, `env.json`), with the container
+image and rocjitsu bundle carried over from what that run recorded.
+
+GitHub can only dispatch a workflow file that already exists on `main`. The PR
+that adds or renames this workflow can't use it, so verify that PR with the
+local commands below.
+
+**Changes to what the GPU jobs produce: "Sanitizers Nightly" on the branch.**
+A PR that changes recipes, fixtures or the GPU jobs themselves needs real
+reports, which a re-render cannot make. Dispatch *Sanitizers Nightly* on the
+branch (`gh workflow run sanitizers-nightly.yml --ref <branch>`). Its `render`
+job holds only `contents: read`. It uploads the rendered tree as
+`sanitizer-dashboard-<run_id>` and, on a non-`main` ref, screenshots as
+`sanitizer-dashboard-screenshots-<run_id>`. Only the `push` job writes
+`sanitizer-results`, and it runs on `main` alone. The GPU runner is shared, so
+use this path only when the CPU preview cannot show the change.
+
+On main, that push refuses when `sanitizer-results` has moved since the render
+job recorded its base. Recover by re-running the render job: that re-runs the
+dependent push, and render reads the gate artifact already uploaded. Re-running
+push alone would commit the stale render. Re-running every job also re-runs the
+GPU job on the shared runner and publishes different reports.
+
+**Locally**, the same steps the preview workflow runs, from a checkout of the
+branch:
+
+```bash
+tmp="$(mktemp -d)"
+git clone --depth 1 --branch sanitizer-results https://github.com/ROCm/aorta.git "$tmp"
+rm -rf "$tmp"/dashboard/runs/*/survey
+python scripts/sanitizers/gen_sanitizer_dashboard.py \
+  --history-root "$tmp/dashboard/runs" --keep 30 --keep-logs 7 \
+  --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
+  --status "$tmp/dashboard/status.json" \
+  --out-dir preview/dashboard
+python scripts/sanitizers/add_asan_tab.py \
+  --results docs/sanitizers/asan-manual-runs.json --page preview/dashboard/index.html
+pip install "playwright==1.64.1" && python -m playwright install --only-shell chromium
+python scripts/sanitizers/screenshot_dashboard.py \
+  --dashboard-dir preview/dashboard --out preview/screenshots
+```
+
+Locally the newest run's area loses its container image and rocjitsu bundle
+lines unless `AORTA_CI_IMAGE`, `AORTA_ROCJITSU_COMMIT` and
+`AORTA_ROCJITSU_RUN_URL` are exported first. The workflow sets them from that
+run's `env.json`.
 
 ## Operating checklist
 

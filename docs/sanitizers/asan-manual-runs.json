@@ -1,0 +1,189 @@
+{
+  "schema": "aorta.asan_manual_runs/1",
+  "runs": [
+    {
+      "date": "2026-10-22",
+      "gpu": "MI350 (gfx950)",
+      "stack": [
+        "ROCm 7.0.2 with its ASan runtime libraries",
+        "PyTorch 2.10.0 built from source with -fsanitize=address for gfx950:xnack+"
+      ],
+      "run_mode": "aorta run --sanitizer asan, proposed in PR #567 (in review, not yet merged)",
+      "run_mode_url": "https://github.com/ROCm/aorta/pull/567",
+      "not_covered": [
+        "hipBLASLt GEMM kernels: generated assembly that ASan can't instrument, even in an ASan build of hipBLASLt",
+        "Stores made with buffer instructions",
+        "Shared memory (LDS) inside PyTorch's kernels: this build turns off ASan's LDS lowering, without which some PyTorch softmax kernels fail to launch on gfx950",
+        "hipMallocManaged memory, and accesses far outside an allocation"
+      ],
+      "notes": [
+        "PyTorch's kernels are checked only because PyTorch is built with ASan: with the stock PyTorch wheel the same gpu_smoke run checks 0 of its 3 kernels (measured 2026-10-20), since the wheel ships device code without ASan.",
+        "aorta run has no option for workload configuration yet, and hrx must be built for gfx950 on MI350, so the hrx rows ran through the same run-mode entry point from Python, with the configuration shown.",
+        "A pass covers what ASan instruments, not every access."
+      ],
+      "rows": [
+        {
+          "name": "gpu_smoke",
+          "description": "Minimal single-process PyTorch GPU check",
+          "group": "workload",
+          "command": "aorta run --workload gpu_smoke --sanitizer asan",
+          "verdict": "pass",
+          "kernels": {
+            "dispatched": 3,
+            "checked": 3
+          },
+          "findings": []
+        },
+        {
+          "name": "training",
+          "description": "PyTorch training loop: forward, loss, backward, optimizer step",
+          "group": "workload",
+          "command": "aorta run --workload training --sanitizer asan",
+          "verdict": "not_checked",
+          "kernels": {
+            "dispatched": 58,
+            "checked": 41
+          },
+          "unchecked": "17 hipBLASLt GEMM kernels (Cijk_*): generated assembly that ASan can't instrument, even in an ASan build of hipBLASLt (measured: with hipBLASLt rebuilt with ASan for gfx950:xnack+, all 17 stay unchecked)",
+          "findings": [],
+          "unchecked_outside_asan": true
+        },
+        {
+          "name": "inference",
+          "description": "PyTorch eval-only model execution (offline batch, bf16)",
+          "group": "workload",
+          "command": "aorta run --workload inference --sanitizer asan",
+          "verdict": "not_checked",
+          "kernels": {
+            "dispatched": 34,
+            "checked": 24
+          },
+          "unchecked": "10 hipBLASLt GEMM kernels (Cijk_*): generated assembly that ASan can't instrument, even in an ASan build of hipBLASLt",
+          "findings": [],
+          "unchecked_outside_asan": true
+        },
+        {
+          "name": "hrx (static)",
+          "description": "HIP launch probe: a kernel compiled into the binary",
+          "group": "workload",
+          "command": "hrx probe=static gpu_arch=gfx950",
+          "verdict": "pass",
+          "kernels": {
+            "dispatched": 1,
+            "checked": 1
+          },
+          "findings": []
+        },
+        {
+          "name": "hrx (module)",
+          "description": "HIP launch probe: a kernel loaded as a separate code object",
+          "group": "workload",
+          "command": "hrx probe=module gpu_arch=gfx950",
+          "verdict": "pass",
+          "kernels": {
+            "dispatched": 1,
+            "checked": 1
+          },
+          "findings": []
+        },
+        {
+          "name": "hrx (graph_add)",
+          "description": "HIP launch probe: a kernel launched through a HIP graph",
+          "group": "workload",
+          "command": "hrx probe=graph_add gpu_arch=gfx950",
+          "verdict": "pass",
+          "kernels": {
+            "dispatched": 1,
+            "checked": 1
+          },
+          "findings": []
+        },
+        {
+          "name": "hrx_perf (triad)",
+          "description": "STREAM triad bandwidth benchmark over 1M floats",
+          "group": "workload",
+          "command": "hrx_perf bench=triad size=1000000 gpu_arch=gfx950",
+          "verdict": "pass",
+          "kernels": {
+            "dispatched": 2,
+            "checked": 2
+          },
+          "findings": []
+        },
+        {
+          "name": "In-bounds view (no bug planted)",
+          "description": "A view of exactly its 10-float tensor, then t * 2: the same path as the two PyTorch controls below, with nothing to find",
+          "group": "control",
+          "verdict": "pass",
+          "kernels": {
+            "dispatched": 2,
+            "checked": 2
+          },
+          "findings": [],
+          "expected": "pass"
+        },
+        {
+          "name": "Out-of-bounds read in a PyTorch kernel",
+          "description": "A 16-float view over a 10-float tensor, then t * 2: PyTorch's elementwise kernel reads past the end",
+          "group": "control",
+          "verdict": "fail",
+          "kernels": {
+            "dispatched": 2,
+            "checked": 2
+          },
+          "findings": [
+            {
+              "code": "heap-buffer-overflow",
+              "access": "READ",
+              "size": 4,
+              "region": "0 bytes past the end of a 40-byte allocation",
+              "kernel": "at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char*, 2ul>>"
+            }
+          ],
+          "expected": "fail"
+        },
+        {
+          "name": "Out-of-bounds write in a PyTorch kernel",
+          "description": "The same over-long view, then t.fill_(1.0): PyTorch's fill kernel writes past the end",
+          "group": "control",
+          "verdict": "fail",
+          "kernels": {
+            "dispatched": 1,
+            "checked": 1
+          },
+          "findings": [
+            {
+              "code": "heap-buffer-overflow",
+              "access": "WRITE",
+              "size": 4,
+              "region": "0 bytes past the end of a 40-byte allocation",
+              "kernel": "at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul>>"
+            }
+          ],
+          "expected": "fail"
+        },
+        {
+          "name": "Off-by-one in a HIP kernel",
+          "description": "hrx's probe kernel with its bounds check changed from i < n to i <= n, built with ASan",
+          "group": "control",
+          "verdict": "fail",
+          "kernels": {
+            "dispatched": 1,
+            "checked": 1
+          },
+          "findings": [
+            {
+              "code": "heap-buffer-overflow",
+              "access": "READ",
+              "size": 4,
+              "region": "0 bytes past the end of a 4000000-byte allocation",
+              "kernel": "add100",
+              "location": "hrx_probe_oob.cpp:12:24"
+            }
+          ],
+          "expected": "fail"
+        }
+      ]
+    }
+  ]
+}

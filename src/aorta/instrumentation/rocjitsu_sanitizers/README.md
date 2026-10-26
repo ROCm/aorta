@@ -221,7 +221,9 @@ sites ConSan can admit: a kernel whose only memory operations are ordinary
 global loads/stores yields `access=0/0` and `applicable=false`, so strict
 `moi_require_records` fails closed at exit 86 no matter what the driver does —
 which is exactly what `daily-consan-tiny.yaml` documents, and dispatching does
-not change it.
+not change it. aorta reports that run as ConSan `not_checked`
+(`consan_not_applicable`) rather than `error`, but only when the coverage
+evidence parses and every loaded object discovered zero sites of every kind.
 
 The dynamic-coverage half is **no longer blocked upstream**:
 [ROCm/rocm-systems#9972](https://github.com/ROCm/rocm-systems/issues/9972)
@@ -441,6 +443,9 @@ PASS.
 - Backend timeout, launch failure, unexpected exit, missing verdict, or
   incomplete coverage → `error`.
 - Missing backend or unsupported worklist scoping → `not_checked`.
+- A strict ConSan run whose loaded objects have no access, barrier, atomic or
+  fence site at all → ConSan `not_checked`; an exit 86 after any site was
+  discovered stays `error`.
 
 Coverage evidence is cross-checked two ways: the aggregate `coverage` counts
 must be internally consistent, and the itemized `coverage_site` lines must
