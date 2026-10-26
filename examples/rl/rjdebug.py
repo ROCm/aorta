@@ -164,6 +164,11 @@ class Client:
         if self.flavor == "auto":
             self.flavor = ("llamacpp" if self._llamacpp_props() else
                            "ollama" if self._ollama_version() else "generic")
+        elif self.flavor == "llamacpp" and not self._llamacpp_props():
+            # The column records the chat template's hash from /props; without it two templates would pair.
+            raise SystemExit(f"--flavor llamacpp: {self.root}/props did not answer, so the chat template is unknown")
+        elif self.flavor == "ollama" and not self._ollama_version():
+            raise SystemExit(f"--flavor ollama: {self.root}/api/version did not answer, so the server is unknown")
         if self.flavor == "ollama" and self.mode == "completions":
             raise SystemExit("Ollama's /v1/completions applies the model template to the prompt; use --mode chat")
 
@@ -251,7 +256,7 @@ class Client:
                 except (http.client.HTTPException, OSError) as body_exc:
                     detail = f"(error body unreadable: {body_exc!r})"
                 last = EndpointError(f"HTTP {exc.code} from {url}: {detail}")
-                if exc.code < 500:  # a 4xx will not get better on retry (e.g. the prompt exceeds the context)
+                if exc.code < 500 and exc.code != 429:  # a 4xx other than a rate limit will not get better on retry
                     raise last from exc
             except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
                 # http.client.IncompleteRead (a body cut short) is an HTTPException, not an OSError.
@@ -266,6 +271,13 @@ class Client:
             choice = doc["choices"][0]
         except (KeyError, IndexError, TypeError) as exc:
             raise EndpointError(f"no choices in the response: {str(doc)[:300]}") from exc
+        msg = choice.get("message") if isinstance(choice, dict) else None
+        if not isinstance(choice, dict) or (self.mode != "completions" and not isinstance(msg, (dict, type(None)))):
+            raise EndpointError(f"malformed choice in the response: {str(doc)[:300]}")
+        fields = [choice.get("text")] if self.mode == "completions" else \
+            [(msg or {}).get("content"), (msg or {}).get("reasoning_content")]
+        if any(f is not None and not isinstance(f, str) for f in fields):
+            raise EndpointError(f"reply text is not a string: {str(doc)[:300]}")
         split = echo = False
         if self.mode == "completions":
             text = choice.get("text")
@@ -710,6 +722,15 @@ def main(argv: list[str] | None = None) -> int:
     if not scenarios:
         print("no scenarios selected", file=sys.stderr)
         return 2
+    if recorded is not None:
+        digests = recorded["config"].get("corpus")
+        for s in scenarios:
+            got = digests.get(s.scenario_id) if isinstance(digests, dict) else None
+            if got != s.digest:
+                # A changed tool observation can keep the outcome and score, so the episodes alone would not show it.
+                print(f"{args.replay} was played against another archive of {s.scenario_id} (recorded digest "
+                      f"{str(got)[:12]}, archive {s.digest[:12]})", file=sys.stderr)
+                return 2
     system = rj.system_for(scenarios)
     sha = hashlib.sha256(system.encode()).hexdigest()
     if recorded is not None and recorded["config"].get("system_sha256") not in (None, sha):

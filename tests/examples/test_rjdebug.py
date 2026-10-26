@@ -32,9 +32,9 @@ class Scripted:
     """An endpoint that answers chat requests from a script and keeps every request body."""
 
     def __init__(self, replies: list[str], props: dict | None = None, status: int = 200,
-                 truncate: bool = False) -> None:
+                 truncate: bool = False, statuses: list[int] | None = None, docs: list[dict] | None = None) -> None:
         self.replies, self.props, self.status, self.bodies = list(replies), props, status, []
-        self.truncate = truncate
+        self.truncate, self.statuses, self.docs = truncate, list(statuses or []), list(docs or [])
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -59,8 +59,12 @@ class Scripted:
 
             def do_POST(self):
                 outer.bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-                if outer.status != 200:
-                    self._send(outer.status, {"error": "context length exceeded"})
+                status = outer.statuses.pop(0) if outer.statuses else outer.status
+                if status != 200:
+                    self._send(status, {"error": "context length exceeded"})
+                    return
+                if outer.docs:
+                    self._send(200, outer.docs.pop(0))
                     return
                 text = outer.replies.pop(0) if outer.replies else ANSWER
                 self._send(200, {"choices": [{"message": {"content": text}, "finish_reason": "stop"}],
@@ -262,3 +266,62 @@ def test_a_replay_refuses_a_column_played_under_another_system_prompt(archive, t
     column["config"]["system_sha256"] = "0" * 64
     path.write_text(json.dumps(column))
     assert rjdebug.main(["--replay", str(path), "--archive", archive, "--out", str(tmp_path / "r"), "--quiet"]) == 2
+
+
+def test_an_explicit_llamacpp_flavor_still_records_the_chat_template(archive, tmp_path):
+    import eval_rocjitsu
+
+    with Scripted([ANSWER, ANSWER], props=_llamacpp("t")) as server:
+        assert _play(server, archive, tmp_path / "a", "--flavor", "llamacpp") == 0
+        server.props = _llamacpp("u")
+        assert _play(server, archive, tmp_path / "b", "--flavor", "llamacpp") == 0
+    a, b = (json.loads((tmp_path / d / "column.json").read_text()) for d in "ab")
+    with pytest.raises(SystemExit, match="generation"):
+        eval_rocjitsu.compare(a, b)
+
+
+def test_an_explicit_flavor_whose_server_does_not_answer_is_refused():
+    with Scripted([]) as server:
+        with pytest.raises(SystemExit, match="props"):
+            rjdebug.Client(server.url, "m", flavor="llamacpp", timeout=10)
+        with pytest.raises(SystemExit, match="api/version"):
+            rjdebug.Client(server.url, "m", flavor="ollama", timeout=10)
+
+
+def test_a_rate_limit_is_retried_and_other_client_errors_are_not(archive, monkeypatch):
+    monkeypatch.setattr(rjdebug.time, "sleep", lambda s: None)
+    scenarios = rjdebug.load_scenarios(archive, "test", ["ran@toy"], "v2")
+    with Scripted([ANSWER], statuses=[429, 429]) as server:
+        client = rjdebug.Client(server.url, "m", timeout=10)
+        _, [result] = rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
+    assert len(server.bodies) == 3 and result.error is None and result.episode.outcome == "exact"
+
+
+@pytest.mark.parametrize("change", ["missing", "other"])
+def test_a_replay_refuses_a_column_played_against_another_archive(archive, tmp_path, change):
+    with Scripted([ANSWER]) as server:
+        assert _play(server, archive, tmp_path / "played") == 0
+    path = tmp_path / "played" / "column.json"
+    column = json.loads(path.read_text())
+    if change == "missing":
+        del column["config"]["corpus"]
+    else:
+        column["config"]["corpus"]["ran@toy"] = "0" * 64
+    path.write_text(json.dumps(column))
+    assert rjdebug.main(["--replay", str(path), "--archive", archive, "--out", str(tmp_path / "r"), "--quiet"]) == 2
+    assert not (tmp_path / "r").exists()
+
+
+@pytest.mark.parametrize("doc", [
+    {"choices": [None]},
+    {"choices": ["x"]},
+    {"choices": [{"message": "x"}]},
+    {"choices": [{"message": {"content": ["x"]}}]},
+    {"choices": [{"message": {"content": "x", "reasoning_content": {"a": 1}}}]},
+], ids=["null-choice", "string-choice", "string-message", "list-content", "dict-reasoning"])
+def test_a_malformed_reply_is_an_episode_error_not_a_crash(archive, doc):
+    scenarios = rjdebug.load_scenarios(archive, "test", ["ran@toy"], "v2")
+    with Scripted([], docs=[doc]) as server:
+        client = rjdebug.Client(server.url, "m", timeout=10, retries=0)
+        _, [result] = rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
+    assert result.error is not None and result.steps == []
