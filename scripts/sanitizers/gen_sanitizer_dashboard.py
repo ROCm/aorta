@@ -1627,8 +1627,9 @@ def survey_cases_from_spec(
     ``base_dir`` (no absolute paths, ``..`` traversal, or URL schemes). ``report_rel``
     is retained only for a *present* report (no dead link, matching the guardrail
     path in ``runs_from_history_root``). A malformed spec (a non-list ``cases``
-    wrapper, a non-string / unsafe ``report_path``) degrades to an empty / absent
-    survey rather than raising.
+    wrapper, a non-string / unsafe ``report_path``, or a report whose nested
+    shape makes reduction raise -- a list-valued ``worklist``, for example)
+    degrades to an empty / absent survey rather than raising.
     """
     cases = spec.get("cases", []) if isinstance(spec, dict) else spec
     # A malformed wrapper (e.g. ``{"cases": 1}``) must degrade to an empty survey,
@@ -1649,7 +1650,17 @@ def survey_cases_from_spec(
         report_path = case.get("report_path")
         if report is None and isinstance(report_path, str) and report_path:
             report = _load_survey_report(report_path, base_dir)
-        summary = summarize_case(report if isinstance(report, dict) else None, None)
+        # A dict report can still hold a malformed nested shape (a list-valued
+        # ``worklist``, ``checks: null``) that makes ``summarize_case`` raise on
+        # ``.get``. This is the same untrusted JSON channel as an informational
+        # survey report, which isolates the call the same way. One broken spec
+        # entry must not abort the whole dashboard, guardrail page included.
+        # Render the named case absent -- the same degradation as a missing or
+        # non-object report -- rather than dropping it or propagating.
+        try:
+            summary = summarize_case(report if isinstance(report, dict) else None, None)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            summary = summarize_case(None, None)
         name = str(case.get("name", case.get("label", "survey")))
         backend = case.get("backend")
         if not backend:
