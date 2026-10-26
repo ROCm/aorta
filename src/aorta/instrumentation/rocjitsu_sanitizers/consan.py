@@ -513,6 +513,22 @@ def parse_consan_output(
 
     decision = parse_coverage_decision(output)
     _require_expected_engine(decision.coverage, expected_mode)
+    # A summary whose reader never appears in coverage was not reconciled with a
+    # loaded object. Dropping it would let a conflict count vanish, and the
+    # no-site downgrade would then read the log as nothing to check.
+    coverage_readers = {str(record.reader) for record in decision.coverage}
+    unmatched = sorted(
+        {
+            report["reader"]
+            for report in auto_reports
+            if report["reader"] not in coverage_readers
+        }
+    )
+    if unmatched:
+        raise ValueError(
+            "ConSan report summary is for reader(s) missing from coverage: "
+            + ", ".join(unmatched)
+        )
     sampled_readers = {
         str(record.reader)
         for record in decision.coverage
@@ -725,6 +741,105 @@ def _launch_diagnostic(process: ProcessResult) -> str:
     )
 
 
+_STRICT_REQUIRE_RECORDS_EXIT = 86
+# The hook's own line for a strict require-records exit. Exit 86 without one of
+# these is not that exit, so it is never read as "nothing to check". The second
+# spelling is the pre-simplification Sampled/Record-Replay hook; this evaluator
+# still reads those logs.
+_REQUIRE_RECORDS_DIAGNOSTICS = (
+    "RJ_CONSAN_REQUIRE_RECORDS requested",
+    "RJ_CONSAN_MOI_REQUIRE_RECORDS requested",
+)
+_NO_SITES_REASON = (
+    "consan_not_applicable: no LDS access, barrier, atomic or fence sites in any "
+    "loaded code object"
+)
+# The coverage rejections that "nothing was applicable" implies on its own. Any
+# other reason -- a non-zero failure counter, the expert patch limit, unitemized
+# sites -- is a coverage failure and must not be relabelled as non-applicability.
+_NO_SITES_REJECTIONS = frozenset(
+    {
+        "verdict applicable=false",
+        "verdict analysis_complete=false",
+        "verdict static_complete=false",
+        "verdict dynamic_complete=false",
+        "no applicable code objects",
+    }
+)
+
+
+def _has_no_sites(parsed: ParsedCombinedOutput) -> bool:
+    """True when no loaded object discovered a site and nothing else was rejected.
+
+    Only then is a rejected coverage decision "nothing to check" rather than an
+    instrumentation failure: a single discovered site, applicable verdict or
+    race finding means ConSan had something to observe, and a rejection reason
+    outside :data:`_NO_SITES_REJECTIONS` is a failure in its own right.
+    """
+
+    decision = parsed.coverage_decision
+    if parsed.consan_findings or decision.verdict.applicable:
+        return False
+    if any(record.applicable for record in decision.coverage):
+        return False
+    return set(decision.reasons) <= _NO_SITES_REJECTIONS
+
+
+def _not_applicable(process: ProcessResult, parsed: ParsedCombinedOutput) -> CheckResult:
+    return CheckResult(
+        sanitizer="consan",
+        state=ExecutionState.NOT_CHECKED,
+        verdict=Verdict.NOT_CHECKED,
+        reason=_NO_SITES_REASON,
+        returncode=process.returncode,
+        coverage=parsed.coverage,
+    )
+
+
+def _waitcheck_result(process: ProcessResult, parsed: ParsedCombinedOutput) -> CheckResult:
+    if parsed.waitcheck_error is not None:
+        return _error_result(
+            "waitcheck",
+            state=ExecutionState.ERROR,
+            reason=f"waitcheck_analysis_failed: {parsed.waitcheck_error}",
+            process=process,
+            findings=parsed.waitcheck_findings,
+        )
+    return CheckResult(
+        sanitizer="waitcheck",
+        state=ExecutionState.RAN,
+        verdict=(Verdict.WARN if parsed.waitcheck_findings else Verdict.PASS),
+        returncode=process.returncode,
+        findings=parsed.waitcheck_findings,
+    )
+
+
+def _no_instrumentable_sites(
+    process: ProcessResult, expected_mode: ConSanMode | None
+) -> tuple[CheckResult, CheckResult] | None:
+    """Read a strict require-records exit as "nothing to check" when it is one.
+
+    Strict ``require_records`` exits 86 both when instrumented sites recorded
+    nothing (an instrumentation failure) and when no loaded object has a single
+    site to instrument. Only the second is returned here, and only when the
+    hook's require-records line is present, the whole stream parses and
+    :func:`_has_no_sites` holds; anything else returns None and stays an error.
+    """
+
+    text = f"{process.stdout}\n{process.stderr}"
+    if not any(diagnostic in text for diagnostic in _REQUIRE_RECORDS_DIAGNOSTICS):
+        return None
+    try:
+        parsed = parse_consan_output(
+            f"{process.stdout}\n{process.stderr}", expected_mode=expected_mode
+        )
+    except ValueError:
+        return None
+    if parsed.waitcheck_error is not None or not _has_no_sites(parsed):
+        return None
+    return _waitcheck_result(process, parsed), _not_applicable(process, parsed)
+
+
 def evaluate_consan_output(
     process: ProcessResult,
     *,
@@ -773,6 +888,10 @@ def evaluate_consan_output(
                 findings=(),
             ),
         )
+    if process.returncode == _STRICT_REQUIRE_RECORDS_EXIT:
+        no_sites = _no_instrumentable_sites(process, expected_mode)
+        if no_sites is not None:
+            return no_sites
     if process.returncode != 0:
         # The machine-readable token stays the whole reason for every exit that
         # aorta cannot explain; only a recognised loader failure appends prose.
@@ -819,24 +938,10 @@ def evaluate_consan_output(
                 findings=(),
             ),
         )
-    waitcheck = (
-        _error_result(
-            "waitcheck",
-            state=ExecutionState.ERROR,
-            reason=f"waitcheck_analysis_failed: {parsed.waitcheck_error}",
-            process=process,
-            findings=parsed.waitcheck_findings,
-        )
-        if parsed.waitcheck_error is not None
-        else CheckResult(
-            sanitizer="waitcheck",
-            state=ExecutionState.RAN,
-            verdict=(Verdict.WARN if parsed.waitcheck_findings else Verdict.PASS),
-            returncode=process.returncode,
-            findings=parsed.waitcheck_findings,
-        )
-    )
+    waitcheck = _waitcheck_result(process, parsed)
     if not parsed.coverage_decision.accepted:
+        if _has_no_sites(parsed):
+            return waitcheck, _not_applicable(process, parsed)
         consan = _error_result(
             "consan",
             state=ExecutionState.ERROR,
