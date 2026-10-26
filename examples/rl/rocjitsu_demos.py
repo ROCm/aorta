@@ -173,10 +173,13 @@ def play(scenario: rj.Scenario, policy, index: int = 0) -> rj.Episode:
     return episode
 
 
-def samples(episode: rj.Episode, source: str) -> list[dict[str, Any]]:
-    """The ``(prompt, completion)`` pairs of a solved episode, as the trainer's loss would see them."""
-    return [{"scenario_id": episode.scenario.scenario_id, "source": source, "episode": episode.index,
-             "step": s.n, "prompt": s.prompt, "completion": s.raw, "outcome": episode.outcome,
+def samples(episode: rj.Episode, source: str, iteration: int = 0) -> list[dict[str, Any]]:
+    """The ``(prompt, completion)`` pairs of a solved episode, as the trainer's loss would see them.
+
+    ``(source, scenario_id, iteration, episode)`` names the episode; ``mix_demos`` keys on it.
+    """
+    return [{"scenario_id": episode.scenario.scenario_id, "source": source, "iteration": iteration,
+             "episode": episode.index, "step": s.n, "prompt": s.prompt, "completion": s.raw, "outcome": episode.outcome,
              "total": round(episode.score().total, 4)} for s in episode.steps]
 
 
@@ -201,6 +204,14 @@ def replay_wire(rows: Sequence[dict[str, Any]], scenarios: dict[str, rj.Scenario
                              f"{episode.score().total:.4f}/{episode.outcome}, the run recorded "
                              f"{recorded['reward']:.4f}/{recorded['terminal']}: not the environment the run saw")
         yield episode, recorded
+
+
+def budget_of(config: dict[str, Any], where: Path) -> int:
+    """The turn budget an input was generated under; the replayed prompts state it."""
+    budget = config.get("max_episode_steps")
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1:
+        raise SystemExit(f"{where} records no usable max_episode_steps ({budget!r})")
+    return budget
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -239,13 +250,22 @@ def main(argv: list[str] | None = None) -> int:
                            "outcomes": dict(Counter(e.outcome for e in played))}
         for e in kept:
             out.extend(samples(e, "recipe"))
-    sources: list[tuple[str, list[dict[str, Any]]]] = []
+    # (identity, turn budget, rows) per input; the identity is the input's resolved path.
+    sources: list[tuple[str, int, list[dict[str, Any]]]] = []
+    expected = stats["system_sha256"]
     for path in a.wire:
+        log_path = path.parent / "train-log.json"
+        if not log_path.is_file():
+            raise SystemExit(f"{path} has no {log_path.name} beside it, so its system prompt and turn budget "
+                             "are unknown")
+        log = json.loads(log_path.read_text())
+        if log.get("system_prompt_sha256") != expected:
+            raise SystemExit(f"{path} was generated under system prompt {str(log.get('system_prompt_sha256'))[:12]}; "
+                             f"expected {expected[:12]} (AORTA_RJ_PROMPT / AORTA_RJ_REWARD differ)")
         rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
         if a.max_wire_iteration:
             rows = [r for r in rows if r["iteration"] <= a.max_wire_iteration]
-        sources.append((f"wire:{path.parent.name}", rows))
-    expected = stats["system_sha256"]
+        sources.append((f"wire:{path.resolve()}", budget_of(log, log_path), rows))
     if a.generated_under is not None:
         source_system = rj.system_prompt_v2(rj.resolve_reward(), profile=a.generated_under)
         if rj.system_for(list(scenarios.values())) != rj.system_prompt_v2(rj.resolve_reward()):
@@ -258,7 +278,8 @@ def main(argv: list[str] | None = None) -> int:
         if recorded != expected:
             raise SystemExit(f"{path} was generated under system prompt {str(recorded)[:12]}; expected "
                              f"{expected[:12]} (AORTA_RJ_PROMPT / AORTA_RJ_REWARD / --generated-under differ)")
-        sources.append((f"column:{path.parent.name}", [dict(r, iteration=0) for r in doc["wire"]]))
+        sources.append((f"column:{path.resolve()}", budget_of(doc["config"], path),
+                        [dict(r, iteration=0) for r in doc["wire"]]))
     if a.quirk_demos:
         kept, qstats = quirk_demos(list(scenarios.values()))
         stats["quirk"] = dict(qstats, copies=a.quirk_demos, scenarios=len({e.scenario.scenario_id for e in kept}))
@@ -269,23 +290,23 @@ def main(argv: list[str] | None = None) -> int:
     seen: Counter[str] = Counter()
     distinct: set[tuple[str, ...]] = set()
     wire_stats = Counter()
-    candidates: list[tuple[str, rj.Episode]] = []
-    for source, rows in sources:
-        for episode, _row in replay_wire(rows, scenarios):
+    candidates: list[tuple[str, rj.Episode, int]] = []
+    for source, budget, rows in sources:
+        for episode, row in replay_wire(rows, scenarios, budget=budget):
             wire_stats["episodes"] += 1
             if episode.solved:
                 wire_stats["solved"] += 1
-                candidates.append((source, episode))
+                candidates.append((source, episode, row["iteration"]))
     if a.best_first:
         candidates.sort(key=lambda c: -c[1].score().total)
-    for source, episode in candidates:
+    for source, episode, iteration in candidates:
         key = (episode.scenario.scenario_id, *(s.raw for s in episode.steps))
         sid = episode.scenario.scenario_id
         if key in distinct or seen[sid] >= a.max_wire_per_scenario:
             continue
         distinct.add(key)
         seen[sid] += 1
-        out.extend(samples(episode, source))
+        out.extend(samples(episode, source, iteration))
     stats["wire"] = dict(wire_stats)
     stats["wire_scenarios_kept"] = len(seen)
     stats["samples"] = len(out)

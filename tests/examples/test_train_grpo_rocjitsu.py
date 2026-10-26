@@ -276,6 +276,7 @@ def test_iteration_slices_depend_on_seed_and_iteration_only():
     (["--split", "test"], "--split applies to --env rocjitsu"),
     (["--env", "rocjitsu", "--split", "validation"], "--split must be"),
     (["--env", "rocjitsu", "--scenarios-per-iteration", "-1"], "--scenarios-per-iteration"),
+    (["--env", "rocjitsu", "--max-episode-steps", "4"], "--max-episode-steps 8"),
 ])
 def test_a_rocjitsu_configuration_that_cannot_mean_what_it_says_is_refused(tmp_path, capsys, flags, fragment):
     code = trainer.main(["--out", str(tmp_path / "run"), *flags])
@@ -393,3 +394,8 @@ def test_the_run_config_records_the_sampling_and_objective_settings_it_adds():
     for line in ('"top_k": args.top_k,', '"advantage_sd_floor": args.advantage_sd_floor,',
                  '"reference_from": str(args.reference_from) if args.reference_from else None,'):
         assert line in source, line
+
+def test_the_loss_loop_drops_its_last_reference_to_a_skipped_samples_graph():
+    """An excluded sample runs no backward(), so `result` would keep its graph alive through the next forward."""
+    source = Path(trainer.__file__).read_text()
+    assert "del loss, result\n" in source

@@ -22,8 +22,9 @@ from pathlib import Path
 from typing import Any
 
 
-def episode_key(row: dict[str, Any]) -> tuple[str, str, int]:
-    return row["source"], row["scenario_id"], row["episode"]
+def episode_key(row: dict[str, Any]) -> tuple[str, str, int, int]:
+    """One episode: its input file, scenario, trainer iteration (0 outside a wire log) and index."""
+    return row["source"], row["scenario_id"], row.get("iteration", 0), row["episode"]
 
 
 def read(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -35,7 +36,7 @@ def read(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 
 def take(rows: list[dict[str, Any]], n: int | None, seed: int) -> list[dict[str, Any]]:
-    episodes: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+    episodes: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
     for row in rows:
         episodes.setdefault(episode_key(row), []).append(row)
     keys = sorted(episodes)
