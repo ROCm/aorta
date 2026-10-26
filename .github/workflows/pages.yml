@@ -177,7 +177,7 @@ jobs:
           fi
 
       # History lives on the sanitizer-results data branch (written by
-      # sanitizers-nightly's publish job); it may not exist until the first
+      # sanitizers-nightly's push job); it may not exist until the first
       # sanitizer nightly runs. Same fail-closed ls-remote contract as ci-results.
       # The /sanitizers/ route must NEVER 404: the root nav and docs link to it
       # unconditionally, so when there is no (trusted) snapshot yet we publish the

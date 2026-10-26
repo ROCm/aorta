@@ -4,12 +4,14 @@ ticket: DAILY-CONSAN-TINY
 description: >
   Informational (non-gating) gfx950 ConSan run over a trivial single-kernel object
   (tiny_vecadd) with no LDS/atomic/barrier sites, driven via the source.consan_command
-  path added in #347. Demonstrates the guardrail's fail-closed behavior when there is
-  nothing analyzable: static analysis is complete but strict require-records fails
-  closed (exit 86) rather than emitting a false pass. It is not a Workload survey
-  (Tab 2) row: synthetic controls are not published there, and it does NOT gate
-  the nightly.
-  DELIBERATE NEGATIVE CONTROL -- the exit 86 is the assertion, not a bug to fix.
+  path added in #347. Demonstrates the guardrail's behavior when there is nothing
+  analyzable: every loaded object reports zero discovered sites of every kind, so
+  aorta records ConSan as not_checked (consan_not_applicable) beside a passing
+  waitcheck preflight -- never a false pass, and never an error that hides a real
+  instrumentation failure. It is a local control, not a Workload survey (Tab 2)
+  row: synthetic controls are not published there, and it does NOT gate the
+  nightly. DELIBERATE NEGATIVE CONTROL -- the not_checked is the assertion, not a
+  bug to fix.
   tiny_vecadd's only memory operations are ordinary global loads/stores, which ConSan
   reports as ordinary_memory_support=supported-synchronization-only and does not admit
   as detector sites, so it observes access=0/0 and applicable=false. Measured 2026-08-27:
@@ -19,23 +21,13 @@ description: >
   require a kernel with admissible sites, which is what daily-consan-lds-dispatch.yaml
   already covers.
 
-  ROCm/aorta#450 proposed flipping this case to consan_policy: lenient alongside
-  daily-consan-gemm, on the grounds that both drive a load-only driver. Measured
-  before acting -- first on gfx950 / ROCm 7.0.2.2, then re-measured inside the
-  digest-pinned ROCm 10 CI image itself -- and it does not hold for THIS case on
-  either: lenient leaves it error/error with zero findings, only relabelling the
-  reason from combined_hook_exit_86 to "consan_coverage_incomplete: verdict
-  applicable=false; no applicable code objects", at access=0/0.
-  Removing RJ_CONSAN_REQUIRE_RECORDS cannot help,
-  because the run is rejected by the coverage cross-check rather than by the record
-  requirement -- an object with no admissible sites has nothing to be complete about.
-  So this case stays strict, where its reason at least names the guardrail it is
-  demonstrating. The expectation is now DECLARED in
-  fixtures/expected/verdict_baselines.json as an expected_error naming
-  combined_hook_exit_86, which is what stops the #450 vacuity sweep flagging it while
-  still failing if this case ever errors for any other reason -- including the
-  lenient reason above, which the declaration deliberately does not admit.
-  Previously the intent lived only in this comment, where no check could read it.
+  Strict and lenient now reach the same outcome here: strict exits 86 on
+  require-records and lenient exits 0 with "no applicable code objects", and both
+  are read from the coverage evidence, not the exit code. It runs lenient, like
+  daily-consan-gemm, because its driver only loads. The report is partial (the
+  waitcheck preflight ran), which the #450 vacuity sweep accepts without a
+  declaration; a run whose coverage shows any discovered site, or does not parse,
+  is still an error and the sweep still fails it.
 sanitizer_plan:
   target: gfx950
   source:
@@ -55,13 +47,9 @@ sanitizer_plan:
   sanitizers:
     - consan
   policy:
-    # Deliberately strict, and deliberately NOT changed by #450 -- see the tail of
-    # the description. lenient produces the same error with a vaguer reason here,
-    # because tiny_vecadd has no ConSan-admissible sites at all.
-    consan_policy: strict
-    # strict with a load-only driver is rejected at load time unless the recipe
-    # names the signed-off outcome: this is its key in verdict_baselines.json.
-    expected_error: consan_tiny
+    # lenient, like daily-consan-gemm: the driver only loads, so strict would
+    # need a signed-off expected_error for an outcome that is not an error.
+    consan_policy: lenient
     on_missing_backend: fail
   output:
     report: sanitizer_report.json
