@@ -31,6 +31,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.asan import (
     _kernel_symbols,
     demangle,
     kernel_inventory,
+    uninterpreted_reports,
 )
 from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
     ENV_ASAN_RUN,
@@ -464,25 +465,116 @@ def test_without_a_declaration_a_deleted_build_is_not_checked(tmp_path):
     assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.NOT_CHECKED
 
 
-def test_a_declaration_the_parent_cannot_parse_is_ignored(tmp_path):
-    evidence = _evidence(tmp_path)
-    probe = _instrumented_binary(tmp_path / "hrx_probe")
-    (evidence / "code_objects.jsonl").write_text(
-        "not json\n"
-        "[1, 2]\n"
-        + json.dumps(
+@pytest.mark.parametrize(
+    "line",
+    [
+        "not json",
+        "[1, 2]",
+        json.dumps(
             {
                 "path": "relative/probe",
                 "compressed_bundles": 0,
                 "unreadable": None,
                 "code_objects": [],
+                "loaded_by": "/bin/probe",
             }
-        )
-        + "\n"
-        + json.dumps({"path": "/x", "code_objects": "wrong"})
-        + "\n"
-    )
+        ),
+        json.dumps({"path": "/x", "code_objects": "wrong", "loaded_by": "/bin/probe"}),
+        json.dumps({"path": "/x", "compressed_bundles": 1, "unreadable": None, "code_objects": []}),
+    ],
+)
+def test_a_declaration_the_parent_cannot_parse_is_an_error(tmp_path, line):
+    """It could be the one saying a loaded file was compressed or uninstrumented."""
+
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "hrx_probe")
+    (evidence / "code_objects.jsonl").write_text(line + "\n")
     _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.ERROR
+    assert "code_objects.jsonl (line 1 does not parse)" in report.reason
+
+
+def test_a_declaration_manifest_aorta_cannot_read_is_an_error(tmp_path, monkeypatch):
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "hrx_probe")
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([probe], loaded_by=probe)
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
+    _unreadable(monkeypatch, "code_objects.jsonl")
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.ERROR
+    assert "code_objects.jsonl (Permission denied)" in report.reason
+
+
+def test_a_linked_declaration_manifest_is_an_error(tmp_path):
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "hrx_probe")
+    (tmp_path / "elsewhere.jsonl").write_text("")
+    (evidence / "code_objects.jsonl").symlink_to(tmp_path / "elsewhere.jsonl")
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.ERROR
+    assert "code_objects.jsonl (a link)" in report.reason
+
+
+def test_no_declaration_manifest_means_no_declarations(tmp_path):
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "hrx_probe")
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"])
+
+    assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.PASS
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "device_heap_buffer_overflow_write.txt",
+        "stock_runtime_hostcall_abort.txt",
+        "uninstrumented_launcher_not_preloaded.txt",
+    ],
+)
+def test_a_report_aorta_recognises_is_not_uninterpreted(fixture):
+    text = (FIXTURES / fixture).read_text()
+    assert uninterpreted_reports({8: text}, "asan") == {}
+
+
+def test_a_report_file_aorta_cannot_interpret_is_an_error(tmp_path):
+    """A report ASan wrote that matches nothing aorta knows could still be an error."""
+
+    evidence = _evidence(tmp_path)
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe"),
+        kernels=["store_index(int*, int)"],
+    )
+    (evidence / "asan.8").write_text(
+        '==8==AddressSanitizer CHECK failed: asan_allocator.cpp:190 "((m->chunk_state)) == ((1))"\n'
+    )
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.ERROR
+    assert "asan.8" in report.reason and "CHECK failed" in report.reason
+
+
+@pytest.mark.parametrize("text", ["", "\n  \n"])
+def test_an_empty_report_file_is_not_a_report(tmp_path, text):
+    evidence = _evidence(tmp_path)
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe"),
+        kernels=["store_index(int*, int)"],
+    )
+    (evidence / "asan.8").write_text(text)
 
     assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.PASS
 

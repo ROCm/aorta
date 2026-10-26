@@ -48,8 +48,11 @@ from aorta.run import _fsafe
 
 from ..rocm_paths import resolve_rocm_roots
 from .asan import (
+    _LOADER_STEM,
+    _REPORT_STEM,
     _RUNTIME_KERNEL_PREFIX,
     _RUNTIME_KERNELS,
+    _UNSAFE_IN_OPTIONS,
     ASAN_OPTIONS_PINNED,
     DISPATCH_LOG_NAME,
     AsanRuntime,
@@ -61,6 +64,7 @@ from .asan import (
     kernel_inventory,
     normalized_signature,
     parse_asan_output,
+    uninterpreted_reports,
 )
 from .execution import ProcessResult, run_argv
 from .models import Finding, Verdict
@@ -74,13 +78,10 @@ EXIT_NOT_CHECKED = 3
 
 # File stems inside the evidence directory. ASan and glibc append ``.<pid>``,
 # the HIP runtime ``_<pid>``.
-_ASAN_LOG = "asan"
-_LD_LOG = "ld"
+_ASAN_LOG = _REPORT_STEM
+_LD_LOG = _LOADER_STEM
 _DECLARED = "code_objects.jsonl"
 _TRITON_CACHE = "triton-cache"
-
-# ASAN_OPTIONS splits on these, so log_path cannot contain them.
-_UNSAFE_IN_OPTIONS = re.compile(r"[\s:,'\"]")
 
 # Preloaded by bare name after the host runtime. PyTorch reaches its bundled
 # copies through DT_RPATH=$ORIGIN, which wins over LD_LIBRARY_PATH; an object
@@ -393,30 +394,38 @@ def loaded_files(ld_log: str) -> LoadedFiles:
     return LoadedFiles(tuple(dict.fromkeys(programs)), tuple(dict.fromkeys(objects)))
 
 
-def _declared_inventories(evidence_dir: Path) -> dict[str, dict[str, list[KernelInventory]]]:
+def _declared_inventories(
+    evidence_dir: Path, unread: dict[str, str]
+) -> dict[str, dict[str, list[KernelInventory]]]:
     """What each declared file defined when it was declared, by the program that loads it.
 
     Keyed both as the program was named and as it resolves, since the loader records a
-    program the way it was invoked.
+    program the way it was invoked. A manifest or a line aorta cannot read goes into
+    ``unread``: the declaration it holds could be the one saying a file is opaque.
     """
 
     manifest = evidence_dir / _DECLARED
+    if not manifest.is_symlink() and not manifest.exists():
+        return {}
     if manifest.is_symlink() or not manifest.is_file():
+        unread[_DECLARED] = "a link" if manifest.is_symlink() else "not a regular file"
         return {}
     try:
         lines = manifest.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    except OSError as error:
+        unread[_DECLARED] = error.strerror or type(error).__name__
         return {}
     declared_by: dict[str, dict[str, list[KernelInventory]]] = {}
-    for line in lines:
+    for number, line in enumerate(lines, 1):
         try:
             record = json.loads(line)
         except ValueError:
-            continue
-        if not isinstance(record, dict) or not isinstance(program := record.get("loaded_by"), str):
-            continue
-        inventory = _inventory_from_record(record)
-        if inventory is None:
+            record = None
+        program = record.get("loaded_by") if isinstance(record, dict) else None
+        inventory = _inventory_from_record(record) if isinstance(program, str) else None
+        # declare_code_objects writes both paths absolute.
+        if inventory is None or not (inventory.path.startswith("/") and program.startswith("/")):
+            unread.setdefault(_DECLARED, f"line {number} does not parse")
             continue
         for key in dict.fromkeys((program, os.path.realpath(program))):
             declared_by.setdefault(key, {}).setdefault(inventory.path, []).append(inventory)
@@ -623,19 +632,20 @@ def evaluate_asan_run(
 
     findings: list[Finding] = []
     lost = not_first = incompatible = init_failed = False
-    for _pid, text in sorted(reports.items()):
+    for text in reports.values():
         parsed = parse_asan_output(text)
         findings.extend(parsed.findings)
         lost |= parsed.device_report_lost
         not_first |= parsed.runtime_not_preloaded
         incompatible |= parsed.incompatible_runtimes
         init_failed |= parsed.init_failed
+    uninterpreted = uninterpreted_reports(reports, _ASAN_LOG)
     for text in hip_logs.values():
         # The runtime's own messages, the stock runtime's hostcall abort among
         # them, go to this log once AMD_LOG_LEVEL_FILE is set.
         lost |= parse_asan_output(text).device_report_lost
 
-    declared_by = _declared_inventories(evidence_dir)
+    declared_by = _declared_inventories(evidence_dir, unread)
     jit = _jit_objects(evidence_dir)
     inventories: dict[str, KernelInventory] = {}
 
@@ -735,6 +745,11 @@ def evaluate_asan_run(
     if findings:
         verdict = Verdict.FAIL
         reason = f"{len(findings)} memory error(s); first: {_finding_summary(findings[0])}"
+    elif uninterpreted:
+        verdict = Verdict.ERROR
+        reason = "ASan wrote a report aorta could not interpret: " + ", ".join(
+            f"{name} ({first})" for name, first in uninterpreted.items()
+        )
     elif unread:
         verdict = Verdict.ERROR
         reason = "aorta could not read the run's evidence, which could hold a report: " + ", ".join(
