@@ -52,7 +52,7 @@ def synthetic_column(root: Path) -> tuple[dict, Path, str]:
                                              advantage_fn=lambda r: ([0.0] * len(r), sum(r) / len(r), 0.0))
         doc["groups"].append(group)
         doc["wire"].extend(wire)
-    doc["config"] = {"source": "scripted", "seed": 0, "split": "train",
+    doc["config"] = {"source": "scripted", "seed": 0, "split": "train", "episodes": 3,
                      "scenarios": [s.scenario_id for s in scenarios],
                      "corpus": {s.scenario_id: s.digest for s in scenarios}}
     doc["metrics"] = ev.summarize(ev.episode_rows(doc))
@@ -121,6 +121,11 @@ def test_the_merge_refuses_what_is_not_one_column(case):
     marked[1]["incomplete"] = True
     with pytest.raises(ValueError, match="unfinished"):
         mc.merge(marked, picked)
+    short = copy.deepcopy(shards)
+    short[1]["groups"][0]["episodes"].pop()
+    short[1]["metrics"] = ev.summarize(ev.episode_rows(short[1]))
+    with pytest.raises(ValueError, match="one row per configured episode"):
+        mc.merge(short, picked)
 
 
 def test_the_cli_checks_the_split_and_writes_the_column(case, tmp_path):
