@@ -149,6 +149,29 @@ def test_a_column_is_checked_against_the_selection_its_baselines_are_scored_on(t
         ev.check_selection(good, picked, system + " ")
 
 
+def test_a_report_refuses_an_incomplete_column_rather_than_crash(tmp_path):
+    corpus = build_corpus(tmp_path / "c")
+    picked = ev.pick_scenarios(rj.load_corpus(corpus, split="train"), 0, -1)
+    system = rj.system_for(picked)
+    col = column(hashlib.sha256(system.encode()).hexdigest(), [s.scenario_id for s in picked])
+    col["config"]["corpus"] = {s.scenario_id: s.digest for s in picked}
+    del col["metrics"]
+    col["incomplete"] = True
+    (tmp_path / "before.json").write_text(json.dumps(col))
+    with pytest.raises(SystemExit, match="incomplete"):
+        ev.report(tmp_path, picked, system=system)
+
+
+@pytest.mark.parametrize("routing", ["0", "1"])
+def test_the_recorded_blas_setup_names_torch_and_the_routing_when_nothing_is_preferred(monkeypatch, routing):
+    pytest.importorskip("torch")
+    monkeypatch.delenv("AORTA_PREFERRED_BLAS", raising=False)
+    monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", routing)
+    backend, runtime = ev.execution_setup()
+    assert backend["torch"] and backend["env"]["ROCBLAS_USE_HIPBLASLT"] == routing
+    assert "python" in runtime
+
+
 def test_a_resumed_column_with_scenarios_left_drops_its_old_metrics(tmp_path):
     corpus = build_corpus(tmp_path)
     picked = ev.pick_scenarios(rj.load_corpus(corpus, split="train"), 0, -1)
