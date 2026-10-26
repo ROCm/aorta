@@ -16,11 +16,14 @@ The nightly ``sanitizers-model-survey`` job runs this once per model inventory i
    case that wrote no report, or whose dispatched object is no longer the one
    waitcheck scanned, is merged as an ``error`` for its kernel.
 
-One time budget covers every launch and ConSan case of every model: each is
-started only while it could still finish at its own timeout, so the run ends
-within the budget whatever hangs. Each later model keeps one launch wave and
-one ConSan wave of that budget, so an earlier model running to its case
-timeouts cannot leave the later one with no ConSan report.
+One time budget covers every launch, waitcheck sweep, and ConSan case. A
+launch or ConSan case starts only while it could still finish at its own
+timeout. A waitcheck sweep is one process and stops at its own deadline,
+before it would spend this model's ConSan wave or the time held for a later
+model; on that deadline the sweep's process group is stopped and the timeout
+is recorded. Each later model keeps one launch wave, one waitcheck sweep, and
+one ConSan wave, so an earlier model running to its timeouts cannot leave the
+later one with no ConSan report.
 
 Each output directory also gets ``model_survey.json``: what was launched, what
 failed to launch, which ConSan cases ran, were excluded, or did not fit tonight.
@@ -50,6 +53,7 @@ import queue
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -76,6 +80,13 @@ INVENTORY_SCHEMA_VERSION = 1
 TARGET = "gfx950"
 WARP_SIZE = 64
 WARM_TIMEOUT_SECONDS = 300
+# One waitcheck sweep, same bound as a ConSan case. Reserved for each later
+# model, and the longest a sweep is allowed to run.
+SCAN_TIMEOUT_SECONDS = 900
+# Returned by ``sweep`` when its deadline fired. Not a process exit status.
+SWEEP_TIMED_OUT = -1
+# Stop a sweep this early so cleanup still leaves the ConSan hold intact.
+_DEADLINE_SLACK_SECONDS = 1.0
 _STEM_RE = re.compile(r"[^A-Za-z0-9._-]")
 _INVENTORY_KEYS = {
     "schema_version",
@@ -342,22 +353,28 @@ def warm_one(
     shim = case / "launch.sh"
     write_shim(shim, model_dir=model_dir, pair=item.pair, cache=case / "triton-cache", run_out=case / "run", python=python)
     start = time.monotonic()
+    proc = subprocess.Popen(
+        [str(shim)],
+        env={**os.environ, "HIP_VISIBLE_DEVICES": gpu},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            [str(shim)],
-            env={**os.environ, "HIP_VISIBLE_DEVICES": gpu},
-            capture_output=True,
-            text=True,
-            timeout=WARM_TIMEOUT_SECONDS,
-        )
+        stdout, stderr = proc.communicate(timeout=WARM_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
+        _stop_process_group(proc)
         item.reason = f"launch timed out after {WARM_TIMEOUT_SECONDS}s"
         item.seconds = time.monotonic() - start
         return item
+    except KeyboardInterrupt:
+        _stop_process_group(proc)
+        raise
     item.seconds = time.monotonic() - start
-    (case / "launch.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
+    (case / "launch.log").write_text(stdout + stderr, encoding="utf-8")
     if proc.returncode != 0:
-        tail = (proc.stderr.strip().splitlines() or ["no output"])[-1]
+        tail = (stderr.strip().splitlines() or ["no output"])[-1]
         item.reason = f"launch exited {proc.returncode}: {tail[:200]}"
         return item
     try:
@@ -488,17 +505,78 @@ class Budget:
             return max(0.0, self.seconds - (self.clock() - self._start))
 
 
-def sweep(recipe: Path, out_dir: Path, *, env: dict[str, str] | None = None) -> int:
+def _stop_process_group(proc: subprocess.Popen[str]) -> None:
+    """Kill ``proc`` and anything it spawned, then reap it.
+
+    ``ProcessLookupError`` is the race where the group is already gone. Any
+    other failure to signal the group is reported, and the direct child is
+    stopped on its own.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        print(
+            f"killpg({proc.pid}) failed: {exc}; stopping the process directly",
+            file=sys.stderr,
+        )
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=1)
+
+
+def _sweep_deadline(budget: Budget, *, reserve: float, keep: float) -> float:
+    """Seconds a sweep may run without spending ``reserve`` or ``keep``.
+
+    ``keep`` is this model's own ConSan wave. ``reserve`` is the hold for
+    later models, including their waitcheck sweep.
+    """
+    slack = budget.remaining() - reserve - keep - _DEADLINE_SLACK_SECONDS
+    return min(float(SCAN_TIMEOUT_SECONDS), slack)
+
+
+def sweep(
+    recipe: Path,
+    out_dir: Path,
+    *,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+) -> int:
+    """Run one ``aorta sweep`` and stop its process group at ``timeout``.
+
+    A timeout returns ``SWEEP_TIMED_OUT`` after the group is killed, and the
+    sweep log says so. ``timeout`` of ``None`` waits without a deadline.
+    """
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True)
     with (out_dir / "sweep.log").open("w", encoding="utf-8") as log:
-        return subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-c", "import sys; from aorta.cli import main; sys.exit(main())",
              "sweep", "run", "--recipe", str(recipe), "--output-dir", str(out_dir)],
             stdout=log,
             stderr=subprocess.STDOUT,
             env={**os.environ, **(env or {})},
-        ).returncode
+            start_new_session=True,
+            text=True,
+        )
+        try:
+            return proc.wait(timeout=timeout)
+        except KeyboardInterrupt:
+            _stop_process_group(proc)
+            raise
+        except subprocess.TimeoutExpired:
+            _stop_process_group(proc)
+            log.write(
+                f"sweep timed out after {timeout:.1f}s; the sweep process group was stopped\n"
+            )
+            return SWEEP_TIMED_OUT
 
 
 def error_case_report(item: Warmed, reason: str) -> dict:
@@ -642,14 +720,17 @@ def merge_consan(reports: Sequence[dict]) -> dict:
 
 
 def _later_reserve(later: Sequence[Inventory]) -> float:
-    """Seconds held so each later model can still launch and run ConSan.
+    """Seconds held so each later model can still launch, scan, and run ConSan.
 
-    One launch wave plus one ConSan wave per later inventory. On the nightly's
-    eight GPUs that is all of Qwen3; on fewer devices it is still one case,
-    which is what writes the report ``--require`` checks for.
+    One launch wave, one waitcheck sweep, and one ConSan wave per later
+    inventory. On the nightly's eight GPUs the launch and ConSan waves cover
+    all of Qwen3; on fewer devices each is still one case, which is what
+    writes the report ``--require`` checks for.
     """
 
-    return float(sum(WARM_TIMEOUT_SECONDS + inv.consan_timeout for inv in later))
+    return float(
+        sum(WARM_TIMEOUT_SECONDS + SCAN_TIMEOUT_SECONDS + inv.consan_timeout for inv in later)
+    )
 
 
 def run_model(
@@ -687,10 +768,25 @@ def run_model(
     wc_recipe.write_text(waitcheck_recipe(inv.model, warmed), encoding="utf-8")
     wc_out = out / f"waitcheck-{inv.model}"
     print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: waitcheck over {len(launched)} objects", flush=True)
-    wc_rc = sweep(wc_recipe, wc_out)
+    # Keep this model's ConSan wave as well as the later-model hold. A scan
+    # that cannot fit is recorded and skipped; it does not cancel ConSan.
+    deadline = _sweep_deadline(budget, reserve=reserve, keep=float(inv.consan_timeout))
+    if deadline <= 0:
+        wc_rc = SWEEP_TIMED_OUT
+        shutil.rmtree(wc_out, ignore_errors=True)
+        wc_out.mkdir(parents=True)
+        (wc_out / "sweep.log").write_text(
+            "waitcheck not started: running it would spend the ConSan time held "
+            f"for this model ({inv.consan_timeout}s) or a later one\n",
+            encoding="utf-8",
+        )
+    else:
+        wc_rc = sweep(wc_recipe, wc_out, timeout=deadline)
     (wc_out / "model_survey.json").write_text(
         json.dumps({"model": inv.model, "inventory": inv.path.name, "pairs": launch_record,
-                    "sweep_returncode": wc_rc}, indent=2) + "\n",
+                    "sweep_returncode": wc_rc, "sweep_timed_out": wc_rc == SWEEP_TIMED_OUT,
+                    "sweep_timeout_seconds": None if deadline <= 0 else round(deadline, 1)},
+                   indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -714,28 +810,38 @@ def run_model(
         recipe.write_text(consan_recipe(inv.model, item, timeout=inv.consan_timeout), encoding="utf-8")
         case_out = consan_root / item.pair.stem
         before = item.sha256
-        rc = sweep(recipe, case_out, env={"HIP_VISIBLE_DEVICES": gpu})
+        rc = sweep(
+            recipe, case_out, env={"HIP_VISIBLE_DEVICES": gpu}, timeout=float(inv.consan_timeout)
+        )
         try:
             obj, _ = cached_object(item.case_dir / "triton-cache")
             same = hashlib.sha256(obj.read_bytes()).hexdigest() == before
         except SurveyError:
             same = False
         report_path = case_out / "sanitizer_report.json"
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        if rc == SWEEP_TIMED_OUT:
             report = error_case_report(
-                item, f"consan_case_produced_no_report: aorta sweep exited {rc}"
+                item,
+                f"consan_case_timed_out: aorta sweep exceeded {inv.consan_timeout}s "
+                "and its process group was stopped",
             )
+            same = False
         else:
-            if not same:
-                # The row would compare ConSan on one object with waitcheck on
-                # another, which is the one thing this survey promises not to do.
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
                 report = error_case_report(
-                    item,
-                    "consan_object_mismatch: the object ConSan dispatched is not the "
-                    "one waitcheck scanned",
+                    item, f"consan_case_produced_no_report: aorta sweep exited {rc}"
                 )
+            else:
+                if not same:
+                    # The row would compare ConSan on one object with waitcheck on
+                    # another, which is the one thing this survey promises not to do.
+                    report = error_case_report(
+                        item,
+                        "consan_object_mismatch: the object ConSan dispatched is not the "
+                        "one waitcheck scanned",
+                    )
         return {"kernel": item.pair.kernel, "scenario": item.pair.scenario, "returncode": rc,
                 "report": report, "same_object_as_waitcheck": same}
 
@@ -775,6 +881,7 @@ def run_model(
         "pairs": len(pairs),
         "compiled": len(launched),
         "waitcheck_returncode": wc_rc,
+        "waitcheck_timed_out": wc_rc == SWEEP_TIMED_OUT,
         "consan_ran": len(ran),
         "consan_candidates": len(order),
         "consan_not_scheduled": len(skipped),
@@ -796,9 +903,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--gpus", default="auto",
                      help="comma-separated device ids, or auto for every visible device")
     run.add_argument("--budget-seconds", type=float, default=3600.0,
-                     help="for every launch and ConSan case of every model; each is started "
-                     "only if it can still finish at its own timeout, and each later model "
-                     "keeps one launch wave and one ConSan wave")
+                     help="for every launch, waitcheck sweep, and ConSan case; a launch or "
+                     "ConSan case starts only if it can still finish at its own timeout, "
+                     "a waitcheck sweep stops before spending that hold, and each later "
+                     "model keeps one launch wave, one waitcheck sweep, and one ConSan wave")
     run.add_argument("--night", type=dt.date.fromisoformat, default=dt.datetime.now(dt.timezone.utc).date())
     args = parser.parse_args(argv)
 

@@ -9,6 +9,8 @@ import importlib.util
 import io
 import json
 import re
+import signal
+import subprocess
 import sys
 import tarfile
 import threading
@@ -478,7 +480,7 @@ def _toy_asset(tmp_path: Path, *, consan_timeout: int = 60) -> None:
                      consan={"timeout_seconds": consan_timeout, "exclude": {}})
 
 
-def _fake_sweep(recipe: Path, out_dir: Path, *, env=None) -> int:
+def _fake_sweep(recipe: Path, out_dir: Path, *, env=None, timeout=None) -> int:
     """Stand-in for `aorta sweep run`: a, pass; b, writes nothing; c, swaps its object."""
     out_dir.mkdir(parents=True, exist_ok=True)
     plan = yaml.safe_load(recipe.read_text())["sanitizer_plan"]
@@ -610,8 +612,10 @@ def test_a_later_model_keeps_a_consan_wave_when_earlier_cases_hang(tmp_path, mon
     monkeypatch.setattr(ms, "sweep", _fake_sweep)
     monkeypatch.chdir(tmp_path)
     # Fits early's launch, exactly one 900s ConSan case, late's launch, and not
-    # a second 900s case. The hold is what makes the one ConSan case be late's.
-    budget = ms.WARM_TIMEOUT_SECONDS * 2 + 900 + 100
+    # a second 900s case, plus the later model's waitcheck sweep. The hold is
+    # what makes the one ConSan case be late's, and it leaves early no time to
+    # scan without spending that hold.
+    budget = ms.WARM_TIMEOUT_SECONDS * 2 + ms.SCAN_TIMEOUT_SECONDS + 900 + 100
     code = ms.main(
         [
             "run",
@@ -626,9 +630,65 @@ def test_a_later_model_keeps_a_consan_wave_when_earlier_cases_hang(tmp_path, mon
     )
     informational = tmp_path / "results" / "informational"
     assert code == 0
+    early_scan = json.loads((informational / "waitcheck-early" / "model_survey.json").read_text())
+    assert early_scan["sweep_timed_out"] is True
+    assert "not started" in (informational / "waitcheck-early" / "sweep.log").read_text()
     assert not (informational / "consan-early" / "sanitizer_report.json").exists()
     assert (informational / "consan-late" / "sanitizer_report.json").is_file()
     monkeypatch.chdir(_REPO)
     assert comparator.main(
         ["prog", "--vacuous-only", "--require", "informational/consan-late", str(tmp_path / "results")]
     ) == 0
+
+
+def test_a_sweep_timeout_stops_the_process_group(tmp_path, monkeypatch):
+    class _Proc:
+        pid = 4321
+
+        def __init__(self):
+            self.calls = 0
+
+        def wait(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired("sweep", timeout)
+            return -signal.SIGKILL
+
+    opened = {}
+
+    def _popen(*_args, **kwargs):
+        opened.update(kwargs)
+        return _Proc()
+
+    killed = []
+    monkeypatch.setattr(ms.subprocess, "Popen", _popen)
+    monkeypatch.setattr(ms.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    rc = ms.sweep(tmp_path / "recipe.yaml", tmp_path / "out", timeout=3)
+    assert rc == ms.SWEEP_TIMED_OUT
+    assert opened["start_new_session"] is True
+    assert killed == [(4321, signal.SIGKILL)]
+    assert "process group was stopped" in (tmp_path / "out" / "sweep.log").read_text()
+
+
+def test_a_timed_out_waitcheck_is_reported_and_consan_still_runs(tmp_path, monkeypatch):
+    def _sweep(recipe: Path, out_dir: Path, *, env=None, timeout=None) -> int:
+        plan = yaml.safe_load(recipe.read_text())["sanitizer_plan"]
+        if plan["sanitizers"] == ["waitcheck"]:
+            assert timeout is not None and timeout > 0
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "sweep.log").write_text("sweep timed out\n")
+            return ms.SWEEP_TIMED_OUT
+        return _fake_sweep(recipe, out_dir, env=env, timeout=timeout)
+
+    _toy_asset(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ms, "sweep", _sweep)
+    assert ms.main([
+        "run", "--inventory", "recipes/toy.yaml", "--out", "results/informational",
+        "--work", "work", "--asset-dir", "asset/aorta-model-kernels", "--gpus", "0",
+    ]) == 0
+    record = json.loads((tmp_path / "results/informational/waitcheck-toy/model_survey.json").read_text())
+    assert record["sweep_timed_out"] is True
+    assert record["sweep_returncode"] == ms.SWEEP_TIMED_OUT
+    merged = json.loads((tmp_path / "results/informational/consan-toy/sanitizer_report.json").read_text())
+    assert merged["checks"][0]["kernel_results"]
