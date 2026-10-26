@@ -399,3 +399,22 @@ def test_the_loss_loop_drops_its_last_reference_to_a_skipped_samples_graph():
     """An excluded sample runs no backward(), so `result` would keep its graph alive through the next forward."""
     source = Path(trainer.__file__).read_text()
     assert "del loss, result\n" in source
+
+
+@pytest.mark.parametrize("hip, refused", [("7.2", True), (None, False)], ids=["rocm", "cuda"])
+def test_cublas_needs_the_rocblas_switch_only_on_rocm(monkeypatch, hip, refused):
+    import blas_backend
+
+    chosen = []
+    monkeypatch.setenv(blas_backend.ENV, "cublas")
+    monkeypatch.delenv("ROCBLAS_USE_HIPBLASLT", raising=False)
+    monkeypatch.setattr(torch.version, "hip", hip, raising=False)
+    monkeypatch.setattr(torch.backends.cuda, "preferred_blas_library",
+                        lambda want=None: chosen.append(want) or "_BlasBackend.Cublas")
+    if refused:
+        with pytest.raises(SystemExit, match="ROCBLAS_USE_HIPBLASLT"):
+            blas_backend.apply()
+        assert chosen == []
+    else:
+        assert blas_backend.apply() == "_BlasBackend.Cublas"
+        assert chosen[0] == "cublas"

@@ -202,6 +202,13 @@ MAX_GENERATION_GAP = 2.0
 MAX_OFF_POLICY_FRACTION = 0.02
 
 
+def tracks_cuda_memory(device: str) -> bool:
+    """Whether ``device`` has CUDA memory statistics; a CUDA host training on the CPU has none."""
+    import torch  # noqa: PLC0415
+
+    return torch.device(device).type == "cuda" and torch.cuda.is_available()
+
+
 def takes_gradient(stats: dict[str, Any]) -> bool:
     """Whether a sample's loss forward agrees with generation closely enough to train on."""
     gap = stats.get("gen_max_abs_diff")
@@ -1382,7 +1389,7 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
             sums = {"nll": 0.0, "kl_sum": 0.0, "kl_tokens": 0.0, "pg_abs": 0.0}
             worst = {"max_token_nll": 0.0, "seq_tokens": 0.0}
             longest = 0.0
-            if torch.cuda.is_available():
+            if tracks_cuda_memory(args.device):
                 torch.cuda.reset_peak_memory_stats(args.device)
             compared: list[dict[str, Any]] = []
             batteries: list[dict[str, Any]] = []
@@ -1455,7 +1462,7 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
                 max_token_nll_seq_tokens=int(worst["seq_tokens"]),
                 longest_sample_tokens=int(longest),
                 peak_loss_memory_gib=(round(torch.cuda.max_memory_allocated(args.device) / 2**30, 2)
-                                      if torch.cuda.is_available() else None),
+                                      if tracks_cuda_memory(args.device) else None),
             )
             print(f"  [it{it}] grad norm {grad_norm:.6g} clip coef {coef:.6g}"
                   + (f"  KL/token {row['mean_kl_per_token']:.6f} share "
