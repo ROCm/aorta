@@ -1457,6 +1457,7 @@ def test_lenient_run_with_one_applicable_object_is_still_incomplete() -> None:
     ("old", "new", "rejection"),
     [
         ("dynamic_incomplete=0", "dynamic_incomplete=1", "dynamic_incomplete=1"),
+        ("epoch_exhaustion=0", "epoch_exhaustion=1", "epoch_exhaustion=1"),
         ("reader=1 mode=default analysis_complete=true expert_limit=false",
          "reader=1 mode=default analysis_complete=true expert_limit=true",
          "expert patch limit enabled"),

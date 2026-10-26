@@ -33,6 +33,12 @@ _LEGACY_VERDICT_COUNTS = (
     "replay_metadata_full",
 )
 _ALL_VERDICT_COUNTS = (*_VERDICT_COUNTS, *_LEGACY_VERDICT_COUNTS)
+# On the current verdict line, and absent from older grammars, so a missing
+# field is zero rather than a parse error. A nonzero value is a failure the
+# hook reported; dropping it lets a no-site log read as nothing to check.
+# ``visible_evidence`` is the other extra field and is a volume: a passing run
+# carries it nonzero, so it is not a failure counter.
+_OPTIONAL_FAILURE_COUNTS = ("epoch_exhaustion",)
 _SITE_FIELDS = (
     "reader",
     "kind",
@@ -279,6 +285,12 @@ def _parse_verdict(payload: str, line_number: int) -> AnalysisVerdict:
             for name in _LEGACY_VERDICT_COUNTS
         }
     )
+    counts.update(
+        {
+            name: _count(fields, name, context) if name in fields else 0
+            for name in _OPTIONAL_FAILURE_COUNTS
+        }
+    )
     pairs = {kind: _pair(fields, kind, context) for kind in _SITE_KINDS}
     return AnalysisVerdict(
         applicable=_boolean(fields, "applicable", context),
@@ -295,7 +307,7 @@ def _aggregate(verdicts: list[AnalysisVerdict]) -> AnalysisVerdict:
     applicable = [verdict for verdict in verdicts if verdict.applicable]
     counts = {
         name: sum(verdict.count_map[name] for verdict in verdicts)
-        for name in _ALL_VERDICT_COUNTS
+        for name in (*_ALL_VERDICT_COUNTS, *_OPTIONAL_FAILURE_COUNTS)
     }
     pairs = {
         kind: (
@@ -470,7 +482,7 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
             reasons.append(f"verdict {name}=false")
     if counts["applicable_code_objects"] == 0:
         reasons.append("no applicable code objects")
-    for name in _ALL_VERDICT_COUNTS[1:]:
+    for name in (*_ALL_VERDICT_COUNTS[1:], *_OPTIONAL_FAILURE_COUNTS):
         if counts[name] != 0:
             reasons.append(f"{name}={counts[name]}")
     for kind, patched, supported in verdict.patched_supported:
