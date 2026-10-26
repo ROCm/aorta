@@ -11,8 +11,10 @@ import ctypes
 import ctypes.util
 import json
 import os
+import shutil
 import stat
 import struct
+import subprocess
 import zlib
 from pathlib import Path
 
@@ -838,8 +840,24 @@ class TestPreflight:
         assert evidence.compressed_bundles == 0
         assert evidence.instrumented_for("gfx950")
 
-    def test_a_header_with_an_unknown_method_is_not_a_bundle(self, tmp_path):
-        stray = b"CCOB" + struct.pack("<HH", 2, _NOT_A_METHOD) + b"\0" * 32
+    def test_a_header_with_a_method_aorta_does_not_know_is_unopened(self, tmp_path):
+        later = b"CCOB" + struct.pack("<HH", 2, _NOT_A_METHOD) + b"\0" * 32
+        assert inspect_device_instrumentation(_binary(tmp_path, later)).compressed_bundles == 1
+
+    @pytest.mark.parametrize("version", [4, 15])
+    def test_a_header_from_a_later_bundler_is_unopened(self, tmp_path, version):
+        later = _ccob(
+            _bundle(("hipv4-amdgcn-amd-amdhsa--gfx950:xnack+", _device_elf(instrumented=True))),
+            version=3,
+        )
+        later = later[:4] + struct.pack("<H", version) + later[6:]
+        evidence = inspect_device_instrumentation(_binary(tmp_path, later))
+        assert (evidence.code_objects, evidence.compressed_bundles) == ((), 1)
+        assert not evidence.instrumented_for("gfx950")
+
+    @pytest.mark.parametrize("version, method", [(0, 0), (16, 0), (2, 16)])
+    def test_a_header_too_far_from_any_bundler_is_not_a_bundle(self, tmp_path, version, method):
+        stray = b"CCOB" + struct.pack("<HH", version, method) + b"\0" * 32
         assert inspect_device_instrumentation(_binary(tmp_path, stray)).compressed_bundles == 0
 
     def test_a_corrupt_payload_is_counted_as_unopened(self, tmp_path):
@@ -1053,29 +1071,59 @@ class TestRuntime:
 # --------------------------------------------------------------------------- #
 
 
+_LOADS_REPRO = object()
+
+
 def _script(
     tmp_path: Path,
     *,
     stderr_fixture: str | None,
     code: int,
     dispatch: str | None = "store_index(int*, int)",
+    loads: object = _LOADS_REPRO,
+    name: str = "repro.sh",
 ) -> Path:
     """A stand-in repro. ``dispatch`` is the kernel it logs as dispatched, the way
-    the HIP runtime does under AMD_LOG_LEVEL_FILE (one file per pid)."""
+    the HIP runtime does under AMD_LOG_LEVEL_FILE (one file per pid). Like ASan, it
+    writes its report to ``log_path.<pid>`` when ASAN_OPTIONS names one; and like
+    the loader under LD_DEBUG, it logs ``loads`` (by default ``repro.bin``, the
+    object :func:`_instrumented` builds) as loaded."""
 
+    if loads is _LOADS_REPRO:
+        loads = tmp_path / "repro.bin"
     marker = tmp_path / "ran"
     lines = [
         "#!/bin/sh",
         f'echo ran > "{marker}"',
         'echo "ASAN_OPTIONS=$ASAN_OPTIONS HSA_XNACK=$HSA_XNACK"',
     ]
+    if loads is not None:
+        lines.append(
+            f'[ "$LD_DEBUG" = files ] && '
+            f'printf "%7d:\\tcalling init: %s\\n" $$ "{loads}" >> "${{LD_DEBUG_OUTPUT}}.$$"'
+        )
     if dispatch is not None:
         lines.append(f'echo ":3: 1 us:  ShaderName : {dispatch}" >> "${{AMD_LOG_LEVEL_FILE}}_$$"')
     if stderr_fixture is not None:
-        lines.append(f'cat "{FIXTURES / stderr_fixture}" >&2')
+        lines += [
+            'case "$ASAN_OPTIONS" in',
+            '  *log_path=*) report="${ASAN_OPTIONS##*log_path=}"; report="${report%%:*}.$$" ;;',
+            "  *) report=/dev/stderr ;;",
+            "esac",
+            f'cat "{FIXTURES / stderr_fixture}" >> "$report"',
+        ]
     lines.append(f"exit {code}")
-    script = tmp_path / "repro.sh"
+    script = tmp_path / name
     script.write_text("\n".join(lines) + "\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
+
+
+def _wrapper(tmp_path: Path, inner: Path, *, name: str = "wrapper.sh") -> Path:
+    """A launcher that runs ``inner``, throws its stderr away, and exits 0."""
+
+    script = tmp_path / name
+    script.write_text(f'#!/bin/sh\nsh "{inner}" 2>/dev/null\nexit 0\n')
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
@@ -1133,11 +1181,12 @@ class TestRunAsan:
         assert kernel.identity.name == "store_index"
         assert kernel.findings == check.findings
         backend = dict(check.backend)
-        assert backend["asan_options"] == ASAN_OPTIONS_PINNED
+        report_path = (tmp_path / "out").absolute() / "asan"
+        assert backend["asan_options"] == f"{ASAN_OPTIONS_PINNED}:log_path={report_path}"
         assert "gfx950:xnack+[asan=yes]" in backend["device_instrumentation"]
         assert len(backend["hip_runtime_sha256"]) == 64
         log = (tmp_path / "out" / "asan.log").read_text()
-        assert f"ASAN_OPTIONS={ASAN_OPTIONS_PINNED} HSA_XNACK=1" in log
+        assert f"ASAN_OPTIONS={ASAN_OPTIONS_PINNED}:log_path={report_path} HSA_XNACK=1" in log
 
     def test_a_clean_run_passes(self, tmp_path, runtime):
         check = run_asan(
@@ -1202,6 +1251,195 @@ class TestRunAsan:
             objects=(_instrumented(tmp_path),),
         )
         assert check.verdict is Verdict.FAIL
+
+    def test_a_wrapper_that_hides_its_childs_report_does_not_pass(self, tmp_path, runtime):
+        inner = _script(tmp_path, stderr_fixture="device_heap_buffer_overflow_write.txt", code=1)
+        check = run_asan(
+            _worklist(),
+            command=_wrapper(tmp_path, inner),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.FAIL
+        assert check.findings
+
+    @pytest.mark.skipif(shutil.which("cc") is None, reason="needs a C compiler")
+    def test_an_elf_launcher_that_hides_its_childs_report_does_not_pass(self, tmp_path, runtime):
+        inner = _script(tmp_path, stderr_fixture="device_heap_buffer_overflow_write.txt", code=1)
+        source = tmp_path / "launcher.c"
+        source.write_text(
+            "#include <stdlib.h>\n"
+            f'int main(void) {{ (void)system("sh {inner} 2>/dev/null"); return 0; }}\n'
+        )
+        launcher = tmp_path / "launcher"
+        subprocess.run(["cc", "-o", str(launcher), str(source)], check=True)
+        check = run_asan(
+            _worklist(),
+            command=launcher,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.FAIL
+
+    @pytest.mark.parametrize("loads", [None, "other.bin"])
+    def test_a_dispatch_from_code_that_was_not_checked_is_not_checked(
+        self, tmp_path, runtime, loads
+    ):
+        inner = _script(
+            tmp_path,
+            stderr_fixture=None,
+            code=0,
+            loads=None if loads is None else tmp_path / loads,
+        )
+        check = run_asan(
+            _worklist(),
+            command=_wrapper(tmp_path, inner),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.NOT_CHECKED
+        assert check.reason.startswith("asan_dispatch_not_from_checked_code:")
+        assert "repro.bin" in check.reason
+
+    def test_a_dispatch_from_a_link_to_the_checked_code_counts(self, tmp_path, runtime):
+        checked = _instrumented(tmp_path)
+        (tmp_path / "linked.bin").symlink_to(checked)
+        inner = _script(tmp_path, stderr_fixture=None, code=0, loads=tmp_path / "linked.bin")
+        check = run_asan(
+            _worklist(),
+            command=_wrapper(tmp_path, inner),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(checked,),
+        )
+        assert check.verdict is Verdict.PASS
+
+    def test_every_dispatching_process_must_have_loaded_checked_code(self, tmp_path, runtime):
+        checked_child = _script(tmp_path, stderr_fixture=None, code=0)
+        other_child = _script(tmp_path, stderr_fixture=None, code=0, loads=None, name="other.sh")
+        launcher = tmp_path / "both.sh"
+        launcher.write_text(f'#!/bin/sh\nsh "{checked_child}"\nsh "{other_child}"\n')
+        launcher.chmod(0o755)
+        check = run_asan(
+            _worklist(),
+            command=launcher,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.reason.startswith("asan_dispatch_not_from_checked_code:")
+
+    def test_a_launcher_that_dispatches_nothing_selected_need_not_load_checked_code(
+        self, tmp_path, runtime
+    ):
+        inner = _script(tmp_path, stderr_fixture=None, code=0)
+        launcher = tmp_path / "launcher.sh"
+        launcher.write_text(
+            "#!/bin/sh\n"
+            'echo ":3: 1 us:  ShaderName : warmup(float*)" >> "${AMD_LOG_LEVEL_FILE}_$$"\n'
+            f'sh "{inner}"\n'
+        )
+        launcher.chmod(0o755)
+        check = run_asan(
+            _worklist(),
+            command=launcher,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.PASS
+
+    def test_a_memory_error_beside_unreadable_evidence_still_fails(
+        self, tmp_path, runtime, monkeypatch
+    ):
+        script = _script(tmp_path, stderr_fixture="device_heap_buffer_overflow_write.txt", code=1)
+        read_text = Path.read_text
+
+        def refuse(self, *args, **kwargs):
+            if self.name.startswith("ld."):
+                raise PermissionError(13, "Permission denied", str(self))
+            return read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", refuse)
+        check = run_asan(
+            _worklist(),
+            command=script,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.FAIL
+
+    def test_a_report_file_aorta_cannot_interpret_is_an_error(self, tmp_path, runtime):
+        script = _script(tmp_path, stderr_fixture=None, code=0)
+        script.write_text(
+            script.read_text().replace(
+                "exit 0",
+                'echo "==8==AddressSanitizer CHECK failed: x" > '
+                '"${ASAN_OPTIONS##*log_path=}.$$"\nexit 0',
+            )
+        )
+        check = run_asan(
+            _worklist(),
+            command=script,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.ERROR
+        assert check.reason.startswith("asan_report_uninterpreted:")
+        assert "CHECK failed" in check.reason
+
+    def test_a_report_file_aorta_cannot_read_is_an_error(self, tmp_path, runtime, monkeypatch):
+        script = _script(tmp_path, stderr_fixture="device_heap_buffer_overflow_write.txt", code=0)
+        read_text = Path.read_text
+
+        def refuse(self, *args, **kwargs):
+            if self.name.startswith("asan.") and self.name[5:].isdigit():
+                raise PermissionError(13, "Permission denied", str(self))
+            return read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", refuse)
+        check = run_asan(
+            _worklist(),
+            command=script,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.ERROR
+        assert check.reason.startswith("asan_evidence_unreadable:")
+        assert "Permission denied" in check.reason
+
+    def test_a_stale_report_does_not_count(self, tmp_path, runtime):
+        out = tmp_path / "out"
+        out.mkdir()
+        fixture = (FIXTURES / "device_heap_buffer_overflow_write.txt").read_text()
+        (out / "asan.1").write_text(fixture)
+        (out / "ld.1").write_text("      1:\tcalling init: /elsewhere\n")
+        check = run_asan(
+            _worklist(),
+            command=_script(tmp_path, stderr_fixture=None, code=0),
+            output_dir=out,
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.PASS
+
+    def test_an_output_dir_asan_options_cannot_carry_is_an_error(self, tmp_path, runtime):
+        check = run_asan(
+            _worklist(),
+            command=_script(tmp_path, stderr_fixture=None, code=0),
+            output_dir=tmp_path / "out dir",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.ERROR
+        assert check.reason.startswith("asan_output_dir_unusable:")
+        assert not (tmp_path / "ran").exists()
 
     def test_an_uninstrumented_build_errors_before_anything_runs(self, tmp_path, runtime):
         script = _script(tmp_path, stderr_fixture=None, code=0)

@@ -283,6 +283,12 @@ is why aorta checks all five instead of trusting the build:
    process) and a clean exit passes only if the selected kernel appears in it
    (`asan_kernel_not_dispatched`; no log at all is `asan_dispatch_unverified`).
    The runtime's own messages go to that file too, and are read with the streams.
+   The dispatch counts only from a process that loaded one of the checked
+   binaries (aorta sets `LD_DEBUG=files`), so a script that runs some other
+   build is `not_checked` (`asan_dispatch_not_from_checked_code`). ASan writes
+   each process's report to its own `log_path` file in the output directory,
+   where a wrapper that throws away its child's stderr cannot hide it; a report
+   file aorta cannot read or does not recognise is an error.
 5. **The node's GPU page migration is sound.** Before the repro, aorta runs the
    run mode's node-health canary (see **Node health** below) under the same ASan
    runtime, into `<output>/asan/node-health-*/node-health/`. A canary that does not
@@ -414,9 +420,10 @@ so a declaration records what each file defines when it is declared. A declarati
 evidence only for the program that made it. A loaded file aorta cannot read, or that
 the loader recorded by a relative path, could hold the copy of a kernel that ran, so it
 leaves that process's kernels unchecked, as compressed device code does. An evidence
-file aorta cannot read (an ASan report, HIP log or loader log that is unreadable or a
-link) makes the run an error, since it could hold a report; a memory error read from the
-other files still fails it. A cell whose
+file aorta cannot read (an ASan report, HIP log, loader log or the declarations file
+that is unreadable, malformed or a link) makes the run an error, since it could hold a
+report or the record of what ran, and so does an ASan report file in which aorta
+recognises nothing; a memory error read from the other files still fails it. A cell whose
 environment, mitigations or `extra_env` would change a setting the mode owns
 (`LD_PRELOAD`, `ASAN_OPTIONS`, `HSA_XNACK`, ...) or which GPUs the workload sees
 (`HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, ...) is refused rather than run with the

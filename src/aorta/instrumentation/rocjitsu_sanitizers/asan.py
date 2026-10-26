@@ -155,6 +155,7 @@ _COMPRESSED_BUNDLE_MAGIC = b"CCOB"
 _CCOB_ZLIB = 0
 _CCOB_ZSTD = 1
 _CCOB_VERSIONS = (1, 2, 3)
+_CCOB_FIELD_LIMIT = 16
 # Bounds the buffer a header can ask for. Code compresses well, but not this well.
 _MAX_INFLATION = 256
 _ELF_MAGIC = b"\x7fELF"
@@ -534,6 +535,20 @@ def _ccob_method(data: bytes, index: int) -> int | None:
     return None
 
 
+def _ccob_from_later_bundler(data: bytes, index: int) -> bool:
+    """Whether the CCOB at ``index`` looks like a version or method aorta does not know.
+
+    The magic recurs by chance in a large binary, so only small header fields count:
+    those are device code aorta cannot see, not stray bytes.
+    """
+
+    try:
+        version, method = struct.unpack_from("<HH", data, index + 4)
+    except struct.error:
+        return False
+    return 0 < version < _CCOB_FIELD_LIMIT and method < _CCOB_FIELD_LIMIT
+
+
 def _ccob_extent(data: bytes, index: int) -> tuple[int, int, int] | None:
     """(payload start, payload end, uncompressed size) of the CCOB at ``index``.
 
@@ -621,6 +636,8 @@ def _offload_bundles(data: bytes) -> tuple[list[tuple[bytes, int]], int]:
     while (index := data.find(_COMPRESSED_BUNDLE_MAGIC, start)) != -1:
         start = index + 1
         if _ccob_method(data, index) is None:
+            if _ccob_from_later_bundler(data, index):
+                unopened += 1
             continue
         inflated = _inflate(data, index)
         if inflated is None:
@@ -1248,19 +1265,21 @@ def evaluate_asan_output(
     *,
     kernel: str | None = None,
     hip_log: str | None = None,
+    reports: str = "",
 ) -> CheckResult:
     """Decide one ASan run. Only a clean exit with no report is a PASS.
 
     A report is a result whatever the exit code says: ASan aborts the process on
     its first error by design, so a nonzero exit beside a report is the report,
-    not a backend failure. ``hip_log`` (:func:`read_hip_log`) is read for the
-    same signals as the process's own streams. When ``kernel`` is given, a clean
+    not a backend failure. ``hip_log`` (:func:`read_hip_log`) and ``reports``
+    (the processes' ``log_path`` files) are read for the same signals as the
+    process's own streams. When ``kernel`` is given, a clean
     exit also has to show that kernel dispatched in it: ASan leaves no trace of a
     kernel that ran clean, so without it a repro that never launched its kernel
     would pass.
     """
 
-    streams = f"{process.stderr}\n{process.stdout}\n{hip_log or ''}"
+    streams = f"{process.stderr}\n{process.stdout}\n{hip_log or ''}\n{reports}"
     parsed = parse_asan_output(streams)
     if process.timed_out:
         return _check(
@@ -1395,6 +1414,97 @@ def _preflight(
     return None, descriptions
 
 
+_REPORT_STEM = "asan"
+_LOADER_STEM = "ld"
+# ASAN_OPTIONS splits on these, so log_path cannot contain them.
+_UNSAFE_IN_OPTIONS = re.compile(r"[\s:,'\"]")
+
+
+def _per_process_files(output_dir: Path) -> list[Path]:
+    pattern = re.compile(
+        rf"(?:{re.escape(_REPORT_STEM)}|{re.escape(_LOADER_STEM)})\.\d+|"
+        rf"{re.escape(DISPATCH_LOG_NAME)}.*"
+    )
+    return [
+        entry
+        for entry in output_dir.iterdir()
+        if pattern.fullmatch(entry.name) and (entry.is_symlink() or not entry.is_dir())
+    ]
+
+
+def uninterpreted_reports(reports: Mapping[int, str], stem: str) -> dict[str, str]:
+    """The report files, by name, in which aorta recognised nothing, each with its
+    first line. ASan writes such a file only to say something, so one aorta cannot
+    read is a report it does not understand, not the absence of one."""
+
+    found: dict[str, str] = {}
+    for pid, text in sorted(reports.items()):
+        parsed = parse_asan_output(text)
+        recognised = (
+            parsed.findings
+            or parsed.device_report_lost
+            or parsed.runtime_not_preloaded
+            or parsed.incompatible_runtimes
+            or parsed.init_failed
+        )
+        if not recognised and (first := next((ln for ln in text.splitlines() if ln.strip()), "")):
+            found[f"{stem}.{pid}"] = first.strip()[:200]
+    return found
+
+
+def _evaluate_run(
+    process: ProcessResult,
+    kernel: str,
+    hip_log: str | None,
+    output_dir: Path,
+    checked: Sequence[Path],
+) -> CheckResult:
+    # asan_run imports this module.
+    from .asan_run import _per_process, loaded_files
+
+    unread: dict[str, str] = {}
+    reports = _per_process(output_dir, _REPORT_STEM, unread)
+    hip_logs = _per_process(output_dir, DISPATCH_LOG_NAME, unread)
+    ld_logs = _per_process(output_dir, _LOADER_STEM, unread)
+    check = evaluate_asan_output(
+        process, kernel=kernel, hip_log=hip_log, reports="\n".join(reports.values())
+    )
+    if check.verdict is Verdict.FAIL:
+        return check
+    if unread:
+        return _error(
+            "asan_evidence_unreadable: aorta could not read the run's evidence, which "
+            "could hold a report: "
+            + ", ".join(f"{name} ({why})" for name, why in sorted(unread.items())),
+            returncode=check.returncode,
+        )
+    if uninterpreted := uninterpreted_reports(reports, _REPORT_STEM):
+        return _error(
+            "asan_report_uninterpreted: ASan wrote a report aorta could not interpret: "
+            + ", ".join(f"{name} ({line})" for name, line in uninterpreted.items()),
+            returncode=check.returncode,
+        )
+    if check.verdict is not Verdict.PASS:
+        return check
+    # The preflight vouches only for the files it inspected, so a dispatch counts
+    # only from a process that loaded one of them.
+    vouched = {os.path.realpath(path) for path in checked}
+    for pid, text in sorted(hip_logs.items()):
+        if not _was_dispatched(kernel, dispatched_kernels(text)):
+            continue
+        loaded = loaded_files(ld_logs.get(pid, ""))
+        if not any(
+            os.path.realpath(path) in vouched for path in (*loaded.programs, *loaded.objects)
+        ):
+            return _not_checked(
+                f"asan_dispatch_not_from_checked_code: process {pid} dispatched {kernel} "
+                "but loaded none of the checked binaries "
+                f"({', '.join(str(path) for path in checked)}), so their instrumentation "
+                "says nothing about what it ran"
+            )
+    return check
+
+
 def run_asan(
     worklist: KernelWorklist,
     *,
@@ -1460,10 +1570,26 @@ def run_asan(
                 f"ROCm runtime; set {ENV_ROCM_ASAN_LIB} to its lib/asan directory or "
                 f"{ENV_ROCM_ASAN_PATH} to the install root"
             )
+        elif _UNSAFE_IN_OPTIONS.search(str(output_dir.absolute())):
+            check = _error(
+                f"asan_output_dir_unusable: {output_dir.absolute()} contains a character "
+                "ASAN_OPTIONS cannot carry (whitespace, ':', ',' or a quote), so ASan "
+                "could not be told where to write its reports"
+            )
         else:
+            evidence_dir = output_dir.absolute()
+            env = asan_environment(
+                os.environ, resolved, dispatch_log=evidence_dir / DISPATCH_LOG_NAME
+            )
+            # Each process's report goes to its own file, which a wrapper cannot
+            # swallow the way it can its child's stderr, and the loader names what
+            # each process ran.
+            env["ASAN_OPTIONS"] = f"{ASAN_OPTIONS_PINNED}:log_path={evidence_dir / _REPORT_STEM}"
+            env["LD_DEBUG"] = "files"
+            env["LD_DEBUG_OUTPUT"] = str(evidence_dir / _LOADER_STEM)
             backend.update(
                 {
-                    "asan_options": ASAN_OPTIONS_PINNED,
+                    "asan_options": env["ASAN_OPTIONS"],
                     "hsa_xnack": "1",
                     "rocm_asan_lib_dirs": os.pathsep.join(
                         str(item) for item in resolved.rocm_lib_dirs
@@ -1490,17 +1616,11 @@ def run_asan(
                     f"on this node cannot be trusted and the repro was not run: {health.reason}"
                 )
             else:
-                # A log left by an earlier run in this directory would vouch for a
-                # dispatch this run never made.
-                for stale in output_dir.glob(f"{DISPATCH_LOG_NAME}*"):
+                # A file left by an earlier run in this directory would vouch for a
+                # dispatch, or report an error, this run never made.
+                for stale in _per_process_files(output_dir):
                     stale.unlink()
-                process = run_argv(
-                    (str(command),),
-                    timeout_seconds=timeout_seconds,
-                    env=asan_environment(
-                        os.environ, resolved, dispatch_log=output_dir / DISPATCH_LOG_NAME
-                    ),
-                )
+                process = run_argv((str(command),), timeout_seconds=timeout_seconds, env=env)
                 (output_dir / "asan.log").write_text(
                     f"{process.stdout}\n{process.stderr}", encoding="utf-8"
                 )
@@ -1510,7 +1630,7 @@ def run_asan(
                     if hip_log is not None
                     else "no dispatch log"
                 )
-                check = evaluate_asan_output(process, kernel=selected.name, hip_log=hip_log)
+                check = _evaluate_run(process, selected.name, hip_log, output_dir, checked)
                 if health.status is NodeHealthStatus.NOT_VERIFIED and check.verdict is Verdict.PASS:
                     check = _not_checked(
                         "asan_node_health_not_verified: the repro passed, but nothing "
