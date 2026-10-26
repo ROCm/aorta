@@ -214,6 +214,21 @@ def budget_of(config: dict[str, Any], where: Path) -> int:
     return budget
 
 
+def check_digests(recorded: Any, rows: Sequence[dict[str, Any]], scenarios: dict[str, rj.Scenario],
+                  where: Path) -> None:
+    """Refuse an input generated against another archive of any scenario it replays.
+
+    A changed archive can keep the prompt, reward and outcome while changing a
+    tool observation, and the demos would then train on prompts the policy never saw.
+    """
+    if not isinstance(recorded, dict):
+        raise SystemExit(f"{where} records no corpus digests, so the archive its episodes saw is unknown")
+    for sid in sorted({r["scenario_id"] for r in rows} & scenarios.keys()):
+        if recorded.get(sid) != scenarios[sid].digest:
+            raise SystemExit(f"{where} was generated against another archive of {sid} "
+                             f"(recorded digest {str(recorded.get(sid))[:12]}, corpus {scenarios[sid].digest[:12]})")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--corpus-root", required=True)
@@ -238,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
                          "and are trained under the deployment prompt); both hashes go into the stats")
     a = ap.parse_args(argv)
     scenarios = {s.scenario_id: s for s in rj.load_corpus(a.corpus_root, split=a.split)}
+    if (a.recipe or a.quirk_demos) and any(s.layout != "v2" for s in scenarios.values()):
+        raise SystemExit("--recipe and --quirk-demos script list_kernels, which a v1-layout corpus does not have")
     system = rj.system_for(list(scenarios.values()))
     out: list[dict[str, Any]] = []
     stats: dict[str, Any] = {"split": a.split, "scenarios": len(scenarios),
@@ -265,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
         if a.max_wire_iteration:
             rows = [r for r in rows if r["iteration"] <= a.max_wire_iteration]
+        check_digests(log.get("corpus"), rows, scenarios, log_path)
         sources.append((f"wire:{path.resolve()}", budget_of(log, log_path), rows))
     if a.generated_under is not None:
         source_system = rj.system_prompt_v2(rj.resolve_reward(), profile=a.generated_under)
@@ -278,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         if recorded != expected:
             raise SystemExit(f"{path} was generated under system prompt {str(recorded)[:12]}; expected "
                              f"{expected[:12]} (AORTA_RJ_PROMPT / AORTA_RJ_REWARD / --generated-under differ)")
+        check_digests(doc["config"].get("corpus"), doc["wire"], scenarios, path)
         sources.append((f"column:{path.resolve()}", budget_of(doc["config"], path),
                         [dict(r, iteration=0) for r in doc["wire"]]))
     if a.quirk_demos:
