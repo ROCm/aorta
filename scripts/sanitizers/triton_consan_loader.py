@@ -35,7 +35,7 @@ Two modes, mirroring the two committed HIP loaders:
     ``15275dad`` and that lane now passes. What still fails closed is an object
     with no ConSan-admissible sites -- ordinary global loads/stores alone give
     ``access=0/0``, so strict ``moi_require_records`` exits 86 regardless of the
-    driver.
+    driver, and aorta reports ConSan as ``not_checked`` for it.
 
 ``run_consan`` executes ``source.consan_command`` as a bare argv with no
 arguments, so a parameterised loader cannot be named directly. ``emit-command``
