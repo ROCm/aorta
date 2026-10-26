@@ -74,6 +74,12 @@ The system prompt is the same for every scenario (the trainer has one), so the
 per-scenario facts -- the workload's description and kernel count -- open each
 user message, as ``rjenv2.Episode.observe`` states them.
 
+Kept as the reference environments have it: ``barrier_early`` swaps the two
+instructions' text and keeps their offsets, so when the predecessor is wider
+than the 4-byte barrier the listing shows it at the barrier's old offset and no
+instruction at the barrier's new offset plus 4. The operator is not in the
+default ``--ops``.
+
 Rewards: ``v1`` (:data:`POINTS`, the prototype's) and ``v2`` (:data:`POINTS_V2`,
 pre-registered in ``docs/rl-rocjitsu-reward-v2.md``), chosen per corpus load (``reward=``,
 else ``$AORTA_RJ_REWARD``, else ``v1``) so every earlier result reproduces. A v1-layout
@@ -641,6 +647,7 @@ def mutated_listing(listing: list[tuple[int, str]], rec: dict[str, Any]) -> list
         a, b = out[i], out[i + 1]
         out[i], out[i + 1] = (a[0], b[1]), (rec["moved_to"], a[1])
     elif op == "barrier_early" and i > 0:
+        # Offsets kept, as in rjenv/rjenv2; the replay tests pin this listing.
         a, b = out[i - 1], out[i]
         out[i - 1], out[i] = (a[0], b[1]), (b[0], a[1])
     return out

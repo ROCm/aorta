@@ -1034,6 +1034,13 @@ def validate_args(args: argparse.Namespace) -> str | None:
         return "--split applies to --env rocjitsu only; the probe corpus has no split"
     if args.split not in (None, "train", "test"):
         return "--split must be train or test"
+    if args.env == "rocjitsu":
+        import rocjitsu_env
+
+        if args.max_episode_steps != rocjitsu_env.MAX_TURNS:
+            # The system prompt states MAX_TURNS whatever the budget is.
+            return (f"--env rocjitsu needs --max-episode-steps {rocjitsu_env.MAX_TURNS}: "
+                    "the system prompt states that budget")
     if not (math.isfinite(args.advantage_sd_floor) and args.advantage_sd_floor >= 0):
         return "--advantage-sd-floor must be finite and >= 0 (0 keeps GRPO's normalisation)"
     if args.snapshot_every < 0:
@@ -1398,7 +1405,7 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
                 else:
                     off_policy += 1
                 longest = max(longest, stats.get("seq_tokens", 0.0))
-                del loss
+                del loss, result
                 if "gen_max_abs_diff" in stats or "prompt_ids_match" in stats:
                     compared.append({"scenario_id": sample.scenario_id, "episode": sample.episode,
                                      "step": sample.step, "seq_tokens": int(stats["seq_tokens"]),
