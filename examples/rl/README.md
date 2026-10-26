@@ -696,13 +696,16 @@ fine-tunes on the result.
   on a faulty scenario, "none" on a clean control. The sources are an evaluation
   column (`--column`, accepted only if it was generated under the system prompt
   the demonstrations are built under, or under the profile `--generated-under`
-  names), a trainer's `wire.jsonl` (`--wire`, refused if a replayed reward
-  differs from the recorded one), the scripted evidence-window recipe
+  names), a trainer's `wire.jsonl` (`--wire`, refused unless the `train-log.json`
+  beside it records that system prompt, or if a replayed reward differs from the
+  recorded one), the scripted evidence-window recipe
   (`--recipe`, which reads only what the agent was shown), and `--quirk-demos N`
   copies of verified episodes on clean controls whose only waitcheck diagnostics
   are its known `s_load` write-after-write report. It keeps at most
   `--max-wire-per-scenario` distinct episodes per scenario, the highest-scoring
-  first with `--best-first`.
+  first with `--best-first`. Each input is replayed under the turn budget it
+  recorded, and an episode is named by its input's resolved path, its trainer
+  iteration and its index.
 - **`mix_demos.py`** mixes demonstration files for a continual cycle: `PATH:N`
   takes N whole episodes from a file, so an episode is kept or dropped with all
   of its turns. Every input must have been rendered under one system prompt.

@@ -63,7 +63,7 @@ def test_shards_cover_the_list_exactly_once():
         assert got == items
 
 
-def _scripted(scenario, replies, index):
+def _scripted(scenario, replies, index, budget=rj.MAX_TURNS):
     def advancing(prompts):
         out = [replies[min(advancing.turn, len(replies) - 1)]] * len(prompts)
         advancing.turn += 1
@@ -74,7 +74,7 @@ def _scripted(scenario, replies, index):
     def advantages(values):
         return [0.0] * len(values), sum(values) / len(values), 0.0
 
-    _g, _s, wire = rj.rollout_scenario(scenario, 1, rj.TurnBudget(), advancing, advantage_fn=advantages)
+    _g, _s, wire = rj.rollout_scenario(scenario, 1, rj.make_policy(budget), advancing, advantage_fn=advantages)
     return [dict(w, episode=index) for w in wire]
 
 
@@ -106,11 +106,29 @@ def clean_scenario(corpus_root):
     return random.Random(11).choice([s for s in scenarios if s.clean])
 
 
-def _column(tmp_path, scenario, rows, sha):
-    path = tmp_path / "shard-0" / "before.json"
+def _column(tmp_path, scenario, rows, sha, budget=rj.MAX_TURNS, name="shard-0"):
+    path = tmp_path / name / "before.json"
     path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"config": {"system_sha256": sha}, "groups": [], "wire": rows}))
+    config = {"system_sha256": sha}
+    if budget is not None:
+        config["max_episode_steps"] = budget
+    path.write_text(json.dumps({"config": config, "groups": [], "wire": rows}))
     return path
+
+
+def _wire(run, rows, sha, budget=rj.MAX_TURNS):
+    run.mkdir(parents=True)
+    (run / "wire.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    log = {"max_episode_steps": budget}
+    if sha is not None:
+        log["system_prompt_sha256"] = sha
+    (run / "train-log.json").write_text(json.dumps(log))
+    return run / "wire.jsonl"
+
+
+def _harvest(corpus_root, out, *flags):
+    return demos.main(["--corpus-root", str(corpus_root), "--split", "train", "--out", str(out),
+                       "--max-wire-per-scenario", "5", *map(str, flags)])
 
 
 def _sha(corpus_root, split="train"):
@@ -133,7 +151,7 @@ def test_a_column_is_harvested_only_under_its_own_system_prompt(tmp_path, corpus
     kept = [json.loads(line) for line in out.read_text().splitlines()]
     assert {k["scenario_id"] for k in kept} == {clean_scenario.scenario_id}
     assert [k["completion"] for k in kept] == TOOLS + NONE
-    assert kept[0]["source"] == "column:shard-0"
+    assert kept[0]["source"] == f"column:{good.resolve()}"
     stats = json.loads(out.with_suffix(".stats.json").read_text())
     assert stats["wire"] == {"episodes": 1, "solved": 1} and stats["wire_scenarios_kept"] == 1
 
@@ -215,3 +233,70 @@ def test_sft_refuses_an_empty_harvest_before_loading_a_model(tmp_path, corpus_ro
     rc = sft_rocjitsu.main(["--demos", str(path), "--corpus-root", str(corpus_root), "--out", str(tmp_path / "o")])
     assert rc == sft_rocjitsu.tr.EXIT_REFUSED and "holds no demonstration" in capsys.readouterr().err
     assert not (tmp_path / "o").exists()
+
+
+def test_two_cycles_of_the_documented_layout_mix(tmp_path, corpus_root, clean_scenario, monkeypatch):
+    """Every cycle harvests <cycle>/gen/before.json; the second cycle mixes with the first."""
+    import mix_demos
+
+    monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
+    rows = _scripted(clean_scenario, TOOLS + NONE, 0)
+    outs = []
+    for cycle in ("cycle1", "cycle2"):
+        col = _column(tmp_path / cycle, clean_scenario, rows, _sha(corpus_root), name="gen")
+        outs.append(tmp_path / cycle / "new.jsonl")
+        assert _harvest(corpus_root, outs[-1], "--column", col) == 0
+    assert mix_demos.main(["--out", str(tmp_path / "mix.jsonl"), str(outs[1]), str(outs[0])]) == 0
+    again = tmp_path / "again.jsonl"
+    assert _harvest(corpus_root, again, "--column", tmp_path / "cycle1" / "gen" / "before.json") == 0
+    assert mix_demos.main(["--out", str(tmp_path / "dup.jsonl"), str(outs[0]), str(again)]) == 3, \
+        "the same input harvested twice is still one episode"
+
+
+def test_two_iterations_of_one_wire_episode_stay_two_episodes(tmp_path, corpus_root, clean_scenario, monkeypatch):
+    import mix_demos
+
+    monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
+    rows = ([dict(r, iteration=1) for r in _scripted(clean_scenario, TOOLS + NONE, 0)]
+            + [dict(r, iteration=2) for r in _scripted(clean_scenario, TOOLS + SIM + NONE, 0)])
+    wire = _wire(tmp_path / "run", rows, _sha(corpus_root))
+    out = tmp_path / "d.jsonl"
+    assert _harvest(corpus_root, out, "--wire", wire) == 0
+    kept = [json.loads(line) for line in out.read_text().splitlines()]
+    assert sorted({k["iteration"] for k in kept}) == [1, 2]
+    assert {k["source"] for k in kept} == {f"wire:{wire.resolve()}"}
+    assert mix_demos.main(["--out", str(tmp_path / "m.jsonl"), str(out)]) == 0
+    mixed = [json.loads(line) for line in (tmp_path / "m.jsonl").read_text().splitlines()]
+    assert [r["completion"] for r in mixed] == TOOLS + NONE + TOOLS + SIM + NONE
+
+
+@pytest.mark.parametrize("sha, log, fragment", [
+    ("other", True, "generated under system prompt"),
+    (None, True, "generated under system prompt"),
+    ("right", False, "no train-log.json"),
+])
+def test_a_wire_log_is_harvested_only_under_its_own_system_prompt(tmp_path, corpus_root, clean_scenario,
+                                                                  monkeypatch, sha, log, fragment):
+    monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
+    rows = [dict(r, iteration=1) for r in _scripted(clean_scenario, TOOLS + NONE, 0)]
+    wire = _wire(tmp_path / "run", rows, _sha(corpus_root) if sha == "right" else ("0" * 64 if sha else None))
+    if not log:
+        (tmp_path / "run" / "train-log.json").unlink()
+    with pytest.raises(SystemExit, match=fragment):
+        _harvest(corpus_root, tmp_path / "d.jsonl", "--wire", wire)
+
+
+def test_an_input_is_replayed_under_the_turn_budget_it_recorded(tmp_path, corpus_root, clean_scenario, monkeypatch):
+    monkeypatch.delenv(rj.PROMPT_ENV, raising=False)
+    rows = _scripted(clean_scenario, TOOLS + NONE, 0, budget=4)
+    col = _column(tmp_path, clean_scenario, rows, _sha(corpus_root), budget=4)
+    out = tmp_path / "d.jsonl"
+    assert _harvest(corpus_root, out, "--column", col) == 0
+    prompts = [json.loads(line)["prompt"] for line in out.read_text().splitlines()]
+    assert prompts and all("of 4." in p and "of 8." not in p for p in prompts)
+    wire = _wire(tmp_path / "run", [dict(r, iteration=1) for r in rows], _sha(corpus_root), budget=4)
+    assert _harvest(corpus_root, tmp_path / "w.jsonl", "--wire", wire) == 0
+    assert [json.loads(line)["prompt"] for line in (tmp_path / "w.jsonl").read_text().splitlines()] == prompts
+    unrecorded = _column(tmp_path / "u", clean_scenario, rows, _sha(corpus_root), budget=None)
+    with pytest.raises(SystemExit, match="no usable max_episode_steps"):
+        _harvest(corpus_root, tmp_path / "u.jsonl", "--column", unrecorded)

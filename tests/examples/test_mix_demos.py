@@ -63,3 +63,12 @@ def test_a_file_without_stats_or_an_episode_twice_is_refused(tmp_path):
     assert mix_demos.main(["--out", str(tmp_path / "m.jsonl"), str(bare)]) == 3
     assert mix_demos.main(["--out", str(tmp_path / "m.jsonl"), str(a), str(a)]) == 3
     assert mix_demos.main(["--out", str(tmp_path / "m.jsonl"), f"{a}:-1"]) == 3
+
+
+def test_an_episode_is_named_by_its_iteration_too(tmp_path):
+    a = write_demos(tmp_path / "a.jsonl", "wire:/run/wire.jsonl", 1, 2)
+    rows_a = rows(a)
+    both = [dict(r, iteration=i) for i in (1, 2) for r in rows_a]
+    a.write_text("".join(json.dumps(r) + "\n" for r in both))
+    assert mix_demos.main(["--out", str(tmp_path / "m.jsonl"), str(a)]) == 0
+    assert json.loads((tmp_path / "m.stats.json").read_text())["episodes"] == 2
