@@ -2619,7 +2619,7 @@ def test_history_root_ignores_malformed_run_dirs(tmp_path):
 
 
 def _publish_step() -> str:
-    """The nightly's publish step, so tests can exercise its shell directly."""
+    """The nightly workflow, so tests can exercise its render and push shell directly."""
     return (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
         encoding="utf-8"
     )
@@ -2887,29 +2887,44 @@ def test_workflow_commit_message_names_the_area_and_the_publish(tmp_path):
     # branch, and a subject named only by run_dir_id would give a re-run the same
     # title as the attempt it replaces (the name is reused). Naming both makes
     # every publish distinct and self-consistent with the directory it wrote.
-    # Run the step's own tail -- that also proves both variables are in scope
-    # inside the subshell and the message survives as one -m argument.
-    block = _dedent_block(_publish_step(), "# Mirror the rendered dashboard", "fi )")
+    # The two names are minted by the render job and reach the push job as its
+    # outputs, so run the push step's own tail from where it reads them -- that
+    # also proves both are in scope inside the subshell and the message survives
+    # as one -m argument.
+    block = _dedent_block(
+        _publish_step(), "# Commit only the tree this run rendered", "fi )"
+    )
+    run_dir_id = "2026-08-23T094112-32638584704"
+    started_iso = "2026-08-24T03:15:00+00:00"
 
     remote = tmp_path / "remote.git"
     work = tmp_path / "checkout"
-    (work / "dashboard").mkdir(parents=True)
-    (work / "dashboard" / "summary.md").write_text("# summary\n", encoding="utf-8")
+    # The clone holds the previous publish: a run the render has since pruned,
+    # and a file it no longer writes. Neither may survive the push.
+    (work / "dashboard" / "runs" / "2026-07-01T000000-1").mkdir(parents=True)
+    (work / "dashboard" / "runs" / "2026-07-01T000000-1" / "meta.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (work / "dashboard" / "stale.json").write_text("{}\n", encoding="utf-8")
+    (work / "dashboard" / "index.html").write_text("old\n", encoding="utf-8")
     # symbolic-ref / checkout -b rather than `git init -b`, which needs git 2.28.
     _run_shell(
         f'git init -q --bare "{remote}"'
         f' && git -C "{remote}" symbolic-ref HEAD refs/heads/sanitizer-results'
         f' && git init -q "{work}" && git -C "{work}" checkout -q -b sanitizer-results'
-        f' && git -C "{work}" remote add origin "{remote}"',
+        f' && git -C "{work}" remote add origin "{remote}"'
+        f' && git -C "{work}" add -A'
+        f' && git -C "{work}" -c user.name=t -c user.email=t@t commit -q -m previous',
         tmp_path,
         {},
     )
-    env = {
-        "tmp": str(work),
-        "run_dir_id": "2026-08-23T094112-32638584704",
-        "started_iso": "2026-08-24T03:15:00+00:00",
-        "GITHUB_STEP_SUMMARY": str(tmp_path / "step_summary.md"),
-    }
+    # The downloaded artifact, in the workspace where download-artifact puts it.
+    rendered = tmp_path / "dashboard"
+    (rendered / "runs" / run_dir_id).mkdir(parents=True)
+    (rendered / "runs" / run_dir_id / "meta.json").write_text("{}\n", encoding="utf-8")
+    (rendered / "index.html").write_text("new\n", encoding="utf-8")
+    (rendered / "summary.md").write_text("# summary\n", encoding="utf-8")
+    env = {"tmp": str(work), "RUN_DIR_ID": run_dir_id, "STARTED_ISO": started_iso}
     _run_shell(block, tmp_path, env)
 
     # The subject the reader of `git log` on sanitizer-results sees, and it is on
@@ -2922,7 +2937,124 @@ def test_workflow_commit_message_names_the_area_and_the_publish(tmp_path):
     )
     # A re-run reuses run_dir_id, so only the publish instant moves it -- that is
     # what keeps the two commits distinguishable.
-    assert env["run_dir_id"] in subject and env["started_iso"] in subject
+    assert run_dir_id in subject and started_iso in subject
+    # The pushed tree IS the artifact: the pruned run and the dropped file are
+    # deleted, not left behind by a copy-over.
+    pushed = _run_shell(
+        f'git -C "{remote}" ls-tree -r --name-only sanitizer-results', tmp_path, {}
+    ).splitlines()
+    assert sorted(pushed) == [
+        "dashboard/index.html",
+        f"dashboard/runs/{run_dir_id}/meta.json",
+        "dashboard/summary.md",
+    ]
+
+
+def test_workflow_push_refuses_an_artifact_that_is_not_this_render(tmp_path):
+    # The push job commits whatever the downloaded tree contains, so it checks the
+    # area its commit subject names is actually in it before touching the clone.
+    block = _dedent_block(
+        _publish_step(), "# Commit only the tree this run rendered", "fi )"
+    )
+    (tmp_path / "dashboard" / "runs" / "2026-08-23T094112-1").mkdir(parents=True)
+    (tmp_path / "dashboard" / "index.html").write_text("x\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", block],
+        cwd=tmp_path,
+        env={**os.environ, "tmp": str(tmp_path / "clone"),
+             "RUN_DIR_ID": "2026-08-23T094112-1", "STARTED_ISO": "x"},
+        capture_output=True, text=True,
+    )
+    assert proc.returncode != 0
+    assert "runs/2026-08-23T094112-1/meta.json" in proc.stdout
+    assert not (tmp_path / "clone").exists()
+
+
+def test_workflow_push_refuses_a_data_branch_that_moved_since_render(tmp_path):
+    # render ships a whole tree, not a delta, so pushing it over a commit it was
+    # not rendered from would silently revert that commit.
+    block = _dedent_block(_publish_step(), 'if [ "$head_sha" != "${BASE_SHA}" ]', "fi")
+
+    def run(head: str, base: str) -> int:
+        return subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", block],
+            cwd=tmp_path, env={**os.environ, "head_sha": head, "BASE_SHA": base},
+            capture_output=True, text=True,
+        ).returncode
+
+    assert run("a" * 40, "a" * 40) == 0
+    assert run("", "") == 0             # absent at render, still absent: the orphan
+    assert run("b" * 40, "a" * 40) != 0  # someone pushed in between
+    assert run("a" * 40, "") != 0       # created in between
+    assert run("", "a" * 40) != 0       # deleted in between
+
+
+def _nightly_workflow() -> dict:
+    import yaml
+
+    return yaml.safe_load(_publish_step())
+
+
+def _nightly_jobs() -> dict:
+    return _nightly_workflow()["jobs"]
+
+
+def test_only_the_main_only_push_job_can_write():
+    # Splitting publish exists so a workflow_dispatch on a PR branch can render the
+    # page without ever holding a token that could push it. That holds only while
+    # the one writer is main-gated and nothing else asks for write -- including
+    # the workflow-level default every other job inherits.
+    assert _nightly_workflow().get("permissions") == {"contents": "read"}
+    jobs = _nightly_jobs()
+    writers = sorted(
+        name for name, job in jobs.items()
+        if "write" in (job.get("permissions") or {}).values()
+    )
+    assert writers == ["push"]
+    push = jobs["push"]
+    assert push.get("permissions") == {"contents": "write"}
+    assert "github.ref == 'refs/heads/main'" in push.get("if", "")
+    assert "needs.render.result == 'success'" in push.get("if", "")
+    assert push.get("needs") == "render"
+    # It moves a rendered tree and runs no repo code.
+    assert not any("checkout" in s.get("uses", "") for s in push["steps"])
+
+
+def test_render_runs_on_any_ref_and_hands_push_its_own_artifact():
+    jobs = _nightly_jobs()
+    render, push = jobs["render"], jobs["push"]
+    # No main guard: rendering on a branch is the preview.
+    assert "refs/heads/main" not in str(render.get("if", ""))
+    assert "needs.sanitizers-gpu.result != 'skipped'" in render.get("if", "")
+    assert render.get("permissions") == {"contents": "read"}
+    # The artifact render uploads is the one push downloads, by exact name.
+    uploads = [
+        s["with"] for s in render["steps"]
+        if "upload-artifact" in s.get("uses", "") and s.get("with", {}).get("path") == "dashboard"
+    ]
+    downloads = [s["with"] for s in push["steps"] if "download-artifact" in s.get("uses", "")]
+    assert len(uploads) == 1 and len(downloads) == 1
+    assert uploads[0].get("name") == downloads[0].get("name") == (
+        "sanitizer-dashboard-${{ github.run_id }}"
+    )
+    assert downloads[0].get("path") == "dashboard"
+    # A dotfile dropped by the zip would be deleted from the branch by push.
+    assert uploads[0].get("include-hidden-files") is True
+    # The names the commit subject needs, and the base the tree was rendered
+    # from, travel step output -> job output -> push env.
+    step = next(s for s in render["steps"] if s.get("id") == "render")
+    env = next(s for s in push["steps"] if "RUN_DIR_ID" in s.get("env", {}))["env"]
+    for out, var in (("run_dir_id", "RUN_DIR_ID"), ("started_iso", "STARTED_ISO"),
+                     ("base_sha", "BASE_SHA")):
+        assert f'echo "{out}=${{{out}}}"' in step["run"]
+        assert render["outputs"][out] == f"${{{{ steps.render.outputs.{out} }}}}"
+        assert env[var] == f"${{{{ needs.render.outputs.{out} }}}}"
+    # Screenshots are a branch-only extra and may never fail the job.
+    shots = [s for s in render["steps"] if "screenshot" in s.get("name", "").lower()]
+    assert shots
+    for s in shots:
+        assert s.get("if") == "github.ref != 'refs/heads/main'"
+        assert s.get("continue-on-error") is True
 
 
 def test_format_instant_renders_a_time_and_never_invents_one():
@@ -6455,7 +6587,7 @@ def test_older_run_areas_keep_their_own_provenance_not_the_current_job(tmp_path,
 
 
 def test_pruning_published_survey_areas_unpublishes_the_survey(tmp_path, monkeypatch):
-    # The nightly publish step deletes runs/*/survey before rendering and passes no
+    # The nightly render step deletes runs/*/survey before rendering and passes no
     # survey input. Nothing it then publishes may still carry survey data: not the
     # dashboard page, a run landing page, summary.md, data.json, or any file left
     # under the output tree.
