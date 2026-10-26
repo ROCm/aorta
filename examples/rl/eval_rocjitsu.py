@@ -167,20 +167,32 @@ def remaining(done: dict[str, Any], scenarios: list[rj.Scenario]) -> list[rj.Sce
     return todo
 
 
+def execution_setup() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply ``$AORTA_PREFERRED_BLAS`` and return the BLAS setup and package versions to record.
+
+    ``apply()`` returns None when the variable is unset, so the record is
+    ``eval_episodes.blas_backend()`` taken afterwards: torch's version, the library
+    torch reports, and every ``*BLAS*`` environment variable.
+    """
+    import blas_backend
+    import eval_episodes
+
+    blas_backend.apply()
+    return eval_episodes.blas_backend(), eval_episodes.runtime_versions()
+
+
 def run_column(checkpoint: Path | None, args: argparse.Namespace, scenarios: list[rj.Scenario],
                path: Path, system: str | None = None) -> dict[str, Any]:
-    import blas_backend
-
-    backend = blas_backend.apply()
+    backend, runtime = execution_setup()
     import torch
     import train_grpo_step
-    from eval_episodes import checkpoint_identity, episode_seed, runtime_versions
+    from eval_episodes import checkpoint_identity, episode_seed
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     source = str(checkpoint) if checkpoint else args.model
     system = system if system is not None else rj.system_for(scenarios)
     system_sha256 = hashlib.sha256(system.encode()).hexdigest()
-    config = column_config(args, source, scenarios, system_sha256, backend, runtime_versions(),
+    config = column_config(args, source, scenarios, system_sha256, backend, runtime,
                            checkpoint=checkpoint_identity(checkpoint, args),
                            generation=generation_settings(source))
     done: dict[str, Any] = {"groups": [], "wire": []}
@@ -342,6 +354,8 @@ def check_selection(cols: dict[str, dict[str, Any]], scenarios: list[rj.Scenario
 
 def report(out: Path, scenarios: list[rj.Scenario], system: str | None = None) -> dict[str, Any]:
     cols = {c: json.loads((out / f"{c}.json").read_text()) for c in COLUMNS if (out / f"{c}.json").exists()}
+    for name, col in cols.items():
+        check_complete(col, name)
     check_selection(cols, scenarios, rj.system_for(scenarios) if system is None else system)
     base = baselines_for(scenarios) if scenarios else {"constant_best_answer": None, "policies": {}}
     result: dict[str, Any] = {"baselines": base, "columns": {c: v["metrics"] for c, v in cols.items()},
