@@ -1333,6 +1333,36 @@ def test_a_repeated_site_does_not_stand_in_for_a_missing_one() -> None:
     assert "access site count mismatch" in str(consan.reason)
 
 
+def test_a_repeated_barrier_site_is_counted_not_deduplicated() -> None:
+    # Only access sites are dual-address. A repeated barrier line is not one
+    # instruction printed twice, so it is counted and fails the reconciliation.
+    output = _current_healthy_coverage().replace(
+        _zero_counts("barrier"),
+        _zero_counts("barrier")
+        .replace("barrier_discovered=0", "barrier_discovered=1")
+        .replace("barrier_supported=0", "barrier_supported=1")
+        .replace("barrier_selected=0", "barrier_selected=1")
+        .replace("barrier_patched=0", "barrier_patched=1"),
+    ).replace("barrier=0/0", "barrier=1/1")
+    barrier = (
+        f"{_PREFIX} coverage_site reader=1 load=1 kind=barrier "
+        "disposition=supported reason=none outcome=patched "
+        "lowering_reason=none resource_reason=none container=k scope=kernel "
+        "text=0x20 mnemonic=s_barrier"
+    )
+
+    _waitcheck, once = evaluate_consan_output(
+        ProcessResult(("app",), 0, f"{_current_report()}\n{output}\n{barrier}", "")
+    )
+    _waitcheck, twice = evaluate_consan_output(
+        ProcessResult(("app",), 0, f"{_current_report()}\n{output}\n{barrier}\n{barrier}", "")
+    )
+
+    assert once.verdict is Verdict.PASS
+    assert twice.verdict is Verdict.ERROR
+    assert "barrier site count mismatch" in str(twice.reason)
+
+
 def test_sites_differing_only_in_text_offset_are_both_counted() -> None:
     output = _current_healthy_coverage().replace(
         "access_discovered=2 access_supported=2 access_selected=2 access_patched=2",
@@ -1410,13 +1440,92 @@ def test_lenient_run_with_no_site_anywhere_is_not_checked() -> None:
 
 
 def test_lenient_run_with_one_applicable_object_is_still_incomplete() -> None:
-    output = _attention_evidence()
+    # The applicable object needs its own reader/load: sharing the no-site
+    # fixture's identity would fail as a duplicate before the guard is reached.
+    output = _attention_evidence().replace("reader=1 load=1", "reader=3 load=3")
 
     _waitcheck, consan = evaluate_record_replay(
         ProcessResult(("app",), 0, f"{_no_site_evidence()}\n{output}", "")
     )
 
     assert consan.state is ExecutionState.ERROR
+    assert str(consan.reason).startswith("consan_coverage_incomplete:")
+    assert "access patched/supported mismatch: 0/3" in str(consan.reason)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "rejection"),
+    [
+        ("dynamic_incomplete=0", "dynamic_incomplete=1", "dynamic_incomplete=1"),
+        ("reader=1 mode=default analysis_complete=true expert_limit=false",
+         "reader=1 mode=default analysis_complete=true expert_limit=true",
+         "expert patch limit enabled"),
+    ],
+)
+def test_a_no_site_run_with_another_coverage_failure_stays_an_error(
+    old: str, new: str, rejection: str
+) -> None:
+    # Nothing applicable is not the only thing the gate objected to here, so the
+    # run must not be relabelled as non-applicability.
+    output = _no_site_evidence()
+    assert output.count(old) == 1
+    output = output.replace(old, new)
+
+    for code, strict in ((86, True), (0, False)):
+        if not strict:
+            output = "\n".join(output.splitlines()[:-1])
+        _waitcheck, consan = evaluate_consan_output(
+            ProcessResult(("app",), code, output, ""),
+            strict=strict,
+            expected_mode=ConSanMode.DEFAULT,
+        )
+        assert consan.state is ExecutionState.ERROR, (code, consan.reason)
+        assert rejection in str(consan.reason) or consan.reason == "combined_hook_exit_86"
+
+
+def test_a_no_site_run_that_reports_a_conflict_is_not_downgraded() -> None:
+    # A reported race is evidence ConSan observed something, sites or not.
+    output = f"{_no_site_evidence()}\n{_current_conflict(reader=1)}"
+
+    _waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 86, output, ""),
+        strict=True,
+        expected_mode=ConSanMode.DEFAULT,
+    )
+
+    assert consan.state is not ExecutionState.NOT_CHECKED
+    assert consan.verdict is not Verdict.NOT_CHECKED
+
+
+def test_an_applicable_verdict_over_non_applicable_objects_is_not_downgraded() -> None:
+    output = _no_site_evidence().replace(
+        "analysis verdict applicable=false", "analysis verdict applicable=true"
+    )
+
+    _waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 86, output, ""),
+        strict=True,
+        expected_mode=ConSanMode.DEFAULT,
+    )
+
+    assert consan.state is ExecutionState.ERROR
+
+
+@pytest.mark.parametrize("strict", (True, False))
+def test_exit_86_without_the_require_records_line_stays_an_error(strict: bool) -> None:
+    # Only the hook's strict require-records exit is "nothing to check"; an
+    # application that exits 86 for its own reasons is a failed run.
+    output = "\n".join(_no_site_evidence().splitlines()[:-1])
+
+    waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 86, output, ""),
+        strict=strict,
+        expected_mode=ConSanMode.DEFAULT,
+    )
+
+    assert consan.state is ExecutionState.ERROR
+    assert consan.reason == "combined_hook_exit_86"
+    assert waitcheck.state is ExecutionState.ERROR
 
 
 def test_strict_exit_after_instrumenting_sites_stays_an_error() -> None:

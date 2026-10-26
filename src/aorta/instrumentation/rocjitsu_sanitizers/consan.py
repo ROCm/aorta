@@ -726,26 +726,42 @@ def _launch_diagnostic(process: ProcessResult) -> str:
 
 
 _STRICT_REQUIRE_RECORDS_EXIT = 86
+# The hook's own line for a strict require-records exit. Exit 86 without it is
+# not that exit, so it is never read as "nothing to check".
+_REQUIRE_RECORDS_DIAGNOSTIC = "RJ_CONSAN_REQUIRE_RECORDS requested"
 _NO_SITES_REASON = (
     "consan_not_applicable: no LDS access, barrier, atomic or fence sites in any "
     "loaded code object"
 )
+# The coverage rejections that "nothing was applicable" implies on its own. Any
+# other reason -- a non-zero failure counter, the expert patch limit, unitemized
+# sites -- is a coverage failure and must not be relabelled as non-applicability.
+_NO_SITES_REJECTIONS = frozenset(
+    {
+        "verdict applicable=false",
+        "verdict analysis_complete=false",
+        "verdict static_complete=false",
+        "verdict dynamic_complete=false",
+        "no applicable code objects",
+    }
+)
 
 
 def _has_no_sites(parsed: ParsedCombinedOutput) -> bool:
-    """True when no loaded object discovered a site of any kind.
+    """True when no loaded object discovered a site and nothing else was rejected.
 
     Only then is a rejected coverage decision "nothing to check" rather than an
     instrumentation failure: a single discovered site, applicable verdict or
-    race finding means ConSan had something to observe.
+    race finding means ConSan had something to observe, and a rejection reason
+    outside :data:`_NO_SITES_REJECTIONS` is a failure in its own right.
     """
 
     decision = parsed.coverage_decision
-    return not (
-        parsed.consan_findings
-        or decision.verdict.applicable
-        or any(record.applicable for record in decision.coverage)
-    )
+    if parsed.consan_findings or decision.verdict.applicable:
+        return False
+    if any(record.applicable for record in decision.coverage):
+        return False
+    return set(decision.reasons) <= _NO_SITES_REJECTIONS
 
 
 def _not_applicable(process: ProcessResult, parsed: ParsedCombinedOutput) -> CheckResult:
@@ -785,10 +801,12 @@ def _no_instrumentable_sites(
     Strict ``require_records`` exits 86 both when instrumented sites recorded
     nothing (an instrumentation failure) and when no loaded object has a single
     site to instrument. Only the second is returned here, and only when the
-    whole stream parses and :func:`_has_no_sites` holds; anything else returns
-    None and stays an error.
+    hook's require-records line is present, the whole stream parses and
+    :func:`_has_no_sites` holds; anything else returns None and stays an error.
     """
 
+    if _REQUIRE_RECORDS_DIAGNOSTIC not in f"{process.stdout}\n{process.stderr}":
+        return None
     try:
         parsed = parse_consan_output(
             f"{process.stdout}\n{process.stderr}", expected_mode=expected_mode

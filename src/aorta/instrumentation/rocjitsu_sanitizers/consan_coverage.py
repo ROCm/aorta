@@ -355,18 +355,21 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
         if payload.startswith("coverage "):
             coverage.append(_parse_coverage(payload[len("coverage ") :], line_number))
         elif payload.startswith("coverage_site "):
-            # RocJITsu itemizes a dual-address DS instruction (ds_read2*,
-            # ds_write2*) once per address but counts it once in *_discovered.
-            # Every field, text offset included, is identical between the
-            # copies, so a repeat names no new site.
-            if payload.strip() in site_payloads:
-                continue
-            site_payloads.add(payload.strip())
             context = f"coverage_site line {line_number}"
             fields = _fields(payload[len("coverage_site ") :], context)
             _require(fields, _SITE_FIELDS, context)
             if fields["kind"] not in _SITE_KINDS:
                 raise CoverageParseError(f"{context}: unsupported kind")
+            # RocJITsu itemizes a dual-address DS instruction (ds_read2*,
+            # ds_write2*) once per address but counts it once in
+            # access_discovered. Every field, text offset included, is identical
+            # between the copies, so a repeat names no new site. Only access
+            # sites are dual-address: a repeated barrier, atomic or fence line
+            # is counted, and then fails the site-count reconciliation below.
+            if fields["kind"] == "access":
+                if payload.strip() in site_payloads:
+                    continue
+                site_payloads.add(payload.strip())
             site_records.append(
                 _SiteRecord(
                     reader=_count(fields, "reader", context),
