@@ -448,6 +448,13 @@ def test_an_out_dir_holding_another_runs_artifact_is_refused(tmp_path, artifact)
     assert artifact in trainer.check_output_dir(tmp_path)
 
 
+@pytest.mark.parametrize("artifact", ["snapshot-it003", "snapshot-it003.partial", "snapshot-it003.previous"])
+def test_an_out_dir_holding_another_runs_snapshot_is_refused(tmp_path, artifact):
+    # publish_snapshot would otherwise replace it when this run reaches the same iteration.
+    (tmp_path / artifact).mkdir()
+    assert artifact in trainer.check_output_dir(tmp_path)
+
+
 def test_a_left_over_partial_train_log_is_another_runs_artifact(tmp_path):
     (tmp_path / "train-log.json.partial").write_text("{")
     assert "train-log.json.partial" in trainer.check_output_dir(tmp_path)
