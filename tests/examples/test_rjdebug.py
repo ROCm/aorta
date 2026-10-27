@@ -402,3 +402,26 @@ def test_a_redirect_never_carries_the_api_key_to_another_server(archive):
             _, [result] = rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
     assert not any(h and "SECRET-KEY" in h for h in seen), "the API key reached the redirect target"
     assert result.error is not None and "redirect" in result.error.lower()
+
+
+def test_env_code_wins_over_the_running_checkout_even_when_already_on_sys_path(tmp_path, monkeypatch):
+    snapshot = tmp_path / "snapshot"
+    rl = snapshot / "examples" / "rl"
+    rl.mkdir(parents=True)
+    (rl / "rocjitsu_env.py").write_text('WHERE = "snapshot"\n')
+    # The running checkout's examples/rl leads sys.path (as a script's own directory does) and the
+    # snapshot's is already present behind it (as PYTHONPATH would put it).
+    monkeypatch.setattr(sys, "path", [str(ROOT / "examples" / "rl"), str(snapshot / "src"), str(rl), *sys.path])
+    monkeypatch.delitem(sys.modules, "rocjitsu_env")
+    monkeypatch.setattr(rjdebug, "_rj", None)
+    env = rjdebug.load_env(snapshot)
+    assert getattr(env, "WHERE", None) == "snapshot", f"imported {env.__file__}"
+
+
+def test_env_code_refuses_a_rocjitsu_env_already_imported_from_elsewhere(tmp_path, monkeypatch):
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "examples" / "rl").mkdir(parents=True)
+    (snapshot / "examples" / "rl" / "rocjitsu_env.py").write_text('WHERE = "snapshot"\n')
+    monkeypatch.setattr(rjdebug, "_rj", None)
+    with pytest.raises(SystemExit, match="not from"):
+        rjdebug.load_env(snapshot)

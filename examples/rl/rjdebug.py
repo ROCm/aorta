@@ -96,10 +96,13 @@ def load_env(code: str | os.PathLike[str] | None = None) -> Any:
     if not (rl / "rocjitsu_env.py").is_file():
         raise SystemExit(f"no rocjitsu_env.py under {rl}; pass --env-code or set {ENV_CODE_VAR}")
     for p in (str(root / "src"), str(rl)):
-        if p not in sys.path:
-            sys.path.insert(0, p)
+        while p in sys.path:
+            sys.path.remove(p)
+        sys.path.insert(0, p)
     import rocjitsu_env  # noqa: PLC0415
 
+    if Path(rocjitsu_env.__file__).resolve().parent != rl.resolve():
+        raise SystemExit(f"rocjitsu_env was imported from {rocjitsu_env.__file__}, not from {rl}")
     _rj = rocjitsu_env
     return _rj
 
