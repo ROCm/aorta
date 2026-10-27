@@ -34,6 +34,7 @@ The multi-step episode path, its predictions and one paired evaluation:
 | [`rocjitsu_demos.py`](rocjitsu_demos.py) | Solved episodes harvested as demonstrations, each replayed and re-scored first | a recorded corpus |
 | [`mix_demos.py`](mix_demos.py) | Whole-episode replay mixing of demonstration files for a continual cycle | nothing |
 | [`sft_rocjitsu.py`](sft_rocjitsu.py) | Supervised fine-tuning on demonstrations with the GRPO trainer's model, numerics and loss | one GPU, `transformers` |
+| [`rjdebug.py`](rjdebug.py) | rocjitsu episodes played by any OpenAI-compatible server, scored by the environment itself, with an offline replay check | a recorded corpus and a server |
 
 ## `probe_weight_transfer.py`
 
@@ -732,3 +733,52 @@ The harvest tests run on a small synthetic corpus, and again on the recorded
 corpus-v2 archive where `$AORTA_RJ_TEST_CORPUS_V2` names one; the tests of the
 recipe and the quirk demonstrations need that archive. Fine-tuning itself needs
 a GPU and `transformers`.
+
+## `rjdebug.py`
+
+`rjdebug.py` plays rocjitsu episodes with whatever model an OpenAI-compatible
+endpoint serves (llama.cpp `llama-server`, vLLM, Ollama, TokenSpeed/SGLang, LM
+Studio) and scores them with `rocjitsu_env.py`, so a score means what it means in
+training and evaluation. Tool outputs are replayed from the recorded archive, so
+nothing executes a kernel. It needs only the standard library and the
+environment's own imports (PyYAML).
+
+```bash
+python examples/rl/rjdebug.py --endpoint http://127.0.0.1:8080/v1 --model <name> \
+    --archive <corpus>/archive --split test --episodes 2 --concurrency 8 --transcript --out <dir>
+```
+
+- **The prompt** is the harness's: each turn is `[system, user]`, the user
+  message re-rendering the whole episode, under Qwen3's template with
+  `enable_thinking=False`. `--mode chat` (the default) has the server apply the
+  template through `chat_template_kwargs`; `--mode completions` renders it here
+  and sends raw text, for servers that ignore those kwargs.
+- **Sampling** defaults to the evaluation protocol: temperature 0.7, top-p 0.95,
+  top-k 20, 192 tokens, 8 turns, one request per reply, seeded per (seed,
+  scenario, episode, turn). A server's seed reproduces that server's draw, not
+  torch's, so a run pairs with an evaluation column by scenario, and with another
+  run on the same server by episode.
+- **Server differences it compensates for.** For llama.cpp (detected through
+  `GET /props`) it pins the sampler chain to the order `transformers` uses (top-k,
+  temperature, top-p) and turns off min-p, repetition penalties, DRY, XTC and
+  top-n-sigma, and it removes llama-server's echo of the template's empty think
+  block from the reply. For Ollama (`GET /api/version`) it turns thinking off with
+  `reasoning_effort: "none"`. `--no-extra-params` sends only OpenAI-spec fields.
+- **Output:** `column.json` in the evaluation's column format, so two runs on
+  one server pair with `eval_rocjitsu.py --compare` (which refuses a run beside an
+  HF column: their seeding differs); `summary.txt` and `summary.json` (mean score
+  with a bootstrap interval, solved and exact rates, missed bugs, false alarms,
+  malformed replies, turns, tool cost, tokens); and per-episode transcripts with
+  `--transcript`. A failed request is reported and never scored as the model's
+  reply, makes the exit status 1, and marks the column incomplete: it carries no
+  metrics and does not pair.
+- **`--replay COLUMN.json`** feeds an evaluation column's recorded replies through
+  the same loop instead of an endpoint, and fails unless every episode reproduces
+  its recorded outcome and score.
+
+It is also a library: `rjdebug.run(scenarios, client, ...)` plays episodes
+through an `rjdebug.Client`, and `play_episode` and `render_prompt` expose one
+episode and the exact prompt text. The environment is imported from this
+checkout unless `--env-code` or `$RJDEBUG_ENV_CODE` names another one. The tests
+serve scripted replies from a standard-library HTTP server on a toy corpus, so
+they need no model.
