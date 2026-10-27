@@ -698,8 +698,8 @@ jobs:
     # waitcheck sweeps and 25 ConSan cases took 77 s. The ceiling is for a night
     # where kernels hang: model_survey.py starts a launch (300 s timeout) or a
     # ConSan case (900 s) only while it can still finish inside one 3600 s budget
-    # shared by both models, so with setup and the two waitcheck sweeps the job
-    # ends inside 90 minutes.
+    # shared by both models, and stops each waitcheck sweep inside it too, so
+    # with setup the job ends inside 90 minutes.
     timeout-minutes: 90
     steps:
       - name: Reclaim workspace ownership
@@ -813,6 +813,14 @@ jobs:
             sudo chown -R "$uidgid" "$ws" || true
           fi
 
+      - name: Mark this attempt's model-kernel results
+        # Same empty-upload hole as the gate job's marker step: v4 will not
+        # delete sanitizer-models-<run_id> unless this attempt uploads a file.
+        if: always()
+        run: |
+          mkdir -p .sanitizer-nightly/out
+          echo "$GITHUB_RUN_ATTEMPT" > .sanitizer-nightly/out/attempt.txt
+
       - name: Upload model-kernel survey results
         # Its own artifact, matched by the publish job download pattern below, so
         # the model rows land in incoming/informational/ beside the GEMM rows.
@@ -822,6 +830,7 @@ jobs:
           name: sanitizer-models-${{ github.run_id }}
           path: .sanitizer-nightly/out
           if-no-files-found: warn
+          overwrite: true   # same re-run collision as the gate artifact
 
       - name: Clean up build/temp state
         if: always()

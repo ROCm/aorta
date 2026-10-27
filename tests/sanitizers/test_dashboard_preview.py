@@ -216,7 +216,9 @@ def test_an_empty_rerun_replaces_the_results_artifact():
             assert not name.startswith("."), f"{job}: {name} is hidden and v4 would drop it"
             assert "mkdir -p .sanitizer-nightly/out" in run
             marked.append((job, name))
-    assert [job for job, _name in marked] == ["sanitizers-gpu", "sanitizers-survey"]
+    assert [job for job, _name in marked] == [
+        "sanitizers-gpu", "sanitizers-survey", "sanitizers-model-survey",
+    ]
     render = next(
         step for step in doc["jobs"]["render"]["steps"] if step.get("id") == "render"
     )["run"]
