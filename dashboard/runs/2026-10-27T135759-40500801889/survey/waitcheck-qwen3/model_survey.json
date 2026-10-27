@@ -1,0 +1,79 @@
+{
+  "model": "qwen3",
+  "inventory": "qwen3.yaml",
+  "pairs": [
+    {
+      "spec": "qwen3.json",
+      "kernel": "_fwd_kernel",
+      "scenario": "C0",
+      "ok": true,
+      "reason": null,
+      "symbol": "_fwd_kernel",
+      "code_object_sha256": "336ef011aa1ac84be3ecafe614eb3cbe9a3022995b0c31da6113dbec7d38473b",
+      "seconds": 3.6
+    },
+    {
+      "spec": "qwen3.json",
+      "kernel": "_fwd_kernel",
+      "scenario": "C1",
+      "ok": true,
+      "reason": null,
+      "symbol": "_fwd_kernel",
+      "code_object_sha256": "336ef011aa1ac84be3ecafe614eb3cbe9a3022995b0c31da6113dbec7d38473b",
+      "seconds": 3.8
+    },
+    {
+      "spec": "qwen3.json",
+      "kernel": "_topk_topp_kernel",
+      "scenario": "C0",
+      "ok": true,
+      "reason": null,
+      "symbol": "_topk_topp_kernel",
+      "code_object_sha256": "0673f020203c471d1b6a7ff515b50e68a9d318866950031fb626fe4117ad1f3f",
+      "seconds": 5.4
+    },
+    {
+      "spec": "qwen3.json",
+      "kernel": "_compute_slot_mapping_kernel",
+      "scenario": "C0",
+      "ok": true,
+      "reason": null,
+      "symbol": "_compute_slot_mapping_kernel",
+      "code_object_sha256": "2b4432007a46d24edce3acd1ca7433b84f5c18ee415377ca5957e5527bdee427",
+      "seconds": 2.3
+    },
+    {
+      "spec": "qwen3.json",
+      "kernel": "_compute_slot_mapping_kernel",
+      "scenario": "C1",
+      "ok": true,
+      "reason": null,
+      "symbol": "_compute_slot_mapping_kernel",
+      "code_object_sha256": "2b4432007a46d24edce3acd1ca7433b84f5c18ee415377ca5957e5527bdee427",
+      "seconds": 2.4
+    },
+    {
+      "spec": "qwen3.json",
+      "kernel": "_compute_slot_mapping_kernel",
+      "scenario": "C2",
+      "ok": true,
+      "reason": null,
+      "symbol": "_compute_slot_mapping_kernel",
+      "code_object_sha256": "2b4432007a46d24edce3acd1ca7433b84f5c18ee415377ca5957e5527bdee427",
+      "seconds": 2.2
+    },
+    {
+      "spec": "qwen3.json",
+      "kernel": "_compute_slot_mapping_kernel",
+      "scenario": "C3",
+      "ok": true,
+      "reason": null,
+      "symbol": "_compute_slot_mapping_kernel",
+      "code_object_sha256": "2b4432007a46d24edce3acd1ca7433b84f5c18ee415377ca5957e5527bdee427",
+      "seconds": 2.3
+    }
+  ],
+  "sweep_returncode": 0,
+  "sweep_timed_out": false,
+  "sweep_timeout_seconds": 900.0
+}

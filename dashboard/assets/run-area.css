@@ -71,15 +71,18 @@
     border:1px solid transparent; border-bottom:none; border-radius:10px 10px 0 0; margin-bottom:-1px;
     transition:color .15s ease, background .15s ease; }
   .tabbar label:hover { color:var(--text-2); }
-  #tab-guardrails:checked ~ .tabbar label[for="tab-guardrails"] {
+  #tab-guardrails:checked ~ .tabbar label[for="tab-guardrails"],
+  #tab-survey:checked ~ .tabbar label[for="tab-survey"] {
     color:var(--text-1); background:var(--panel);
     border-color:var(--border); border-bottom:1px solid var(--panel); }
   /* The radios are visually hidden (opacity:0) so they show no native focus ring;
      mirror :focus-visible onto the label so keyboard users can see the focused tab. */
-  #tab-guardrails:focus-visible ~ .tabbar label[for="tab-guardrails"] {
+  #tab-guardrails:focus-visible ~ .tabbar label[for="tab-guardrails"],
+  #tab-survey:focus-visible ~ .tabbar label[for="tab-survey"] {
     outline:2px solid var(--blue); outline-offset:-2px; }
   .tabpanel { display:none; }
   #tab-guardrails:checked ~ #panel-guardrails { display:block; }
+  #tab-survey:checked ~ #panel-survey { display:block; }
 
   .gate { display:flex; align-items:center; gap:13px; border-radius:var(--radius);
     padding:14px 16px; margin-bottom:12px; border:1px solid; border-left-width:3px; }
@@ -234,6 +237,44 @@
   details.panel > summary .spacer { flex:1 1 auto; }
   .panel-body { padding:16px; }
 
+  .chips { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
+  .chip { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm);
+    padding:13px 15px; display:flex; gap:12px; align-items:center;
+    transition:border-color .16s ease, background .16s ease; }
+  .chip:hover { border-color:var(--border-hover); background:var(--raised); }
+  .chip .circle { width:34px; height:34px; flex:0 0 auto; border-radius:50%; display:grid; place-items:center; }
+  .chip .circle.blue   { background:rgba(59,130,246,.14); color:var(--blue);   box-shadow:0 0 0 1px rgba(59,130,246,.24) inset; }
+  .chip .circle.purple { background:rgba(139,92,246,.14); color:var(--purple); box-shadow:0 0 0 1px rgba(139,92,246,.24) inset; }
+  .chip .circle.green  { background:rgba(34,197,94,.14);  color:var(--green);  box-shadow:0 0 0 1px rgba(34,197,94,.24) inset; }
+  .chip .h { font-size:14px; font-weight:600; color:var(--text-1); display:block; }
+  .chip .d { font-size:13px; color:var(--text-3); display:block; margin-top:2px; line-height:1.4; }
+
+  .two-col { display:grid; grid-template-columns:1.85fr 1fr; gap:12px; align-items:start; margin-bottom:12px; }
+  .two-col > .panel { margin-bottom:0; }
+
+  /* Same reachability rule as .table-wrap: the five steps are fixed-width, so a
+     narrow viewport scrolls the band instead of spilling it out of its panel. */
+  .flow { display:flex; align-items:flex-start; justify-content:space-between; gap:4px;
+    padding:2px 0; overflow-x:auto; }
+  .step { display:flex; flex-direction:column; align-items:center; text-align:center; width:104px; }
+  /* Solid, deepened fills: white on the identity accents at 85% alpha measured
+     2.99:1 for green (WCAG AA needs 4.5:1 for this 11.5px bold text). These
+     opaque shades clear it -- blue 5.2:1, purple 5.7:1, green 5.0:1. */
+  .step-num { width:21px; height:21px; border-radius:50%; display:grid; place-items:center;
+    font-size:11.5px; font-weight:700; margin-bottom:7px; color:#fff; }
+  .step-num.blue { background:#2563EB; }
+  .step-num.purple { background:#7C3AED; }
+  .step-num.green { background:#15803D; }
+  .step .tile { width:46px; height:46px; border-radius:var(--radius-sm); }
+  .step .label { font-size:13px; font-weight:600; color:var(--text-1); margin-top:9px; line-height:1.25; }
+  .step .desc { font-size:12px; color:var(--text-3); margin-top:4px; line-height:1.35; }
+  .flow-arrow { color:rgba(148,163,184,.42); font-size:15px; margin-top:46px; flex:0 0 auto; }
+
+  .panel-note { margin-top:14px; display:flex; align-items:center; gap:10px; background:var(--inset);
+    border:1px solid var(--border); border-radius:var(--radius-sm); padding:11px 14px;
+    font-size:13px; color:var(--text-2); }
+  .panel-note svg { flex:0 0 auto; color:var(--text-3); }
+
   details.notes > summary { justify-content:space-between; }
   details.notes ul { list-style:none; margin:0; padding:0 16px 15px; display:flex; flex-direction:column; gap:11px; }
   details.notes li { display:flex; gap:9px; align-items:flex-start; font-size:13px; color:var(--text-2); line-height:1.45; }
@@ -241,10 +282,17 @@
     margin-top:1px; background:rgba(34,197,94,.14); color:var(--green);
     box-shadow:0 0 0 1px rgba(34,197,94,.26) inset; }
 
+  .statline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:12px; }
+  .statline .lead { font-size:14px; color:var(--text-2); margin-right:4px; }
+  .kgroup-title .kname { font-family:var(--mono); font-size:16px; }
+  .survey-empty { font-size:14px; color:var(--text-2); margin:8px 0; }
+
   @media (max-width:1000px) {
     .topbar { flex-direction:column; } .runcard { width:100%; }
+    .two-col { grid-template-columns:1fr; }
+    .flow { flex-wrap:wrap; justify-content:center; gap:10px; }
   }
-  @media (max-width:720px) { .toolgrid { grid-template-columns:1fr; } }
+  @media (max-width:720px) { .toolgrid, .chips { grid-template-columns:1fr; } }
 
   .wrap { max-width:900px; }
   /* `.cap`'s heading bar is `var(--accent, var(--text-3))`, and --accent is only
