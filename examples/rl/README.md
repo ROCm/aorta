@@ -22,9 +22,18 @@ The multi-step episode path, its predictions and one paired evaluation:
 | [`event_reward.py`](event_reward.py) | A discrete per-step event reward for a probe episode, every event decidable from the reply, the log and an archived matrix | nothing — no GPU, no container |
 | [`episode_env.py`](episode_env.py) | Multi-step probe episodes run offline against archived matrices, through the agent loop's own decision functions | the archived matrices (`--corpus-root`) |
 | [`rescore_episodes.py`](rescore_episodes.py) | Constant policies against the corpus, a run's wire reduced, and a replay of recorded episodes | the archived matrices |
-| [`train_grpo_step.py`](train_grpo_step.py) | GRPO over episodes with in-process `transformers`, every weight update checked before a checkpoint is written | one GPU (two with `--kl-beta`), `transformers` |
+| [`train_grpo_step.py`](train_grpo_step.py) | GRPO over episodes with in-process `transformers`, every weight update checked before a checkpoint is written; `--env rocjitsu` trains on `rocjitsu_env` episodes | one GPU (two with `--kl-beta`), `transformers` |
 | [`eval_episodes.py`](eval_episodes.py) | A fixed checkpoint against a control, paired per scenario, no optimiser step | one GPU, `transformers` |
 | [`verify_checkpoint_delta.py`](verify_checkpoint_delta.py) | A checkpoint pair on disk: every trained tensor moved, the control did not, nothing past Adam's ceiling | `numpy` only |
+| [`rocjitsu_env.py`](rocjitsu_env.py) | Multi-turn GPU-debugging episodes: find the one synchronization fault injected into a workload's machine code, with every tool output replayed from a recorded archive | a recorded corpus (`--corpus-root` or `$AORTA_RJ_CORPUS_ROOT`) |
+| [`rocjitsu_baselines.py`](rocjitsu_baselines.py) | Scripted and constant policies for those episodes, scored by the same parser and reward as a model | a recorded corpus |
+| [`prepare_rocjitsu_corpus.py`](prepare_rocjitsu_corpus.py) | A v1-layout corpus directory and its by-kernel split, from a recorded campaign | a recorded campaign |
+| [`blas_backend.py`](blas_backend.py) | Opt-in choice of PyTorch's BLAS library before the first GEMM, recorded in the run's config | `torch` |
+| [`eval_rocjitsu.py`](eval_rocjitsu.py) | A fixed checkpoint over a rocjitsu split, paired episode for episode with a control and with the CPU baselines | one GPU, `transformers` |
+| [`merge_columns.py`](merge_columns.py) | The shards of one evaluation column put back into the column an unsharded run writes | the shards and the corpus |
+| [`rocjitsu_demos.py`](rocjitsu_demos.py) | Solved episodes harvested as demonstrations, each replayed and re-scored first | a recorded corpus |
+| [`mix_demos.py`](mix_demos.py) | Whole-episode replay mixing of demonstration files for a continual cycle | nothing |
+| [`sft_rocjitsu.py`](sft_rocjitsu.py) | Supervised fine-tuning on demonstrations with the GRPO trainer's model, numerics and loss | one GPU, `transformers` |
 
 ## `probe_weight_transfer.py`
 
@@ -524,3 +533,202 @@ nothing**, loading uninitialised device memory into the model instead; a
 perturb-only test would have reported it as working. The findings are written up
 in [`docs/tokenspeed-rl-post-training.md`](../../docs/tokenspeed-rl-post-training.md)
 under Phase 2.
+
+## `rocjitsu_env.py`
+
+An episode is a GPU workload in which at most one kernel carries one
+synchronization fault, injected as a same-size edit to its machine code (or none:
+a clean control). The policy calls tools — `waitcheck`, the rocjitsu simulator,
+a native run, a disassembly — each at a fixed cost, then answers
+`{class, kernel, offset}` within 8 turns. Ground truth is exact because the fault
+was injected at a known instruction. Every tool output is replayed from an
+archive recorded once per scenario, so an episode needs no GPU and runs in
+milliseconds. The module's docstring records each design decision; the reward
+versions are in [`docs/rl-rocjitsu-reward-v2.md`](../../docs/rl-rocjitsu-reward-v2.md).
+
+The corpus is not part of this repository: its listings are disassembly of
+kernels from third-party libraries, and its held-out test splits stay useful
+only while they are not published. The environment reads two layouts, detected
+per directory:
+
+- **v1** (one workload): `sites.json`, `results.jsonl` (one record per mutant
+  plus a `BASELINE:<kernel>` record per kernel), the workload's disassembly,
+  `analysis.json`, and the `split.json` that `prepare_rocjitsu_corpus.py` writes.
+  Scored under reward v1 only: its system prompt states v1's points, so loading
+  it with reward v2 is refused.
+- **v2** (many workloads): `scenarios.jsonl` (one record per scenario: workload,
+  kernel id, operator, class, accepted offsets, the byte edit, and every tool's
+  recorded result), `kernels.json`, `workloads.json`, `listings/<kernel id>.json`
+  (the original listing; the edit is applied when it is served) and
+  `splits/<name>.txt`.
+
+The tests build small synthetic archives in both layouts and need nothing
+outside the repository. Two replay suites compare the environment with the
+reference implementations the corpora were recorded with, and run only when
+pointed at them: `AORTA_RJ_TEST_PROTOTYPE` (a v1 campaign directory) and
+`AORTA_RJ_TEST_CORPUS_V2` (a corpus-v2 build directory with `archive/` and
+`scripts/rjenv2.py`).
+
+### Known limitations
+
+- **`run_sim all` folds quiet kernels into one line.** A kernel with no race or
+  memory-wait report is listed as "no findings" even when its simulated output
+  check is `FAIL` or `CRASH`; the line says "simulated output PASS" only when
+  every folded kernel passed, but it does not say which one did not. A
+  per-kernel `run_sim` shows the status. It is kept because the released model
+  was trained on exactly this observation, and changing the text would change
+  what that model sees; it will be fixed in the next environment version.
+- **History pruning does not put `disasm` listings first.** When the history
+  outgrows its budget, older tool results are replaced by a placeholder, and
+  listings were meant to go first because they are the largest and the cheapest
+  to fetch again. The test looks for a header starting with `disasm`, but every
+  tool header is the JSON of the call (`{"tool": "disasm", ...}`), so it never
+  matches and pruning is oldest-first for every tool. It is kept because the
+  released model was trained on exactly this history; it will be fixed in the
+  next environment version.
+- **Near credit counts instructions in the kernel as built.** An answer is near
+  when it is within 2 instructions of an accepted offset, counted in the
+  original listing. A v2 edit that moves a wait past a longer instruction can
+  leave an accepted offset that is an instruction only of the served listing;
+  that offset earns exact credit but is skipped for near credit, so an answer 2
+  instructions after it can get kernel credit only. The corpus's reference
+  environment scores this way, and so does every recorded evaluation; it will be
+  fixed with a new reward version.
+
+## `train_grpo_step.py --env rocjitsu`
+
+`--env rocjitsu` trains on `rocjitsu_env` episodes instead of probe episodes,
+from a corpus split (`--corpus-root`, `--split`). Each turn of an episode is one
+`(prompt, completion)` sample; generation and both loss forwards template it
+under the environment's system prompt, and the loss forward keeps only the
+completion's logits. What a port to another trainer has to keep for its numbers
+to compare with this one's:
+
+- **One advantage per episode**, shared by all of its turns and normalised within
+  the group of episodes on one scenario: `A = (r - mean) / max(sd, 1.0)`
+  (`--advantage-sd-floor 1.0`). Without the floor, a group whose episodes all
+  failed differs only in tool costs, and dividing by that small spread scales
+  the noise up to unit size.
+- **KL to a frozen bf16 reference**, `--kl-beta 1e-3` with the k3 estimator, on
+  its own device. `--reference-from` anchors it to a warm start (`--init-from`)
+  rather than to the base model.
+- **Adam** at `--lr 1e-6` with moments kept across iterations, no gradient clip,
+  fp32 parameters.
+- **One numerics for sampling and both loss forwards** (`policy_numerics()`, a
+  single bf16 autocast).
+- **The off-policy gate.** Each sample's loss forward is compared token by token
+  with the log-probabilities generation recorded. A sample whose largest gap is
+  over 2 nats is left out of the gradient; the step is refused if more than 2%
+  of its samples are, or if a sample that takes a gradient has a token its loss
+  forward scores below exp(-30), whose KL term would own the gradient. `--diag`
+  records the comparison without stopping and writes no checkpoint.
+- **Sampling:** 8 scenarios × 8 episodes per iteration
+  (`--scenarios-per-iteration 8 --group 8`) at temperature 1.0, top-p 0.95 and
+  top-k 20, 8 turns of at most 192 tokens. `--top-k` is passed to `generate`, so
+  a model directory's own generation config cannot change it.
+
+```bash
+python examples/rl/train_grpo_step.py --env rocjitsu --corpus-root <corpus> --split train \
+    --out <run> --model Qwen/Qwen3-8B --iterations 40 --scenarios-per-iteration 8 --group 8 \
+    --temperature 1.0 --top-p 0.95 --top-k 20 --max-episode-steps 8 --max-new-tokens 192 \
+    --lr 1e-6 --kl-beta 1e-3 --param-dtype float32 --advantage-sd-floor 1.0 --snapshot-every 10
+```
+
+`--snapshot-every N` also writes `snapshot-itNNN` every N verified iterations:
+the sampler's weights (linear layers in bf16, everything else as trained) with
+the tokenizer and the generation config, so an evaluation loads exactly what
+generated the rollouts. `blas_backend.py` is opt-in: with
+`AORTA_PREFERRED_BLAS` set (`cublas` also needs `ROCBLAS_USE_HIPBLASLT=0`) it
+sets PyTorch's preferred BLAS library before the first GEMM, and the run's
+config records the choice; unset, it changes nothing.
+
+## `eval_rocjitsu.py` and `merge_columns.py`
+
+One checkpoint rolled out over a split, with no optimiser step, is a *column*:
+`--before` (the base `--model` by default) and `--after` give one each. Every
+reply is seeded from `(--seed, scenario, episode, step)` and generated on its
+own, so two columns on the same scenarios are paired episode for episode and
+their difference is the weights. A column records the system prompt's sha256
+and every sampler setting it was drawn with.
+
+- `--compare` writes `comparison.json`: each column's metrics over all, faulty
+  and clean scenarios, the paired score difference by scenario with a bootstrap
+  95% interval, McNemar counts for solved episodes and for exact locations, and
+  the CPU baselines (the scripted policies and the best constant answer) on the
+  same scenarios.
+- It refuses to pair columns that ran different scenarios or corpus digests,
+  that differ in seed, episodes, temperature, top-p, token limit or turn budget,
+  or that were drawn under different or unrecorded system prompts, or under two
+  recorded `top_k` values. `--reuse` resumes a partial column only under the same
+  source, seed, system prompt and `top_k`.
+- `--shard K/N` runs scenarios K, K+N, ... of the split, so one column can be
+  spread over N devices. Each reply's seed depends only on its scenario, episode
+  and step, so `merge_columns.py` can put the shards back into exactly the
+  column an unsharded run writes; it refuses shards that disagree on a setting,
+  overlap, are unfinished, or do not cover the split.
+
+```bash
+for k in 0 1 2 3; do
+  python examples/rl/eval_rocjitsu.py --corpus-root <corpus> --split val --out <dir>/shard-$k \
+      --after <checkpoint> --column after --shard $k/4 --device cuda:$k &
+done; wait
+python examples/rl/merge_columns.py --corpus-root <corpus> --split val --out <dir>/after.json \
+    <dir>/shard-*/after.json
+python examples/rl/eval_rocjitsu.py --corpus-root <corpus> --split val --out <dir> --column none --compare
+```
+
+`before.json` is computed the same way with `--column before`. Computing a
+column needs a GPU and `transformers`, as `eval_episodes.py` does;
+the tests cover the pairing rules, the resume refusals, `--shard` and the merge.
+The merge tests run on a synthetic column and, where `$AORTA_RJ_TEST_COLUMN`
+names a recorded one (with `$AORTA_RJ_TEST_CORPUS_V2` for its corpus), on that
+too.
+
+## Expert iteration: `rocjitsu_demos.py`, `mix_demos.py`, `sft_rocjitsu.py`
+
+One cycle rolls a policy out on the train split, keeps the episodes the
+environment scores as solved, mixes in replay from earlier cycles, and
+fine-tunes on the result.
+
+- **`rocjitsu_demos.py`** harvests demonstrations. Every episode is replayed reply
+  by reply through `rocjitsu_env.Episode`, so each step's prompt is exactly the
+  one the trainer renders, and only solved episodes are kept: the exact location
+  on a faulty scenario, "none" on a clean control. The sources are an evaluation
+  column (`--column`, accepted only if it was generated under the system prompt
+  the demonstrations are built under, or under the profile `--generated-under`
+  names), a trainer's `wire.jsonl` (`--wire`, refused unless the `train-log.json`
+  beside it records that system prompt, or if a replayed reward differs from the
+  recorded one), the scripted evidence-window recipe
+  (`--recipe`, which reads only what the agent was shown), and `--quirk-demos N`
+  copies of verified episodes on clean controls whose only waitcheck diagnostics
+  are its known `s_load` write-after-write report. It keeps at most
+  `--max-wire-per-scenario` distinct episodes per scenario, the highest-scoring
+  first with `--best-first`. Each input is replayed under the turn budget it
+  recorded, and an episode is named by its input's resolved path, its trainer
+  iteration and its index.
+- **`mix_demos.py`** mixes demonstration files for a continual cycle: `PATH:N`
+  takes N whole episodes from a file, so an episode is kept or dropped with all
+  of its turns. Every input must have been rendered under one system prompt.
+- **`sft_rocjitsu.py`** fine-tunes with the GRPO trainer's model, numerics and
+  loss: each step is a `(prompt, completion)` sample with advantage +1 and no
+  KL term, so the objective is the completion's mean log-likelihood, end-of-turn
+  token included. It refuses demonstrations rendered under another system
+  prompt, and `model.embed_tokens` stays frozen, so `verify_checkpoint_delta.py`
+  audits the step as it does a GRPO one. When the starting checkpoint is not
+  stored in `--param-dtype` it also writes `checkpoint-pre`, the model as
+  loaded, since the audit pairs tensors of one dtype.
+
+```bash
+python examples/rl/eval_rocjitsu.py --corpus-root <corpus> --split train --out <cycle>/gen \
+    --before <policy> --column before --episodes-per-scenario 8 --temperature 1.0
+python examples/rl/rocjitsu_demos.py --corpus-root <corpus> --split train --out <cycle>/new.jsonl \
+    --column <cycle>/gen/before.json --best-first
+python examples/rl/mix_demos.py --out <cycle>/mix.jsonl <cycle>/new.jsonl <previous>/mix.jsonl:300
+python examples/rl/sft_rocjitsu.py --demos <cycle>/mix.jsonl --corpus-root <corpus> --out <cycle>/sft \
+    --init-from <policy> --epochs 1 --lr 1e-5 --batch 16 --grad-checkpointing
+```
+
+The harvest tests run on a small synthetic corpus, and again on the recorded
+corpus-v2 archive where `$AORTA_RJ_TEST_CORPUS_V2` names one; the tests of the
+recipe and the quirk demonstrations need that archive. Fine-tuning itself needs
+a GPU and `transformers`.
