@@ -714,7 +714,9 @@ fine-tunes on the result.
   KL term, so the objective is the completion's mean log-likelihood, end-of-turn
   token included. It refuses demonstrations rendered under another system
   prompt, and `model.embed_tokens` stays frozen, so `verify_checkpoint_delta.py`
-  audits the step as it does a GRPO one.
+  audits the step as it does a GRPO one. When the starting checkpoint is not
+  stored in `--param-dtype` it also writes `checkpoint-pre`, the model as
+  loaded, since the audit pairs tensors of one dtype.
 
 ```bash
 python examples/rl/eval_rocjitsu.py --corpus-root <corpus> --split train --out <cycle>/gen \
