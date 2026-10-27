@@ -269,3 +269,33 @@ each job starting with the pure-HIP check as a control (jobs 92455 and 92456):
 Built without ASan, the canary is the pure-HIP check on its own:
 `hipcc --offload-arch=gfx950:xnack+ asan_canary.hip -o canary && HSA_XNACK=1 ./canary` exits 0
 on the sound node and 3 on an affected one, in about 4.5 s (jobs 92293 and 92294).
+
+## A prebuilt ASan PyTorch image
+
+Building PyTorch from source with device ASan takes about 25 minutes, so `docker/Dockerfile.asan-pytorch`
+packages it. **It is a testing convenience with no guarantees** -- not a supported PyTorch build, not
+tracked against PyTorch or ROCm releases, and refreshed only every few months. If you need guarantees,
+build your own from the file.
+
+The build context is the repo root, so the image installs aorta from the checkout and matches the commit
+it was built from. The four ROCm 7.0.2 ASan runtime packages (`comgr-asan`, `hip-runtime-amd-asan`,
+`hsa-rocr-asan`, `rocm-core-asan`) are not in the base image; the build fetches them from `repo.radeon.com`
+at pinned versions and verifies them against `docker/asan-pytorch/SHA256SUMS`, failing on a mismatch.
+
+```sh
+# from the repo root
+docker build -f docker/Dockerfile.asan-pytorch -t aorta-asan-pytorch:2.10.0-rocm7.0.2-gfx950 .
+
+docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
+    --security-opt seccomp=unconfined aorta-asan-pytorch:2.10.0-rocm7.0.2-gfx950 \
+    aorta run --workload gpu_smoke --sanitizer asan
+```
+
+To run as a non-root UID, also pass `--user $(id -u):$(id -g) -e HOME=/tmp -w /tmp` (or bind-mount a
+writable directory and point `-w` at it): `aorta run` writes `./results` under the working directory,
+and the image's default working directory is the root-owned `/`, so `--user` alone fails with
+`PermissionError: '/results'`. A plain `import torch` fails outside the run
+mode (`undefined symbol: __asan_...`); it works only under `aorta run --sanitizer asan`, which preloads
+the ASan runtime. Device ASan depends on sound GPU<->host page migration, so run it only on a healthy
+node -- the run mode's canary checks this first (see "Node health" above), and `gpu_smoke` must come back
+`pass` with 3 of 3 kernels checked before any other result on that node can be trusted.

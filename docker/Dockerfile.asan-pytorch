@@ -1,0 +1,118 @@
+# PyTorch with device AddressSanitizer for MI350 (gfx950), for `aorta run --sanitizer asan`.
+#
+# DISCLAIMER: a convenience image for finding memory errors in testing, with no guarantees. It is
+# not a supported PyTorch build. It is refreshed every few months, not tracked against PyTorch or
+# ROCm releases. If you need guarantees, build your own from this file.
+#
+# What it checks, and what it does not:
+#   * PyTorch's own GPU kernels (the at::native ones) are compiled with device ASan. A buffer
+#     overflow inside one is reported with the kernel's name, the lanes and addresses that went
+#     out of bounds, and the host stack that allocated the buffer. There is no source line: the
+#     device code is built without debug info.
+#   * ROCm library kernels (hipBLASLt GEMMs, MIOpen, AITER) are the stock builds and are not
+#     checked; aorta reports a run that used them as "not checked", never as a pass.
+#   * Shared-memory (LDS) accesses are not checked; see EXTRA_HIPCC_FLAGS below.
+#   * PyTorch bounds-checks indices on the device. On ROCm that check is abort(), so a bad index
+#     stops the kernel before ASan sees an access, and aorta reports the run as an error.
+#
+# Self-contained: the build context is the aorta repo root (this installs aorta from the checkout,
+# so the image matches the commit it was built from). The four ROCm 7.0.2 ASan runtime packages are
+# fetched from repo.radeon.com at pinned versions and verified against docker/asan-pytorch/SHA256SUMS;
+# a checksum mismatch fails the build.
+#   # from the repo root:
+#   docker build -f docker/Dockerfile.asan-pytorch -t aorta-asan-pytorch:2.10.0-rocm7.0.2-gfx950 .
+# Use (as root; for any other UID add --user $(id -u):$(id -g) -e HOME=/tmp -w /tmp, because aorta
+# writes ./results under the working directory and the image's default one is the root-owned /):
+#   docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
+#       --security-opt seccomp=unconfined aorta-asan-pytorch:2.10.0-rocm7.0.2-gfx950 \
+#       aorta run --workload gpu_smoke --sanitizer asan
+# `import torch` works only under `aorta run --sanitizer asan`, which preloads the ASan runtime.
+#
+# NODE HEALTH: device ASan reads its shadow (host memory) through GPU XNACK page faults, so it only
+# works on a node whose GPU<->host page migration is sound. On a bad node every check degrades to a
+# host-side "unknown-crash ... sanitizer_common_interceptors.inc" or a shadow dump full of x86 code,
+# and results cannot be trusted (the image is still fine; the node is not). Detect it in ~1s before
+# trusting any run -- an in-bounds kernel under ASan must stay silent:
+#   docker run ... aorta run --workload gpu_smoke --sanitizer asan   # must PASS, 3/3 checked
+# Demonstrate a caught overflow with a __cuda_array_interface__ view claiming more elements than the
+# allocation holds (torch's own as_strided/set_ are bounds-checked and cannot express it). Keep the
+# backing tensor alive through the kernel: the run mode disables the caching allocator, so a
+# temporary's storage is freed before the view is used and the run aborts without a report:
+#   base = torch.arange(10, device="cuda", dtype=torch.float32)
+#   v = type("V",(),{})(); v.__cuda_array_interface__={"shape":(16,),"typestr":"<f4",
+#     "data":(base.data_ptr(),False),"version":2}
+#   out = torch.as_tensor(v, device="cuda")*2; torch.cuda.synchronize()
+#   # -> device heap-buffer-overflow in vectorized_elementwise_kernel
+
+FROM rocm/dev-ubuntu-22.04:7.0.2 AS base
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git python3-dev python3-pip python3-venv \
+        rocm-libs rccl miopen-hip hipblaslt \
+    && rm -rf /var/lib/apt/lists/*
+# The ASan-instrumented ROCm runtime (lib/asan). With the stock runtime a device detection aborts
+# with "Hostcall: no handler found for service ID 4" and no report. These four packages are not in
+# the base image. Fetch them at pinned versions and verify against the committed checksums; a
+# mismatch fails the build. The versions are the ROCm 7.0.2 (-56~22.04) -asan builds.
+ARG ROCM_ASAN_POOL=https://repo.radeon.com/rocm/apt/7.0.2/pool/main
+ARG COMGR_ASAN_DEB=comgr-asan_3.0.0.70002-56~22.04_amd64.deb
+ARG HIP_RUNTIME_ASAN_DEB=hip-runtime-amd-asan_7.0.51831.70002-56~22.04_amd64.deb
+ARG HSA_ROCR_ASAN_DEB=hsa-rocr-asan_1.18.0.70002-56~22.04_amd64.deb
+ARG ROCM_CORE_ASAN_DEB=rocm-core-asan_7.0.2.70002-56~22.04_amd64.deb
+COPY docker/asan-pytorch/SHA256SUMS /tmp/debs/SHA256SUMS
+RUN cd /tmp/debs \
+    && curl -fsSL -O "${ROCM_ASAN_POOL}/c/comgr-asan/${COMGR_ASAN_DEB}" \
+    && curl -fsSL -O "${ROCM_ASAN_POOL}/h/hip-runtime-amd-asan/${HIP_RUNTIME_ASAN_DEB}" \
+    && curl -fsSL -O "${ROCM_ASAN_POOL}/h/hsa-rocr-asan/${HSA_ROCR_ASAN_DEB}" \
+    && curl -fsSL -O "${ROCM_ASAN_POOL}/r/rocm-core-asan/${ROCM_CORE_ASAN_DEB}" \
+    && sha256sum -c SHA256SUMS \
+    && for d in /tmp/debs/*.deb; do dpkg -x "$d" /; done \
+    && rm -rf /tmp/debs && test -e /opt/rocm/lib/asan/libamdhip64.so
+
+FROM base AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ninja-build cmake build-essential rccl-dev miopen-hip-dev hipblaslt-dev \
+    && rm -rf /var/lib/apt/lists/*
+ARG TORCH_REF=v2.10.0
+RUN git clone --depth 1 --branch "${TORCH_REF}" --recurse-submodules --shallow-submodules \
+        https://github.com/pytorch/pytorch /opt/pytorch
+WORKDIR /opt/pytorch
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
+# Device ASan without patching PyTorch's CMake: PyTorch compiles device code through hipcc, and
+# hipcc appends HIPCC_COMPILE_FLAGS_APPEND / HIPCC_LINK_FLAGS_APPEND to every compile and link.
+# Device ASan exists only for xnack+ code objects; a plain gfx950 target builds and checks nothing.
+ARG MAX_JOBS=128
+# With ASan's shared-memory checking on, ROCm 7.0.2 gives some kernels (the block softmax among
+# them) more registers than a 1024-thread workgroup can hold, and the GPU refuses the dispatch
+# (HSA_STATUS_ERROR_INVALID_ISA). Turning it off keeps global-memory checking.
+ARG EXTRA_HIPCC_FLAGS="-mllvm -amdgpu-enable-sw-lower-lds=false"
+ENV PYTORCH_ROCM_ARCH="gfx950:xnack+" \
+    HIPCC_COMPILE_FLAGS_APPEND="-fsanitize=address -fno-gpu-rdc ${EXTRA_HIPCC_FLAGS}" \
+    HIPCC_LINK_FLAGS_APPEND="-fsanitize=address -shared-libsan" \
+    USE_ROCM=1 USE_CUDA=0 BUILD_TEST=0 USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 \
+    MAX_JOBS=${MAX_JOBS}
+RUN python3 tools/amd_build/build_amd.py && python3 setup.py bdist_wheel
+
+FROM base
+# The wheel is bind-mounted from the build stage (BuildKit, the default builder since Docker 23), not
+# COPY'd: a COPY layer keeps the ~240 MB wheel in the image even after the install deletes it.
+# A venv, because Ubuntu's system setuptools leaks into pip's isolated builds and cannot build aorta.
+# numpy is a runtime dependency, not an extra: without it torch prints "Failed to initialize NumPy"
+# on every run, and torch.as_tensor() on a __cuda_array_interface__ object (how the planted-overflow
+# check builds an out-of-bounds view) raises "Numpy is not available" before any kernel runs.
+RUN --mount=type=bind,from=build,source=/opt/pytorch/dist,target=/tmp/dist \
+    python3 -m venv /opt/venv && /opt/venv/bin/python -m pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/python -m pip install --no-cache-dir numpy /tmp/dist/torch-*.whl
+ENV PATH=/opt/venv/bin:${PATH}
+# Install aorta from the build context (the repo checkout), so the image matches the commit it was
+# built from, rather than a pinned remote ref. setuptools_scm reads the version from git, which the
+# context does not carry; pass a PEP 440 AORTA_VERSION to stamp it, e.g.
+# `--build-arg AORTA_VERSION=$(python -m setuptools_scm)` from the checkout (raw `git describe`
+# output such as v0.3.0-340-gabc1234 is not PEP 440 and fails the install), else it falls back to
+# the pyproject default. The ASan run mode ships in the base package -- no extras are needed.
+COPY pyproject.toml README.md LICENSE /tmp/aorta-src/
+COPY src /tmp/aorta-src/src/
+ARG AORTA_VERSION=
+RUN SETUPTOOLS_SCM_PRETEND_VERSION="${AORTA_VERSION}" \
+        python -m pip install --no-cache-dir /tmp/aorta-src && rm -rf /tmp/aorta-src
+LABEL org.opencontainers.image.description="PyTorch with device AddressSanitizer for gfx950, for aorta. Testing only, no guarantees."
