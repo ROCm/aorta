@@ -403,6 +403,18 @@ def test_merge_counts_one_cause_once_whatever_reader_reported_it():
     assert [kr["identity"]["name"] for kr in consan["kernel_results"]] == ["a", "b", "c", "d"]
 
 
+def test_merge_counts_a_timed_out_kernel_as_not_completed():
+    merged = ms.merge_consan([
+        _case_report("a", "ran", "pass"),
+        _case_report("b", "timed_out", "error", reason="consan_timeout"),
+    ])
+    consan = merged["checks"][0]
+    assert (merged["overall_verdict"], merged["execution_status"]) == ("error", "error")
+    assert (consan["state"], consan["reason"]) == (
+        "error", "1 of 2 kernels did not complete (1x consan_timeout)"
+    )
+
+
 # --------------------------------------------------------------- dashboard
 
 
@@ -553,15 +565,149 @@ def test_launches_and_consan_cases_share_one_budget(tmp_path, monkeypatch):
     _toy_asset(tmp_path)
     assert _run_toy(tmp_path, monkeypatch, "--budget-seconds", str(ms.WARM_TIMEOUT_SECONDS - 1)) == 2
 
-    # Enough for the launches but not for one 900 s ConSan case: every kernel is
-    # recorded as not scheduled, and no ConSan row is written to pass for it.
+    # Enough for one launch but not for one 900 s ConSan case: the first wave
+    # still compiles, later launches would spend that wave and are not started,
+    # and no ConSan row is written to pass for the kernel that did compile.
     other = tmp_path / "second"
     other.mkdir()
     _toy_asset(other, consan_timeout=900)
     assert _run_toy(other, monkeypatch, "--budget-seconds", str(ms.WARM_TIMEOUT_SECONDS + 60)) == 0
     selection = json.loads((other / "results/informational/consan-toy/model_survey.json").read_text())
-    assert selection["not_scheduled_tonight"] == ["a", "b", "c"]
+    assert selection.get("not_scheduled_tonight") == ["a"]
+    assert sorted(selection.get("not_launched") or {}) == ["b", "c"]
     assert not (other / "results/informational/consan-toy/sanitizer_report.json").exists()
+
+
+def test_slow_launches_leave_this_models_consan_wave(tmp_path, monkeypatch):
+    # Every launch succeeds just inside its timeout. Without holding this
+    # model's ConSan wave, four of them spend the budget and no ConSan case
+    # starts, so --require finds no consan report.
+    original = ms.Budget
+
+    class _SlowLaunches(original):
+        def admit(self, case_seconds: float, *, reserve: float = 0.0) -> bool:
+            admitted = original.admit(self, case_seconds, reserve=reserve)
+            if admitted and case_seconds == ms.WARM_TIMEOUT_SECONDS:
+                with self._lock:
+                    self._start -= ms.WARM_TIMEOUT_SECONDS - 1
+            return admitted
+
+    _toy_asset(tmp_path, consan_timeout=900)
+    monkeypatch.setattr(ms, "Budget", _SlowLaunches)
+    budget = ms.WARM_TIMEOUT_SECONDS * 2 + 900
+    assert _run_toy(tmp_path, monkeypatch, "--budget-seconds", str(budget)) == 0
+    informational = tmp_path / "results" / "informational"
+    record = json.loads((informational / "waitcheck-toy" / "model_survey.json").read_text())
+    assert [p.get("ok") for p in record.get("pairs") or []] == [True, True, False, False]
+    selection = json.loads((informational / "consan-toy" / "model_survey.json").read_text())
+    assert [r.get("kernel") for r in selection.get("ran") or []] == ["a"]
+    assert (informational / "consan-toy" / "sanitizer_report.json").is_file()
+
+
+def test_an_interrupt_stops_running_launches_and_drops_queued_ones(monkeypatch):
+    # Only the main thread sees KeyboardInterrupt. Without stopping the groups
+    # here, the pool would wait for each worker's subprocess to time out.
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("SIGINT handlers can only be installed from the main thread")
+    monkeypatch.setattr(ms, "_CHILDREN", ms._Children())
+    started: list[int] = []
+    procs: list[subprocess.Popen] = []
+    lock = threading.Lock()
+    both_running = threading.Event()
+
+    def work(item: int, gpu: str) -> int:
+        proc = ms._CHILDREN.start([sys.executable, "-c", "import time; time.sleep(60)"])
+        with lock:
+            started.append(item)
+            procs.append(proc)
+            if len(started) == 2:
+                both_running.set()
+        proc.wait()
+        return item
+
+    main = threading.main_thread().ident
+    assert main is not None
+
+    def interrupt() -> None:
+        if both_running.wait(timeout=10):
+            signal.pthread_kill(main, signal.SIGINT)
+
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        threading.Thread(target=interrupt, daemon=True).start()
+        begin = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            ms.on_gpus(["0", "1"], [0, 1, 2, 3], work)
+        elapsed = time.monotonic() - begin
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert sorted(started) == [0, 1]
+    assert all(proc.poll() is not None for proc in procs)
+    assert elapsed < 30
+    with pytest.raises(KeyboardInterrupt):
+        ms._CHILDREN.start([sys.executable, "-c", "pass"])
+
+
+def test_a_timed_out_consan_case_stays_on_the_row_as_an_error(tmp_path, monkeypatch):
+    def _sweep(recipe: Path, out_dir: Path, *, env=None, timeout=None) -> int:
+        plan = yaml.safe_load(recipe.read_text())["sanitizer_plan"]
+        if plan["sanitizers"] == ["consan"] and plan["source"]["kernel"]["name"] == "b_sym":
+            out_dir.mkdir(parents=True, exist_ok=True)
+            return ms.SWEEP_TIMED_OUT
+        return _fake_sweep(recipe, out_dir, env=env, timeout=timeout)
+
+    _toy_asset(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ms, "sweep", _sweep)
+    assert ms.main([
+        "run", "--inventory", "recipes/toy.yaml", "--out", "results/informational",
+        "--work", "work", "--asset-dir", "asset/aorta-model-kernels", "--gpus", "0",
+    ]) == 0
+    merged = json.loads((tmp_path / "results/informational/consan-toy/sanitizer_report.json").read_text())
+    consan = (merged.get("checks") or [{}])[0]
+    results = {kr["identity"]["name"]: kr for kr in consan.get("kernel_results") or []}
+    assert results["b_sym"].get("verdict") == "error"
+    assert str(results["b_sym"].get("reason") or "").startswith("consan_case_timed_out:")
+    assert merged.get("overall_verdict") == "error"
+    assert "consan_case_timed_out" in str(consan.get("reason") or "")
+    monkeypatch.chdir(_REPO)
+    assert comparator.main(
+        ["prog", "--vacuous-only", "--require", "informational/consan-toy", str(tmp_path / "results")]
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    ("planted", "returncode", "reason"),
+    [
+        pytest.param('{"schema": "aorta.sanitizer_re', -9, "waitcheck_produced_no_report", id="truncated"),
+        pytest.param('{"schema": "aorta.sanitizer_report/0.1"}', 1, "waitcheck_produced_no_report",
+                     id="schema-invalid"),
+        pytest.param("[]", ms.SWEEP_TIMED_OUT, "waitcheck_timed_out", id="not-a-mapping"),
+    ],
+)
+def test_an_unreadable_waitcheck_report_is_replaced(tmp_path, monkeypatch, planted, returncode, reason):
+    # The dashboard drops a report it cannot load, so a sweep killed mid-write
+    # must not leave its partial file in place of the failure report.
+    def _sweep(recipe: Path, out_dir: Path, *, env=None, timeout=None) -> int:
+        plan = yaml.safe_load(recipe.read_text())["sanitizer_plan"]
+        if plan["sanitizers"] == ["waitcheck"]:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "sanitizer_report.json").write_text(planted, encoding="utf-8")
+            return returncode
+        return _fake_sweep(recipe, out_dir, env=env, timeout=timeout)
+
+    _toy_asset(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ms, "sweep", _sweep)
+    assert ms.main([
+        "run", "--inventory", "recipes/toy.yaml", "--out", "results/informational",
+        "--work", "work", "--asset-dir", "asset/aorta-model-kernels", "--gpus", "0",
+    ]) == 0
+    scan = json.loads((tmp_path / "results/informational/waitcheck-toy/sanitizer_report.json").read_text())
+    SanitizerReport.from_dict(scan)
+    check = (scan.get("checks") or [{}])[0]
+    assert str(check.get("reason") or "").startswith(f"{reason}:")
+    assert scan.get("overall_verdict") == "error"
 
 
 def _plant_model(root: Path, name: str, kernels: list[str]) -> None:

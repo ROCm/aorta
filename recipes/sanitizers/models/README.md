@@ -18,7 +18,9 @@ Like the rest of Tab 2 they are observed-only and never gate the nightly.
    arguments and dispatches the kernel, with a private `TRITON_CACHE_DIR`.
    Triton specialises on runtime values, so the object it compiles here is the
    one the kernel actually dispatches. Identical objects (two scenarios that
-   compile to the same bytes) are scanned once.
+   compile to the same bytes) are scanned once. A launch starts only while its
+   timeout fits in the budget; after the first wave it must also leave time for
+   the model's ConSan wave.
 2. **Waitcheck** scans every launched object in one `kernel_list` sweep.
 3. **ConSan** dispatches one scenario per kernel, the first the spec lists, which
    is its most frequent launch shape, against the same cache, so it

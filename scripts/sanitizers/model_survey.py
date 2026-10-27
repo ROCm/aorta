@@ -18,7 +18,9 @@ The nightly ``sanitizers-model-survey`` job runs this once per model inventory i
 
 One time budget covers every launch, waitcheck sweep, and ConSan case. A
 launch or ConSan case starts only while it could still finish at its own
-timeout. A waitcheck sweep is one process and stops at its own deadline,
+timeout. After a model's first launch wave, a launch must also leave that
+model's ConSan wave, so slow launches cannot spend the time that writes its
+ConSan report. A waitcheck sweep is one process and stops at its own deadline,
 before it would spend this model's ConSan wave or the time held for a later
 model; on that deadline the sweep's process group is stopped and the timeout
 is recorded. Each later model keeps one launch wave, one waitcheck sweep, and
@@ -353,13 +355,12 @@ def warm_one(
     shim = case / "launch.sh"
     write_shim(shim, model_dir=model_dir, pair=item.pair, cache=case / "triton-cache", run_out=case / "run", python=python)
     start = time.monotonic()
-    proc = subprocess.Popen(
+    proc = _CHILDREN.start(
         [str(shim)],
         env={**os.environ, "HIP_VISIBLE_DEVICES": gpu},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        start_new_session=True,
     )
     try:
         stdout, stderr = proc.communicate(timeout=WARM_TIMEOUT_SECONDS)
@@ -368,9 +369,8 @@ def warm_one(
         item.reason = f"launch timed out after {WARM_TIMEOUT_SECONDS}s"
         item.seconds = time.monotonic() - start
         return item
-    except KeyboardInterrupt:
-        _stop_process_group(proc)
-        raise
+    finally:
+        _CHILDREN.forget(proc)
     item.seconds = time.monotonic() - start
     (case / "launch.log").write_text(stdout + stderr, encoding="utf-8")
     if proc.returncode != 0:
@@ -390,7 +390,13 @@ def warm_one(
 
 
 def on_gpus(gpus: Sequence[str], items: Sequence[object], work: Callable[[object, str], object]) -> list:
-    """Run ``work(item, gpu)`` with at most one item per GPU at a time, keeping order."""
+    """Run ``work(item, gpu)`` with at most one item per GPU at a time, keeping order.
+
+    ``KeyboardInterrupt`` reaches only this thread, never a worker waiting on
+    its subprocess. On an interrupt, queued items are dropped and every process
+    group the survey started is stopped before the pool is joined, so the
+    interrupt does not wait out the workers' timeouts.
+    """
     free: queue.Queue[str] = queue.Queue()
     for gpu in gpus:
         free.put(gpu)
@@ -402,8 +408,16 @@ def on_gpus(gpus: Sequence[str], items: Sequence[object], work: Callable[[object
         finally:
             free.put(gpu)
 
-    with ThreadPoolExecutor(max_workers=len(gpus)) as pool:
-        return list(pool.map(run, items))
+    pool = ThreadPoolExecutor(max_workers=len(gpus))
+    try:
+        futures = [pool.submit(run, item) for item in items]
+        return [future.result() for future in futures]
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        _CHILDREN.stop_all()
+        raise
+    finally:
+        pool.shutdown(wait=True)
 
 
 def waitcheck_recipe(model: str, warmed: Sequence[Warmed]) -> str:
@@ -536,6 +550,38 @@ def _stop_process_group(proc: subprocess.Popen[str]) -> None:
         proc.wait(timeout=1)
 
 
+class _Children:
+    """Every process group the survey has running, so an interrupt can stop them all."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._procs: set[subprocess.Popen[str]] = set()
+        self._stopped = False
+
+    def start(self, argv: Sequence[str], **kwargs: object) -> subprocess.Popen[str]:
+        """``Popen`` in a new session; refused once ``stop_all`` has run."""
+        with self._lock:
+            if self._stopped:
+                raise KeyboardInterrupt("the survey was interrupted")
+            proc = subprocess.Popen(argv, start_new_session=True, **kwargs)
+            self._procs.add(proc)
+            return proc
+
+    def forget(self, proc: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._procs.discard(proc)
+
+    def stop_all(self) -> None:
+        with self._lock:
+            self._stopped = True
+            procs = list(self._procs)
+        for proc in procs:
+            _stop_process_group(proc)
+
+
+_CHILDREN = _Children()
+
+
 def _sweep_deadline(budget: Budget, *, reserve: float, keep: float) -> float:
     """Seconds a sweep may run without spending ``reserve`` or ``keep``.
 
@@ -561,13 +607,12 @@ def sweep(
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True)
     with (out_dir / "sweep.log").open("w", encoding="utf-8") as log:
-        proc = subprocess.Popen(
+        proc = _CHILDREN.start(
             [sys.executable, "-c", "import sys; from aorta.cli import main; sys.exit(main())",
              "sweep", "run", "--recipe", str(recipe), "--output-dir", str(out_dir)],
             stdout=log,
             stderr=subprocess.STDOUT,
             env={**os.environ, **(env or {})},
-            start_new_session=True,
             text=True,
         )
         try:
@@ -581,6 +626,8 @@ def sweep(
                 f"sweep timed out after {timeout:.1f}s; the sweep process group was stopped\n"
             )
             return SWEEP_TIMED_OUT
+        finally:
+            _CHILDREN.forget(proc)
 
 
 def error_case_report(item: Warmed, reason: str) -> dict:
@@ -847,11 +894,22 @@ def run_model(
     pairs = model_pairs(inv, model_dir)
     root = work / inv.model
     print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: launching {len(pairs)} pairs on {len(gpus)} GPU(s)", flush=True)
+    items = [Warmed(pair, root / "cases" / pair.stem) for pair in pairs]
+    # The first wave holds only the later-model time. Holding this model's
+    # ConSan wave there too would compile nothing on a budget too small for
+    # that wave, and "no pair compiled" stops the survey before later models.
+    first_wave = {id(item) for item in items[: len(gpus)]}
+    keep = float(inv.consan_timeout)
     warmed = on_gpus(
         gpus,
-        [Warmed(pair, root / "cases" / pair.stem) for pair in pairs],
+        items,
         lambda item, gpu: warm_one(
-            item, model_dir=model_dir, python=python, gpu=gpu, budget=budget, reserve=reserve
+            item,
+            model_dir=model_dir,
+            python=python,
+            gpu=gpu,
+            budget=budget,
+            reserve=reserve if id(item) in first_wave else reserve + keep,
         ),
     )
     launched = [w for w in warmed if w.ok]
@@ -1025,8 +1083,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--budget-seconds", type=float, default=3600.0,
                      help="for every launch, waitcheck sweep, and ConSan case; a launch or "
                      "ConSan case starts only if it can still finish at its own timeout, "
-                     "a waitcheck sweep stops before spending that hold, and each later "
-                     "model keeps one launch wave, one waitcheck sweep, and one ConSan wave")
+                     "a launch after a model's first wave also leaves that model's "
+                     "ConSan wave, a waitcheck sweep stops before spending that hold, and "
+                     "each later model keeps one launch wave, one waitcheck sweep, and "
+                     "one ConSan wave")
     run.add_argument("--night", type=dt.date.fromisoformat, default=dt.datetime.now(dt.timezone.utc).date())
     args = parser.parse_args(argv)
 
