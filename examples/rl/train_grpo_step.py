@@ -113,6 +113,18 @@ are not written to disk -- so each link restarts with a first step of up to
 ``eps``. That is a real discontinuity and belongs beside any chained
 curve.
 
+Environments
+============
+``--env probe`` (the default) is ``episode_env``: archived probe matrices.
+``--env rocjitsu`` is ``rocjitsu_env``: GPU-kernel debugging episodes over an
+archived tool campaign, with a train/test ``--split``. Both expose the same
+``rollout_scenario``; each brings its own system prompt, which is threaded
+through generation *and* the loss, so the gradient is taken on the prompt that
+was sampled. ``--scenarios-per-iteration`` rolls out a fixed-size slice of a
+large corpus per iteration (see :func:`iteration_scenarios`); with it,
+``checkpoint-best`` is not written, because iterations score different
+scenarios and their mean rewards do not rank weights.
+
 Usage
 -----
 
@@ -123,9 +135,12 @@ Usage
 from __future__ import annotations
 
 import argparse
+import functools
+import hashlib
 import json
 import logging
 import math
+import random
 import shutil
 import sys
 import time
@@ -136,6 +151,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import blas_backend  # noqa: E402
 import episode_env  # noqa: E402
 from adam_bound import optimiser_bound  # noqa: E402
 from episode_env import Sample  # noqa: E402
@@ -160,30 +176,158 @@ GATING_CHECKS = (
     "gradient_is_finite_and_nonzero",
 )
 
+#: Gates the step too, but is decided before it (``update_checks`` audits the
+#: step after the fact), so it is not one of ``GATING_CHECKS``.
+LOSS_FORWARD_CHECK = "loss_forward_scores_its_own_samples"
 
-def advantages(values: list[float]) -> tuple[list[float], float, float]:
-    """GRPO's within-group normalisation: ``(r - mean) / (sd + eps)``.
+#: A token the policy sampled (temperature 0.7, top-p 0.95) that its own loss
+#: forward scores below exp(-30) did not come from that forward: the loss
+#: forward is wrong, not the policy. Its KL term (~exp(30)) would then own the
+#: gradient while every weight check still passes.
+MAX_SAMPLED_TOKEN_NLL = 30.0
+
+#: The largest per-token gap, in nats, allowed between the log-prob generation
+#: gave a sampled token and the log-prob the loss forward gives it under the
+#: same weights. Two bf16 forwards of one model differ by well under this; a
+#: loss forward that evaluates a different function than the sampler (fp32
+#: master weights read in fp32 while sampling reads them in bf16) differed by
+#: 3.6 nats after one Adam step and 10.9 after two.
+MAX_GENERATION_GAP = 2.0
+
+#: A sample past :data:`MAX_GENERATION_GAP` is off-policy by more than numerics
+#: explain and is left out of the gradient, as a clipped importance ratio would
+#: leave it out. Past this fraction of a step's samples the gap is systematic
+#: and the step is refused: after the fix 1 sample in 1,527 crossed the bound,
+#: before it 8 of 43 crossed 1 nat after one step.
+MAX_OFF_POLICY_FRACTION = 0.02
+
+
+def tracks_cuda_memory(device: str) -> bool:
+    """Whether ``device`` has CUDA memory statistics; a CUDA host training on the CPU has none."""
+    import torch  # noqa: PLC0415
+
+    return torch.device(device).type == "cuda" and torch.cuda.is_available()
+
+
+def takes_gradient(stats: dict[str, Any]) -> bool:
+    """Whether a sample's loss forward agrees with generation closely enough to train on."""
+    gap = stats.get("gen_max_abs_diff")
+    return gap is None or gap <= MAX_GENERATION_GAP
+
+
+def policy_numerics(device: str) -> Any:
+    """The autocast context the policy runs under, for sampling and for the loss alike.
+
+    Both must evaluate one function. A step of ``lr`` 1e-6 on fp32 master
+    weights that started on the bf16 grid leaves every bf16-rounded weight
+    unchanged, so a bf16 sampler keeps drawing from the pre-step model while an
+    fp32 loss forward scores the post-step one: the samples stop being on-policy.
+    """
+    return torch.autocast(device.split(":")[0], dtype=torch.bfloat16)
+
+
+def loss_forward_check(max_token_nll: float, seq_tokens: int, generation_gap: float | None = None,
+                       off_policy: int = 0, compared: int = 0) -> dict[str, Any]:
+    fraction = off_policy / compared if compared else 0.0
+    passed = max_token_nll <= MAX_SAMPLED_TOKEN_NLL and fraction <= MAX_OFF_POLICY_FRACTION
+    return {"passed": passed, "max_token_nll": max_token_nll, "bound": MAX_SAMPLED_TOKEN_NLL,
+            "seq_tokens": seq_tokens, "generation_gap": generation_gap,
+            "generation_gap_bound": MAX_GENERATION_GAP, "off_policy_samples": off_policy,
+            "compared_samples": compared, "off_policy_fraction": round(fraction, 4),
+            "off_policy_fraction_bound": MAX_OFF_POLICY_FRACTION}
+
+
+def advantages(values: list[float], sd_floor: float = 0.0) -> tuple[list[float], float, float]:
+    """GRPO's within-group normalisation: ``(r - mean) / (sd + eps)``, or ``/ max(sd, sd_floor)``.
 
     A group of one has no spread, so its advantage is zero rather than a
-    division by an undefined standard deviation.
+    division by an undefined standard deviation. With ``sd_floor`` a group whose
+    rewards differ by less than the floor -- episodes that all failed and differ
+    only in tool costs -- keeps advantages that small, instead of having them
+    scaled up to unit size and pushing every such group towards fewer tools.
     """
     mean = sum(values) / len(values)
     if len(values) > DDOF:
         sd = (sum((v - mean) ** 2 for v in values) / (len(values) - DDOF)) ** 0.5
     else:
         sd = 0.0
-    return [(v - mean) / (sd + ADV_EPS) for v in values], mean, sd
+    scale = max(sd, sd_floor) if sd_floor > 0 else sd + ADV_EPS
+    return [(v - mean) / scale for v in values], mean, sd
 
 
-def chat_prompt(tok: Any, user: str) -> str:
+ENVIRONMENTS = ("probe", "rocjitsu")
+
+
+def environment(name: str) -> Any:
+    """The environment module for ``--env``; each has ``rollout_scenario``."""
+    if name == "probe":
+        return episode_env
+    if name == "rocjitsu":
+        import rocjitsu_env
+
+        return rocjitsu_env
+    raise ValueError(f"unknown environment {name!r}; known: {ENVIRONMENTS}")
+
+
+def env_policy(env: Any, max_episode_steps: int) -> Any:
+    if env is episode_env:
+        from aorta.agent.policy import AgentPolicy
+
+        return AgentPolicy(max_iterations=max_episode_steps)
+    return env.make_policy(max_episode_steps)
+
+
+def env_scenarios(env: Any, args: argparse.Namespace, only: list[str]) -> list[Any]:
+    if env is episode_env:
+        return episode_env.load_corpus(args.corpus_root, only=only)
+    return env.load_corpus(args.corpus_root, only=only, split=args.split or "train")
+
+
+def env_system(env: Any, scenarios: list[Any]) -> str:
+    """The system prompt the environment's replies are sampled and scored under."""
+    system_for = getattr(env, "system_for", None)
+    return system_for(scenarios) if system_for is not None else env.SYSTEM
+
+
+def env_describe(env: Any, scenario: Any) -> str:
+    if env is episode_env:
+        return (f"{scenario.scenario_id:<22} {len(scenario.grid.verdicts):>3} cells  "
+                f"resolvers={sorted(scenario.resolvers) or '(unresolvable)'}")
+    return env.describe(scenario)
+
+
+def iteration_scenarios(scenarios: list[Any], per_iteration: int, iteration: int,
+                        seed: int) -> list[Any]:
+    """The scenarios iteration ``iteration`` (1-based) rolls out.
+
+    ``per_iteration`` 0 means every scenario, every iteration. Otherwise the
+    pool is permuted once per epoch, seeded by ``(seed, epoch)``, and the
+    iteration takes the next consecutive chunk, so every scenario is visited
+    at most once per epoch and the sequence depends on ``(seed, iteration)``
+    alone -- a chained link with ``--iteration-offset`` continues it. The
+    remainder of an epoch that does not fill a chunk is skipped; the next
+    permutation reorders it.
+    """
+    if per_iteration <= 0 or per_iteration >= len(scenarios):
+        return list(scenarios)
+    chunks = len(scenarios) // per_iteration
+    epoch, chunk = divmod(iteration - 1, chunks)
+    order = list(range(len(scenarios)))
+    random.Random(f"{seed}/{epoch}").shuffle(order)
+    return [scenarios[i] for i in order[chunk * per_iteration:(chunk + 1) * per_iteration]]
+
+
+def chat_prompt(tok: Any, user: str, system: str | None = None) -> str:
     """The templated prompt. ``enable_thinking=False`` is not optional.
 
     Qwen3 is a thinking model by default and would spend the token budget
     inside ``<think>``; the reply would then fail to parse for a reason that
-    has nothing to do with the policy.
+    has nothing to do with the policy. ``system`` defaults to the probe
+    environment's prompt; another environment passes its own, and the loss
+    must be given the same one the reply was sampled under.
     """
     return tok.apply_chat_template(
-        [{"role": "system", "content": episode_env.SYSTEM},
+        [{"role": "system", "content": episode_env.SYSTEM if system is None else system},
          {"role": "user", "content": user}],
         tokenize=False,
         add_generation_prompt=True,
@@ -251,10 +395,17 @@ class Completion(str):
     """
 
     token_ids: tuple[int, ...]
+    #: The unpadded prompt IDs generation conditioned on, and the log-prob (at
+    #: temperature 1, from the raw logits) generation gave each sampled token.
+    prompt_ids: tuple[int, ...] | None
+    logprobs: tuple[float, ...] | None
 
-    def __new__(cls, text: str, token_ids: Any) -> Completion:
+    def __new__(cls, text: str, token_ids: Any, prompt_ids: Any = None,
+                logprobs: Any = None) -> Completion:
         obj = super().__new__(cls, text)
         obj.token_ids = tuple(int(t) for t in token_ids)
+        obj.prompt_ids = None if prompt_ids is None else tuple(int(t) for t in prompt_ids)
+        obj.logprobs = None if logprobs is None else tuple(float(x) for x in logprobs)
         return obj
 
 
@@ -273,22 +424,31 @@ def sampled_ids(generated: list[int], stop_ids: set[int]) -> list[int]:
     return list(generated)
 
 
+def drawn_logprobs(step_logits: Any, drawn: Any) -> Any:
+    """log softmax of each decode step's raw logits at the token drawn there, ``[B, T]``.
+
+    Raw logits are the model's, before temperature, top-p or any processor, so
+    this is the generation-time value of exactly what the loss forward
+    computes for the same token.
+    """
+    if not step_logits:
+        return torch.zeros((drawn.shape[0], 0))
+    cols = [torch.log_softmax(step.float(), dim=-1).gather(1, drawn[:, t : t + 1]).squeeze(1)
+            for t, step in enumerate(step_logits)]
+    return torch.stack(cols, dim=1).cpu()
+
+
+#: Qwen3-8B's own generation_config.json value. Passed explicitly, never inherited: a model
+#: directory without that file (every evaluation snapshot written before 2026-10-06) gets
+#: transformers' defaults instead -- top_k 50 and no KV cache.
+DEFAULT_TOP_K = 20
+
+
 def _stop_ids(model: Any, tok: Any) -> set[int]:
     configured = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
     stops = set(configured) if isinstance(configured, (list, tuple)) else {configured}
     stops.add(tok.eos_token_id)
     return {int(t) for t in stops if t is not None}
-
-
-def policy_numerics(device: str) -> Any:
-    """The autocast context the policy runs under, for sampling and for the loss alike.
-
-    Both must evaluate one function. A step of ``lr`` 1e-6 on fp32 master
-    weights that started on the bf16 grid leaves every bf16-rounded weight
-    unchanged, so a bf16 sampler keeps drawing from the pre-step model while an
-    fp32 loss forward scores the post-step one: the samples stop being on-policy.
-    """
-    return torch.autocast(device.split(":")[0], dtype=torch.bfloat16)
 
 
 def generate(model: Any, tok: Any, prompts: list[str], args: Any,
@@ -323,14 +483,28 @@ def generate(model: Any, tok: Any, prompts: list[str], args: Any,
                 do_sample=True,
                 temperature=args.temperature,
                 top_p=args.top_p,
+                top_k=getattr(args, "top_k", DEFAULT_TOP_K),
+                use_cache=True,
                 max_new_tokens=args.max_new_tokens,
                 pad_token_id=tok.pad_token_id,
                 logits_processor=[guard],
+                output_logits=True,
+                return_dict_in_generate=True,
             )
         width = enc["input_ids"].shape[1]
-        for seq in out:
+        sequences = getattr(out, "sequences", out)
+        step_logits = getattr(out, "logits", None)
+        gen_lp = None if step_logits is None else drawn_logprobs(step_logits, sequences[:, width:])
+        mask = enc.get("attention_mask") if hasattr(enc, "get") else None
+        for row, seq in enumerate(sequences):
             ids = sampled_ids(seq[width:].tolist(), stops)
-            out_texts.append(Completion(tok.decode(ids, skip_special_tokens=True), ids))
+            row_ids = enc["input_ids"][row]
+            prompt = (row_ids if mask is None else row_ids[mask[row].bool()]).tolist()
+            out_texts.append(Completion(
+                tok.decode(ids, skip_special_tokens=True), ids, prompt_ids=prompt,
+                logprobs=None if gen_lp is None else gen_lp[row, : len(ids)].tolist()))
+        # The full-vocabulary logits would otherwise stay alive through the next batch's generate.
+        del out, sequences, step_logits
     if guard.nan_steps or guard.dead_rows:
         # Printed, never swallowed: a repaired row is partly the guard's text
         # rather than the policy's, so the count travels with any number
@@ -350,12 +524,15 @@ def episode_rollouts(
     *,
     log_root: Path | None = None,
     episode_seed: Any = None,
+    env: Any = None,
+    system: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[Sample], list[dict[str, Any]]]:
     """Multi-step episodes. Everything except generation lives in the env.
 
     ``episode_seed(scenario_id, episode, step) -> int``, when given, seeds every
     reply on its own (see :func:`generate`); training leaves it ``None`` and
-    keeps batched sampling.
+    keeps batched sampling. ``env`` is the environment module (default
+    ``episode_env``) and ``system`` its system prompt (default the probe one).
 
     ``episode_env.rollout_scenario`` imports no ``torch``, so the environment,
     the scoring, the flattening and the group statistics are tested on a CPU;
@@ -363,23 +540,25 @@ def episode_rollouts(
     chat-templated here because the template is a property of the model being
     trained, and the environment is model-agnostic.
     """
+    env = episode_env if env is None else env
     groups: list[dict[str, Any]] = []
     samples: list[Sample] = []
     wire: list[dict[str, Any]] = []
     for scenario in scenarios:
         if episode_seed is None:
             def gen(users, _keys=None):
-                return generate(model, tok, [chat_prompt(tok, u) for u in users], args)
+                return generate(model, tok, [chat_prompt(tok, u, system) for u in users], args)
         else:
             def gen(users, keys, _sid=scenario.scenario_id):
                 seeds = [episode_seed(_sid, index, step) for index, step in keys]
-                return generate(model, tok, [chat_prompt(tok, u) for u in users], args, seeds)
-        group, scenario_samples, scenario_wire = episode_env.rollout_scenario(
+                return generate(model, tok, [chat_prompt(tok, u, system) for u in users], args,
+                                seeds)
+        group, scenario_samples, scenario_wire = env.rollout_scenario(
             scenario,
             args.group,
             policy,
             gen,
-            advantage_fn=advantages,
+            advantage_fn=functools.partial(advantages, sd_floor=getattr(args, "advantage_sd_floor", 0.0)),
             log_root=log_root,
             log_first=args.log_episodes,
             keyed=episode_seed is not None,
@@ -393,6 +572,154 @@ def episode_rollouts(
     return groups, samples, wire
 
 
+def completion_logprobs(model: Any, ids: Any, n_comp: int) -> Any:
+    """log pi of the last ``n_comp`` tokens of ``ids``, shape ``[1, n_comp]``.
+
+    Logits are materialised for the completion positions only (``logits_to_keep``):
+    a multi-turn prompt runs to thousands of tokens, and float32 logits over a
+    152k vocabulary for every prompt position, plus their log-softmax and
+    gradient, cost tens of GB per sample next to fp32 Adam state. Models whose
+    forward has no ``logits_to_keep`` get the full logits, sliced.
+    """
+    try:
+        logits = model(input_ids=ids, logits_to_keep=n_comp + 1).logits
+    except TypeError:
+        logits = model(input_ids=ids).logits
+    logits = logits[:, -(n_comp + 1) : -1, :].float()
+    targets = ids[:, -n_comp:]
+    return torch.log_softmax(logits, dim=-1).gather(2, targets.unsqueeze(-1)).squeeze(-1)
+
+
+def loss_ids(tok: Any, sample: Sample, system: str | None) -> tuple[Any, Any]:
+    """``(prompt_ids, completion_ids)``, each ``[1, n]``, as the loss forward scores them."""
+    prompt_ids = tok(chat_prompt(tok, sample.prompt, system), return_tensors="pt")["input_ids"]
+    sampled = getattr(sample.completion, "token_ids", None)
+    if sampled is not None:
+        comp_ids = torch.tensor([list(sampled)], dtype=prompt_ids.dtype)
+    else:
+        comp_ids = tok(sample.completion, return_tensors="pt",
+                       add_special_tokens=False)["input_ids"]
+    return prompt_ids, comp_ids
+
+
+def versus_generation(completion: Any, prompt_ids: Any, comp_lp: Any) -> dict[str, float]:
+    """How the loss forward's scoring of a sample compares with generation's.
+
+    ``prompt_ids_match`` is 1.0 when the loss conditions on exactly the prompt
+    IDs generation did; ``gen_max_abs_diff`` is the largest per-token gap
+    between the two log-probs of the sampled tokens. Empty when the completion
+    carries no generation record.
+    """
+    out: dict[str, float] = {}
+    gen_prompt = getattr(completion, "prompt_ids", None)
+    if gen_prompt is not None:
+        out["prompt_ids_match"] = float(list(gen_prompt) == prompt_ids[0].tolist())
+    gen = getattr(completion, "logprobs", None)
+    if gen is not None and len(gen) == comp_lp.shape[-1] and len(gen):
+        diff = (comp_lp.detach().double().cpu().reshape(-1)
+                - torch.tensor(gen, dtype=torch.float64)).abs()
+        out["gen_max_abs_diff"] = float(diff.max())
+        out["gen_worst_pos"] = float(int(diff.argmax()))
+    return out
+
+
+def generation_agreement(compared: list[dict[str, Any]]) -> dict[str, Any]:
+    """One iteration's loss-vs-generation agreement, over the samples that carried a record."""
+    diffs = [c["gen_max_abs_diff"] for c in compared if c.get("gen_max_abs_diff") is not None]
+    matches = [c["prompt_ids_match"] for c in compared if c.get("prompt_ids_match") is not None]
+    worst = sorted((c for c in compared if c.get("gen_max_abs_diff") is not None),
+                   key=lambda c: -c["gen_max_abs_diff"])[:10]
+    return {
+        "samples": len(compared),
+        "with_logprobs": len(diffs),
+        "prompt_ids_mismatched": sum(1 for m in matches if m != 1.0),
+        "max_abs_diff": round(max(diffs), 4) if diffs else None,
+        "median_max_abs_diff": round(sorted(diffs)[len(diffs) // 2], 4) if diffs else None,
+        "over_1": sum(d > 1.0 for d in diffs),
+        "over_5": sum(d > 5.0 for d in diffs),
+        "over_20": sum(d > 20.0 for d in diffs),
+        "worst": worst,
+    }
+
+
+def _cached_logprobs(model: Any, prompt_ids: Any, comp_ids: Any) -> Any:
+    """Generation's own route, unbatched: prefill the prompt, then one cached step per token."""
+    out = model(input_ids=prompt_ids, use_cache=True, logits_to_keep=1)
+    past, logits = out.past_key_values, out.logits[:, -1, :]
+    lps = []
+    for t in range(comp_ids.shape[1]):
+        lps.append(torch.log_softmax(logits.float(), dim=-1)[0, comp_ids[0, t]])
+        if t + 1 < comp_ids.shape[1]:
+            out = model(input_ids=comp_ids[:, t : t + 1], past_key_values=past, use_cache=True)
+            past, logits = out.past_key_values, out.logits[:, -1, :]
+    return torch.stack(lps).unsqueeze(0)
+
+
+def loss_forward_battery(model: Any, tok: Any, sample: Sample, system: str | None,
+                         device: str, first_lp: Any) -> dict[str, Any]:
+    """Re-score one sample every way that could disagree, in the trainer's state.
+
+    Diagnostic only (``--diag-battery``). Each entry is the largest per-token
+    gap to generation's log-probs and to the loss forward's own first pass.
+    """
+    prompt_ids, comp_ids = loss_ids(tok, sample, system)
+    n = comp_ids.shape[1]
+    ids = torch.cat([prompt_ids, comp_ids], dim=1).to(device)
+    gen = torch.tensor(sample.completion.logprobs, dtype=torch.float64)
+    first = first_lp.detach().double().cpu().reshape(-1)
+    res: dict[str, Any] = {"prompt_tokens": int(prompt_ids.shape[1]), "completion_tokens": int(n)}
+
+    def rec(name: str, lp: Any) -> None:
+        lp = lp.detach().double().cpu().reshape(-1)
+        res[name] = {"vs_gen": round(float((lp - gen).abs().max()), 4),
+                     "vs_loss": round(float((lp - first).abs().max()), 4),
+                     "worst_vs_gen": int((lp - gen).abs().argmax()), "nll": round(float(-lp.sum()), 4)}
+
+    was_training = model.training
+    use_cache = model.config.use_cache
+    with policy_numerics(device):
+        rec("loss_again_grad", completion_logprobs(model, ids, n))
+    with torch.no_grad():
+        rec("nograd_train_fp32", completion_logprobs(model, ids, n))
+        rec("nograd_full_logits", torch.log_softmax(model(input_ids=ids).logits[:, -(n + 1):-1, :].float(), -1)
+            .gather(2, ids[:, -n:].unsqueeze(-1)).squeeze(-1))
+        model.eval()
+        rec("nograd_eval_fp32", completion_logprobs(model, ids, n))
+        with torch.autocast(device.split(":")[0], dtype=torch.bfloat16):
+            rec("nograd_eval_bf16", completion_logprobs(model, ids, n))
+            model.config.use_cache = True
+            rec("cached_eval_bf16", _cached_logprobs(model, prompt_ids.to(device), comp_ids.to(device)))
+            model.config.use_cache = use_cache
+        gen_prompt = getattr(sample.completion, "prompt_ids", None)
+        res["prompt_ids_match"] = gen_prompt is not None and list(gen_prompt) == prompt_ids[0].tolist()
+        if gen_prompt is not None and not res["prompt_ids_match"]:
+            gp = torch.tensor([list(gen_prompt)], dtype=prompt_ids.dtype)
+            a, b = list(gen_prompt), prompt_ids[0].tolist()
+            k = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+            res["prompt_first_mismatch"] = {"index": k, "gen_len": len(a), "loss_len": len(b),
+                                            "gen": tok.decode(a[max(0, k - 20):k + 20]),
+                                            "loss": tok.decode(b[max(0, k - 20):k + 20])}
+            rec("with_generation_prompt_ids", completion_logprobs(model, torch.cat([gp, comp_ids], 1).to(device), n))
+        if was_training:
+            model.train()
+        torch.cuda.empty_cache()
+        rec("after_empty_cache", completion_logprobs(model, ids, n))
+    retok = tok(str(sample.completion), add_special_tokens=False)["input_ids"]
+    if hasattr(retok, "tolist"):
+        retok = retok.tolist()
+    if retok and isinstance(retok[0], list):
+        retok = retok[0]
+    drawn = list(sample.completion.token_ids)
+    res["retokenised_equal"] = retok == drawn
+    res["retokenised_equal_but_stop"] = retok == drawn[:-1]
+    j = int((first - gen).abs().argmax())
+    toks = comp_ids[0].tolist()
+    res["worst"] = {"pos": j, "token": toks[j], "text": tok.decode([toks[j]]),
+                    "gen_lp": round(float(gen[j]), 4), "loss_lp": round(float(first[j]), 4),
+                    "before": tok.decode(toks[max(0, j - 12):j]), "after": tok.decode(toks[j + 1:j + 6])}
+    return res
+
+
 def sample_loss(
     model: Any,
     tok: Any,
@@ -403,6 +730,7 @@ def sample_loss(
     reference: Any = None,
     reference_device: str | None = None,
     kl_beta: float = 0.0,
+    system: str | None = None,
 ) -> tuple[Any, dict[str, float]] | None:
     """The loss for one (prompt, completion) sample, or None if it has none.
 
@@ -420,31 +748,22 @@ def sample_loss(
     with_kl = reference is not None and kl_beta > 0.0
     if sample.advantage == 0.0 and not with_kl:
         return None
-    prompt_ids = tok(chat_prompt(tok, sample.prompt), return_tensors="pt")["input_ids"]
-    sampled = getattr(sample.completion, "token_ids", None)
-    if sampled is not None:
-        comp_ids = torch.tensor([list(sampled)], dtype=prompt_ids.dtype)
-    else:
-        comp_ids = tok(sample.completion, return_tensors="pt",
-                       add_special_tokens=False)["input_ids"]
+    prompt_ids, comp_ids = loss_ids(tok, sample, system)
     if comp_ids.shape[1] == 0:
         return None
     ids = torch.cat([prompt_ids, comp_ids], dim=1).to(device)
     with policy_numerics(device):
-        logits = model(input_ids=ids).logits[:, :-1, :].float()
-    targets = ids[:, 1:]
-    picked = torch.log_softmax(logits, dim=-1).gather(2, targets.unsqueeze(-1)).squeeze(-1)
-    comp_lp = picked[:, prompt_ids.shape[1] - 1 :]
+        comp_lp = completion_logprobs(model, ids, comp_ids.shape[1])
     loss = -(sample.advantage / total) * comp_lp.sum()
     stats = {"nll": float(-comp_lp.sum().item()), "kl_sum": 0.0, "kl_tokens": 0.0,
-             "pg_abs": float(abs((sample.advantage / total) * comp_lp.sum().item()))}
+             "pg_abs": float(abs((sample.advantage / total) * comp_lp.sum().item())),
+             "max_token_nll": float(-comp_lp.min().item()), "seq_tokens": float(ids.shape[1])}
+    stats.update(versus_generation(sample.completion, prompt_ids, comp_lp))
+    stats["_comp_lp"] = comp_lp.detach()
     if with_kl:
         ref_device = reference_device or device
         with torch.no_grad(), policy_numerics(ref_device):
-            ref_logits = reference(input_ids=ids.to(ref_device)).logits[:, :-1, :].float()
-            ref_lp = torch.log_softmax(ref_logits, dim=-1).gather(
-                2, targets.unsqueeze(-1).to(ref_device)
-            ).squeeze(-1)[:, prompt_ids.shape[1] - 1 :].to(comp_lp.device)
+            ref_lp = completion_logprobs(reference, ids.to(ref_device), comp_ids.shape[1]).to(comp_lp.device)
         logratio = ref_lp - comp_lp
         kl = torch.exp(logratio) - logratio - 1.0
         loss = loss + (kl_beta / total) * kl.sum()
@@ -571,6 +890,46 @@ def publish_checkpoint(model: Any, tok: Any, dest: Path) -> None:
         shutil.rmtree(previous)
 
 
+def snapshot_tensors(model: Any) -> dict[str, Any]:
+    """The weights as the sampler reads them, on the CPU.
+
+    Under :func:`policy_numerics` a linear layer reads its weight cast to bf16, so
+    those weights are stored in bf16 and lose nothing the policy uses. Everything
+    else -- embeddings, norm scales, biases -- is read at its own precision and is
+    stored as it is.
+    """
+    linear = {f"{name}.weight" for name, mod in model.named_modules() if isinstance(mod, torch.nn.Linear)}
+    return {name: (t.detach().to("cpu", torch.bfloat16) if name in linear else t.detach().to("cpu")).contiguous()
+            for name, t in model.state_dict().items()}
+
+
+def publish_snapshot(model: Any, tok: Any, dest: Path) -> None:
+    """An evaluation snapshot at ``dest`` (half a checkpoint's size), complete or absent."""
+    from safetensors.torch import save_file
+
+    partial = dest.with_name(dest.name + ".partial")
+    if partial.exists():
+        shutil.rmtree(partial)
+    partial.mkdir(parents=True)
+    save_file(snapshot_tensors(model), str(partial / "model.safetensors"), metadata={"format": "pt"})
+    model.config.save_pretrained(partial)
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.save_pretrained(partial)
+    tok.save_pretrained(partial)
+    previous = dest.with_name(dest.name + ".previous")
+    if dest.exists():
+        shutil.rmtree(previous, ignore_errors=True)
+        dest.rename(previous)
+    partial.rename(dest)
+    # A reader still mapping the old file leaves an NFS placeholder that defeats rmdir.
+    shutil.rmtree(previous, ignore_errors=True)
+
+
+def writes_checkpoints(args: argparse.Namespace) -> bool:
+    """Whether the run publishes model trees: a ``--diag`` run writes none of them."""
+    return not getattr(args, "diag", False)
+
+
 def update_best(best: dict[str, Any], reward_mean: float, iteration: int,
                 model: Any, tok: Any, dest: Path) -> bool:
     """Publish ``model`` as ``checkpoint-best`` if its rollouts scored best so far.
@@ -677,12 +1036,42 @@ def validate_args(args: argparse.Namespace) -> str | None:
         return "--top-p must be in (0, 1]"
     if not (math.isfinite(args.temperature) and args.temperature > 0):
         return "--temperature must be finite and > 0; sampling at 0 has no spread to normalise"
+    if args.env not in ENVIRONMENTS:
+        return f"--env must be one of {ENVIRONMENTS}"
+    if args.split is not None and args.env != "rocjitsu":
+        return "--split applies to --env rocjitsu only; the probe corpus has no split"
+    if args.split not in (None, "train", "test"):
+        return "--split must be train or test"
+    if args.env == "rocjitsu":
+        import rocjitsu_env
+
+        if args.max_episode_steps != rocjitsu_env.MAX_TURNS:
+            # The system prompt states MAX_TURNS whatever the budget is.
+            return (f"--env rocjitsu needs --max-episode-steps {rocjitsu_env.MAX_TURNS}: "
+                    "the system prompt states that budget")
+    if not (math.isfinite(args.advantage_sd_floor) and args.advantage_sd_floor >= 0):
+        return "--advantage-sd-floor must be finite and >= 0 (0 keeps GRPO's normalisation)"
+    if args.snapshot_every < 0:
+        return "--snapshot-every must be >= 0 (0 writes no snapshots)"
+    if args.scenarios_per_iteration < 0:
+        return "--scenarios-per-iteration must be >= 0 (0 rolls out every scenario)"
+    if (args.diag_step != "adam" or args.diag_battery) and not args.diag:
+        return "--diag-step and --diag-battery are diagnostic: they need --diag"
     return None
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", default="Qwen/Qwen3-8B")
+    parser.add_argument("--env", default="probe", choices=ENVIRONMENTS,
+                        help="probe: archived probe matrices (episode_env); rocjitsu: GPU "
+                             "kernel debugging over an archived tool campaign (rocjitsu_env)")
+    parser.add_argument("--split", default=None,
+                        help="--env rocjitsu: which split of the corpus to train on "
+                             "(default train)")
+    parser.add_argument("--scenarios-per-iteration", type=int, default=0,
+                        help="roll out this many scenarios per iteration, a fresh slice of "
+                             "a per-epoch permutation each time; 0 rolls out all of them")
     parser.add_argument("--corpus-root", default=None,
                         help=f"directory holding the archived matrices "
                              f"(default: ${episode_env.CORPUS_ROOT_ENV})")
@@ -701,6 +1090,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adam-eps", type=float, default=1e-8)
     parser.add_argument("--clip", type=float, default=0.0,
                         help="global gradient-norm clip; 0 disables it")
+    parser.add_argument("--advantage-sd-floor", type=float, default=0.0,
+                        help="divide a group's centred rewards by max(sd, this) instead of sd + eps; "
+                             "0 keeps GRPO's normalisation")
     parser.add_argument("--kl-beta", type=float, default=0.0,
                         help="coefficient on KL to the frozen reference; 0 disables it")
     parser.add_argument("--device", default="cuda:0")
@@ -717,6 +1109,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "decoder layers, so only the tensors outside them move")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
+                        help="sample from the top-k tokens (passed to generate, not inherited from the model dir)")
     parser.add_argument("--max-new-tokens", type=int, default=320)
     parser.add_argument("--gen-batch", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20260918)
@@ -736,6 +1130,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--budget-sec", type=float, default=4800.0,
                         help="stop starting new iterations past this; checkpoint-last "
                              "is written after every iteration that passes its checks")
+    parser.add_argument("--reference-from", type=Path, default=None,
+                        help="load the frozen KL reference from this checkpoint instead of --model: "
+                             "the warm start a run continues from, so the KL term anchors to it")
+    parser.add_argument("--snapshot-every", type=int, default=0,
+                        help="also write snapshot-itNNN (the sampler's weights: bf16 matrices, fp32 "
+                             "vectors) every this many verified iterations; 0 = never")
+    parser.add_argument("--diag", action="store_true",
+                        help="diagnostic run: write no checkpoint and record failed checks "
+                             "without stopping")
+    parser.add_argument("--diag-step", choices=("adam", "adam-lr0", "sgd", "none"), default="adam",
+                        help="with --diag, what the step does: Adam, Adam at lr 0 (moments "
+                             "allocated, weights unchanged), plain SGD at --lr, or nothing")
+    parser.add_argument("--diag-battery", type=int, default=0,
+                        help="re-score up to this many mismatching samples per iteration "
+                             "every way that could disagree (see loss_forward_battery)")
+    parser.add_argument("--diag-threshold", type=float, default=5.0,
+                        help="a sample whose loss forward differs from generation by more "
+                             "than this many nats on some token gets the battery")
     return parser
 
 
@@ -770,9 +1182,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one linear training loop
+    # Before the first GEMM: inert unless AORTA_PREFERRED_BLAS is set.
+    backend = blas_backend.apply()
     from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    from aorta.agent.policy import AgentPolicy
 
     # The candidate filter warns once per dropped name, which is right for an
     # operator and thousands of lines per iteration here; every drop is in the
@@ -781,14 +1193,15 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
 
     started = time.time()
     torch.manual_seed(args.seed)
-    policy = AgentPolicy(max_iterations=args.max_episode_steps)
+    env = environment(args.env)
+    policy = env_policy(env, args.max_episode_steps)
     only = [s.strip() for s in args.scenarios.split(",") if s.strip()]
-    scenarios = episode_env.load_corpus(args.corpus_root, only=only)
-    print(f"[corpus] {len(scenarios)} scenarios, {len(scenarios[0].offered)} offered "
-          f"candidates, G={args.group}", flush=True)
+    scenarios = env_scenarios(env, args, only)
+    system = env_system(env, scenarios)
+    print(f"[corpus] env={args.env} {len(scenarios)} scenarios, G={args.group}, "
+          f"per iteration {args.scenarios_per_iteration or len(scenarios)}", flush=True)
     for scenario in scenarios:
-        print(f"  [corpus] {scenario.scenario_id:<22} {len(scenario.grid.verdicts):>3} cells  "
-              f"resolvers={sorted(scenario.resolvers) or '(unresolvable)'}", flush=True)
+        print(f"  [corpus] {env_describe(env, scenario)}", flush=True)
 
     print(f"[load] {args.init_from or args.model} in {args.param_dtype}", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
@@ -831,9 +1244,10 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
 
     reference = None
     if args.kl_beta > 0.0:
-        print(f"[load] frozen reference on {args.reference_device}", flush=True)
+        print(f"[load] frozen reference {args.reference_from or args.model} on {args.reference_device}",
+              flush=True)
         reference = AutoModelForCausalLM.from_pretrained(
-            args.model, torch_dtype=torch.bfloat16, local_files_only=True,
+            str(args.reference_from or args.model), torch_dtype=torch.bfloat16, local_files_only=True,
             attn_implementation="sdpa",
         ).to(args.reference_device)
         reference.eval()
@@ -841,7 +1255,7 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
         for rp in reference.parameters():
             rp.requires_grad_(False)
 
-    if args.init_from is None:
+    if args.init_from is None and writes_checkpoints(args):
         pre_dir = args.out / "checkpoint-pre"
         print(f"[ckpt] writing PRE -> {pre_dir}", flush=True)
         model.save_pretrained(pre_dir, safe_serialization=True)
@@ -863,14 +1277,22 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
         "betas": list(betas),
         "clip": args.clip,
         "kl_beta": args.kl_beta,
+        "advantage_sd_floor": args.advantage_sd_floor,
         "group": args.group,
         "max_episode_steps": args.max_episode_steps,
         "temperature": args.temperature,
         "top_p": args.top_p,
+        "top_k": args.top_k,
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
         "iteration_offset": args.iteration_offset,
         "init_from": str(args.init_from) if args.init_from else None,
+        "reference_from": str(args.reference_from) if args.reference_from else None,
+        "env": args.env,
+        "split": args.split,
+        "scenarios_per_iteration": args.scenarios_per_iteration,
+        "system_prompt_sha256": hashlib.sha256(system.encode()).hexdigest(),
+        "blas_backend": backend,
         "scenarios": [s.scenario_id for s in scenarios],
         # What the run was scored against, so a later --replay can refuse a
         # corpus whose archives changed under the same scenario IDs.
@@ -906,11 +1328,18 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
             for p in trained.values():
                 p.grad = None
             torch.cuda.empty_cache()
+            todo = iteration_scenarios(scenarios, args.scenarios_per_iteration, it, args.seed)
+            row["scenarios"] = [s.scenario_id for s in todo]
             groups, samples, wire_rows = episode_rollouts(
-                model, tok, scenarios, args, policy,
+                model, tok, todo, args, policy,
                 log_root=(args.out / "episodes" / f"it{it:03d}") if args.log_episodes else None,
+                env=env, system=system,
             )
             row["groups"] = groups
+            summarize = getattr(env, "iteration_metrics", None)
+            if summarize is not None:
+                row["metrics"] = summarize(groups)
+                print(f"  [it{it}] {json.dumps(row['metrics'], sort_keys=True)}", flush=True)
             for record in wire_rows:
                 wire.write(json.dumps({"iteration": it, **record}) + "\n")
             wire.flush()
@@ -937,9 +1366,17 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
                 break
 
             # Before the step: the reward was earned by the weights that
-            # sampled these rollouts, so those are the weights to keep.
-            update_best(best, row["reward_mean"], it, model, tok, args.out / "checkpoint-best")
-            log["best"] = dict(best)
+            # sampled these rollouts, so those are the weights to keep. Not
+            # when iterations roll out different slices: their means do not
+            # rank weights, and each save is a model's size.
+            if not writes_checkpoints(args):
+                log["best"] = {"disabled": "--diag writes no checkpoint"}
+            elif args.scenarios_per_iteration:
+                log["best"] = {"disabled": "--scenarios-per-iteration: iterations score "
+                                           "different scenarios"}
+            else:
+                update_best(best, row["reward_mean"], it, model, tok, args.out / "checkpoint-best")
+                log["best"] = dict(best)
 
             # ---- the policy-gradient step ---------------------------------
             model.config.use_cache = False
@@ -950,18 +1387,53 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
             model.train()
             total = len(samples)
             sums = {"nll": 0.0, "kl_sum": 0.0, "kl_tokens": 0.0, "pg_abs": 0.0}
+            worst = {"max_token_nll": 0.0, "seq_tokens": 0.0}
+            longest = 0.0
+            if tracks_cuda_memory(args.device):
+                torch.cuda.reset_peak_memory_stats(args.device)
+            compared: list[dict[str, Any]] = []
+            batteries: list[dict[str, Any]] = []
+            off_policy = 0
             for sample in samples:
                 result = sample_loss(
                     model, tok, sample, total, device=args.device, reference=reference,
                     reference_device=args.reference_device, kl_beta=args.kl_beta,
+                    system=system,
                 )
                 if result is None:
                     continue
                 loss, stats = result
-                loss.backward()
-                for key in sums:
-                    sums[key] += stats[key]
-                del loss
+                first_lp = stats.pop("_comp_lp", None)
+                if takes_gradient(stats):
+                    loss.backward()
+                    for key in sums:
+                        sums[key] += stats[key]
+                    if stats.get("max_token_nll", 0.0) > worst["max_token_nll"]:
+                        worst = {k: stats[k] for k in worst}
+                else:
+                    off_policy += 1
+                longest = max(longest, stats.get("seq_tokens", 0.0))
+                del loss, result
+                if "gen_max_abs_diff" in stats or "prompt_ids_match" in stats:
+                    compared.append({"scenario_id": sample.scenario_id, "episode": sample.episode,
+                                     "step": sample.step, "seq_tokens": int(stats["seq_tokens"]),
+                                     "gen_max_abs_diff": stats.get("gen_max_abs_diff"),
+                                     "gen_worst_pos": stats.get("gen_worst_pos"),
+                                     "prompt_ids_match": stats.get("prompt_ids_match"),
+                                     "max_token_nll": round(stats["max_token_nll"], 4)})
+                if (args.diag_battery and len(batteries) < args.diag_battery and first_lp is not None
+                        and stats.get("gen_max_abs_diff", 0.0) > args.diag_threshold):
+                    bat = loss_forward_battery(model, tok, sample, system, args.device, first_lp)
+                    bat.update(scenario_id=sample.scenario_id, episode=sample.episode, step=sample.step,
+                               gen_max_abs_diff=stats["gen_max_abs_diff"])
+                    batteries.append(bat)
+                    print(f"  [it{it}] battery {json.dumps(bat, sort_keys=True)}", flush=True)
+            row["loss_vs_generation"] = generation_agreement(compared)
+            row["loss_vs_generation"]["off_policy_excluded"] = off_policy
+            if batteries:
+                row["loss_forward_battery"] = batteries
+            print(f"  [it{it}] loss vs generation {json.dumps({k: v for k, v in row['loss_vs_generation'].items() if k != 'worst'}, sort_keys=True)}",
+                  flush=True)
 
             sq = torch.zeros((), dtype=torch.float64, device=args.device)
             for p in trained.values():
@@ -983,6 +1455,14 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
                           / (total * sums["pg_abs"] + args.kl_beta * sums["kl_sum"]), 6)
                     if sums["kl_tokens"] and (sums["pg_abs"] or sums["kl_sum"]) else None
                 ),
+                # A sampled token the policy itself scores far below its own
+                # sampling distribution means the loss forward disagrees with
+                # the generation forward; the sequence length says which samples.
+                max_token_nll=round(worst["max_token_nll"], 4),
+                max_token_nll_seq_tokens=int(worst["seq_tokens"]),
+                longest_sample_tokens=int(longest),
+                peak_loss_memory_gib=(round(torch.cuda.max_memory_allocated(args.device) / 2**30, 2)
+                                      if tracks_cuda_memory(args.device) else None),
             )
             print(f"  [it{it}] grad norm {grad_norm:.6g} clip coef {coef:.6g}"
                   + (f"  KL/token {row['mean_kl_per_token']:.6f} share "
@@ -997,13 +1477,30 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
                     else torch.zeros_like(trained[n]))
                 for n in audit_names
             }
-            gradient_ok = grad_norm == grad_norm and grad_norm > 0.0
+            forward_check = loss_forward_check(row["max_token_nll"], row["max_token_nll_seq_tokens"],
+                                               row["loss_vs_generation"]["max_abs_diff"],
+                                               off_policy, row["loss_vs_generation"]["with_logprobs"])
+            gradient_ok = grad_norm == grad_norm and grad_norm > 0.0 and forward_check["passed"]
             if gradient_ok:
                 if coef != 1.0:
                     for p in trained.values():
                         if p.grad is not None:
                             p.grad.mul_(coef)
-                opt.step()
+                if args.diag_step == "adam":
+                    opt.step()
+                elif args.diag_step == "adam-lr0":
+                    for group in opt.param_groups:
+                        group["lr"] = 0.0
+                    opt.step()
+                    for group in opt.param_groups:
+                        group["lr"] = args.lr
+                elif args.diag_step == "sgd":
+                    with torch.no_grad():
+                        for p in trained.values():
+                            if p.grad is not None:
+                                p.add_(p.grad, alpha=-args.lr)
+                if args.diag_step != "adam":
+                    row["diag_step"] = args.diag_step
             fp_post = {n: fingerprint(t) for n, t in trained.items()}
             # Against the copy taken at load, byte for byte: the control must
             # never move, so every iteration is checked against the start.
@@ -1020,11 +1517,20 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
             cosine = dot / ((nrm_d**0.5 * nrm_g**0.5) + 1e-30)
             row["checks"] = update_checks(fp_pre, fp_post, frozen_identical,
                                           grad_norm, cosine)
+            row["checks"][LOSS_FORWARD_CHECK] = forward_check
             for key, check in row["checks"].items():
                 mark = "PASS" if check["passed"] else ("warn" if check.get("advisory") else "FAIL")
                 print(f"  [it{it}] check {key}: {mark}", flush=True)
-            failed = [k for k in GATING_CHECKS if not row["checks"][k]["passed"]]
+            failed = [k for k in (*GATING_CHECKS, LOSS_FORWARD_CHECK) if not row["checks"][k]["passed"]]
             row["elapsed_sec"] = round(time.time() - t_it, 1)
+            if args.diag:
+                # Diagnostic runs bisect the step itself (an unmoved tensor is
+                # the point of --diag-step none) and write no checkpoint.
+                row["verdict"] = f"diag: checks failed {failed}" if failed else "diag"
+                log["iterations"].append(row)
+                write_log()
+                print(f"  [it{it}] done in {row['elapsed_sec']}s (diag, no checkpoint)", flush=True)
+                continue
             if failed:
                 # Before the checkpoint, so checkpoint-last is always the last
                 # iteration whose update was verified.
@@ -1038,7 +1544,11 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
             # Disk policy: pre, last and best only -- a checkpoint per
             # iteration costs a model's size each and adds no information.
             publish_checkpoint(model, tok, args.out / "checkpoint-last")
-            log["best"] = dict(best)
+            if args.snapshot_every and it % args.snapshot_every == 0:
+                publish_snapshot(model, tok, args.out / f"snapshot-it{it:03d}")
+                row["snapshot"] = f"snapshot-it{it:03d}"
+            if not args.scenarios_per_iteration:
+                log["best"] = dict(best)
             log["last_verified_iteration"] = it
             log["iterations"].append(row)
             write_log()
@@ -1073,7 +1583,7 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
         print(f"  it{row['iteration']}: reward {row.get('reward_mean'):+.4f}  "
               f"parse {row.get('parse_fraction')}  grad norm "
               f"{row.get('grad_norm', float('nan')):.6g}  {row.get('verdict', '')}")
-    if log.get("last_verified_iteration") is None:
+    if log.get("last_verified_iteration") is None and not args.diag:
         return EXIT_FAILED
     return status
 
