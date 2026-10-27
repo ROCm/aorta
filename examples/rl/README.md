@@ -31,6 +31,9 @@ The multi-step episode path, its predictions and one paired evaluation:
 | [`blas_backend.py`](blas_backend.py) | Opt-in choice of PyTorch's BLAS library before the first GEMM, recorded in the run's config | `torch` |
 | [`eval_rocjitsu.py`](eval_rocjitsu.py) | A fixed checkpoint over a rocjitsu split, paired episode for episode with a control and with the CPU baselines | one GPU, `transformers` |
 | [`merge_columns.py`](merge_columns.py) | The shards of one evaluation column put back into the column an unsharded run writes | the shards and the corpus |
+| [`rocjitsu_demos.py`](rocjitsu_demos.py) | Solved episodes harvested as demonstrations, each replayed and re-scored first | a recorded corpus |
+| [`mix_demos.py`](mix_demos.py) | Whole-episode replay mixing of demonstration files for a continual cycle | nothing |
+| [`sft_rocjitsu.py`](sft_rocjitsu.py) | Supervised fine-tuning on demonstrations with the GRPO trainer's model, numerics and loss | one GPU, `transformers` |
 
 ## `probe_weight_transfer.py`
 
@@ -680,3 +683,52 @@ the tests cover the pairing rules, the resume refusals, `--shard` and the merge.
 The merge tests run on a synthetic column and, where `$AORTA_RJ_TEST_COLUMN`
 names a recorded one (with `$AORTA_RJ_TEST_CORPUS_V2` for its corpus), on that
 too.
+
+## Expert iteration: `rocjitsu_demos.py`, `mix_demos.py`, `sft_rocjitsu.py`
+
+One cycle rolls a policy out on the train split, keeps the episodes the
+environment scores as solved, mixes in replay from earlier cycles, and
+fine-tunes on the result.
+
+- **`rocjitsu_demos.py`** harvests demonstrations. Every episode is replayed reply
+  by reply through `rocjitsu_env.Episode`, so each step's prompt is exactly the
+  one the trainer renders, and only solved episodes are kept: the exact location
+  on a faulty scenario, "none" on a clean control. The sources are an evaluation
+  column (`--column`, accepted only if it was generated under the system prompt
+  the demonstrations are built under, or under the profile `--generated-under`
+  names), a trainer's `wire.jsonl` (`--wire`, refused unless the `train-log.json`
+  beside it records that system prompt, or if a replayed reward differs from the
+  recorded one), the scripted evidence-window recipe
+  (`--recipe`, which reads only what the agent was shown), and `--quirk-demos N`
+  copies of verified episodes on clean controls whose only waitcheck diagnostics
+  are its known `s_load` write-after-write report. It keeps at most
+  `--max-wire-per-scenario` distinct episodes per scenario, the highest-scoring
+  first with `--best-first`. Each input is replayed under the turn budget it
+  recorded, and an episode is named by its input's resolved path, its trainer
+  iteration and its index.
+- **`mix_demos.py`** mixes demonstration files for a continual cycle: `PATH:N`
+  takes N whole episodes from a file, so an episode is kept or dropped with all
+  of its turns. Every input must have been rendered under one system prompt.
+- **`sft_rocjitsu.py`** fine-tunes with the GRPO trainer's model, numerics and
+  loss: each step is a `(prompt, completion)` sample with advantage +1 and no
+  KL term, so the objective is the completion's mean log-likelihood, end-of-turn
+  token included. It refuses demonstrations rendered under another system
+  prompt, and `model.embed_tokens` stays frozen, so `verify_checkpoint_delta.py`
+  audits the step as it does a GRPO one. When the starting checkpoint is not
+  stored in `--param-dtype` it also writes `checkpoint-pre`, the model as
+  loaded, since the audit pairs tensors of one dtype.
+
+```bash
+python examples/rl/eval_rocjitsu.py --corpus-root <corpus> --split train --out <cycle>/gen \
+    --before <policy> --column before --episodes-per-scenario 8 --temperature 1.0
+python examples/rl/rocjitsu_demos.py --corpus-root <corpus> --split train --out <cycle>/new.jsonl \
+    --column <cycle>/gen/before.json --best-first
+python examples/rl/mix_demos.py --out <cycle>/mix.jsonl <cycle>/new.jsonl <previous>/mix.jsonl:300
+python examples/rl/sft_rocjitsu.py --demos <cycle>/mix.jsonl --corpus-root <corpus> --out <cycle>/sft \
+    --init-from <policy> --epochs 1 --lr 1e-5 --batch 16 --grad-checkpointing
+```
+
+The harvest tests run on a small synthetic corpus, and again on the recorded
+corpus-v2 archive where `$AORTA_RJ_TEST_CORPUS_V2` names one; the tests of the
+recipe and the quirk demonstrations need that archive. Fine-tuning itself needs
+a GPU and `transformers`.
