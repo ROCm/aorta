@@ -182,12 +182,12 @@ def test_survey_error_and_warn_never_flip_the_gate():
     html = gen.build_html([run], survey=survey)
     md = gen.build_summary_md([run], survey=survey)
     # guardrail gate stays healthy despite survey warn/error rows
-    assert "HEALTHY" in html
+    assert '<span class="health ok">Healthy</span>' in html
     assert "REGRESSION" not in html
-    assert "**HEALTHY**" in md and "**REGRESSION**" not in md
-    # survey rows are observed-only (explicit note on the tab)
-    assert "This tab is observational only." in html
-    assert "Findings represent observed behavior, not regressions." in html
+    assert "**Healthy**" in md and "**REGRESSION**" not in md
+    # the observed-only note lives in the info panel
+    assert "Workload survey is observed only." in html
+    assert "Findings represent observed behavior, not a gate result." in html
     # each case drills down to its published report link
     for entry in survey:
         assert entry["report_rel"] in html
@@ -296,7 +296,8 @@ def test_rendered_dashboard_output_is_public_safe(tmp_path, monkeypatch):
 
     # Tab 2 populated with the survey kernels and both sanitizers; gate healthy
     assert "hipblaslt_gemm_f32_nt_128x128" in html
-    assert "Workload survey (observed-only)" in html
+    assert "Workload survey" in html
+    assert "observed-only" not in html.split("<div class=tabbar>", 1)[1].split("</div>", 1)[0]
     parsed = json.loads(data)
     assert len(parsed[0]["survey"]) == 2
     assert parsed[0]["gate"] is True

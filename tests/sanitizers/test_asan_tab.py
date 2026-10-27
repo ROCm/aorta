@@ -108,7 +108,7 @@ def test_tab_joins_the_nightly_tabs():
     assert at("id=tab-survey") < at("id=tab-asan") < at("<div class=tabbar>")
     tabbar = page[at("<div class=tabbar>") :]
     tabbar = tabbar[: tabbar.index("</div>")]
-    assert '<label for="tab-asan">AddressSanitizer (manual run)</label>' in tabbar
+    assert '<label for="tab-asan">Manual runs</label>' in tabbar
     assert at("id=panel-survey") < at("<section class=tabpanel id=panel-asan>")
     # The panel has to stay a sibling of the radios, inside .tabs, for :checked to show it.
     assert page.endswith("</table></div></section>\n  </section>\n  </div>\n</div></body></html>\n")
@@ -132,7 +132,7 @@ def _guardrails_only_page() -> str:
     assert end is not None
     page = page[:survey] + page[end.start(1) :]
     page = page.replace("\n  <input type=radio name=santab id=tab-survey class=tabradio>", "")
-    page = page.replace('\n    <label for="tab-survey">Workload survey (observed-only)</label>', "")
+    page = page.replace('\n    <label for="tab-survey">Workload survey</label>', "")
     assert "tab-survey" not in page.split("<style>", 1)[1].split("</style>", 1)[1]
     return page
 
@@ -143,7 +143,7 @@ def test_tab_joins_a_guardrails_only_page():
     assert at("id=tab-guardrails") < at("id=tab-asan") < at("<div class=tabbar>")
     tabbar = joined[at("<div class=tabbar>") :]
     tabbar = tabbar[: tabbar.index("</div>")]
-    assert '<label for="tab-asan">AddressSanitizer (manual run)</label>' in tabbar
+    assert '<label for="tab-asan">Manual runs</label>' in tabbar
     assert at("id=panel-guardrails") < at("<section class=tabpanel id=panel-asan>")
     assert joined.endswith("</table></div></section>\n  </section>\n  </div>\n</div></body></html>\n")
     # A tab, not the always-visible section the no-runs page gets.
@@ -167,7 +167,7 @@ def test_tab_only_adds_to_the_nightly_page():
 
 def test_no_runs_page_gets_the_results_as_a_section():
     page = gen.add_asan_tab(gen.build_html([]), _runs())
-    assert "<section id=panel-asan><h2 class=asan-heading>AddressSanitizer (manual run)</h2>" in page
+    assert "<section id=panel-asan><h2 class=asan-heading>Manual runs</h2>" in page
     assert "tabpanel id=panel-asan" not in page
     assert "No sanitizer runs yet." in page
     assert page.endswith("</table></div></section></section>\n</div></body></html>\n")
@@ -207,7 +207,7 @@ def _table(page: str) -> list[tuple[str, str, str, str, str]]:
     """The tab's rows as (what ran, result, result colour, kernels checked, note)."""
     rows = re.findall(
         r'<tr><td><details class="asan-row"><summary>(.*?)</summary>.*?</details></td>'
-        r'<td><span class="asan-r (\w+)">(.*?)</span></td>'
+        r'<td><span class="status"><span class="dot (\w+)"></span>(.*?)</span></td>'
         r"<td class=num>(.*?)</td><td>(.*?)</td></tr>",
         page,
     )

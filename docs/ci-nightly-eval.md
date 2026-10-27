@@ -354,7 +354,6 @@ branch:
 ```bash
 tmp="$(mktemp -d)"
 git clone --depth 1 --branch sanitizer-results https://github.com/ROCm/aorta.git "$tmp"
-rm -rf "$tmp"/dashboard/runs/*/survey
 python scripts/sanitizers/gen_sanitizer_dashboard.py \
   --history-root "$tmp/dashboard/runs" --keep 30 --keep-logs 7 \
   --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
