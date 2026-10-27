@@ -45,7 +45,7 @@ from aorta.probe.sandbox import MAX_LOG_BYTES
 # Bumped per the policy above; consumers MAY pin to a known version
 # in their CI to detect platform-side pattern changes that would
 # alter ``failure_detectors_fired`` for already-archived runs.
-BUILTIN_PATTERN_VERSION = "1"
+BUILTIN_PATTERN_VERSION = "2"
 
 # Detector IDs. The prefix is uniformly ``tier4:`` so a reader of
 # ``failure_detectors_fired`` can route by prefix (``tier1:`` for
@@ -59,6 +59,7 @@ DETECTOR_ROCM_ERROR = "tier4:rocm_error"
 DETECTOR_NCCL_RCCL_ERROR = "tier4:nccl_rccl_error"
 DETECTOR_COLLECTIVE_TIMEOUT = "tier4:collective_timeout"
 DETECTOR_NAN_SIGNATURE = "tier4:nan_signature"
+DETECTOR_ASAN_MEMORY_ERROR = "tier4:asan_memory_error"
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,20 @@ _BUILTIN_PATTERNS: tuple[BuiltinPattern, ...] = (
         # NaN'. Common shapes across PyTorch, TF, JAX trainers.
         regex=re.compile(r"loss(?: is)? NaN|loss=nan", re.IGNORECASE),
         sample="loss is NaN",
+    ),
+    BuiltinPattern(
+        detector_id=DETECTOR_ASAN_MEMORY_ERROR,
+        description="AddressSanitizer memory-error report (host or GPU device)",
+        # The report header, which host and device reports share. Device reports
+        # print no 'SUMMARY:' line, so matching that would miss every GPU
+        # finding; LeakSanitizer reports say 'ERROR: LeakSanitizer' and stay out.
+        # Not anchored, matching the ASan backend's parser: the header can follow
+        # unterminated output or colour codes, or carry log_exe_name's prefix.
+        regex=re.compile(r"==(?:[^=\s]+==)?\d+==ERROR: AddressSanitizer: "),
+        sample=(
+            "==4242==ERROR: AddressSanitizer: heap-buffer-overflow on amdgpu "
+            "device 0 at pc 0x7bf4d3f0a820"
+        ),
     ),
 )
 
@@ -232,6 +247,7 @@ __all__ = [
     "ALL_DETECTOR_IDS",
     "BUILTIN_PATTERN_VERSION",
     "BuiltinPattern",
+    "DETECTOR_ASAN_MEMORY_ERROR",
     "DETECTOR_COLLECTIVE_TIMEOUT",
     "DETECTOR_CUDA_ERROR",
     "DETECTOR_HIP_ERROR",

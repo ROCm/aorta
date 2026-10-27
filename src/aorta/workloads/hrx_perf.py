@@ -49,7 +49,9 @@ from aorta.workloads.hrx import (
     _gpu_available,
     _missing_preload_objects,
     _persist_full_logs,
+    _refuse_hrx_runtime_under_asan,
     _resolve_hipcc,
+    _sanitizer_build,
     _validated_arch,
 )
 
@@ -168,6 +170,7 @@ class HrxPerfWorkload(Workload):
         self._size, self._iters, self._warmup = size, iters, warmup
 
         self._arch = _validated_arch(self.config.get("gpu_arch", _DEFAULT_ARCH))
+        self._sanitize = _sanitizer_build(self.config, self._arch, "hrx_perf")
         # Validate the timeout up front: subprocess.run(..., timeout=<=0) would
         # raise at run() time and be misclassified as an infrastructure failure.
         self._timeout = int(self.config.get("timeout_sec", _DEFAULT_TIMEOUT_SEC))
@@ -214,6 +217,7 @@ class HrxPerfWorkload(Workload):
                 "so the cell would silently measure stock HIP. Fix the path(s) "
                 "in the cell's extra_env (absolute paths)."
             )
+        _refuse_hrx_runtime_under_asan(self._sanitize, "hrx_perf")
 
         hipcc = _resolve_hipcc(self.config.get("hipcc"))
         if hipcc is None:
@@ -249,14 +253,21 @@ class HrxPerfWorkload(Workload):
             self._owns_build_dir = True
 
         self._binary = self._build()
+        if self._sanitize.asan:
+            from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
+                declare_code_objects,
+            )
+
+            declare_code_objects([self._binary], loaded_by=self._binary)
 
     def _build(self) -> Path:
         # Artifacts live in an arch subdir so a shared build_dir reused across
         # differing --offload-arch builds can't reuse a benchmark compiled for a
         # different GPU arch (the binary name encodes the bench but not the
         # arch). size/iters/warmup are runtime argv, not compile-time, so arch
-        # is the only compile-time discriminator that needs isolating.
-        build_root = self._build_dir / self._arch
+        # is the only compile-time discriminator that needs isolating -- apart
+        # from an ASan build, which gets its own subdir.
+        build_root = self._build_dir / self._sanitize.build_subdir
         build_root.mkdir(parents=True, exist_ok=True)
         binary = build_root / self._spec.binary
         # Reuse an already-built benchmark. setup() runs per trial, so a run
@@ -273,7 +284,9 @@ class HrxPerfWorkload(Workload):
         cmd = [
             self._hipcc,
             "-O3",
-            f"--offload-arch={self._arch}",
+            *self._sanitize.compile_flags,
+            *self._sanitize.link_flags,
+            f"--offload-arch={self._sanitize.offload_arch}",
             str(_KERNELS_DIR / self._spec.source),
             "-o",
             str(binary),

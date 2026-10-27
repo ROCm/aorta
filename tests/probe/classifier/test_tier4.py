@@ -30,6 +30,7 @@ FIXTURES = Path(__file__).parent.parent / "fixtures" / "tier4_logs"
         ("nccl_rccl_error.txt", tier4_patterns.DETECTOR_NCCL_RCCL_ERROR),
         ("collective_timeout.txt", tier4_patterns.DETECTOR_COLLECTIVE_TIMEOUT),
         ("nan_signature.txt", tier4_patterns.DETECTOR_NAN_SIGNATURE),
+        ("asan_memory_error.txt", tier4_patterns.DETECTOR_ASAN_MEMORY_ERROR),
     ],
 )
 def test_each_fixture_fires_its_detector(fixture_name, detector_id):
@@ -58,9 +59,25 @@ def test_multiple_patterns_in_one_log():
     assert tier4_patterns.DETECTOR_HIP_ERROR in fired
 
 
-def test_builtin_pattern_version_is_string_one():
-    """The version starts at '1' for the Phase-2 PR (rubric §X.1)."""
-    assert BUILTIN_PATTERN_VERSION == "1"
+def test_builtin_pattern_version_is_string_two():
+    """'1' for the Phase-2 PR (rubric §X.1); '2' adds tier4:asan_memory_error."""
+    assert BUILTIN_PATTERN_VERSION == "2"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # LeakSanitizer shares the header shape; a leak is not an illegal access.
+        "==580==ERROR: LeakSanitizer: detected memory leaks\n",
+        # The stock HIP runtime's abort when device ASan fires with no handler:
+        # a detection without a report, which the ASan backend calls an error.
+        ":0:/src/clr/rocclr/device/devhostcall.cpp:122 : 1 us:  "
+        "Hostcall: no handler found for service ID 4\n",
+        "ASan runtime does not come first in initial library list\n",
+    ],
+)
+def test_asan_detector_ignores_asan_adjacent_noise(text):
+    assert tier4_patterns.DETECTOR_ASAN_MEMORY_ERROR not in scan(text)
 
 
 def test_catalogue_entries_have_compiled_regex():
@@ -107,9 +124,9 @@ def test_window_overlap_catches_straddling_match(monkeypatch):
     assert len(straddling) > 100, "fixture must exceed MAX_LOG_BYTES to force chunking"
     # Sanity: the traceback header crosses byte 100 (window seam).
     header_start = straddling.index("Traceback")
-    assert header_start < 100 < header_start + len("Traceback (most recent call last):"), (
-        "fixture must place the header *across* the seam to exercise the overlap"
-    )
+    assert (
+        header_start < 100 < header_start + len("Traceback (most recent call last):")
+    ), "fixture must place the header *across* the seam to exercise the overlap"
 
     fired = scan(straddling)
     assert tier4_patterns.DETECTOR_PYTHON_TRACEBACK in fired, (

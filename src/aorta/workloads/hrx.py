@@ -128,6 +128,58 @@ def _build_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in _RUNTIME_ROUTING_VARS}
 
 
+@dataclass(frozen=True)
+class _SanitizerBuild:
+    """How this run builds its HIP code: as configured, or with ASan."""
+
+    offload_arch: str
+    compile_flags: tuple[str, ...] = ()
+    link_flags: tuple[str, ...] = ()
+    build_subdir: str = ""
+
+    @property
+    def asan(self) -> bool:
+        return bool(self.compile_flags)
+
+
+def _sanitizer_build(config: dict[str, Any], arch: str, workload: str) -> _SanitizerBuild:
+    """The build for ``arch`` under ``aorta run --sanitizer asan`` (or without it).
+
+    Device ASan only instruments an xnack+ code object -- any other target
+    builds cleanly and checks nothing -- so ``:xnack+`` is added, and a target
+    that turns XNACK off is refused. ASan builds go to their own
+    ``<arch>-asan`` directory so a reused build directory never hands an
+    uninstrumented binary to an ASan run, or the reverse.
+    """
+    if config.get("_aorta_sanitizer") != "asan":
+        return _SanitizerBuild(offload_arch=arch, build_subdir=arch)
+    processor, *features = arch.split(":")
+    if "xnack-" in features:
+        raise ValueError(
+            f"{workload}: gpu_arch {arch!r} turns XNACK off, and device ASan only "
+            "instruments xnack+ code; drop ':xnack-' for an ASan run"
+        )
+    if "xnack+" not in features:
+        features.append("xnack+")
+    return _SanitizerBuild(
+        offload_arch=":".join([processor, *features]),
+        compile_flags=("-fsanitize=address", "-g"),
+        link_flags=("-shared-libsan",),
+        build_subdir=f"{arch}-asan",
+    )
+
+
+def _refuse_hrx_runtime_under_asan(build: _SanitizerBuild, workload: str) -> None:
+    """An HRX cell replaces the HIP runtime, and ASan reports only through its own."""
+    if build.asan and os.environ.get("HRX_GPU_DRIVER"):
+        raise RuntimeError(
+            f"{workload}: HRX_GPU_DRIVER routes the probe through the HRX runtime, but "
+            "device ASan reports through the ASan build of the stock HIP runtime -- "
+            "under HRX a detection would abort without a report. Run the stock-HIP "
+            "cell under --sanitizer asan."
+        )
+
+
 def _validated_arch(arch: str) -> str:
     """Return ``arch`` if it is safe to use as a build-directory component.
 
@@ -329,6 +381,8 @@ class HrxWorkload(Workload):
         self._probe = self._validated_probe()
         self._spec = _PROBES[self._probe]
         self._arch = _validated_arch(self.config.get("gpu_arch", _DEFAULT_ARCH))
+        self._sanitize = _sanitizer_build(self.config, self._arch, "hrx")
+        _refuse_hrx_runtime_under_asan(self._sanitize, "hrx")
         # Validate here: subprocess.run(..., timeout=<=0) would raise at run()
         # time and be misclassified as an infrastructure failure. Fail fast in
         # setup() with a clear config error instead.
@@ -385,6 +439,17 @@ class HrxWorkload(Workload):
             self._owns_build_dir = True
 
         self._binary = self._build()
+        if self._sanitize.asan:
+            from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
+                declare_code_objects,
+            )
+
+            # The module probe loads its kernel with hipModuleLoad, which the
+            # run's loader record cannot see.
+            objects = [self._binary]
+            if self._spec.kernel_object:
+                objects.append(self._build_root() / self._spec.kernel_object)
+            declare_code_objects(objects, loaded_by=self._binary)
 
     def _run_hipcc(self, args: list[str], what: str) -> None:
         cmd = [self._hipcc, *args]
@@ -408,9 +473,10 @@ class HrxWorkload(Workload):
         run the wrong thing. Isolating artifacts in a ``<build_dir>/<arch>/``
         subdir makes reuse arch-safe; the probe loads its code object from its
         own exe directory (``/proc/self/exe``), so the relative name still
-        resolves inside the subdir.
+        resolves inside the subdir. An ASan build has its own subdir (see
+        :func:`_sanitizer_build`).
         """
-        root = self._build_dir / self._arch
+        root = self._build_dir / self._sanitize.build_subdir
         root.mkdir(parents=True, exist_ok=True)
         return root
 
@@ -441,11 +507,13 @@ class HrxWorkload(Workload):
             return binary
         # Standalone code object first (module path only), placed next to the
         # binary because the probe loads it from its own exe directory.
+        sanitize = self._sanitize
         if spec.kernel_source and spec.kernel_object:
             self._run_hipcc(
                 [
                     "--genco",
-                    f"--offload-arch={self._arch}",
+                    *sanitize.compile_flags,
+                    f"--offload-arch={sanitize.offload_arch}",
                     str(_KERNELS_DIR / spec.kernel_source),
                     "-o",
                     str(build_root / spec.kernel_object),
@@ -455,7 +523,9 @@ class HrxWorkload(Workload):
         self._run_hipcc(
             [
                 "-O2",
-                f"--offload-arch={self._arch}",
+                *sanitize.compile_flags,
+                *sanitize.link_flags,
+                f"--offload-arch={sanitize.offload_arch}",
                 str(_KERNELS_DIR / spec.source),
                 "-o",
                 str(binary),

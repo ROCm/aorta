@@ -1,0 +1,66 @@
+=================================================================
+==250==ERROR: AddressSanitizer: heap-use-after-free on amdgpu device 0 at pc 0x7b48c446a620
+WRITE of size 4 in workgroup id (0,31497,1)
+  #0 0x7b48c446a620 in write_n(int*, int) at /work/src/asan_probe.hip:45:19
+
+Thread ids and accessed addresses:
+192 : 0x7f48c7515300 193 : 0x7f48c7515304 194 : 0x7f48c7515308 195 : 0x7f48c751530c 196 : 0x7f48c7515310 197 : 0x7f48c7515314 198 : 0x7f48c7515318 199 : 0x7f48c751531c
+200 : 0x7f48c7515320 201 : 0x7f48c7515324 202 : 0x7f48c7515328 203 : 0x7f48c751532c 204 : 0x7f48c7515330 205 : 0x7f48c7515334 206 : 0x7f48c7515338 207 : 0x7f48c751533c
+208 : 0x7f48c7515340 209 : 0x7f48c7515344 210 : 0x7f48c7515348 211 : 0x7f48c751534c 212 : 0x7f48c7515350 213 : 0x7f48c7515354 214 : 0x7f48c7515358 215 : 0x7f48c751535c
+216 : 0x7f48c7515360 217 : 0x7f48c7515364 218 : 0x7f48c7515368 219 : 0x7f48c751536c 220 : 0x7f48c7515370 221 : 0x7f48c7515374 222 : 0x7f48c7515378 223 : 0x7f48c751537c
+224 : 0x7f48c7515380 225 : 0x7f48c7515384 226 : 0x7f48c7515388 227 : 0x7f48c751538c 228 : 0x7f48c7515390 229 : 0x7f48c7515394 230 : 0x7f48c7515398 231 : 0x7f48c751539c
+232 : 0x7f48c75153a0 233 : 0x7f48c75153a4 234 : 0x7f48c75153a8 235 : 0x7f48c75153ac 236 : 0x7f48c75153b0 237 : 0x7f48c75153b4 238 : 0x7f48c75153b8 239 : 0x7f48c75153bc
+240 : 0x7f48c75153c0 241 : 0x7f48c75153c4 242 : 0x7f48c75153c8 243 : 0x7f48c75153cc 244 : 0x7f48c75153d0 245 : 0x7f48c75153d4 246 : 0x7f48c75153d8 247 : 0x7f48c75153dc
+248 : 0x7f48c75153e0 249 : 0x7f48c75153e4 250 : 0x7f48c75153e8 251 : 0x7f48c75153ec 252 : 0x7f48c75153f0 253 : 0x7f48c75153f4 254 : 0x7f48c75153f8 255 : 0x7f48c75153fc
+
+0x7f48c7515300 is located 768 bytes inside of 4000-byte region [0x7f48c7515000,0x7f48c7515fa0)
+freed by thread T0 here:
+    #0 0x7f48d501b331 in hsa_amd_memory_pool_free /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:812:3
+    #1 0x7f48d3964801  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3a801) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+
+previously allocated by thread T0 here:
+    #0 0x7f48d501b206 in hsa_amd_memory_pool_allocate /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:804:3
+    #1 0x7f48d3965226  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3b226) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #2 0x7f48d39821bc  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa581bc) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #3 0x7f48d3962242  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa38242) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #4 0x7f48d392f813  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa05813) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #5 0x7f48d392f028  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa05028) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #6 0x7f48d396592e  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3b92e) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #7 0x7f48d3937447  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa0d447) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #8 0x7f48d34830de  (/opt/rocm/lib/asan/libamdhip64.so.7+0x5590de) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #9 0x0000002239a1 in hipError_t hipMalloc<int>(int**, unsigned long) /opt/rocm-7.0.2/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:9853:12
+    #10 0x0000002239a1 in main /work/src/asan_probe.hip:93:3
+    #11 0x7f48d29f1d8f  (/lib/x86_64-linux-gnu/libc.so.6+0x29d8f) (BuildId: 4f7b0c955c3d81d7cac1501a2498b69d1d82bfe7)
+
+Shadow bytes around the buggy address:
+  0x7f48c7515080: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515100: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515180: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515200: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515280: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+=>0x7f48c7515300:[fd]fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515380: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515400: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515480: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515500: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x7f48c7515580: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==250==ABORTING

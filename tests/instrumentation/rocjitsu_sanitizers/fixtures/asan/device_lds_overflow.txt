@@ -1,0 +1,65 @@
+=================================================================
+==266==ERROR: AddressSanitizer: heap-buffer-overflow on amdgpu device 0 at pc 0x7b5cc475df98
+WRITE of size 4 in workgroup id (0,0,4294967295)
+  #0 0x7b5cc475df98 in lds_oob(int*, int) at /work/src/asan_probe.hip:69:8
+
+Thread ids and accessed addresses:
+64 : 0x7b1ca10011c0
+
+0x7b1ca10011c0 is 288 bytes above an address from a device malloc (or free) call of size 352 from
+  #0 0xfffffffffffffffc in ?? at ??:0:0
+
+0x7b1ca10011c0 is located 448 bytes inside of 2097152-byte region [0x7b1ca1001000,0x7b1ca1201000)
+allocated by thread T5 here:
+    #0 0x7f5cd3688206 in hsa_amd_memory_pool_allocate /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:804:3
+    #1 0x7f5cd1fd2226  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa3b226) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #2 0x7f5cd1fef4d4  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa584d4) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #3 0x7f5cd1fcf242  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa38242) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #4 0x7f5cd1f9c813  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa05813) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #5 0x7f5cd1f9c028  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa05028) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #6 0x7f5cd1fe1d6d  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa4ad6d) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #7 0x7f5cd1fe2713  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa4b713) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #8 0x7f5cd1fb8206  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa21206) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #9 0x7f5cd1f6fa65  (/opt/rocm/lib/asan/libamdhip64.so.7+0x9d8a65) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #10 0x7f5cd369f396 in asan_thread_start(void*) /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:240:28
+
+Thread T5 created by T0 here:
+    #0 0x7f5cd3684671 in pthread_create /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:251:3
+    #1 0x7f5cd1f6ffa1  (/opt/rocm/lib/asan/libamdhip64.so.7+0x9d8fa1) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #2 0x7f5cd1fb7af2  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa20af2) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #3 0x7f5cd1fe44aa  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa4d4aa) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #4 0x7f5cd1fe39e6  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa4c9e6) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+    #5 0x7f5cd1fdbae3  (/opt/rocm/lib/asan/libamdhip64.so.7+0xa44ae3) (BuildId: 6629337bed05411cf93d51729ebc8ae6606495b7)
+
+Shadow bytes around the buggy address:
+  0x7b1ca1000f00: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7b1ca1000f80: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7b1ca1001000: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7b1ca1001080: fa fa fa fa 00 fa fa fa 00 00 00 00 00 00 00 00
+  0x7b1ca1001100: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7b1ca1001180: 00 00 00 00 00 00 00 00[fa]fa fa fa fa fa fa fa
+  0x7b1ca1001200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7b1ca1001280: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7b1ca1001300: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7b1ca1001380: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7b1ca1001400: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==266==ABORTING

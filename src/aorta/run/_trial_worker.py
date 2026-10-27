@@ -116,6 +116,7 @@ def _run_request_from_dict(data: dict[str, Any]):
         mitigation_index=int(data.get("mitigation_index", 0)),
         save_logs=bool(data.get("save_logs", False)),
         env_probe=(dict(data["env_probe"]) if data.get("env_probe") is not None else None),
+        sanitizer=data.get("sanitizer"),
     )
 
 
