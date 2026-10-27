@@ -318,10 +318,40 @@ def test_a_replay_refuses_a_column_played_against_another_archive(archive, tmp_p
     {"choices": [{"message": "x"}]},
     {"choices": [{"message": {"content": ["x"]}}]},
     {"choices": [{"message": {"content": "x", "reasoning_content": {"a": 1}}}]},
-], ids=["null-choice", "string-choice", "string-message", "list-content", "dict-reasoning"])
+    {"choices": [{}]},
+    {"choices": [{"message": None}]},
+    {"choices": [{"message": {"content": None}}]},
+    {"choices": [{"message": {"content": "x"}}], "usage": ["unexpected"]},
+    {"choices": [{"message": {"content": "x"}}], "timings": ["unexpected"]},
+    {"choices": [{"message": {"content": "x"}}], "usage": {"prompt_tokens": "3"}},
+    {"choices": [{"message": {"content": "x"}}], "usage": {"completion_tokens": True}},
+], ids=["null-choice", "string-choice", "string-message", "list-content", "dict-reasoning", "empty-choice",
+        "null-message", "null-content", "list-usage", "list-timings", "string-token-count", "bool-token-count"])
 def test_a_malformed_reply_is_an_episode_error_not_a_crash(archive, doc):
     scenarios = rjdebug.load_scenarios(archive, "test", ["ran@toy"], "v2")
     with Scripted([], docs=[doc]) as server:
         client = rjdebug.Client(server.url, "m", timeout=10, retries=0)
         _, [result] = rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
     assert result.error is not None and result.steps == []
+
+
+def test_an_explicitly_empty_reply_is_still_the_models_reply(archive):
+    scenarios = rjdebug.load_scenarios(archive, "test", ["ran@toy"], "v2")
+    with Scripted([""]) as server:
+        client = rjdebug.Client(server.url, "m", timeout=10, retries=0)
+        _, [result] = rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
+    assert result.error is None and result.steps
+
+
+def test_a_replay_fails_when_the_column_lost_an_episodes_summary(archive, tmp_path):
+    with Scripted([ANSWER, ANSWER]) as server:
+        assert _play(server, archive, tmp_path / "played", "--episodes", "2") == 0
+    path = tmp_path / "played" / "column.json"
+    column = json.loads(path.read_text())
+    [group] = column["groups"]
+    assert len(group["episodes"]) == 2
+    group["episodes"].pop()
+    path.write_text(json.dumps(column))
+    assert rjdebug.main(["--replay", str(path), "--archive", archive, "--out", str(tmp_path / "r"), "--quiet"]) != 0
+    check = json.loads((tmp_path / "r" / "summary.json").read_text())["replay_check"]
+    assert check["identical"] == 1 and check["mismatches"] == ["ran@toy#1"]

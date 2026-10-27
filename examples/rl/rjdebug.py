@@ -278,6 +278,13 @@ class Client:
             [(msg or {}).get("content"), (msg or {}).get("reasoning_content")]
         if any(f is not None and not isinstance(f, str) for f in fields):
             raise EndpointError(f"reply text is not a string: {str(doc)[:300]}")
+        if all(f is None for f in fields):  # an empty string is a reply; no text at all is not
+            raise EndpointError(f"no reply text in the response: {str(doc)[:300]}")
+        usage, timings = doc.get("usage"), doc.get("timings")
+        if not isinstance(usage, (dict, type(None))) or not isinstance(timings, (dict, type(None))) or any(
+                not isinstance(n, (int, type(None))) or isinstance(n, bool)
+                for n in ((usage or {}).get("prompt_tokens"), (usage or {}).get("completion_tokens"))):
+            raise EndpointError(f"malformed usage or timings in the response: {str(doc)[:300]}")
         split = echo = False
         if self.mode == "completions":
             text = choice.get("text")
@@ -295,10 +302,10 @@ class Client:
                 echo = True
         if text is None:
             text = ""
-        usage = doc.get("usage") or {}
+        usage = usage or {}
         return Reply(text=text, finish_reason=choice.get("finish_reason"), prompt_tokens=usage.get("prompt_tokens"),
                      completion_tokens=usage.get("completion_tokens"), latency_s=round(latency, 3),
-                     timings=doc.get("timings"), reasoning_split=split, prefill_echo=echo)
+                     timings=timings, reasoning_split=split, prefill_echo=echo)
 
 
 def enforces_top_k(client: Any) -> bool:
@@ -628,8 +635,9 @@ def check_replay(col: dict[str, Any], recorded: dict[str, Any], selected: set[st
             if e["scenario_id"] in selected}
     got = {(e["scenario_id"], e["index"]): e for g in col["groups"] for e in g["episodes"]}
     keys = ("outcome", "steps", "solved", "tool_cost", "answer", "sequence", "total")
-    bad = [k for k in want if k not in got or any(got[k][f] != want[k][f] for f in keys)]
-    return {"episodes": len(want), "replayed": len(got), "identical": len(want) - len(bad),
+    same = [k for k in want if k in got and all(got[k][f] == want[k][f] for f in keys)]
+    bad = sorted(want.keys() - set(same)) + sorted(got.keys() - want.keys())
+    return {"episodes": len(want), "replayed": len(got), "identical": len(same),
             "mismatches": [f"{k[0]}#{k[1]}" for k in bad[:10]]}
 
 
