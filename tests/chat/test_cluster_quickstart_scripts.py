@@ -593,6 +593,7 @@ def test_ui_stop_refuses_a_reused_tunnel_pid(tmp_path: Path) -> None:
 
         assert stopped.returncode != 0
         assert f"refusing to stop unfamiliar tunnel PID {victim.pid}" in stopped.stderr
+        assert f"remove {tunnel_pid}" in stopped.stderr
         assert victim.poll() is None, "an unrelated process from a reused PID was killed"
         assert tunnel_pid.is_file(), "the unowned PID record was discarded"
         assert not (runtime / "aorta-chat-stop-8080.requested").exists()

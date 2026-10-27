@@ -265,7 +265,7 @@ stop_local_tunnel() {
   if [[ "$args" != ssh\ -N* ]] ||
      [[ "$args" != *"-L ${UI_PORT}:127.0.0.1:${UI_PORT}"* ]] ||
      [[ "$args" != *"$LOGIN_HOST"* ]]; then
-    die "refusing to stop unfamiliar tunnel PID $pid: $args"
+    die "refusing to stop unfamiliar tunnel PID $pid ($args); if it is not an AORTA tunnel, remove $TUNNEL_PID_FILE"
   fi
 
   kill -TERM "$pid" 2>/dev/null || true
