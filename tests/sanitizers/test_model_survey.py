@@ -408,9 +408,9 @@ def test_merge_counts_a_timed_out_kernel_as_not_completed():
         _case_report("a", "ran", "pass"),
         _case_report("b", "timed_out", "error", reason="consan_timeout"),
     ])
-    consan = merged["checks"][0]
-    assert (merged["overall_verdict"], merged["execution_status"]) == ("error", "error")
-    assert (consan["state"], consan["reason"]) == (
+    consan = (merged.get("checks") or [{}])[0]
+    assert (merged.get("overall_verdict"), merged.get("execution_status")) == ("error", "error")
+    assert (consan.get("state"), consan.get("reason")) == (
         "error", "1 of 2 kernels did not complete (1x consan_timeout)"
     )
 
@@ -666,8 +666,9 @@ def test_a_timed_out_consan_case_stays_on_the_row_as_an_error(tmp_path, monkeypa
     merged = json.loads((tmp_path / "results/informational/consan-toy/sanitizer_report.json").read_text())
     consan = (merged.get("checks") or [{}])[0]
     results = {kr["identity"]["name"]: kr for kr in consan.get("kernel_results") or []}
-    assert results["b_sym"].get("verdict") == "error"
-    assert str(results["b_sym"].get("reason") or "").startswith("consan_case_timed_out:")
+    timed_out = results.get("b_sym") or {}
+    assert timed_out.get("verdict") == "error"
+    assert str(timed_out.get("reason") or "").startswith("consan_case_timed_out:")
     assert merged.get("overall_verdict") == "error"
     assert "consan_case_timed_out" in str(consan.get("reason") or "")
     monkeypatch.chdir(_REPO)
