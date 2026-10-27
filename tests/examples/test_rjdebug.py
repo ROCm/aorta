@@ -355,3 +355,50 @@ def test_a_replay_fails_when_the_column_lost_an_episodes_summary(archive, tmp_pa
     assert rjdebug.main(["--replay", str(path), "--archive", archive, "--out", str(tmp_path / "r"), "--quiet"]) != 0
     check = json.loads((tmp_path / "r" / "summary.json").read_text())["replay_check"]
     assert check["identical"] == 1 and check["mismatches"] == ["ran@toy#1"]
+
+
+class _Redirector:
+    """A server that answers every request with a redirect to ``target``."""
+
+    def __init__(self, target: str) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _redirect(self):
+                self.send_response(307)
+                self.send_header("Location", target + self.path)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_POST = _redirect
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v1"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def __enter__(self) -> _Redirector:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_a_redirect_never_carries_the_api_key_to_another_server(archive):
+    seen = []
+    with Scripted([ANSWER]) as other:
+        original = other.httpd.RequestHandlerClass
+
+        class Spy(original):
+            def parse_request(self):
+                ok = super().parse_request()
+                seen.append(self.headers.get("Authorization"))
+                return ok
+        other.httpd.RequestHandlerClass = Spy
+        with _Redirector(other.url[: -len("/v1")]) as front:
+            scenarios = rjdebug.load_scenarios(archive, "test", ["ran@toy"], "v2")
+            client = rjdebug.Client(front.url, "m", api_key="SECRET-KEY", timeout=10, retries=0)
+            _, [result] = rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
+    assert not any(h and "SECRET-KEY" in h for h in seen), "the API key reached the redirect target"
+    assert result.error is not None and "redirect" in result.error.lower()

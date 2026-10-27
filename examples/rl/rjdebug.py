@@ -142,6 +142,16 @@ class Reply:
     prefill_echo: bool = False
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Raise on a redirect instead of following it: a followed redirect would carry the API key to its target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ARG002
+        raise urllib.error.HTTPError(req.full_url, code, f"redirect to {newurl} refused", headers, fp)
+
+
+_NO_REDIRECTS = urllib.request.build_opener(_RefuseRedirects)
+
+
 @dataclass
 class Client:
     """One OpenAI-compatible endpoint. ``endpoint`` is the API base (``.../v1``; added if missing)."""
@@ -180,7 +190,7 @@ class Client:
         req.add_header("Content-Type", "application/json")
         if self.api_key:
             req.add_header("Authorization", f"Bearer {self.api_key}")
-        with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+        with _NO_REDIRECTS.open(req, timeout=timeout or self.timeout) as resp:
             return json.loads(resp.read().decode())
 
     def _llamacpp_props(self) -> bool:
@@ -255,8 +265,8 @@ class Client:
                     detail = exc.read().decode(errors="replace")[:500]
                 except (http.client.HTTPException, OSError) as body_exc:
                     detail = f"(error body unreadable: {body_exc!r})"
-                last = EndpointError(f"HTTP {exc.code} from {url}: {detail}")
-                if exc.code < 500 and exc.code != 429:  # a 4xx other than a rate limit will not get better on retry
+                last = EndpointError(f"HTTP {exc.code} {exc.reason} from {url}: {detail}")
+                if exc.code < 500 and exc.code != 429:  # a refused redirect or non-429 4xx will not improve
                     raise last from exc
             except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
                 # http.client.IncompleteRead (a body cut short) is an HTTPException, not an OSError.
