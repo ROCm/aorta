@@ -110,7 +110,11 @@ def test_tab_joins_the_nightly_tabs():
     tabbar = tabbar[: tabbar.index("</div>")]
     assert '<label for="tab-asan">Manual runs</label>' in tabbar
     assert at("id=panel-survey") < at("<section class=tabpanel id=panel-asan>")
-    # The panel has to stay a sibling of the radios, inside .tabs, for :checked to show it.
+    # Radios precede the header so Manual runs can hide the nightly run-details icon.
+    # The panel stays inside .tabs, which follows those radios, for :checked to show it.
+    assert at("id=tab-asan") < at('aria-label="Run details"')
+    assert "rundetails" in page
+    assert "#tab-asan:checked ~ .navrow .rundetails { display:none; }" in page
     assert page.endswith("</table></div></section>\n  </section>\n  </div>\n</div></body></html>\n")
     assert "#tab-asan:checked ~ #panel-asan { display:block; }" in page
     head = page[: at("</head>")]

@@ -4514,8 +4514,8 @@ def test_build_html_tabs_have_keyboard_focus_style():
     # The visually-hidden radios (opacity:0) must project a focus indicator onto
     # their labels so keyboard users can see which tab is focused.
     html = gen.build_html([_healthy_guardrail_run()])
-    assert ':focus-visible ~ .tabbar label[for="tab-guardrails"]' in html
-    assert ':focus-visible ~ .tabbar label[for="tab-survey"]' in html
+    assert ':focus-visible ~ .tabs .tabbar label[for="tab-guardrails"]' in html
+    assert ':focus-visible ~ .tabs .tabbar label[for="tab-survey"]' in html
 
 
 def _healthy_guardrail_run() -> dict:
@@ -4577,8 +4577,8 @@ def test_build_html_renders_two_self_contained_tabs():
     assert "Expected behavior (guardrails)" not in html
     assert "observed-only" not in html.split("<div class=tabbar>", 1)[1].split("</div>", 1)[0]
     # The tabs are a pure-CSS :checked toggle, so these rules are the mechanism.
-    assert "#tab-guardrails:checked ~ #panel-guardrails { display:block; }" in html
-    assert "#tab-survey:checked ~ #panel-survey { display:block; }" in html
+    assert "#tab-guardrails:checked ~ .tabs #panel-guardrails { display:block; }" in html
+    assert "#tab-survey:checked ~ .tabs #panel-survey { display:block; }" in html
     # self-contained: no external JS/CSS, no CDN, no protocol-absolute links
     assert "<script" not in html.lower()
     assert "cdn" not in html.lower()

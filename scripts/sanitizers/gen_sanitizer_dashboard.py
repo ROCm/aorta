@@ -35,7 +35,8 @@ The published page has a third tab, **Manual runs**, that this nightly never
 renders: ASan has no nightly lane, so Pages adds it at deploy time from
 committed results (``add_asan_tab`` / ``scripts/sanitizers/add_asan_tab.py``).
 The radio id stays ``tab-asan``. ``add_asan_tab`` splices onto ``tab-survey``
-first, then ``tab-guardrails``.
+first, then ``tab-guardrails``. The header's run-details icon describes this
+nightly run, so it is hidden while Manual runs is selected.
 
 Three input shapes are supported:
 
@@ -181,25 +182,29 @@ _CSS = """
   .runrow .rv { font-family:var(--mono); font-size:11.5px; color:var(--text-2);
     text-align:right; word-break:break-all; }
 
-  /* Self-contained tabs (no external JS/CSS): radios toggle sibling panels via :checked. */
+  /* Self-contained tabs (no external JS/CSS): radios sit before the header so a
+     :checked rule can also hide the run-details icon. They toggle panels inside
+     the following .tabs via :checked. */
   .tabradio { position:absolute; opacity:0; pointer-events:none; }
   .tabbar { display:flex; gap:4px; border-bottom:1px solid var(--border); margin:18px 0 16px; }
   .tabbar label { cursor:pointer; padding:10px 18px; font-size:14px; font-weight:600; color:var(--text-3);
     border:1px solid transparent; border-bottom:none; border-radius:10px 10px 0 0; margin-bottom:-1px;
     transition:color .15s ease, background .15s ease; }
   .tabbar label:hover { color:var(--text-2); }
-  #tab-guardrails:checked ~ .tabbar label[for="tab-guardrails"],
-  #tab-survey:checked ~ .tabbar label[for="tab-survey"] {
+  #tab-guardrails:checked ~ .tabs .tabbar label[for="tab-guardrails"],
+  #tab-survey:checked ~ .tabs .tabbar label[for="tab-survey"] {
     color:var(--text-1); background:var(--panel);
     border-color:var(--border); border-bottom:1px solid var(--panel); }
   /* The radios are visually hidden (opacity:0) so they show no native focus ring;
      mirror :focus-visible onto the label so keyboard users can see the focused tab. */
-  #tab-guardrails:focus-visible ~ .tabbar label[for="tab-guardrails"],
-  #tab-survey:focus-visible ~ .tabbar label[for="tab-survey"] {
+  #tab-guardrails:focus-visible ~ .tabs .tabbar label[for="tab-guardrails"],
+  #tab-survey:focus-visible ~ .tabs .tabbar label[for="tab-survey"] {
     outline:2px solid var(--blue); outline-offset:-2px; }
   .tabpanel { display:none; }
-  #tab-guardrails:checked ~ #panel-guardrails { display:block; }
-  #tab-survey:checked ~ #panel-survey { display:block; }
+  #tab-guardrails:checked ~ .tabs #panel-guardrails { display:block; }
+  #tab-survey:checked ~ .tabs #panel-survey { display:block; }
+  /* The nightly run id, commit, date, and target do not describe a manual ASan run. */
+  #tab-asan:checked ~ .navrow .rundetails { display:none; }
 
   .stale { display:flex; gap:12px; align-items:flex-start; background:rgba(239,68,68,.10);
     border:1px solid rgba(239,68,68,.30); border-left:3px solid var(--v-fail);
@@ -411,7 +416,13 @@ def _raw_reports_icon_html(rel: str | None) -> str:
 
 
 def _run_details_html(meta: dict[str, Any]) -> str:
-    """The run-details icon: click opens run id, commit, date, and target."""
+    """The run-details icon: click opens the nightly run id, commit, date, and target.
+
+    Hidden while Manual runs is selected. That tab is a hand-committed ASan
+    result, and this icon describes the nightly run, not that result. The hide
+    rule is ``#tab-asan:checked ~ .navrow .rundetails``, so the radios have to
+    precede this icon in the page.
+    """
     rows = (
         ("Run", meta.get("run", "")),
         ("Commit", meta.get("commit", "")),
@@ -424,7 +435,7 @@ def _run_details_html(meta: dict[str, Any]) -> str:
         for label, value in rows
     )
     return (
-        '<details class="iconpop">'
+        '<details class="iconpop rundetails">'
         '<summary aria-label="Run details" title="Run details">'
         f"{_svg(_ICON_LIST, size=16, width=2)}</summary>"
         f'<div class="pop"><p class="pop-title">This run</p>{body}</div>'
@@ -4376,6 +4387,8 @@ def build_html(
 <title>{_esc(title)}</title>
 <style>{_CSS}</style></head>
 <body><div class=wrap>
+  <input type=radio name=santab id=tab-guardrails class=tabradio checked>
+  <input type=radio name=santab id=tab-survey class=tabradio>
   <div class=navrow>
     <a href="../">&larr; back to CI dashboard</a>
     {tools}
@@ -4384,8 +4397,6 @@ def build_html(
   {heading}
 
   <div class=tabs>
-  <input type=radio name=santab id=tab-guardrails class=tabradio checked>
-  <input type=radio name=santab id=tab-survey class=tabradio>
   <div class=tabbar>
     <label for="tab-guardrails">Nightly gate</label>
     <label for="tab-survey">Workload survey</label>
@@ -4445,12 +4456,18 @@ _ASAN_VERDICTS: dict[str, str] = {
 _ASAN_TAB_LABEL = "Manual runs"
 
 _ASAN_TAB_CSS = """
+  /* Both DOM shapes Pages still joins: radios before .tabs (this generator),
+     and radios inside .tabs beside .tabbar (a page rendered before that move). */
+  #tab-asan:checked ~ .tabs .tabbar label[for="tab-asan"],
   #tab-asan:checked ~ .tabbar label[for="tab-asan"] {
     color:var(--text-1); background:var(--panel);
     border-color:var(--border); border-bottom:1px solid var(--panel); }
+  #tab-asan:focus-visible ~ .tabs .tabbar label[for="tab-asan"],
   #tab-asan:focus-visible ~ .tabbar label[for="tab-asan"] {
     outline:2px solid var(--blue); outline-offset:-2px; }
+  #tab-asan:checked ~ .tabs #panel-asan,
   #tab-asan:checked ~ #panel-asan { display:block; }
+  #tab-asan:checked ~ .navrow .rundetails { display:none; }
   .asan-intro { font-size:14px; color:var(--text-2); margin:0 0 12px; line-height:1.55; }
   .asan-intro a { color:var(--blue); }
   .asan-heading { font-size:20px; font-weight:600; margin:24px 0 12px; }
