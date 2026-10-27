@@ -832,9 +832,11 @@ def _cxa_demangle() -> Callable[[str], str | None] | None:
 
 
 def normalized_signature(signature: str) -> str:
-    """``signature`` without whitespace, which demanglers do not agree on."""
+    """``signature`` without the whitespace demanglers do not agree on: around
+    punctuation. Spaces between words (``unsigned long``) are part of the type."""
 
-    return re.sub(r"\s+", "", signature)
+    collapsed = re.sub(r"\s+", " ", signature.strip())
+    return re.sub(r" ?([^\w ]) ?", r"\1", collapsed)
 
 
 def _without_templates(name: str) -> str:
@@ -978,14 +980,17 @@ def kernel_inventory(path: Path) -> KernelInventory:
                 if len(head) >= 20 and struct.unpack_from("<H", head, 18)[0] == _EM_AMDGPU:
                     data = read(0, size)
                     if (target := _amdgpu_target(data)) is None:
-                        return KernelInventory(path=str(path))
+                        return KernelInventory(path=str(path), unreadable="truncated AMDGPU ELF")
                     processor, features = target
                     triple = f"amdgcn-amd-amdhsa--{':'.join((processor, *features))}"
                     return KernelInventory(
                         path=str(path),
                         code_objects=(_kernel_code_object(triple, processor, features, data),),
                     )
-                sections = _elf_sections(read, size) or []
+                # Without the section table the fat binary cannot be found, which is
+                # not the same as there being none.
+                if (sections := _elf_sections(read, size)) is None:
+                    return KernelInventory(path=str(path), unreadable="no readable section table")
                 region = b"".join(
                     read(section.offset, section.size)
                     for section in sections
@@ -1487,14 +1492,17 @@ def _evaluate_run(
     if check.verdict is not Verdict.PASS:
         return check
     # The preflight vouches only for the files it inspected, so a dispatch counts
-    # only from a process that loaded one of them.
+    # only from a process that loaded one of them. A relative path names a file in
+    # the child's own working directory, which the loader does not record.
     vouched = {os.path.realpath(path) for path in checked}
+    vouched_dispatch = False
     for pid, text in sorted(hip_logs.items()):
         if not _was_dispatched(kernel, dispatched_kernels(text)):
             continue
         loaded = loaded_files(ld_logs.get(pid, ""))
         if not any(
-            os.path.realpath(path) in vouched for path in (*loaded.programs, *loaded.objects)
+            path.startswith("/") and os.path.realpath(path) in vouched
+            for path in (*loaded.programs, *loaded.objects)
         ):
             return _not_checked(
                 f"asan_dispatch_not_from_checked_code: process {pid} dispatched {kernel} "
@@ -1502,6 +1510,13 @@ def _evaluate_run(
                 f"({', '.join(str(path) for path in checked)}), so their instrumentation "
                 "says nothing about what it ran"
             )
+        vouched_dispatch = True
+    if not vouched_dispatch:
+        return _not_checked(
+            f"asan_dispatch_not_from_checked_code: {kernel} was dispatched, but in no "
+            f"per-process {DISPATCH_LOG_NAME}_<pid>, so aorta cannot tie it to a process "
+            "that loaded the checked binaries"
+        )
     return check
 
 

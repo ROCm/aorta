@@ -31,6 +31,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.asan import (
     _kernel_symbols,
     demangle,
     kernel_inventory,
+    normalized_signature,
     uninterpreted_reports,
 )
 from aorta.instrumentation.rocjitsu_sanitizers.asan_run import (
@@ -207,6 +208,12 @@ def test_demangle_spells_a_kernel_as_the_dispatch_log_does():
     assert demangle("_Znot_a_name") == "_Znot_a_name"
 
 
+def test_a_normalized_signature_drops_only_spacing_around_punctuation():
+    assert normalized_signature("f<a<b> >(int *, float const *)") == "f<a<b>>(int*,float const*)"
+    assert normalized_signature(" k(unsigned \t long) ") == "k(unsigned long)"
+    assert normalized_signature("k(unsigned long)") != normalized_signature("k(unsignedlong)")
+
+
 def test_inventory_reads_the_fatbin_section_and_nothing_else(tmp_path):
     decoy = _bundle([(_GFX950_PLAIN, _code_object(["_Z5decoyv"], asan=False, xnack=False))])
     binary = _write(
@@ -273,6 +280,21 @@ def test_files_without_device_code_and_unreadable_files(tmp_path):
     assert not kernel_inventory(script).has_device_code
     missing = kernel_inventory(tmp_path / "gone.so")
     assert missing.unreadable and not missing.has_device_code
+
+
+def _without_section_table(path: Path) -> Path:
+    data = bytearray(path.read_bytes())
+    struct.pack_into("<Q", data, 0x28, len(data) + 4096)
+    return _write(path, bytes(data))
+
+
+def test_a_host_elf_whose_sections_cannot_be_read_is_unreadable(tmp_path):
+    """Its device code, if any, is somewhere aorta did not look."""
+
+    inventory = kernel_inventory(_without_section_table(_plain_binary(tmp_path / "libplain.so")))
+    assert inventory.unreadable and not inventory.code_objects
+    truncated = _write(tmp_path / "k.hsaco", _code_object(["add100"], asan=True)[:40])
+    assert kernel_inventory(truncated).unreadable
 
 
 # --------------------------------------------------------------------------- #
@@ -825,6 +847,73 @@ def test_an_unreadable_loaded_file_could_hold_the_copy_that_ran(tmp_path):
     assert not kernel.checked and "could define the copy that ran" in kernel.reason
     assert report.opaque_device_code == (str(plain),)
     assert "1 unreadable" in kernel.reason
+
+
+def test_a_library_whose_sections_cannot_be_read_could_hold_the_copy_that_ran(tmp_path):
+    evidence = _evidence(tmp_path)
+    plain = _without_section_table(_plain_binary(tmp_path / "libplain.so"))
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe"),
+        kernels=["store_index(int*, int)"],
+        objects=[plain],
+    )
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    assert report.opaque_device_code == (str(plain),)
+
+
+def test_a_process_that_execs_another_program_is_not_vouched_for(tmp_path, monkeypatch):
+    """``exec`` keeps the pid, so the first program's declarations would describe
+    files the second one loaded under the same names."""
+
+    evidence = _evidence(tmp_path)
+    probe = _instrumented_binary(tmp_path / "probe")
+    library = _instrumented_binary(tmp_path / "libkernels.so")
+    monkeypatch.setenv(ENV_ASAN_RUN, str(evidence))
+    declare_code_objects([library], loaded_by=probe)
+    _plain_binary(library)
+    _process(evidence, 7, program=probe, kernels=["store_index(int*, int)"], objects=[library])
+    with (evidence / "ld.7").open("a") as log:
+        log.write(f"   7:\tinitialize program: {_python(tmp_path)}\n")
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    (kernel,) = report.kernels
+    assert not kernel.checked
+
+
+def test_signatures_differing_only_in_spacing_are_one_kernel(tmp_path):
+    evidence = _evidence(tmp_path)
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe", ["_Z6add100PfPKfm"]),
+        kernels=["add100(float *, float const *, unsigned  long)"],
+    )
+
+    assert evaluate_asan_run(evidence, returncode=0).verdict is Verdict.PASS
+
+
+def test_spacing_that_separates_words_is_kept(tmp_path):
+    """``unsigned long`` and a type named ``unsignedlong`` are different kernels."""
+
+    evidence = _evidence(tmp_path)
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe", ["_Z1k12unsignedlong"]),
+        kernels=["k(unsigned long)"],
+    )
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    assert "defined in no device code" in report.kernels[0].reason
 
 
 def test_a_declaration_supplies_a_file_its_program_loaded_and_deleted(tmp_path, monkeypatch):

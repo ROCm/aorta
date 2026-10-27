@@ -285,9 +285,10 @@ is why aorta checks all five instead of trusting the build:
    process) and a clean exit passes only if the selected kernel appears in it
    (`asan_kernel_not_dispatched`; no log at all is `asan_dispatch_unverified`).
    The runtime's own messages go to that file too, and are read with the streams.
-   The dispatch counts only from a process that loaded one of the checked
-   binaries (aorta sets `LD_DEBUG=files`), so a script that runs some other
-   build is `not_checked` (`asan_dispatch_not_from_checked_code`). ASan writes
+   The dispatch counts only from a process whose own log shows it and that
+   loaded one of the checked binaries by absolute path (aorta sets
+   `LD_DEBUG=files`), so a script that runs some other build, or runs the repro
+   by a relative path, is `not_checked` (`asan_dispatch_not_from_checked_code`). ASan writes
    each process's report to its own `log_path` file in the output directory,
    where a wrapper that throws away its child's stderr cannot hide it; a report
    file aorta cannot read or does not recognise is an error.
@@ -365,7 +366,8 @@ A dispatched kernel counts as checked only when aorta finds it defined in an
 ASan-instrumented, xnack+ code object, and in no uninstrumented one, among the files
 that process loaded, the code objects the workload declared, and Triton's kernel
 cache. Kernels are matched on the full signature HIP logs (`store_index(int*,
-int)`), read from each code object's kernel-descriptor symbols. A kernel aorta
+int)`), read from each code object's kernel-descriptor symbols, ignoring only
+spacing around punctuation. A kernel aorta
 cannot find counts as unchecked, so the rule can only under-state coverage.
 
 | exit | verdict | meaning |
@@ -419,9 +421,11 @@ A workload that loads code objects by file (`hipModuleLoad`) must declare them w
 `asan_run.declare_code_objects`, or their kernels count as unchecked: the loader's
 record does not list them, and a workload may delete its build before the run ends,
 so a declaration records what each file defines when it is declared. A declaration is
-evidence only for the program that made it. A loaded file aorta cannot read, or that
-the loader recorded by a relative path, could hold the copy of a kernel that ran, so it
-leaves that process's kernels unchecked, as compressed device code does. An evidence
+evidence only for the program that made it. A loaded file aorta cannot read (including
+an ELF whose section table it cannot parse), or that the loader recorded by a relative
+path, could hold the copy of a kernel that ran, so it leaves that process's kernels
+unchecked, as compressed device code does; so does a process that `exec`s another
+program, since the loader's record does not say which program loaded what. An evidence
 file aorta cannot read (an ASan report, HIP log, loader log or the declarations file
 that is unreadable, malformed or a link) makes the run an error, since it could hold a
 report or the record of what ran, and so does an ASan report file in which aorta

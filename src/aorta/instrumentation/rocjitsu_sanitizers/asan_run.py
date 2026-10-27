@@ -671,6 +671,11 @@ def evaluate_asan_run(
             continue
         definitions: dict[str, list[tuple[str, bool, str]]] = {}
         process_opaque: dict[str, str] = {}
+        # exec keeps the pid, and the loader log does not say which program loaded
+        # what, so one program's declarations could describe another's files.
+        if len(loaded.programs) > 1:
+            for program in loaded.programs:
+                process_opaque[program] = "run by one process in turn (exec)"
         # A declaration is evidence only for the program that declared it, and Triton's
         # cache only for a process that loaded Triton, so a kernel another process
         # declared or compiled is never taken as proof of what this one ran.
