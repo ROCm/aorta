@@ -33,7 +33,7 @@ class Scripted:
 
     def __init__(self, replies: list[str], props: dict | None = None, status: int = 200,
                  truncate: bool = False, statuses: list[int] | None = None, docs: list[dict] | None = None) -> None:
-        self.replies, self.props, self.status, self.bodies = list(replies), props, status, []
+        self.replies, self.props, self.status, self.bodies, self.paths = list(replies), props, status, [], []
         self.truncate, self.statuses, self.docs = truncate, list(statuses or []), list(docs or [])
         outer = self
 
@@ -59,6 +59,7 @@ class Scripted:
 
             def do_POST(self):
                 outer.bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                outer.paths.append(self.path)
                 status = outer.statuses.pop(0) if outer.statuses else outer.status
                 if status != 200:
                     self._send(status, {"error": "context length exceeded"})
@@ -67,7 +68,8 @@ class Scripted:
                     self._send(200, outer.docs.pop(0))
                     return
                 text = outer.replies.pop(0) if outer.replies else ANSWER
-                self._send(200, {"choices": [{"message": {"content": text}, "finish_reason": "stop"}],
+                choice = {"text": text} if self.path.endswith("/v1/completions") else {"message": {"content": text}}
+                self._send(200, {"choices": [{**choice, "finish_reason": "stop"}],
                                  "usage": {"prompt_tokens": 3, "completion_tokens": 2}})
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -425,3 +427,32 @@ def test_env_code_refuses_a_rocjitsu_env_already_imported_from_elsewhere(tmp_pat
     monkeypatch.setattr(rjdebug, "_rj", None)
     with pytest.raises(SystemExit, match="not from"):
         rjdebug.load_env(snapshot)
+
+
+def test_completions_mode_sends_the_qwen3_template_rendered_here_and_its_column_replays(archive, tmp_path):
+    scenarios = rjdebug.load_scenarios(archive, "test", ["ran@toy"], "v2")
+    with Scripted([TOOL, ANSWER]) as chat:
+        rjdebug.run(scenarios, rjdebug.Client(chat.url, "m", timeout=10), episodes=1, concurrency=1, progress=False)
+    with Scripted([TOOL, ANSWER]) as server:
+        client = rjdebug.Client(server.url, "m", mode="completions", timeout=10)
+        _, [result] = rjdebug.run(scenarios, client, episodes=1, concurrency=1, progress=False)
+    assert server.paths == ["/v1/completions"] * 2
+    assert result.error is None and result.episode.outcome == "exact"
+    for sent, asked in zip(server.bodies, chat.bodies, strict=True):
+        system, user = (m["content"] for m in asked["messages"])
+        assert "messages" not in sent
+        assert sent["prompt"] == (f"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n"
+                                  "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    with Scripted([TOOL, ANSWER]) as server:
+        assert _play(server, archive, tmp_path / "played", "--mode", "completions") == 0
+    assert rjdebug.main(["--replay", str(tmp_path / "played" / "column.json"), "--archive", archive,
+                         "--out", str(tmp_path / "replayed"), "--quiet"]) == 0
+    check = json.loads((tmp_path / "replayed" / "summary.json").read_text())["replay_check"]
+    assert check["episodes"] == 1 and check["identical"] == 1 and not check["mismatches"]
+
+
+def test_an_explicit_env_code_that_differs_from_the_loaded_one_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(rjdebug, "_rj", rj)
+    assert rjdebug.load_env() is rj and rjdebug.load_env(ROOT) is rj
+    with pytest.raises(SystemExit, match="already loaded"):
+        rjdebug.load_env(tmp_path / "another-snapshot")
