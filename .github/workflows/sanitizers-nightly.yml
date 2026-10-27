@@ -365,14 +365,12 @@ jobs:
 
 
   sanitizers-survey:
-    name: gfx950 workload survey (non-gating)
+    name: gfx950 workload survey (Tab 2, non-gating)
     needs: sanitizers-gpu
-    # Disabled: survey results must not be published. This repo is public, so the
-    # survey artifact, logs and job summary of a run are all visible to anyone.
-    # To re-enable, restore the condition below and pass
-    # --informational-results-dir in the render job again:
-    #   if: always() && needs.sanitizers-gpu.result != 'skipped'
-    if: false
+    # Always run, including when the gate failed: Tab 2 is observed-only and its
+    # rows are still worth publishing next to a red Tab 1. Skipped only when the
+    # gate job itself was skipped.
+    if: always() && needs.sanitizers-gpu.result != 'skipped'
     # Same runner label set as the gate job; `needs` serialises them, so the gate
     # verdict is recorded and uploaded before this job starts competing for the GPU.
     runs-on: [self-hosted, gpu]
@@ -419,7 +417,7 @@ jobs:
       # rocjitsu bundle and rebuilds its own fixtures rather than inheriting them,
       # so it stays independent of whether the gate job succeeded or was killed.
       # Workspace-relative paths keep artifacts visible on the host for upload.
-      - name: Run workload survey
+      - name: Run workload survey (Tab 2)
         env:
           # Downloading GitHub Actions artifacts requires a token with
           # `actions:read` -- even for a public repo. The default GITHUB_TOKEN is
@@ -488,10 +486,10 @@ jobs:
             unset GH_TOKEN GITHUB_TOKEN
 
             # Observed-only (non-gating) sanitizer survey over real GPU kernels,
-            # published in the job summary, data.json and the landing page of each
-            # run (not on the dashboard page itself). Each kernel is scanned by BOTH
-            # sanitizers (waitcheck static + ConSan dynamic) so the survey shows
-            # both outcomes per kernel.
+            # rendered on the dashboard Workload survey tab (Tab 2), NOT a separate
+            # informational section (#374). Each kernel is scanned by BOTH sanitizers
+            # (waitcheck static + ConSan dynamic) so Tab 2 shows both outcomes per
+            # kernel.
             #
             # This used to run inside the gate job, wrapped in one guarded subshell so a
             # bad genco/bundler/compile could not abort the gate. The job boundary now
@@ -511,7 +509,7 @@ jobs:
             # The fixture build above is deliberately NOT guarded: a broken
             # genco/bundler/compile is infrastructure breakage, not an observation, and
             # should fail this job loudly.
-            echo "[$(date +%T)] survey: ConSan + waitcheck over real GPU kernels (non-gating) …"
+            echo "[$(date +%T)] survey: ConSan + waitcheck over real GPU kernels (Tab 2; non-gating) …"
 
             # Same PATH fix the gate job needs: hipcc shells out to
             # clang-offload-bundler, which lives in the ROCm LLVM bindir and is not on
@@ -603,11 +601,11 @@ jobs:
             # timeout-minutes ceiling) does not need excusing: it takes this whole
             # payload down, so the line below never runs at all.
             #
-            # --known-vacuous names the two rows that are ALREADY vacuous on the
-            # ROCm 10 objects this lane scans, so the check can be armed today
-            # without being red for reasons nobody can act on here. Measured on
-            # the real survey trees of runs 33755195031, 33872660689, 33965800908
-            # and 34032862308, both on the same 169,996,560-byte Tensile object:
+            # --known-vacuous names the row that is ALREADY vacuous on the ROCm 10
+            # object this lane scans, so the check can be armed today without
+            # being red for reasons nobody can act on here. Measured on the real
+            # survey trees of runs 33755195031, 33872660689, 33965800908 and
+            # 34032862308, on the same 169,996,560-byte Tensile object:
             #
             #   consan-gemm     consan_strict_load_rejection, 0 findings. ConSan
             #                   needs 1,721,958,400 B of patched image against a
@@ -615,20 +613,20 @@ jobs:
             #                   it. consan_policy does not change that -- see
             #                   daily-consan-gemm.yaml and
             #                   docs/sanitizers/consan-gemm-patched-image-growth-cap.md.
-            #   waitcheck-gemm  worklist_not_fully_checked, 0 findings. The
-            #                   rj_waitcheck CFG dataflow non-convergence of #453.
+            #
+            # waitcheck-gemm was on this list for the #453 CFG non-convergence.
+            # It has produced signal every night since at least 2026-10-01, and
+            # the comparator failed this job for the stale entry, so it is
+            # checked for real again.
             #
             # This is NOT a blessing and is deliberately not spelled as an
-            # expected_error: it says these outcomes are wrong and being worked,
-            # not that they are acceptable. It is self-retiring -- the comparator
-            # FAILS if a listed case starts producing signal, so a fixed row cannot
-            # leave a stale suppression behind, and it fails if a listed case has no
-            # report at all. Both remaining Tab 2 rows are the known-vacuous GEMM
-            # pair; synthetic tiny_vecadd and lds_reduce controls are not published.
-            # Every row this sweep sees is on that list, so --vacuous-only cannot
-            # fail this lane for a run that produced no signal. What remains is
-            # --require (the report must exist) and the self-retiring property
-            # above.
+            # expected_error: it says the outcome is wrong and being worked, not
+            # that it is acceptable. It is self-retiring -- the comparator FAILS if
+            # a listed case starts producing signal, so a fixed row cannot leave a
+            # stale suppression behind, and it fails if a listed case has no
+            # report at all. Synthetic tiny_vecadd and lds_reduce controls are not
+            # published. The open-source model rows run in sanitizers-model-survey
+            # and are checked there.
             echo "[$(date +%T)] survey: rejecting vacuous outcomes …"
             REQUIRE=""
             for c in ${CONSAN_CASES} ${WAITCHECK_CASES}; do
@@ -638,7 +636,6 @@ jobs:
             python scripts/sanitizers/compare_verdict_baselines.py \
               --vacuous-only ${REQUIRE} \
               --known-vacuous informational/consan-gemm \
-              --known-vacuous informational/waitcheck-gemm \
               "${SANITIZER_OUT}"
           '
 
@@ -689,6 +686,161 @@ jobs:
         working-directory: docker
         run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
 
+  sanitizers-model-survey:
+    name: gfx950 open-source model kernels (Tab 2, non-gating)
+    # After the GEMM survey, not beside it: both need the one MI350 runner, and
+    # daily-consan-gemm alone holds that job for up to 100 minutes, which is why
+    # the model kernels have their own job and ceiling instead of a share of it.
+    needs: [sanitizers-gpu, sanitizers-survey]
+    if: always() && needs.sanitizers-gpu.result != 'skipped'
+    runs-on: [self-hosted, gpu]
+    # Measured in the pinned CI image on 8 gfx950 GPUs: 189 launches, two
+    # waitcheck sweeps and 25 ConSan cases took 77 s. The ceiling is for a night
+    # where kernels hang: model_survey.py starts a launch (300 s timeout) or a
+    # ConSan case (900 s) only while it can still finish inside one 3600 s budget
+    # shared by both models, and stops each waitcheck sweep inside it too, so
+    # with setup the job ends inside 90 minutes.
+    timeout-minutes: 90
+    steps:
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+
+      # The kernel sources come from the aorta-model-kernels release asset, which
+      # model_survey.py downloads itself and refuses unless its SHA-256 matches
+      # the digest pinned in that script. The inventories under
+      # recipes/sanitizers/models/ say which kernels each model contributes.
+      - name: Run model-kernel survey (Tab 2)
+        env:
+          ROCJITSU_ARTIFACTS_TOKEN: ${{ secrets.ROCJITSU_ARTIFACTS_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/ci/docker_cmd.sh exec \
+            -e ROCJITSU_REF="${ROCJITSU_REF}" \
+            -e ROCJITSU_RUN="${{ needs.sanitizers-gpu.outputs.rocjitsu_run_id }}" \
+            -e GH_TOKEN="${ROCJITSU_ARTIFACTS_TOKEN}" \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            SANITIZER_ROOT=".sanitizer-nightly"
+            ROCJITSU_PREBUILT="${SANITIZER_ROOT}/rocjitsu-prebuilt"
+            SANITIZER_OUT="${SANITIZER_ROOT}/out"
+
+            echo "[$(date +%T)] setup: installing aorta (editable, [tests]) …"
+            python -m pip install --upgrade pip
+            pip install -e ".[tests]"
+
+            # Same bundle the gate job judged: ROCJITSU_RUN pins its run id.
+            echo "[$(date +%T)] setup: downloading prebuilt rocjitsu sanitizer bundle (${ROCJITSU_REF}) …"
+            rm -rf "${ROCJITSU_PREBUILT}"
+            mkdir -p "${SANITIZER_ROOT}"
+            python scripts/sanitizers/download_sanitizer_artifacts.py \
+              --branch "${ROCJITSU_REF}" --run "${ROCJITSU_RUN:-latest}" \
+              --dest "${ROCJITSU_PREBUILT}" --force
+            export ROCJITSU_PREBUILT="$(cd "${ROCJITSU_PREBUILT}" && pwd)"
+            echo "ROCJITSU_PREBUILT=${ROCJITSU_PREBUILT}"
+            if [ ! -f "${ROCJITSU_PREBUILT}/sha256sums.txt" ]; then
+              echo "::error::prebuilt bundle has no sha256sums.txt; refusing unverified artifacts" >&2
+              exit 1
+            fi
+            # Drop the cross-repo PAT before anything below runs downloaded code:
+            # the release asset, rj_waitcheck and the ConSan hook.
+            unset GH_TOKEN GITHUB_TOKEN
+
+            # Same resolver-derived PATH and LD_LIBRARY_PATH lines as the other two
+            # payloads, for the same reasons (issue #381).
+            export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
+            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+
+            # One run covers every model. It exits non-zero only for an
+            # infrastructure fault -- an asset that fails its digest, a pair count
+            # that drifted from the inventory, nothing compiled -- which should fail
+            # this job loudly. A sanitizer verdict never does.
+            MODELS="gpt-oss qwen3"
+            INVENTORIES=""
+            for m in ${MODELS}; do
+              INVENTORIES="${INVENTORIES} --inventory recipes/sanitizers/models/${m}.yaml"
+            done
+            echo "[$(date +%T)] models: waitcheck + ConSan over ${MODELS} …"
+            # shellcheck disable=SC2086  # INVENTORIES is a deliberate argument list
+            python scripts/sanitizers/model_survey.py run ${INVENTORIES} \
+              --work "${SANITIZER_ROOT}/model-survey-work" \
+              --out "${SANITIZER_OUT}/informational" \
+              --budget-seconds 3600
+
+            # Same vacuity check as the GEMM survey, over the four model rows. A
+            # model whose ConSan had nothing to instrument on some kernels reads
+            # partial beside its waitcheck preflight, which this accepts; a report
+            # with no signal at all, or a missing one, fails the job.
+            echo "[$(date +%T)] models: rejecting vacuous outcomes …"
+            REQUIRE=""
+            for m in ${MODELS}; do
+              REQUIRE="${REQUIRE} --require informational/consan-${m} --require informational/waitcheck-${m}"
+            done
+            # shellcheck disable=SC2086  # REQUIRE is a deliberate argument list
+            python scripts/sanitizers/compare_verdict_baselines.py \
+              --vacuous-only ${REQUIRE} "${SANITIZER_OUT}"
+          '
+
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Mark this attempt's model-kernel results
+        # Same empty-upload hole as the gate job's marker step: v4 will not
+        # delete sanitizer-models-<run_id> unless this attempt uploads a file.
+        if: always()
+        run: |
+          mkdir -p .sanitizer-nightly/out
+          echo "$GITHUB_RUN_ATTEMPT" > .sanitizer-nightly/out/attempt.txt
+
+      - name: Upload model-kernel survey results
+        # Its own artifact, matched by the publish job download pattern below, so
+        # the model rows land in incoming/informational/ beside the GEMM rows.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-models-${{ github.run_id }}
+          path: .sanitizer-nightly/out
+          if-no-files-found: warn
+          overwrite: true   # same re-run collision as the gate artifact
+
+      - name: Clean up build/temp state
+        if: always()
+        run: rm -rf .sanitizer-nightly
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
+
   # Publishing is split in two so that rendering and writing never share a token.
   #
   #   render  runs on ANY ref, holds only `contents: read`, and does everything
@@ -709,9 +861,11 @@ jobs:
   # recorded ref is not refs/heads/main.
   render:
     name: render sanitizer dashboard
-    # Gated on the GATE job only. sanitizers-survey is disabled and its results are
-    # never published; it stays in `needs` so re-enabling it keeps the ordering.
-    needs: [sanitizers-gpu, sanitizers-survey]
+    # Every GPU job, so the dashboard renders Tab 1 and Tab 2 from the same run.
+    # Gated on the GATE job only: the survey jobs are non-gating and may
+    # legitimately be killed by the cap in #370, and rendering Tab 1 must not
+    # depend on them.
+    needs: [sanitizers-gpu, sanitizers-survey, sanitizers-model-survey]
     # Run even when the GPU job failed (to render the failure, not a stale green
     # page) but NOT when it was skipped. Deliberately NO main-only guard here --
     # that guard lives on `push`, the only job that can write.
@@ -729,15 +883,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
-        # The gate artifact lands as incoming/<case>/. A survey artifact (only if
-        # sanitizers-survey is re-enabled) would land as incoming/informational/,
-        # which the render step below never stages. On a re-run the pattern also
-        # matches this run's own sanitizer-dashboard[-screenshots]-<run_id> from the
+        # Merge the gate artifact and the survey artifact into one `incoming` tree:
+        # the gate writes <case>/ and the survey writes informational/<case>/, so
+        # they do not collide and the staging loop below sees the same layout it
+        # did when one job produced both. On a re-run the pattern also matches
+        # this run's own sanitizer-dashboard[-screenshots]-<run_id> from the
         # earlier attempt; that is inert, because the step below reads only
-        # incoming/<case>/sanitizer_report.json and incoming/rocjitsu.json.
+        # incoming/<case>/sanitizer_report.json, incoming/informational/, and
+        # incoming/rocjitsu.json.
         #
-        # A failed GPU job may leave no artifact at all; don't hard-fail the
-        # render job -- we still want to record the failure on the public page.
+        # A failed GPU job may leave no artifact at all, and a survey killed by the
+        # cap in #370 leaves none either; don't hard-fail the render job -- we
+        # still want to record the failure on the public page.
         continue-on-error: true
         with:
           pattern: sanitizer-*-${{ github.run_id }}
@@ -957,15 +1114,18 @@ jobs:
             done
           fi
 
-          # Survey results are not published. Delete the survey areas earlier
-          # nightlies co-published under every retained run, so the regenerated
-          # landing pages, data.json and summary.md carry no survey rows, and
-          # never pass --informational-results-dir (even if a survey artifact were
-          # downloaded into incoming/informational, it stays out of the branch).
-          rm -rf "$runs_dir"/*/survey
-
           # Regenerate the rendered dashboard from the merged, pruned history. This
           # also writes each retained run's tiny runs/<id>/index.html landing page.
+          # THIS run's observed-only survey cases (ConSan + waitcheck over real
+          # kernels) are folded into the Workload survey tab (Tab 2) as non-gating
+          # rows -- no longer a separate informational section (#374). Their reports
+          # are co-published under runs/<id>/survey/<case>/ so the raw-report links
+          # resolve. Absent (e.g. GPU job failed) is handled gracefully by the
+          # generator -> no survey rows, gate unaffected.
+          info_arg=()
+          if [ -d incoming/informational ]; then
+            info_arg=(--informational-results-dir incoming/informational)
+          fi
           # Provenance the reports themselves cannot carry, recorded into each
           # run area's env.json / REPRODUCE.md (#384). Both are best-effort: an
           # absent value is omitted rather than published empty.
@@ -988,6 +1148,7 @@ jobs:
             --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
             --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
             --status status.json \
+            "${info_arg[@]}" \
             --out-dir "$tmp/dashboard"
 
           # Copy the rendered tree to the workspace for the upload below, and
@@ -1061,10 +1222,10 @@ jobs:
     # PR branch from publishing (see the comment above render).
     #
     # always() is load-bearing. Without a status function GitHub applies an
-    # implicit success() over the WHOLE needs chain, not just render: the
-    # disabled sanitizers-survey is always skipped and a red gate job is failed,
-    # so push would be skipped every night and the stale banner a failed night
-    # renders would never reach the page. needs.render.result is the real gate.
+    # implicit success() over the WHOLE needs chain, not just render: a red
+    # gate job is failed, so push would be skipped every night and the stale
+    # banner a failed night renders would never reach the page.
+    # needs.render.result is the real gate.
     if: always() && github.ref == 'refs/heads/main' && needs.render.result == 'success'
     runs-on: ubuntu-latest
     permissions:
