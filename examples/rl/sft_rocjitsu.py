@@ -30,6 +30,9 @@ import blas_backend  # noqa: E402
 import rocjitsu_env as rj  # noqa: E402
 import train_grpo_step as tr  # noqa: E402
 from episode_env import Sample  # noqa: E402
+from safetensors_tree import read_header, tensor_map  # noqa: E402
+
+STORED_DTYPE = {"float32": "F32", "bfloat16": "BF16"}
 
 
 def end_of_turn_id(tok: Any) -> int:
@@ -57,6 +60,22 @@ def demo_samples(rows: list[dict[str, Any]], tok: Any) -> list[Sample]:
                           completion=tr.Completion(r["completion"], list(ids) + [stop]), advantage=1.0,
                           episode=r.get("episode", 0), step=r.get("step", 1)))
     return out
+
+
+def stored_dtypes(source: str | Path) -> set[str] | None:
+    """The dtypes a local checkpoint (a directory or a cached hub id) stores its tensors in; None if unreadable."""
+    path = Path(source)
+    if not path.is_dir():
+        try:
+            from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+            path = Path(snapshot_download(str(source), local_files_only=True))
+        except Exception:  # not cached, or no hub client: the stored dtype is unknown
+            return None
+    try:
+        return {info["dtype"] for f in set(tensor_map(path).values()) for info in read_header(f)[0].values()}
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def batches(items: list[Any], size: int, rng: random.Random) -> list[list[Any]]:
@@ -127,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
     model = AutoModelForCausalLM.from_pretrained(str(a.init_from) if a.init_from else a.model,
                                                  torch_dtype=getattr(torch, a.param_dtype),
                                                  local_files_only=True, attn_implementation="sdpa").to(a.device)
+    source = a.init_from or a.model
+    before = None
+    if stored_dtypes(source) != {STORED_DTYPE[a.param_dtype]}:
+        # verify_checkpoint_delta.py pairs tensors of one dtype; a converted source is no before-state.
+        before = a.out / "checkpoint-pre"
+        tr.publish_checkpoint(model, tok, before)
     trained = {}
     for name, p in model.named_parameters():
         p.requires_grad_(not name.startswith(tr.FROZEN_PREFIXES))
@@ -149,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     log: dict[str, Any] = {"demos": str(a.demos), "samples": len(samples), "epochs": a.epochs, "lr": a.lr,
                            "batch": a.batch, "clip": a.clip, "param_dtype": a.param_dtype, "system_sha256": system_sha,
                            "init_from": str(a.init_from) if a.init_from else a.model, "blas_backend": backend,
+                           "before_state": str(before or source),
                            "steps": []}
     started, step = time.time(), 0
     for epoch in range(1, a.epochs + 1):

@@ -355,3 +355,53 @@ def test_scripted_demos_are_refused_on_a_v1_corpus(tmp_path, flag):
     root = build_corpus(tmp_path)
     with pytest.raises(SystemExit, match="v1-layout"):
         _harvest(root, tmp_path / "out.jsonl", *flag)
+
+
+class _PastTheBeforeState(Exception):
+    pass
+
+
+def _safetensors_dir(root: Path, dtype: str) -> Path:
+    root.mkdir(parents=True)
+    header = json.dumps({"model.embed_tokens.weight": {"dtype": dtype, "shape": [1], "data_offsets": [0, 2]}}).encode()
+    (root / "model.safetensors").write_bytes(len(header).to_bytes(8, "little") + header + b"\0\0")
+    return root
+
+
+@pytest.mark.parametrize("stored, param_dtype, writes_pre", [
+    ("BF16", "float32", True), ("F32", "float32", False), ("BF16", "bfloat16", False), (None, "float32", True),
+], ids=["bf16-trained-fp32", "fp32-fp32", "bf16-bf16", "unreadable"])
+def test_sft_writes_a_before_state_unless_its_source_is_stored_in_the_training_dtype(
+        tmp_path, corpus_root, monkeypatch, stored, param_dtype, writes_pre):
+    pytest.importorskip("torch")
+    import types
+
+    import sft_rocjitsu
+
+    class Model:
+        def to(self, device):
+            return self
+
+        def named_parameters(self):
+            raise _PastTheBeforeState
+
+    stub = types.ModuleType("transformers")
+    stub.AutoTokenizer = types.SimpleNamespace(
+        from_pretrained=lambda *a, **k: types.SimpleNamespace(pad_token="p", eos_token="e"))
+    stub.AutoModelForCausalLM = types.SimpleNamespace(from_pretrained=lambda *a, **k: Model())
+    monkeypatch.setitem(sys.modules, "transformers", stub)
+    written = []
+
+    def publish(model, tok, dest):
+        written.append(dest)
+        raise _PastTheBeforeState
+
+    monkeypatch.setattr(sft_rocjitsu.tr, "publish_checkpoint", publish)
+    source = _safetensors_dir(tmp_path / "init", stored) if stored else tmp_path / "absent"
+    path = tmp_path / "d.jsonl"
+    path.write_text("{}\n")
+    path.with_suffix(".stats.json").write_text(json.dumps({"system_sha256": _sha(corpus_root)}))
+    with pytest.raises(_PastTheBeforeState):
+        sft_rocjitsu.main(["--demos", str(path), "--corpus-root", str(corpus_root), "--out", str(tmp_path / "o"),
+                           "--init-from", str(source), "--param-dtype", param_dtype])
+    assert written == ([tmp_path / "o" / "checkpoint-pre"] if writes_pre else [])
