@@ -25,6 +25,9 @@ The multi-step episode path, its predictions and one paired evaluation:
 | [`train_grpo_step.py`](train_grpo_step.py) | GRPO over episodes with in-process `transformers`, every weight update checked before a checkpoint is written | one GPU (two with `--kl-beta`), `transformers` |
 | [`eval_episodes.py`](eval_episodes.py) | A fixed checkpoint against a control, paired per scenario, no optimiser step | one GPU, `transformers` |
 | [`verify_checkpoint_delta.py`](verify_checkpoint_delta.py) | A checkpoint pair on disk: every trained tensor moved, the control did not, nothing past Adam's ceiling | `numpy` only |
+| [`rocjitsu_env.py`](rocjitsu_env.py) | Multi-turn GPU-debugging episodes: find the one synchronization fault injected into a workload's machine code, with every tool output replayed from a recorded archive | a recorded corpus (`--corpus-root` or `$AORTA_RJ_CORPUS_ROOT`) |
+| [`rocjitsu_baselines.py`](rocjitsu_baselines.py) | Scripted and constant policies for those episodes, scored by the same parser and reward as a model | a recorded corpus |
+| [`prepare_rocjitsu_corpus.py`](prepare_rocjitsu_corpus.py) | A v1-layout corpus directory and its by-kernel split, from a recorded campaign | a recorded campaign |
 
 ## `probe_weight_transfer.py`
 
@@ -524,3 +527,64 @@ nothing**, loading uninitialised device memory into the model instead; a
 perturb-only test would have reported it as working. The findings are written up
 in [`docs/tokenspeed-rl-post-training.md`](../../docs/tokenspeed-rl-post-training.md)
 under Phase 2.
+
+## `rocjitsu_env.py`
+
+An episode is a GPU workload in which at most one kernel carries one
+synchronization fault, injected as a same-size edit to its machine code (or none:
+a clean control). The policy calls tools — `waitcheck`, the rocjitsu simulator,
+a native run, a disassembly — each at a fixed cost, then answers
+`{class, kernel, offset}` within 8 turns. Ground truth is exact because the fault
+was injected at a known instruction. Every tool output is replayed from an
+archive recorded once per scenario, so an episode needs no GPU and runs in
+milliseconds. The module's docstring records each design decision; the reward
+versions are in [`docs/rl-rocjitsu-reward-v2.md`](../../docs/rl-rocjitsu-reward-v2.md).
+
+The corpus is not part of this repository: its listings are disassembly of
+kernels from third-party libraries, and its held-out test splits stay useful
+only while they are not published. The environment reads two layouts, detected
+per directory:
+
+- **v1** (one workload): `sites.json`, `results.jsonl` (one record per mutant
+  plus a `BASELINE:<kernel>` record per kernel), the workload's disassembly,
+  `analysis.json`, and the `split.json` that `prepare_rocjitsu_corpus.py` writes.
+  Scored under reward v1 only: its system prompt states v1's points, so loading
+  it with reward v2 is refused.
+- **v2** (many workloads): `scenarios.jsonl` (one record per scenario: workload,
+  kernel id, operator, class, accepted offsets, the byte edit, and every tool's
+  recorded result), `kernels.json`, `workloads.json`, `listings/<kernel id>.json`
+  (the original listing; the edit is applied when it is served) and
+  `splits/<name>.txt`.
+
+The tests build small synthetic archives in both layouts and need nothing
+outside the repository. Two replay suites compare the environment with the
+reference implementations the corpora were recorded with, and run only when
+pointed at them: `AORTA_RJ_TEST_PROTOTYPE` (a v1 campaign directory) and
+`AORTA_RJ_TEST_CORPUS_V2` (a corpus-v2 build directory with `archive/` and
+`scripts/rjenv2.py`).
+
+### Known limitations
+
+- **`run_sim all` folds quiet kernels into one line.** A kernel with no race or
+  memory-wait report is listed as "no findings" even when its simulated output
+  check is `FAIL` or `CRASH`; the line says "simulated output PASS" only when
+  every folded kernel passed, but it does not say which one did not. A
+  per-kernel `run_sim` shows the status. It is kept because the released model
+  was trained on exactly this observation, and changing the text would change
+  what that model sees; it will be fixed in the next environment version.
+- **History pruning does not put `disasm` listings first.** When the history
+  outgrows its budget, older tool results are replaced by a placeholder, and
+  listings were meant to go first because they are the largest and the cheapest
+  to fetch again. The test looks for a header starting with `disasm`, but every
+  tool header is the JSON of the call (`{"tool": "disasm", ...}`), so it never
+  matches and pruning is oldest-first for every tool. It is kept because the
+  released model was trained on exactly this history; it will be fixed in the
+  next environment version.
+- **Near credit counts instructions in the kernel as built.** An answer is near
+  when it is within 2 instructions of an accepted offset, counted in the
+  original listing. A v2 edit that moves a wait past a longer instruction can
+  leave an accepted offset that is an instruction only of the served listing;
+  that offset earns exact credit but is skipped for near credit, so an answer 2
+  instructions after it can get kernel credit only. The corpus's reference
+  environment scores this way, and so does every recorded evaluation; it will be
+  fixed with a new reward version.
