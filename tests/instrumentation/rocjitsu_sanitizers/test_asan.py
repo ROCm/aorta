@@ -1081,13 +1081,16 @@ def _script(
     code: int,
     dispatch: str | None = "store_index(int*, int)",
     loads: object = _LOADS_REPRO,
+    program: str | None = None,
+    dispatch_log: str = "${AMD_LOG_LEVEL_FILE}_$$",
     name: str = "repro.sh",
 ) -> Path:
     """A stand-in repro. ``dispatch`` is the kernel it logs as dispatched, the way
     the HIP runtime does under AMD_LOG_LEVEL_FILE (one file per pid). Like ASan, it
     writes its report to ``log_path.<pid>`` when ASAN_OPTIONS names one; and like
     the loader under LD_DEBUG, it logs ``loads`` (by default ``repro.bin``, the
-    object :func:`_instrumented` builds) as loaded."""
+    object :func:`_instrumented` builds) as loaded, and ``program`` as the program
+    it initialised."""
 
     if loads is _LOADS_REPRO:
         loads = tmp_path / "repro.bin"
@@ -1102,8 +1105,13 @@ def _script(
             f'[ "$LD_DEBUG" = files ] && '
             f'printf "%7d:\\tcalling init: %s\\n" $$ "{loads}" >> "${{LD_DEBUG_OUTPUT}}.$$"'
         )
+    if program is not None:
+        lines.append(
+            f'[ "$LD_DEBUG" = files ] && '
+            f'printf "%7d:\\tinitialize program: %s\\n" $$ "{program}" >> "${{LD_DEBUG_OUTPUT}}.$$"'
+        )
     if dispatch is not None:
-        lines.append(f'echo ":3: 1 us:  ShaderName : {dispatch}" >> "${{AMD_LOG_LEVEL_FILE}}_$$"')
+        lines.append(f'echo ":3: 1 us:  ShaderName : {dispatch}" >> "{dispatch_log}"')
     if stderr_fixture is not None:
         lines += [
             'case "$ASAN_OPTIONS" in',
@@ -1316,6 +1324,54 @@ class TestRunAsan:
             objects=(checked,),
         )
         assert check.verdict is Verdict.PASS
+
+    @pytest.mark.parametrize("program", ["./repro.bin", "repro.bin"])
+    def test_a_relative_program_name_vouches_for_nothing(
+        self, tmp_path, runtime, monkeypatch, program
+    ):
+        """The loader records a program as invoked, from the child's own directory,
+        which can hold another build of the same name."""
+
+        checked = _instrumented(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        inner = _script(tmp_path, stderr_fixture=None, code=0, loads=None, program=program)
+        check = run_asan(
+            _worklist(),
+            command=_wrapper(tmp_path, inner),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(checked,),
+        )
+        assert check.verdict is Verdict.NOT_CHECKED
+        assert check.reason.startswith("asan_dispatch_not_from_checked_code:")
+
+    def test_the_checked_program_by_absolute_path_counts(self, tmp_path, runtime):
+        checked = _instrumented(tmp_path)
+        inner = _script(tmp_path, stderr_fixture=None, code=0, loads=None, program=str(checked))
+        check = run_asan(
+            _worklist(),
+            command=_wrapper(tmp_path, inner),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(checked,),
+        )
+        assert check.verdict is Verdict.PASS
+
+    @pytest.mark.parametrize("log", ["${AMD_LOG_LEVEL_FILE}", "${AMD_LOG_LEVEL_FILE}_x$$"])
+    def test_a_dispatch_no_process_log_holds_is_not_checked(self, tmp_path, runtime, log):
+        """HIP writes one ``_<pid>`` log per process; a dispatch logged anywhere else
+        cannot be tied to a process that loaded the checked code."""
+
+        inner = _script(tmp_path, stderr_fixture=None, code=0, dispatch_log=log)
+        check = run_asan(
+            _worklist(),
+            command=_wrapper(tmp_path, inner),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(_instrumented(tmp_path),),
+        )
+        assert check.verdict is Verdict.NOT_CHECKED
+        assert check.reason.startswith("asan_dispatch_not_from_checked_code:")
 
     def test_every_dispatching_process_must_have_loaded_checked_code(self, tmp_path, runtime):
         checked_child = _script(tmp_path, stderr_fixture=None, code=0)
