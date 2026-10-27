@@ -956,6 +956,15 @@ def _kernel_code_object(
     )
 
 
+_NO_SECTION_TABLE = "no readable section table"
+
+
+def _has_section_table(blob: bytes) -> bool:
+    return (
+        _elf_sections(lambda offset, length: blob[offset : offset + length], len(blob)) is not None
+    )
+
+
 def kernel_inventory(path: Path) -> KernelInventory:
     """Which kernels ``path`` defines, per device code object.
 
@@ -981,6 +990,8 @@ def kernel_inventory(path: Path) -> KernelInventory:
                     data = read(0, size)
                     if (target := _amdgpu_target(data)) is None:
                         return KernelInventory(path=str(path), unreadable="truncated AMDGPU ELF")
+                    if not _has_section_table(data):
+                        return KernelInventory(path=str(path), unreadable=_NO_SECTION_TABLE)
                     processor, features = target
                     triple = f"amdgcn-amd-amdhsa--{':'.join((processor, *features))}"
                     return KernelInventory(
@@ -990,12 +1001,13 @@ def kernel_inventory(path: Path) -> KernelInventory:
                 # Without the section table the fat binary cannot be found, which is
                 # not the same as there being none.
                 if (sections := _elf_sections(read, size)) is None:
-                    return KernelInventory(path=str(path), unreadable="no readable section table")
-                region = b"".join(
-                    read(section.offset, section.size)
-                    for section in sections
-                    if section.name == _FATBIN_SECTION and section.offset + section.size <= size
-                )
+                    return KernelInventory(path=str(path), unreadable=_NO_SECTION_TABLE)
+                fatbins = [section for section in sections if section.name == _FATBIN_SECTION]
+                if any(section.offset + section.size > size for section in fatbins):
+                    return KernelInventory(
+                        path=str(path), unreadable=f"{_FATBIN_SECTION} lies outside the file"
+                    )
+                region = b"".join(read(section.offset, section.size) for section in fatbins)
             elif head.startswith((_BUNDLE_MAGIC, _COMPRESSED_BUNDLE_MAGIC)):
                 region = read(0, size)
             else:
@@ -1007,8 +1019,12 @@ def kernel_inventory(path: Path) -> KernelInventory:
     objects = []
     for bundle, base in bundles:
         for triple, begin, end in _bundle_entries(bundle, base):
+            blob = bundle[begin:end]
+            # A code object aorta cannot parse names no kernels for that reason alone.
+            if not _has_section_table(blob):
+                return KernelInventory(path=str(path), unreadable=f"{triple}: {_NO_SECTION_TABLE}")
             processor, features = _split_target(triple)
-            objects.append(_kernel_code_object(triple, processor, features, bundle[begin:end]))
+            objects.append(_kernel_code_object(triple, processor, features, blob))
     return KernelInventory(path=str(path), code_objects=tuple(objects), compressed_bundles=unopened)
 
 
@@ -1500,6 +1516,12 @@ def _evaluate_run(
         if not _was_dispatched(kernel, dispatched_kernels(text)):
             continue
         loaded = loaded_files(ld_logs.get(pid, ""))
+        if loaded.execed:
+            return _not_checked(
+                f"asan_dispatch_not_from_checked_code: process {pid} dispatched {kernel} "
+                f"after running more than one program ({', '.join(loaded.programs)}), so "
+                "aorta cannot tell whether a checked binary is what dispatched it"
+            )
         if not any(
             path.startswith("/") and os.path.realpath(path) in vouched
             for path in (*loaded.programs, *loaded.objects)
