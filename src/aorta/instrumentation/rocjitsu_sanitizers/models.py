@@ -50,6 +50,8 @@ class FindingSeverity(str, Enum):
     WARNING = "warning"
     RACE = "race"
     ERROR = "error"
+    # An observed invalid memory access (ASan): out of bounds, use after free.
+    MEMORY_ERROR = "memory_error"
 
 
 def _required_str(data: Mapping[str, object], key: str) -> str:

@@ -1,0 +1,28 @@
+schema_version: 1
+mode: sanitizer
+ticket: ASAN-CLEAN
+description: >
+  gfx950 device AddressSanitizer control: the same kernel as asan-heap-overflow,
+  in bounds, verifying its own output (expect PASS). A PASS here is what proves
+  the ASan environment itself does not fail a correct program; the overflow
+  recipe alone cannot show that. Build fixtures/bin/asan_clean first.
+
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: store_index
+    asan_command: fixtures/bin/asan_clean
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - asan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json

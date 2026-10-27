@@ -7,6 +7,7 @@ setup-time guards (hipcc absent, bad LD_PRELOAD).
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -478,3 +479,59 @@ def test_config_errors_precede_the_preload_check(monkeypatch, tmp_path):
     ):
         with pytest.raises(ValueError):
             HrxPerfWorkload({"bench": "gemm", **config}).setup()
+
+
+# --------------------------------------------------------------------------- #
+# aorta run --sanitizer asan
+# --------------------------------------------------------------------------- #
+
+
+def _recorded_build(monkeypatch, build_dir, config):
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    wl = HrxPerfWorkload({"bench": "triad", "build_dir": str(build_dir), **config})
+    wl.setup()
+    return wl, calls
+
+
+def test_asan_run_builds_the_benchmark_with_device_asan(monkeypatch, tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    monkeypatch.setenv("AORTA_ASAN_RUN", str(evidence))
+    wl, (cmd,) = _recorded_build(
+        monkeypatch, tmp_path / "build", {"gpu_arch": "gfx950", "_aorta_sanitizer": "asan"}
+    )
+
+    assert {"-O3", "-fsanitize=address", "-g", "-shared-libsan", "--offload-arch=gfx950:xnack+"} <= set(
+        cmd
+    )
+    assert wl._binary == tmp_path / "build" / "gfx950-asan" / _BENCHES["triad"].binary
+    declared = (evidence / "code_objects.jsonl").read_text().splitlines()
+    assert [json.loads(line)["path"] for line in declared] == [str(wl._binary)]
+
+
+def test_plain_benchmark_build_is_unchanged(monkeypatch, tmp_path):
+    _, (cmd,) = _recorded_build(monkeypatch, tmp_path, {"gpu_arch": "gfx950"})
+    assert cmd[1:3] == ["-O3", "--offload-arch=gfx950"]
+    assert not any("sanitize" in arg or "libsan" in arg for arg in cmd)
+
+
+def test_an_xnack_off_target_is_a_config_error_under_asan():
+    """Hardware-free, like every other config check (see _validated_config)."""
+    wl = HrxPerfWorkload({"gpu_arch": "gfx950:xnack-", "_aorta_sanitizer": "asan"})
+    with pytest.raises(ValueError, match="turns XNACK off"):
+        wl._validated_config()
+
+
+def test_asan_run_refuses_the_hrx_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setenv("HRX_GPU_DRIVER", "amdgpu")
+    wl = HrxPerfWorkload({"build_dir": str(tmp_path), "_aorta_sanitizer": "asan"})
+    with pytest.raises(RuntimeError, match="HRX_GPU_DRIVER"):
+        wl.setup()
