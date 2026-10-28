@@ -225,23 +225,15 @@ _TEXT_MODE_HINT = (
     "name.\n"
 )
 
-#: And the pointer every ``native`` line carries, found by sweeping this
-#: function for the same green-with-no-advice shape review found in the
-#: no-model-name branch. ``native`` is the mode with an endpoint requirement,
-#: and nothing in this report tests it. Stated as "no probe sends a request
-#: carrying ``tools``" rather than as "the probe asks ``/health``", because only
-#: the vLLM backend asks anything: both remote ``probe()`` implementations are
-#: ``preflight()`` under another name and make no network call at all, on
-#: purpose -- a reachability check against a metered endpoint bills the operator
-#: for running a diagnostic. Naming ``/health`` told a remote user a request had
-#: succeeded when none was made, which is a worse failure than the one this hint
-#: was added for: it read green over the one tool-mode setting that cannot work
-#: at all -- ``native`` on a stock local vLLM -- and the user who reaches it has
-#: already configured the failure.
+#: The pointer every ``native`` line carries. Local vLLM now gets a real tools
+#: request in :func:`_check_backend`; remote probes remain configuration-only
+#: because spending a metered completion in a diagnostic would be surprising.
+#: The hint names both policies so a green tool-mode row is not mistaken for a
+#: network check that did not run.
 _NATIVE_MODE_HINT = (
-    "Nothing here confirms the endpoint accepts it: no probe sends a request\n"
-    "carrying 'tools'. A local server answers /health normally whether or not\n"
-    "it takes them, and a remote backend is only checked for configuration.\n"
+    "For local vLLM, the 'llm native tools' check below sends a request carrying\n"
+    "'tools'. Remote providers are checked only for configuration so doctor\n"
+    "does not spend a billable request.\n"
     'If action-routed questions fail, "text" is the mode to try.\n'
 )
 
@@ -255,9 +247,9 @@ _NATIVE_MODE_HINT = (
 #: mode is branched on -- so the only reason it said it was that nobody asked
 #: the question on this path.
 _NATIVE_REASONING_HINT = (
-    "Nothing here confirms the endpoint accepts it: no probe sends a request\n"
-    "carrying 'tools'. A local server answers /health normally whether or not\n"
-    "it takes them, and a remote backend is only checked for configuration.\n"
+    "For local vLLM, the 'llm native tools' check below sends a request carrying\n"
+    "'tools'. Remote providers are checked only for configuration so doctor\n"
+    "does not spend a billable request.\n"
     "This model has no second option if it does not -- a reasoning model\n"
     'cannot drive "text" mode, which is why that mode warns about it, so\n'
     "the endpoint is the thing to fix rather than the setting.\n"
@@ -1518,6 +1510,12 @@ def _check_backend(report: Report) -> None:
         report.add("llm backend", FAIL, str(exc))
         return
 
+    from aorta.chat.config import settings
+
+    check_native_tools = (
+        backend.name == "vllm"
+        and str(settings.llm_tool_mode or "").strip().lower() == "native"
+    )
     try:
         asyncio.run(backend.probe(timeout=_BACKEND_PROBE_TIMEOUT))
     except Exception as exc:
@@ -1537,8 +1535,40 @@ def _check_backend(report: Report) -> None:
             f"{backend.describe()} did not answer",
             hint=hint,
         )
+        if check_native_tools:
+            report.add(
+                "llm native tools",
+                SKIP,
+                "not checked because the vLLM backend did not answer",
+            )
         return
     report.add("llm backend", OK, backend.describe())
+
+    if not check_native_tools:
+        return
+    probe_tools = getattr(backend, "probe_tools", None)
+    if not callable(probe_tools):
+        report.add(
+            "llm native tools",
+            FAIL,
+            f"{backend.describe()} has no native-tools probe",
+        )
+        return
+    try:
+        asyncio.run(probe_tools(timeout=_BACKEND_PROBE_TIMEOUT))
+    except Exception as exc:
+        report.add(
+            "llm native tools",
+            FAIL,
+            f"{backend.describe()} did not return a valid function call",
+            hint=f"{type(exc).__name__}: {exc}",
+        )
+        return
+    report.add(
+        "llm native tools",
+        OK,
+        f"{backend.describe()} returned a valid function call",
+    )
 
 
 def _settings_load_error(report: Report) -> bool:
@@ -1626,6 +1656,13 @@ def run_checks(*, backend: bool = True) -> Report:
         _check_backend(report)
     else:
         report.add("llm backend", SKIP, "not checked (--no-backend)")
+        from aorta.chat.config import settings
+
+        if (
+            str(settings.llm_provider or "").strip().lower() == "vllm"
+            and str(settings.llm_tool_mode or "").strip().lower() == "native"
+        ):
+            report.add("llm native tools", SKIP, "not checked (--no-backend)")
     return report
 
 

@@ -80,7 +80,11 @@ def sample(advantage: float, completion: str = '{"x": 1}') -> Sample:
 
 def test_the_normaliser_agrees_with_the_cpu_copy_the_reports_use():
     for values in ([1.0, 2.0, 3.0], [0.5, 0.5, 0.5], [4.0], [-3.0, 7.0]):
-        assert trainer.advantages(values) == pytest.approx(rescore_episodes.advantages(values))
+        actual_advantages, actual_mean, actual_sd = trainer.advantages(values)
+        expected_advantages, expected_mean, expected_sd = rescore_episodes.advantages(values)
+        assert actual_advantages == pytest.approx(expected_advantages)
+        assert actual_mean == pytest.approx(expected_mean)
+        assert actual_sd == pytest.approx(expected_sd)
 
 
 def test_a_flat_group_has_zero_advantage_not_a_division_blow_up():
