@@ -1,0 +1,173 @@
+{
+  "model": "gpt-oss",
+  "inventory": "gpt-oss.yaml",
+  "night": "2026-10-28",
+  "budget_seconds": 3600,
+  "case_timeout_seconds": 900,
+  "ran": [
+    {
+      "kernel": "_matmul_ogs",
+      "scenario": "P1",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    },
+    {
+      "kernel": "_matmul_ogs@w2",
+      "scenario": "P1",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    },
+    {
+      "kernel": "_post_update_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_prepare_pos_seq_lens_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_prepare_prefill_inputs_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_rms_norm_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "fail"
+    },
+    {
+      "kernel": "_rope_kernel_cached_thd_2c_gqa_fwd",
+      "scenario": "P1",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    },
+    {
+      "kernel": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_stage2_pow2",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "fail"
+    },
+    {
+      "kernel": "_swiglu",
+      "scenario": "P1",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    },
+    {
+      "kernel": "_topk_forward",
+      "scenario": "P1",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    },
+    {
+      "kernel": "_topk_topp_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "fail"
+    },
+    {
+      "kernel": "kernel_unified_attention_2d",
+      "scenario": "P1_swa",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    },
+    {
+      "kernel": "kernel_unified_attention_3d",
+      "scenario": "X1_full",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    },
+    {
+      "kernel": "pack_bitmatrix",
+      "scenario": "P1",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    },
+    {
+      "kernel": "reduce_segments",
+      "scenario": "X1_full",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "fail"
+    },
+    {
+      "kernel": "_combine_sampled_and_draft_tokens_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_compute_slot_mappings_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_fused_add_rmsnorm_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "fail"
+    },
+    {
+      "kernel": "_fused_add_rmsnorm_pad",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "fail"
+    },
+    {
+      "kernel": "_gather_block_tables_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_get_num_sampled_and_rejected_kernel",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_masked_compaction",
+      "scenario": "P1",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    }
+  ],
+  "not_scheduled_tonight": [],
+  "excluded": {},
+  "not_launched": {}
+}
