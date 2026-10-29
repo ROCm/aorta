@@ -3,9 +3,11 @@
 # Same model and checks as recipes/training/tiny-transformer.yaml.
 # `launcher: spur` runs `spur srun -N 2 --ntasks-per-node 8`, which re-execs
 # this aorta command with `AORTA_INNER=1`. Workers map `SLURM_PROCID` to
-# `RANK` and set `MASTER_ADDR` to the controller IPv4. Spur is not on PATH
-# on this cluster: set `workload_config.spur_bin` to the overlay binary
-# (default `spur`). This recipe does not submit a Slurm job.
+# `RANK` and set `MASTER_ADDR` to the controller IPv4. Set
+# `AORTA_MASTER_PORT` to a free TCP port before launching; the controller
+# does not guess one. Spur is not on PATH on this cluster: set
+# `workload_config.spur_bin` to the overlay binary (default `spur`). This
+# recipe does not submit a Slurm job.
 #
 #   # validate only (does not spawn):
 #   aorta triage run --recipe recipes/training/tiny-transformer-spur.yaml --dry-run

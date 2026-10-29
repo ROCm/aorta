@@ -214,6 +214,7 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
         "aorta.workloads.distributed_launch.controller_ipv4",
         lambda: "10.190.161.245",
     )
+    monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
     result = launch_spur(
         {"steps": 20},
         nodes=2,
@@ -240,6 +241,7 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
     assert master == "10.190.161.245"
     assert is_ipv4(master)
     assert env.get("WORLD_SIZE") == "16"
+    assert env.get("MASTER_PORT") == "29501"
     assert "RANK" not in env
     inner = argv[argv.index("aorta-inner") + 1 :]
     assert "run" in inner
@@ -283,6 +285,7 @@ def test_unreadable_rank0_result_fails_the_trial(monkeypatch, tmp_path) -> None:
         "aorta.workloads.distributed_launch.controller_ipv4",
         lambda: "10.0.0.8",
     )
+    monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
     result = launch_spur({"steps": 1}, nodes=1, gpus_per_node=1, spur_bin="spur")
     assert result.passed is False
     errors = [
@@ -292,6 +295,57 @@ def test_unreadable_rank0_result_fails_the_trial(monkeypatch, tmp_path) -> None:
     ]
     assert errors
     assert "trial_d0_m0_t0.json" in str(errors[0])
+
+
+def test_spur_requires_explicit_master_port(monkeypatch) -> None:
+    monkeypatch.delenv("AORTA_MASTER_PORT", raising=False)
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.controller_ipv4",
+        lambda: "10.0.0.8",
+    )
+    with pytest.raises(RuntimeError, match="AORTA_MASTER_PORT"):
+        launch_spur({"steps": 1}, nodes=1, gpus_per_node=1, spur_bin="spur")
+
+
+def test_inherited_rank_env_still_spawns(monkeypatch) -> None:
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.delenv("AORTA_INNER", raising=False)
+    monkeypatch.delenv("TORCHELASTIC_RUN_ID", raising=False)
+    workload = TinyTransformerWorkload(
+        {
+            "launcher": "spur",
+            "nodes": 2,
+            "gpus_per_node": 8,
+            "expected_world_size": 16,
+            "device": "cpu",
+        }
+    )
+    workload.setup()
+    assert workload._train_here is False
+
+
+def test_inner_and_elastic_ranks_train_here(monkeypatch) -> None:
+    spec = {
+        "launcher": "spur",
+        "nodes": 1,
+        "gpus_per_node": 1,
+        "expected_world_size": 1,
+        "device": "cpu",
+    }
+    monkeypatch.setenv("AORTA_INNER", "1")
+    monkeypatch.delenv("TORCHELASTIC_RUN_ID", raising=False)
+    inner = TinyTransformerWorkload(spec)
+    inner.setup()
+    assert inner._train_here is True
+
+    monkeypatch.delenv("AORTA_INNER", raising=False)
+    monkeypatch.setenv("TORCHELASTIC_RUN_ID", "1")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    elastic = TinyTransformerWorkload(spec)
+    elastic.setup()
+    assert elastic._train_here is True
 
 
 def test_spur_verdict_requires_exit_code_and_rank0() -> None:

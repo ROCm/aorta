@@ -123,12 +123,15 @@ def controller_ipv4() -> str:
 def is_launched_rank() -> bool:
     """True when this process should train instead of spawning workers.
 
-    Spur workers export ``AORTA_INNER=1``. A parent that already exported
-    ``RANK`` and ``WORLD_SIZE`` (torchrun, or Monarch's elastic env) is a
-    rank as well.
+    Spur workers export ``AORTA_INNER=1``. Torchrun and Monarch's elastic
+    agent set ``TORCHELASTIC_RUN_ID`` together with ``RANK`` and
+    ``WORLD_SIZE``. A controller that only inherited ``RANK`` and
+    ``WORLD_SIZE`` from the shell still spawns.
     """
     if os.environ.get("AORTA_INNER") == "1":
         return True
+    if not os.environ.get("TORCHELASTIC_RUN_ID"):
+        return False
     return "RANK" in os.environ and "WORLD_SIZE" in os.environ
 
 
@@ -225,7 +228,13 @@ def launch_spur(
 ) -> WorkloadResult:
     """Spawn ``spur srun`` and return rank 0's verdict gated on the exit code."""
     master_addr = controller_ipv4()
-    master_port = _tcp_port(os.environ.get("AORTA_MASTER_PORT"), name="AORTA_MASTER_PORT")
+    raw_port = os.environ.get("AORTA_MASTER_PORT")
+    if raw_port is None or raw_port == "":
+        raise RuntimeError(
+            "launcher 'spur' needs AORTA_MASTER_PORT set to a free TCP port. "
+            "An ephemeral port cannot be held until the workers bind it."
+        )
+    master_port = _tcp_port(raw_port, name="AORTA_MASTER_PORT")
     with tempfile.TemporaryDirectory(prefix="aorta-tiny-transformer-") as tmp:
         output = Path(tmp)
         argv, env = build_spur_launch(
@@ -461,16 +470,13 @@ def _worker_env(
     return env
 
 
-def _tcp_port(raw: str | None, *, name: str) -> int:
-    """Return ``raw`` when it is set, otherwise an ephemeral IPv4 port.
+def _tcp_port(raw: str, *, name: str) -> int:
+    """Return ``raw`` as a TCP port.
 
-    An omitted ``AORTA_MASTER_PORT`` asks the kernel for a free port. A set
-    but non-numeric value is a config error.
+    Callers pass an explicit port. Probing an ephemeral port and closing the
+    socket leaves a gap before workers bind it, so this function does not
+    pick one.
     """
-    if raw is None:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("", 0))
-            return int(sock.getsockname()[1])
     if not raw.isdigit():
         raise ValueError(f"{name} must be an integer, got {raw!r}")
     port = int(raw)

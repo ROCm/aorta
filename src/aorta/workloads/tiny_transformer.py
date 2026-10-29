@@ -6,8 +6,9 @@ This workload only fixes that recipe's shape and chooses how the ranks start:
 * ``inprocess`` (default) runs one rank here. World size 1 uses the gloo
   defaults in ``TrainingWorkload``. CI does not need Monarch, Spur, or a GPU.
 * ``spur`` and ``monarch`` spawn workers from the controller process. A
-  process with ``AORTA_INNER=1``, or with ``RANK`` and ``WORLD_SIZE`` already
-  set, is a worker and runs the loop instead of spawning again.
+  process with ``AORTA_INNER=1``, or a torchrun/elastic rank
+  (``TORCHELASTIC_RUN_ID`` plus ``RANK`` and ``WORLD_SIZE``), runs the loop
+  instead of spawning again. ``RANK`` alone does not make this process a worker.
 
 ``launcher`` stays inside ``workload_config``. The recipe loader rejects
 unknown top-level keys.
