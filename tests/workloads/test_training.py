@@ -11,13 +11,13 @@ from __future__ import annotations
 import pytest
 
 from aorta.workloads.training import (
-    ChecksSpec,
     ModelSpec,
     OptimizerSpec,
     TrainingConfig,
     TrainingWorkload,
+    _percentile,
+    cuda_device_index,
 )
-from aorta.workloads.training import _percentile
 
 # --------------------------------------------------------------------------- #
 # Config parsing / validation (torch-free)
@@ -30,6 +30,9 @@ def test_config_defaults() -> None:
     assert cfg.model.kind == "transformer"
     assert cfg.optimizer.kind == "adamw"
     assert cfg.checks.fail_on_nan_loss is True
+    # Opt-in checks stay off so existing training recipes are unchanged.
+    assert cfg.checks.fail_on_rank_loss_mismatch is False
+    assert cfg.expected_world_size is None
 
 
 def test_config_nested_sections_parsed() -> None:
@@ -108,6 +111,35 @@ def test_percentile_helper() -> None:
     assert _percentile([], 50) == 0.0
     assert _percentile([4.0], 99) == 4.0
     assert _percentile([1.0, 2.0, 3.0, 4.0], 50) == pytest.approx(2.5)
+
+
+def test_cuda_device_index_single_visible_gpu() -> None:
+    """One visible GPU is device 0; a wider mask keeps LOCAL_RANK."""
+    assert cuda_device_index(3, "4") == 0
+    assert cuda_device_index(3, "7") == 0
+    assert cuda_device_index(3, "0,1,2,3") == 3
+    assert cuda_device_index(2, None) == 2
+    assert cuda_device_index(1, "") == 1
+    assert cuda_device_index(1, "  ") == 1
+
+
+def test_expected_world_size_mismatch_fails_before_training() -> None:
+    wl = TrainingWorkload({})
+    wl._cfg = TrainingConfig.from_dict({"expected_world_size": 16, "steps": 2, "device": "cpu"})
+    wl._world_size = 1
+    wl._rank = 0
+    result = wl.run()
+    assert result.passed is False
+    assert result.main_work_started is False
+    assert result.metrics.get("world_size") == 1
+    assert result.metrics.get("final_loss") is None
+    problems = result.failure_details[0].get("problems")
+    assert problems == ["unexpected_world_size"]
+
+
+def test_mismatch_flag_rejects_non_bool() -> None:
+    with pytest.raises(TypeError, match="fail_on_rank_loss_mismatch"):
+        TrainingConfig.from_dict({"checks": {"fail_on_rank_loss_mismatch": "false"}})
 
 
 def test_workload_declares_contract() -> None:

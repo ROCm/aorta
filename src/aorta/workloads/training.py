@@ -21,6 +21,11 @@ Launch modes
   ``torchrun --standalone --nproc_per_node=2 $(which aorta) run
   --workload training --steps 2``.
 
+On CUDA, ``set_device(0)`` is used when ``CUDA_VISIBLE_DEVICES`` lists one
+GPU (torchrun's mask). Otherwise ``set_device(LOCAL_RANK)`` (Monarch leaves
+the node GPUs visible). Two checks default off so existing recipes stay
+the same: ``checks.fail_on_rank_loss_mismatch`` and ``expected_world_size``.
+
 Distributed ownership
 ---------------------
 The workload owns ``torch.distributed.init_process_group``; the platform does
@@ -193,6 +198,10 @@ class ChecksSpec:
     fail_on_nan_loss: bool = True
     fail_on_nan_grad: bool = True
     fail_on_nonfinite_output: bool = True
+    # Off unless a recipe opts in. When on, each rank draws the same batch
+    # (see ``TrainingWorkload.setup``) and the final losses are all-reduced;
+    # the trial fails when those losses disagree.
+    fail_on_rank_loss_mismatch: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ChecksSpec":
@@ -204,7 +213,15 @@ class ChecksSpec:
                 "ChecksSpec: unknown keys in checks config (possible typos): %s",
                 sorted(unknown),
             )
-        return cls(**{k: bool(v) for k, v in d.items() if k in known})
+        mismatch = d.get("fail_on_rank_loss_mismatch", False)
+        if not isinstance(mismatch, bool):
+            raise TypeError(
+                "checks.fail_on_rank_loss_mismatch must be a bool, "
+                f"got {type(mismatch).__name__}"
+            )
+        parsed = {k: bool(v) for k, v in d.items() if k in known}
+        parsed["fail_on_rank_loss_mismatch"] = mismatch
+        return cls(**parsed)
 
 
 @dataclass
@@ -222,6 +239,9 @@ class TrainingConfig:
     model: ModelSpec = field(default_factory=ModelSpec)
     optimizer: OptimizerSpec = field(default_factory=OptimizerSpec)
     checks: ChecksSpec = field(default_factory=ChecksSpec)
+    # ``None`` leaves the process-group size unchecked. A positive int fails
+    # the trial when the group size is something else.
+    expected_world_size: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "TrainingConfig":
@@ -240,6 +260,7 @@ class TrainingConfig:
             "seq_len",
             "warmup_steps",
             "steps",
+            "expected_world_size",
         }
         all_known = scalar_keys | {"model", "optimizer", "checks"}
         unknown = {k for k in set(d) - all_known if not k.startswith("_aorta_")}
@@ -268,12 +289,70 @@ class TrainingConfig:
             raise ValueError(f"steps must be >= 1, got {cfg.steps}")
         if cfg.warmup_steps < 0:
             raise ValueError(f"warmup_steps must be >= 0, got {cfg.warmup_steps}")
+        expected = cfg.expected_world_size
+        if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)):
+            raise TypeError(
+                "expected_world_size must be a positive int or omitted, "
+                f"got {type(expected).__name__}"
+            )
+        if expected is not None and expected < 1:
+            raise ValueError(f"expected_world_size must be >= 1, got {expected}")
         return cfg
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def cuda_device_index(local_rank: int, cuda_visible_devices: str | None) -> int:
+    """Device argument for ``torch.cuda.set_device``.
+
+    Torchrun often sets ``CUDA_VISIBLE_DEVICES`` to a single id, so the
+    process's only GPU is index 0 and ``LOCAL_RANK`` would select a device
+    that is not visible. Monarch on these nodes leaves the node GPUs
+    visible, and then ``LOCAL_RANK`` is the right index. An unset or empty
+    mask keeps ``LOCAL_RANK``.
+    """
+    if cuda_visible_devices is None:
+        return local_rank
+    visible = [item.strip() for item in cuda_visible_devices.split(",") if item.strip()]
+    if len(visible) == 1:
+        return 0
+    return local_rank
+
+
+# Ranks whose final losses differ by more than this, after the all-reduce,
+# fail ``checks.fail_on_rank_loss_mismatch``. The absolute floor ignores
+# float32 noise; the relative term still flags a real split.
+_LOSS_MISMATCH_ATOL = 1e-5
+_LOSS_MISMATCH_RTOL = 1e-3
+
+
+def final_losses_disagree(local_loss: float, *, world_size: int, device: Any) -> bool:
+    """All-reduce max and min of ``local_loss`` and report whether ranks split.
+
+    World size 1, or a process group that is not initialized, is not a
+    mismatch: there is no other rank to disagree with.
+    """
+    if world_size <= 1:
+        return False
+    import torch
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        return False
+    packed = torch.tensor(
+        [float(local_loss), -float(local_loss)],
+        dtype=torch.float64,
+        device=device,
+    )
+    dist.all_reduce(packed, op=dist.ReduceOp.MAX)
+    reduced_max = float(packed[0].item())
+    reduced_min = -float(packed[1].item())
+    diff = abs(reduced_max - reduced_min)
+    scale = max(abs(reduced_max), abs(reduced_min), 1.0)
+    return diff > _LOSS_MISMATCH_ATOL and diff > _LOSS_MISMATCH_RTOL * scale
+
+
 def _percentile(values: list[float], pct: float) -> float:
     """Linear-interpolation percentile (no numpy dependency at the base layer)."""
     if not values:
@@ -381,18 +460,22 @@ class TrainingWorkload(Workload):
 
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         if self._device.type == "cuda":
-            torch.cuda.set_device(local_rank)
-            self._device = torch.device(f"cuda:{local_rank}")
+            index = cuda_device_index(local_rank, os.environ.get("CUDA_VISIBLE_DEVICES"))
+            torch.cuda.set_device(index)
+            self._device = torch.device(f"cuda:{index}")
 
         # Fixed seed → identical initial weights across ranks; CPU/Python RNGs
         # here, the CUDA device is seeded after set_device (per enable_deterministic).
         enable_deterministic(cfg.seed)
         if self._device.type == "cuda":
             torch.cuda.manual_seed(cfg.seed)
-        # Per-rank input generator: distinct rank streams, deterministic per step.
-        self._input_gen = torch.Generator(device="cpu").manual_seed(
-            cfg.seed + 7919 * (self._rank + 1)
-        )
+        # Distinct batches per rank, unless the recipe compares final losses:
+        # that check is only meaningful when every rank saw the same tokens.
+        if cfg.checks.fail_on_rank_loss_mismatch:
+            batch_seed = cfg.seed
+        else:
+            batch_seed = cfg.seed + 7919 * (self._rank + 1)
+        self._input_gen = torch.Generator(device="cpu").manual_seed(batch_seed)
 
         model = _build_model(cfg.model, cfg.seq_len)
         self._parameter_count = sum(p.numel() for p in model.parameters())
@@ -414,10 +497,13 @@ class TrainingWorkload(Workload):
             )
 
     def run(self) -> WorkloadResult:
-        import torch.distributed as dist
-
         assert self._cfg is not None
         cfg = self._cfg
+        if cfg.expected_world_size is not None and self._world_size != cfg.expected_world_size:
+            return self._unexpected_world_size_result(cfg)
+
+        import torch.distributed as dist
+
         vocab = cfg.model.vocab_size
         model = self._model
         optimizer = self._optimizer
@@ -457,6 +543,24 @@ class TrainingWorkload(Workload):
                     first_failure = step
                 failures.append({"step": step, "rank": self._rank, "problems": problems})
                 log.error("[rank %d] numeric check failed at step %d: %s", self._rank, step, problems)
+
+        if cfg.checks.fail_on_rank_loss_mismatch and final_losses_disagree(
+            final_loss,
+            world_size=self._world_size,
+            device=self._device,
+        ):
+            if first_failure is None:
+                first_failure = max(cfg.steps - 1, 0)
+            failures.append({
+                "step": max(cfg.steps - 1, 0),
+                "rank": self._rank,
+                "problems": ["rank_loss_mismatch"],
+            })
+            log.error(
+                "[rank %d] final loss disagreed across ranks (local_loss=%s)",
+                self._rank,
+                final_loss,
+            )
 
         # Global verdict: any rank seeing a failure fails the cell.
         local_fail = torch.tensor([len(failures)], dtype=torch.long, device=self._device)
@@ -520,6 +624,37 @@ class TrainingWorkload(Workload):
                 "final_loss": final_loss,
                 "step_time_p50": _percentile(timed, 50.0),
                 "step_time_p99": _percentile(timed, 99.0),
+            },
+        )
+
+    def _unexpected_world_size_result(self, cfg: TrainingConfig) -> WorkloadResult:
+        """Fail the trial before the loop when the process group is the wrong size."""
+        log.error(
+            "TrainingWorkload world size %d != expected %d",
+            self._world_size,
+            cfg.expected_world_size,
+        )
+        return WorkloadResult(
+            passed=False,
+            failure_count=1,
+            failure_details=[
+                {
+                    "rank": self._rank,
+                    "problems": ["unexpected_world_size"],
+                    "world_size": self._world_size,
+                    "expected_world_size": cfg.expected_world_size,
+                }
+            ],
+            total_iterations=0,
+            main_work_started=False,
+            executed_iterations=0,
+            configured_iterations=cfg.steps,
+            metrics={
+                "parallelism": cfg.parallelism,
+                "rank": self._rank,
+                "world_size": self._world_size,
+                "final_loss": None,
+                "expected_world_size": cfg.expected_world_size,
             },
         )
 
@@ -678,4 +813,6 @@ __all__ = [
     "ModelSpec",
     "OptimizerSpec",
     "ChecksSpec",
+    "cuda_device_index",
+    "final_losses_disagree",
 ]
