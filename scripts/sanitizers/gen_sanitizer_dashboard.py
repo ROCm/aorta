@@ -5266,8 +5266,16 @@ def main() -> int:
     # reconstructs. A published ``survey/`` has the same <case>/sanitizer_report.json
     # layout an informational results dir does, so the newest run's list is rebuilt
     # from the areas already published under it, at full card fidelity.
+    #
+    # That rebuild also covers a re-render that brought no survey of its own: the
+    # preview workflow, and a nightly whose survey artifact is absent. Both treat
+    # the newest retained run as current and would otherwise publish an empty
+    # Workload survey tab over areas the data branch already holds. A job that did
+    # pass ``--survey`` or ``--informational-results-dir`` keeps that input, even
+    # when it loaded no cases, so a failed sweep stays an empty tab.
     displayed_survey = survey
-    if runs and current_index != 0 and args.history_root is not None:
+    live_survey = args.survey is not None or args.informational_results_dir is not None
+    if runs and args.history_root is not None and (current_index != 0 or not live_survey):
         displayed_survey = survey_cases_from_informational_dir(
             args.history_root / str(runs[0]["meta"].get("run", "")) / "survey",
             rel=runs[0].get("rel"),
@@ -5438,11 +5446,15 @@ def main() -> int:
                     logs=keep_logs,
                     current=False,
                 )
+            # This job's own survey list only when it actually supplied one. A
+            # re-render with no survey input still lists the areas published under
+            # the run, including the newest one the preview treats as current.
+            if current and live_survey:
+                index_survey = survey
+            else:
+                index_survey = survey_entries_from_published(run_out)
             (run_out / "index.html").write_text(
-                build_run_index_html(
-                    run,
-                    survey=survey if current else survey_entries_from_published(run_out),
-                ),
+                build_run_index_html(run, survey=index_survey),
                 encoding="utf-8",
             )
         # Co-publish each caller-supplied ConSan report (#347) under the survey area

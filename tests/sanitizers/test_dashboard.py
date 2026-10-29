@@ -6455,6 +6455,68 @@ def test_disjoint_history_and_output_trees_keep_the_survey_subtree(
     assert (area / "sanitizer_report.json").is_file()
 
 
+def test_preview_rerender_fills_the_survey_tab_from_published_areas(
+    tmp_path, monkeypatch
+):
+    # The preview clones sanitizer-results and passes neither --current-run nor
+    # --informational-results-dir. The newest run is then "this job", which used
+    # to leave the Workload survey tab empty even though that run's survey/ was
+    # already on the data branch.
+    history = tmp_path / "history"
+    out = tmp_path / "dashboard"
+    _write_history_run(history, "2026-08-05-33")
+    area = history / "2026-08-05-33" / "survey" / "consan-gemm"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(history),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "gemm_f32_ss" in html
+    assert 'href="runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json"' in html
+    assert "No workload-survey kernels in this run." not in html
+    landing = (out / "runs/2026-08-05-33/index.html").read_text(encoding="utf-8")
+    assert 'href="survey/consan-gemm/">run area</a>' in landing
+
+
+def test_a_live_survey_that_loaded_nothing_stays_empty(tmp_path, monkeypatch):
+    # A sweep that ran and produced no readable case must not be filled back in
+    # from survey areas already published under the same run.
+    history = tmp_path / "history"
+    out = tmp_path / "dashboard"
+    _write_history_run(history, "2026-08-05-33")
+    area = history / "2026-08-05-33" / "survey" / "consan-gemm"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    info = tmp_path / "informational"
+    info.mkdir()
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(history),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--informational-results-dir", str(info),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "No workload-survey kernels in this run." in html
+    assert "gemm_f32_ss" not in html
+    landing = (out / "runs/2026-08-05-33/index.html").read_text(encoding="utf-8")
+    assert "survey/consan-gemm" not in landing
+
+
 def test_published_survey_area_keeps_its_recorded_command(tmp_path):
     """Reconstructing a published run must not recompute its reproduce command.
 
