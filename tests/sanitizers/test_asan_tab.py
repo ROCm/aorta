@@ -117,6 +117,9 @@ def test_tab_joins_the_nightly_tabs():
     assert "#tab-asan:checked ~ .navrow .rundetails { display:none; }" in page
     assert page.endswith("</table></div></section>\n  </section>\n  </div>\n</div></body></html>\n")
     assert "#tab-asan:checked ~ #panel-asan { display:block; }" in page
+    # A page rendered before the dot styles existed still has to colour results.
+    assert ".dot.pass { background:var(--green); }" in gen._ASAN_TAB_CSS
+    assert ".status { display:inline-flex;" in gen._ASAN_TAB_CSS
     head = page[: at("</head>")]
     assert "#tab-asan:checked" in head
     # The nightly's own default tab is still the one selected.

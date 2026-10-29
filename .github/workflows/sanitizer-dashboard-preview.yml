@@ -67,9 +67,10 @@ jobs:
             git clone --depth 1 --branch sanitizer-results "$repo_url" "$tmp"
             mkdir -p "$tmp/dashboard/runs"
           fi
-          # Survey areas stay. Since #572 the nightly publishes them under
-          # runs/<id>/survey/ and the Workload survey tab reads them. Deleting
-          # them here previewed an empty tab the branch would not publish.
+          # Survey areas stay. This job passes no --survey and no
+          # --informational-results-dir, so the generator fills the Workload
+          # survey tab from the newest retained run's published survey/
+          # directory. Deleting those areas previewed an empty tab.
 
           # No --current-run: the generator then treats the newest retained run as
           # this job's, and rewrites its run area (env.json, REPRODUCE.md, recipe

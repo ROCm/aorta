@@ -3668,6 +3668,11 @@ def test_help_lives_in_the_info_panel_above_the_tabs():
     assert html.index('aria-label="How to read this page"') < tabbar
     assert "toolgrid" not in html and "feature-card" not in html
     assert "Finds <code>s_waitcnt</code>" not in html.split("id=panel-survey", 1)[1]
+    # Both popovers hang from the icon bar. Anchoring one to its own icon puts
+    # the help text off the left edge of a phone-width page.
+    css = gen._CSS.replace(" ", "")
+    assert ".iconbar{position:relative;" in css
+    assert ".iconpop{position:relative" not in css
 
 
 def test_survey_intro_qualifies_the_both_sanitizers_claim():

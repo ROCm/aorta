@@ -137,13 +137,13 @@ _CSS = """
   .navrow > a { color:var(--text-3); } .navrow > a:hover { color:var(--text-2); }
 
   /* Three same-size outline icons. Info and run details are <details>; raw reports
-     is a link. The popover is positioned so opening it does not reflow the title. */
-  .iconbar { display:flex; align-items:center; gap:6px; }
+     is a link. Popovers hang from the bar, not from each icon: a 420px panel
+     anchored to the info icon runs off the left edge of a phone-width page. */
+  .iconbar { position:relative; display:flex; align-items:center; gap:6px; }
   .iconbtn, .iconpop > summary {
     width:32px; height:32px; display:grid; place-items:center; margin:0; padding:0;
     border:1px solid var(--border); border-radius:8px; color:var(--text-2);
     background:transparent; cursor:pointer; list-style:none; text-decoration:none; }
-  .iconpop { position:relative; }
   .iconpop > summary::-webkit-details-marker { display:none; }
   .iconbtn:hover, .iconpop > summary:hover { border-color:var(--border-hover); color:var(--text-1);
     text-decoration:none; }
@@ -4529,6 +4529,16 @@ _ASAN_TAB_CSS = """
   #tab-asan:checked ~ .tabs #panel-asan,
   #tab-asan:checked ~ #panel-asan { display:block; }
   #tab-asan:checked ~ .navrow .rundetails { display:none; }
+  /* Pages splices this tab onto a dashboard rendered before these rules existed.
+     That page has the colour variables but no .status/.dot, so a manual-run
+     result would be an uncolored word. */
+  .status { display:inline-flex; align-items:center; gap:6px; color:inherit;
+    white-space:nowrap; vertical-align:middle; }
+  .dot { width:8px; height:8px; border-radius:99px; flex:0 0 auto; display:inline-block; }
+  .dot.pass { background:var(--green); }
+  .dot.warn { background:var(--v-warn); }
+  .dot.fail, .dot.error { background:var(--v-fail); }
+  .dot.neutral { background:var(--text-3); }
   .asan-intro { font-size:14px; color:var(--text-2); margin:0 0 12px; line-height:1.55; }
   .asan-intro a { color:var(--blue); }
   .asan-heading { font-size:20px; font-weight:600; margin:24px 0 12px; }
