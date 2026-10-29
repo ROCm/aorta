@@ -103,11 +103,12 @@ _DASH = "\u2014"  # em dash; kept as a name so it can sit inside f-string braces
 # Dashboard stylesheet. Kept as a module-level plain string (not part of the
 # f-string body) so CSS braces need no doubling and the design diffs cleanly.
 #
-# Colour means the result, and only there. A status is a small dot plus the word
-# in the normal text colour: green pass / matched, amber warn, red fail /
-# unmatched. The word itself is not recolored, and tool names are plain text.
-# The Healthy / Failed pill beside the title is the only solid fill. It is the
-# gate, and it counts only the nightly-gate rows.
+# Colour means the result, and only there. A verdict is a small dot plus the word
+# in the normal text colour: green pass, amber warn, red fail. The word itself
+# is not recolored, and tool names are plain text. Baseline match is a separate
+# chip (matched / unmatched), not another verdict dot. The Healthy / Failed pill
+# beside the title is the only solid fill. It is the gate, and it counts only
+# the nightly-gate rows.
 _CSS = """
   :root {
     color-scheme: dark;
@@ -240,8 +241,10 @@ _CSS = """
   td.empty { color:var(--text-3); font-style:italic; }
   .dash { color:var(--text-3); }
 
-  /* Status: a dot, then the word in the surrounding text colour. The cue class
-     paints only the dot. fail and error share one red. */
+  /* Verdicts are a dot, then the word in the surrounding text colour. The cue
+     class paints only the dot. fail and error share one red. Baseline match is
+     not a verdict: it is a chip at the end of the row, so a green matched
+     beside a red fail is not two copies of the same status. */
   .status { display:inline-flex; align-items:center; gap:6px; color:inherit;
     white-space:nowrap; vertical-align:middle; }
   .dot { width:8px; height:8px; border-radius:99px; flex:0 0 auto; display:inline-block; }
@@ -249,6 +252,11 @@ _CSS = """
   .dot.warn { background:var(--v-warn); }
   .dot.fail, .dot.error { background:var(--v-fail); }
   .dot.neutral { background:var(--text-3); }
+  .match { display:inline-flex; align-items:center; padding:2px 9px; border-radius:999px;
+    font-size:12.5px; font-weight:600; line-height:1.5; white-space:nowrap;
+    border:1px solid transparent; }
+  .match.pass { color:#BBF7D0; background:rgba(34,197,94,.18); border-color:rgba(34,197,94,.45); }
+  .match.fail { color:#FECACA; background:rgba(239,68,68,.16); border-color:rgba(239,68,68,.45); }
 
   .kcard { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm);
     margin-bottom:10px; overflow:hidden; }
@@ -3475,8 +3483,14 @@ def _status_md(word: str, cue: str) -> str:
 
 
 def _baseline_status_html(row: dict[str, Any]) -> str:
+    """The baseline result as a highlighted chip, not a verdict dot.
+
+    Sits at the end of a gate row. A dot here would look like pass, warn, or
+    fail, which is the observed verdict in an earlier column.
+    """
     word, cue = _baseline_cue(row)
-    return _status_html(word, cue)
+    tone = "pass" if cue == "pass" else "fail"
+    return f'<span class="match {tone}">{_esc(word)}</span>'
 
 
 # Verdict dot cues, keyed on the observed verdict string. ``fail`` and ``error``
@@ -3496,9 +3510,9 @@ def _verdict_html(verdict: Any) -> str:
     """An observed verdict as a dot and the word.
 
     Used by both tabs, kernel details, history, and the per-run page. The colour
-    describes that column only. On the nightly gate a red ``fail`` beside a green
-    ``matched`` is a positive control, and the Healthy pill is what says the row
-    is a good gate result.
+    describes that column only. On the nightly gate a red ``fail`` is the
+    observed verdict; the highlighted baseline chip at the end of the row is
+    what says the row matched.
     """
     text, cue = _verdict_cue(verdict)
     return _status_html(text, cue)
@@ -3583,7 +3597,7 @@ def _history_case_html(row: dict[str, Any]) -> str:
     expected = ""
     if row["present"] and not row["match"]:
         expected = f' <span class="dash">expected</span> {_verdict_html(row["expected"])}'
-    return f"{_baseline_status_html(row)} {_verdict_html(row['verdict'])}{expected}"
+    return f"{_verdict_html(row['verdict'])}{expected} {_baseline_status_html(row)}"
 
 
 def _history_gate_html(run: dict[str, Any]) -> str:
@@ -3593,14 +3607,17 @@ def _history_gate_html(run: dict[str, Any]) -> str:
 
 def _baseline_status_md(row: dict[str, Any]) -> str:
     word, cue = _baseline_cue(row)
-    return _status_md(word, cue)
+    return f"**{_status_md(word, cue)}**"
 
 
 def _history_case_md(row: dict[str, Any]) -> str:
     expected = ""
     if row["present"] and not row["match"]:
         expected = f"; expected {_verdict_md(row['expected'])}"
-    return f"{_baseline_status_md(row)}<br>Observed: {_verdict_md(row['verdict'])}{expected}"
+    return (
+        f"Observed: {_verdict_md(row['verdict'])}{expected}"
+        f"<br>{_baseline_status_md(row)}"
+    )
 
 
 def _report_link_html(report_rel: str | None) -> str:
@@ -3786,17 +3803,18 @@ def _tone_for(verdict: Any) -> str:
     return "" if cls == "pass" else cls
 
 
-def _card_summary_html(*, name: str, kind: str, trailing: str) -> str:
+def _card_summary_html(*, name: str, kind: str, trailing: str, end: str = "") -> str:
     """The collapsed card's triage row.
 
     Every card ships closed. The row is the name, the tool as plain text, and
-    the caller's status dots. No identity tile and no accent colour.
+    the caller's status dots. ``end`` is the baseline chip, after the spacer,
+    so it is the last thing on the row. No identity tile and no accent colour.
     """
     kind_html = f'<span class="kind">{_esc(kind)}</span>' if kind else ""
     return (
         "<summary>"
         f'<span class="name">{_esc(name)}</span>'
-        f"{kind_html}{trailing}<span class=\"spacer\"></span>{_chevron_html()}</summary>"
+        f"{kind_html}{trailing}<span class=\"spacer\"></span>{end}{_chevron_html()}</summary>"
     )
 
 
@@ -3809,11 +3827,11 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
     blocks: list[str] = []
     for case, _key, label, backend_label in CASES:
         row = rows[case]
-        trailing = (
-            f"{_baseline_status_html(row)}{_verdict_html(row['verdict'])}"
-            f"{_findings_chip_html(row)}"
+        trailing = f"{_verdict_html(row['verdict'])}{_findings_chip_html(row)}"
+        summary = _card_summary_html(
+            name=label, kind=backend_label, trailing=trailing,
+            end=_baseline_status_html(row),
         )
-        summary = _card_summary_html(name=label, kind=backend_label, trailing=trailing)
         tone = _tone_for(row["verdict"])
         if not row["present"]:
             body = _observation_html(row, tone="fail")
@@ -4352,13 +4370,13 @@ def build_html(
 
     latest_rows = "".join(
         f"<tr><td class=mono>{_esc(label)}</td><td>{_esc(backend)}</td>"
-        f"<td>{_baseline_status_html(latest['rows'][case])}</td>"
         f"<td>{_verdict_html(latest['rows'][case]['verdict'])}</td>"
         f"<td>{_verdict_html(latest['rows'][case]['expected'] or _DASH)}</td>"
         f"<td>{_execution_html(latest['rows'][case]['execution'])}</td>"
         f"<td class=num>{latest['rows'][case]['findings']}</td>"
         f"<td class=mono>{_esc(latest['rows'][case]['coverage']) or '<span class=dash>&mdash;</span>'}</td>"
-        f"<td>{_report_link_html(latest['rows'][case].get('report_rel'))}</td></tr>"
+        f"<td>{_report_link_html(latest['rows'][case].get('report_rel'))}</td>"
+        f"<td>{_baseline_status_html(latest['rows'][case])}</td></tr>"
         for case, _key, label, backend in CASES
     )
     # Link to the whole run area (co-located raw reports) when published there.
@@ -4407,9 +4425,9 @@ def build_html(
   <section class="panel">
     <h2>Latest run <span class=count>{len(CASES)} recipes</span></h2>
     <div class="table-wrap"><table><thead>
-      <tr><th>Recipe</th><th>Backend</th><th>Baseline status</th><th>Observed</th>
+      <tr><th>Recipe</th><th>Backend</th><th>Observed</th>
           <th>Expected</th><th>Execution</th><th class=num>Findings</th>
-          <th>Coverage</th><th>Report</th></tr></thead>
+          <th>Coverage</th><th>Report</th><th>Baseline</th></tr></thead>
       <tbody>{latest_rows}</tbody>
     </table></div>
   </section>
@@ -4868,9 +4886,10 @@ def build_run_index_html(
 
     report_rows = "".join(
         f"<tr><td class=mono>{_esc(label)}</td>"
-        f"<td>{_baseline_status_html(rows[case])} {_verdict_html(rows[case]['verdict'])}</td>"
+        f"<td>{_verdict_html(rows[case]['verdict'])}</td>"
         f"<td>{_cell(case, rows[case]['present'])}</td>"
-        f"<td>{_area_cell(case, rows[case]['present'])}</td></tr>"
+        f"<td>{_area_cell(case, rows[case]['present'])}</td>"
+        f"<td>{_baseline_status_html(rows[case])}</td></tr>"
         for case, _key, label, _backend in CASES
     )
     # Shares the dashboard stylesheet so a drill-down does not look like a
@@ -4887,8 +4906,8 @@ def build_run_index_html(
         f"{run_link}</div>\n"
         f"{_title_block_html(title, summary, count_line, subtitle=subtitle)}\n"
         '<section class="panel"><h2>Raw reports</h2><div class="table-wrap"><table>\n'
-        "<thead><tr><th>Recipe</th><th>Baseline status</th><th>Raw report</th>"
-        "<th>Files</th></tr></thead>\n"
+        "<thead><tr><th>Recipe</th><th>Observed</th><th>Raw report</th>"
+        "<th>Files</th><th>Baseline</th></tr></thead>\n"
         f"<tbody>{report_rows}</tbody>\n"
         "</table></div></section>\n"
         f"{_run_index_survey_html(survey)}"
@@ -5022,15 +5041,16 @@ def build_summary_md(
         "A matched row is healthy even when the verdict is fail. "
         "Baseline status is matched or unmatched.",
         "",
-        "| Recipe | Backend | Baseline status | Observed | Expected | Execution | Findings | Coverage |",
-        "|---|---|---|---|---|---|--:|---|",
+        "| Recipe | Backend | Observed | Expected | Execution | Findings | Coverage | Baseline |",
+        "|---|---|---|---|---|--:|---|---|",
     ]
     for case, _key, label, backend in CASES:
         r = latest["rows"][case]
         lines.append(
-            f"| {label} | {backend} | {_baseline_status_md(r)} | {_verdict_md(r['verdict'])} | "
+            f"| {label} | {backend} | {_verdict_md(r['verdict'])} | "
             f"{_verdict_md(r['expected'] or _DASH)} | "
-            f"{_execution_md(r['execution'])} | {r['findings']} | {r['coverage'] or _DASH} |"
+            f"{_execution_md(r['execution'])} | {r['findings']} | {r['coverage'] or _DASH} | "
+            f"{_baseline_status_md(r)} |"
         )
 
     lines += [
@@ -5044,7 +5064,8 @@ def build_summary_md(
     for case, _key, label, _backend in CASES:
         r = latest["rows"][case]
         lines.append(
-            f"<details><summary><b>{label}</b> \u2014 " f"{_baseline_status_md(r)}</summary>"
+            f"<details><summary><b>{label}</b> \u2014 "
+            f"{_verdict_md(r['verdict'])} \u2014 {_baseline_status_md(r)}</summary>"
         )
         lines.append("")
         if not r["present"]:

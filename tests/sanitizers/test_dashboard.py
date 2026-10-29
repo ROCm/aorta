@@ -2130,7 +2130,7 @@ def test_summary_md_expected_warn_and_fail_are_healthy():
     assert "**Healthy** — 3/3 matched" in md
     assert md.count(gen._status_md("matched", "pass")) >= 3
     assert "positive-control outcomes" in md
-    assert "| Baseline status | Observed | Expected | Execution |" in md
+    assert "| Observed | Expected | Execution | Findings | Coverage | Baseline |" in md
     assert f"| {gen._verdict_md('fail')} | {gen._verdict_md('fail')} |" in md
     assert "**REGRESSION**" not in md
     assert "Kernel details" in md
@@ -2139,7 +2139,7 @@ def test_summary_md_expected_warn_and_fail_are_healthy():
     # per-case observation summary is surfaced on the guardrail (Tab 1) MD too
     assert "Observation: waitcheck warn" in md
     assert "| Kernel | Dispatch | Observed sanitizer verdict |" in md
-    assert f"{gen._status_md('matched', 'pass')}<br>Observed: {gen._verdict_md('warn')}" in md
+    assert f"Observed: {gen._verdict_md('warn')}<br>**{gen._status_md('matched', 'pass')}**" in md
     assert f"{gen._status_md('healthy', 'pass')} |" in md
     assert "green" not in md and "red" not in md
 
@@ -2158,8 +2158,8 @@ def test_summary_md_mismatch_is_actionable_regression():
     assert gen._status_md("unmatched", "fail") in md
     assert f"| {gen._verdict_md('fail')} | {gen._verdict_md('pass')} |" in md
     assert (
-        f"{gen._status_md('unmatched', 'fail')}<br>Observed: {gen._verdict_md('fail')}"
-        f"; expected {gen._verdict_md('pass')}"
+        f"Observed: {gen._verdict_md('fail')}; expected {gen._verdict_md('pass')}"
+        f"<br>{gen._baseline_status_md(rows['consan-clean'])}"
     ) in md
     assert f"{gen._status_md('failed', 'fail')} |" in md
 
@@ -2182,14 +2182,15 @@ def test_build_html_expected_warn_and_fail_are_healthy_and_neutral():
     # the gate is a pill beside the title and a gray count under it
     assert '<span class="health ok">Healthy</span>' in html
     assert '<p class="countline">3/3 matched</p>' in html
-    assert html.count(gen._status_html("matched", "pass")) >= 3
+    assert html.count('class="match pass">matched</span>') >= 3
     # verdicts are a dot plus the word; the word itself is not recolored
     assert gen._status_html("warn", "warn") in html
     assert gen._status_html("fail", "fail") in html
     assert "Nightly gate compares each recipe with its baseline." in html
     assert "This tab is the regression gate." not in html
-    assert "<th>Baseline status</th><th>Observed</th>" in html
-    assert "<th>Expected</th><th>Execution</th>" in html
+    assert html.index("<th>Observed</th>") < html.index("<th>Expected</th>")
+    assert html.index("<th>Expected</th>") < html.index("<th>Execution</th>")
+    assert html.index("<th>Report</th>") < html.index("<th>Baseline</th>")
     assert "gemm_x" in html and "Kernel details" in html
     assert gen._status_html("healthy", "pass") in html
     assert ">green<" not in html and ">red<" not in html
@@ -2213,7 +2214,7 @@ def test_build_html_mismatch_is_primary_regression_signal():
 
     assert '<span class="health bad">Failed</span>' in html
     assert '<p class="countline">1/3 unmatched</p>' in html
-    assert gen._status_html("unmatched", "fail") in html
+    assert '<span class="match fail">unmatched</span>' in html
     assert gen._status_html("fail", "fail") in html
     assert f'<span class="dash">expected</span> {gen._status_html("pass", "pass")}' in html
     assert gen._status_html("failed", "fail") in html
@@ -2238,12 +2239,12 @@ def test_renderers_make_missing_report_explicit():
     md = gen.build_summary_md(runs)
 
     dash = "\u2014"
-    assert gen._status_html("report missing", "fail") in html
+    assert '<span class="match fail">report missing</span>' in html
     assert gen._status_html(dash, "neutral") in html
     assert gen._status_md("report missing", "fail") in md
     assert f"Observed {gen._verdict_md(dash)}" in md
     assert (
-        f"{gen._status_md('report missing', 'fail')}<br>Observed: {gen._verdict_md(dash)}"
+        f"Observed: {gen._verdict_md(dash)}<br>**{gen._status_md('report missing', 'fail')}**"
     ) in md
     # the per-case observation summary renders for a missing guardrail report too,
     # on both Tab 1 renderers (parity with the survey missing branch / #367).
@@ -2315,7 +2316,7 @@ def test_missing_only_run_is_incomplete_not_regression():
     assert "Regression" not in html and "REGRESSION" not in html
     assert "Regression" not in md and "REGRESSION" not in md
     # per-case missing status stays explicit
-    assert gen._status_html("report missing", "fail") in html
+    assert '<span class="match fail">report missing</span>' in html
     assert gen._status_md("report missing", "fail") in md
 
 
@@ -3232,7 +3233,7 @@ def test_build_run_index_html_missing_report_reads_incomplete(tmp_path):
     # A missing report fails the gate and says report missing, not a verdict mismatch.
     assert '<span class="health bad">Failed</span>' in page
     assert "1/3 missing" in page
-    assert gen._status_html("report missing", "fail") in page
+    assert '<span class="match fail">report missing</span>' in page
     assert "verdict mismatch" not in page
 
 
@@ -3584,11 +3585,8 @@ def test_absent_report_never_claims_no_findings():
         [{"meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
           "rows": rows, "gate": False}]
     )
-    assert gen._status_html("report missing", "fail") in html
+    assert gen._baseline_status_html(missing) in html
     # the surviving "no findings" chip belongs to a present case, never the absent one
-    assert (
-        'report missing</span><span class="status"><span class="dot neutral"></span>'
-    ) in html
     dash = "\u2014"
     assert f'{gen._status_html(dash, "neutral")}<span class="findings">' not in html
 
@@ -3631,18 +3629,17 @@ def test_wide_tables_stay_reachable_on_narrow_viewports():
 
 
 def test_verdict_and_baseline_use_separate_visual_axes():
-    # A matched fail is a green matched dot beside a red fail dot. The words
-    # stay in the normal text colour, so the fail does not read as the gate.
+    # A matched fail keeps the red fail dot for the verdict. The baseline is a
+    # chip, not a second dot, so matched does not read as another pass.
     row = gen.summarize_case(_consan_racy_report(), "fail")
     assert gen._verdict_html(row["verdict"]) == (
         '<span class="status"><span class="dot fail"></span>fail</span>'
     )
-    assert gen._baseline_status_html(row) == (
-        '<span class="status"><span class="dot pass"></span>matched</span>'
-    )
+    assert gen._baseline_status_html(row) == '<span class="match pass">matched</span>'
     css = gen._CSS
     assert ".dot.pass { background:var(--green); }" in css
     assert ".dot.fail, .dot.error { background:var(--v-fail); }" in css
+    assert ".match.pass" in css and ".match.fail" in css
     assert ".status.fail" not in css
 
 
