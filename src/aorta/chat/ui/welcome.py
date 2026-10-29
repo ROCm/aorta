@@ -44,9 +44,9 @@ def capabilities() -> str:
         )
     if settings.allow_cluster_jobs:
         lines.append(
-            "- submit GPU jobs to the cluster from a paste. **One message can "
-            "occupy a node for minutes**, run the code you paste on it, and "
-            "write outside the roots above."
+            "- run GPU diagnostic jobs from a paste, either on this workstation "
+            "or through Slurm. **One message can occupy a GPU for minutes**, run "
+            "the code you paste, and write outside the roots above."
         )
     return "\n".join(lines)
 

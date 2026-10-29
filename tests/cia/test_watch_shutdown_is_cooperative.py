@@ -435,7 +435,7 @@ class TestNoSweepBeginsAfterCancellation:
         stop = threading.Event()
         launches = []
 
-        def reconcile_then_stop(_jobs_root):
+        def reconcile_then_stop(_jobs_root, _backend=""):
             stop.set()
             return 0
 
@@ -470,9 +470,8 @@ class TestNoSweepBeginsAfterCancellation:
 
         monkeypatch.setattr(triage_mod, "launch", launch_then_stop)
         monkeypatch.setattr(
-            triage_mod,
-            "cancel",
-            lambda job_id: (cancelled.append(job_id) or (True, "")),
+            "aorta.cia.launch.backend.SlurmBackend.cancel",
+            lambda _self, job_id: (cancelled.append(job_id) or (True, "")),
         )
         monkeypatch.setattr(triage_mod.threading, "Thread", watch_must_not_start)
 

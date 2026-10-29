@@ -12,9 +12,8 @@ one queued behind it.
 
 from __future__ import annotations
 
+import json
 import subprocess
-
-import pytest
 
 from aorta.cia.launch import cancel
 from aorta.cia.launch.cluster import cancel_sbatch
@@ -97,9 +96,11 @@ def _triage_stopping_at(tmp_path, monkeypatch, state: str, *, cancels: bool = Tr
 
     monkeypatch.setattr(triage_mod, "launch", lambda **kw: ("99999", ""))
     monkeypatch.setattr(
-        triage_mod,
-        "cancel",
-        lambda job_id: (cancelled.append(job_id) or (cancels, "" if cancels else "no scancel")),
+        "aorta.cia.launch.backend.SlurmBackend.cancel",
+        lambda _self, job_id: (
+            cancelled.append(job_id)
+            or (cancels, "" if cancels else "no scancel")
+        ),
     )
     monkeypatch.setattr(triage_mod, "wait_for_job", lambda *a, **k: state)
 
@@ -115,9 +116,7 @@ class TestAnAbandonedTriageReleasesItsNode:
     @staticmethod
     def _run(tmp_path, monkeypatch, *, cancels: bool = True) -> tuple[dict, list]:
         # The caller gave up while the job was still running.
-        return _triage_stopping_at(
-            tmp_path, monkeypatch, "ABANDONED(RUNNING)", cancels=cancels
-        )
+        return _triage_stopping_at(tmp_path, monkeypatch, "ABANDONED(RUNNING)", cancels=cancels)
 
     def test_the_allocation_is_cancelled(self, tmp_path, monkeypatch):
         _result, cancelled = self._run(tmp_path, monkeypatch)
@@ -137,14 +136,14 @@ class TestAnAbandonedTriageReleasesItsNode:
         result, _ = self._run(tmp_path, monkeypatch, cancels=False)
 
         assert result["cancelled"] is False
+        record = json.loads((tmp_path / result["job_id"] / "job.json").read_text(encoding="utf-8"))
+        assert record["status"] == "running"
 
     def test_the_job_record_is_marked_cancelled(self, tmp_path, monkeypatch):
         import json
 
         result, _ = self._run(tmp_path, monkeypatch)
-        record = json.loads(
-            (tmp_path / result["job_id"] / "job.json").read_text(encoding="utf-8")
-        )
+        record = json.loads((tmp_path / result["job_id"] / "job.json").read_text(encoding="utf-8"))
 
         assert record["status"] == "cancelled"
 
@@ -154,13 +153,27 @@ class TestAnAbandonedTriageReleasesItsNode:
 
         cancelled: list = []
         monkeypatch.setattr(triage_mod, "launch", lambda **kw: ("99999", ""))
-        monkeypatch.setattr(triage_mod, "cancel", lambda job_id: cancelled.append(job_id))
+        monkeypatch.setattr(
+            "aorta.cia.launch.backend.SlurmBackend.cancel",
+            lambda _self, job_id: cancelled.append(job_id),
+        )
         monkeypatch.setattr(triage_mod, "wait_for_job", lambda *a, **k: "COMPLETED")
 
         source = tmp_path / "k.hip"
         source.write_text("__global__ void bump(float* o) { o[0] += 1; }\n", encoding="utf-8")
         triage_mod.run_triage(
-            ["--source", str(source), "--jobs-root", str(tmp_path), "--kernel-name", "bump"]
+            [
+                "--source",
+                str(source),
+                "--jobs-root",
+                str(tmp_path),
+                "--kernel-name",
+                "bump",
+                "--watch-grace",
+                "0",
+                "--watch-rounds",
+                "1",
+            ]
         )
 
         assert cancelled == []
@@ -194,9 +207,7 @@ class TestATimedOutTriageReleasesItsNodeToo:
 
     def test_a_job_that_never_started_is_released_as_well(self, tmp_path, monkeypatch):
         """Timing out while still PENDING holds a queue slot, not a node."""
-        _result, cancelled = _triage_stopping_at(
-            tmp_path, monkeypatch, "TIMEOUT_WAITING(PENDING)"
-        )
+        _result, cancelled = _triage_stopping_at(tmp_path, monkeypatch, "TIMEOUT_WAITING(PENDING)")
 
         assert cancelled == ["99999"]
 
@@ -222,14 +233,14 @@ class TestATimedOutTriageReleasesItsNodeToo:
         result, _ = self._run(tmp_path, monkeypatch, cancels=False)
 
         assert result["cancelled"] is False
+        record = json.loads((tmp_path / result["job_id"] / "job.json").read_text(encoding="utf-8"))
+        assert record["status"] == "running"
 
     def test_the_job_record_is_marked_cancelled(self, tmp_path, monkeypatch):
         import json
 
         result, _ = self._run(tmp_path, monkeypatch)
-        record = json.loads(
-            (tmp_path / result["job_id"] / "job.json").read_text(encoding="utf-8")
-        )
+        record = json.loads((tmp_path / result["job_id"] / "job.json").read_text(encoding="utf-8"))
 
         assert record["status"] == "cancelled"
 

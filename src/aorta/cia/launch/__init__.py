@@ -1,24 +1,54 @@
-"""Launch: put a workload on a node and record where its log will be.
-
-``launch`` is the seam. It is Slurm today; a scheduler-less backend branches
-here rather than at every call site, which is why callers should not reach for
-``submit_sbatch`` directly.
-"""
+"""One execution-backend seam for CIA submit, wait, cancel, and quick work."""
 
 from pathlib import Path
 
+from aorta.cia.launch.backend import (
+    AUTO_SLURM_BACKEND,
+    LOCAL_BACKEND,
+    SLURM_BACKEND,
+    JobBackend,
+    LocalBackend,
+    SlurmBackend,
+    backend_for,
+    backend_from_record,
+    resolve_backend,
+    select_backend,
+)
+from aorta.cia.launch.local import ALREADY_FINISHED
+
 
 def cancel(job_id: str) -> tuple[bool, str]:
-    """Release the allocation *job_id* holds. Returns ``(cancelled, error)``.
+    """Stop the scheduler allocation or local process represented by *job_id*."""
+    return backend_for(job_id).cancel(job_id)
 
-    The other half of :func:`launch`, and here for the same reason: a
-    scheduler-less backend branches once rather than at every call site. A
-    caller that stops waiting owes the cluster this -- the job it submitted
-    holds a node until its own time limit otherwise.
-    """
-    from aorta.cia.launch.cluster import cancel_sbatch
 
-    return cancel_sbatch(job_id)
+def backend_for_job(job_id: str) -> str:
+    """Compatibility spelling for callers that only need the persisted name."""
+    return backend_for(job_id).name
+
+
+def state(job_id: str, job_dir: Path) -> str:
+    """Return the state of whichever backend owns *job_id*."""
+    return backend_for(job_id).state(job_id, job_dir)
+
+
+def node(job_id: str) -> str:
+    """Return the node reported by whichever backend owns *job_id*."""
+    return backend_for(job_id).node(job_id)
+
+
+def record_cancellation(
+    job_id: str,
+    job_dir: Path,
+    *,
+    preserve_terminal: bool = True,
+) -> None:
+    """Persist backend-specific cancellation state when needed."""
+    backend_for(job_id).record_cancellation(
+        job_id,
+        job_dir,
+        preserve_terminal=preserve_terminal,
+    )
 
 
 def launch(
@@ -31,15 +61,18 @@ def launch(
     env_vars: dict[str, str] | None = None,
     node: str = "",
     tolerate_nonzero: bool = False,
+    backend: str | JobBackend | None = None,
 ) -> tuple[str, str]:
     """Submit *command*. Returns ``(job_id, error)``; one of the two is empty.
 
     A failed launch must surface its error rather than be reported as a run
     that never happened.
     """
-    from aorta.cia.launch.cluster import submit_sbatch
-
-    return submit_sbatch(
+    try:
+        selected = select_backend(backend)
+    except ValueError as exc:
+        return "", str(exc)
+    return selected.submit(
         command=command,
         job_name=job_name,
         log_path=log_path,
@@ -49,3 +82,24 @@ def launch(
         node=node,
         tolerate_nonzero=tolerate_nonzero,
     )
+
+
+__all__ = [
+    "ALREADY_FINISHED",
+    "AUTO_SLURM_BACKEND",
+    "LOCAL_BACKEND",
+    "SLURM_BACKEND",
+    "JobBackend",
+    "LocalBackend",
+    "SlurmBackend",
+    "backend_for",
+    "backend_for_job",
+    "backend_from_record",
+    "cancel",
+    "launch",
+    "node",
+    "record_cancellation",
+    "resolve_backend",
+    "select_backend",
+    "state",
+]

@@ -314,6 +314,57 @@ def build_sbatch_script(
     return "\n".join(["#!/bin/bash", *directives, "", *body, ""])
 
 
+def sacct_state(slurm_id: str) -> str:
+    """Terminal-or-running state, tolerating a lagging accounting database."""
+    try:
+        result = subprocess.run(
+            [
+                "sacct",
+                "-j",
+                slurm_id,
+                "--format=State",
+                "--noheader",
+                "--parsable2",
+                "-X",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        lines = (result.stdout or "").strip().splitlines()
+        if lines:
+            return lines[0].strip().split()[0]
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
+def sacct_nodelist(slurm_id: str) -> str:
+    """Which node Slurm actually ran *slurm_id* on, or ``""`` if unknown."""
+    try:
+        result = subprocess.run(
+            [
+                "sacct",
+                "-j",
+                slurm_id,
+                "--format=NodeList",
+                "--noheader",
+                "--parsable2",
+                "-X",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in (result.stdout or "").strip().splitlines():
+            node = line.strip()
+            if node and not node.lower().startswith("none"):
+                return node
+    except Exception as exc:
+        log.info("could not read the node for slurm %s: %s", slurm_id, exc)
+    return ""
+
+
 def cancel_sbatch(slurm_id: str) -> tuple[bool, str]:
     """Release the allocation for *slurm_id*. Returns ``(cancelled, error)``.
 

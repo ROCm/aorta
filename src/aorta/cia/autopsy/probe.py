@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from aorta.cia.cancellation import Stop, pause, stopped
+from aorta.cia.launch import backend_from_record
 from aorta.cia.launch.cluster import ssh_user
 from aorta.cia.launch.job import JobRecord
 from aorta.cia.launch.planner import check_recipe_mode
@@ -99,6 +100,18 @@ def run_aorta_probe(
     """
     if stopped(stop):
         print("[probe] caller gave up; not launching a production sweep")
+        return None
+    backend = backend_from_record(
+        getattr(job, "scheduler", ""),
+        getattr(job, "scheduler_job_id", ""),
+    )
+    if not backend.supports_remote_probe:
+        # This escalation is SSH-only. A backend that cannot make that promise
+        # must not reinterpret its node value as a remote compute host.
+        print(
+            f"[probe] {backend.name} job: skipping the SSH "
+            "production-sweep escalation"
+        )
         return None
     if not valid_host(job.node):
         print(f"[probe] {job.node!r} is not a hostname; not probing")
