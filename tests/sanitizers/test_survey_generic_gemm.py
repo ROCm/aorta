@@ -186,8 +186,8 @@ def test_survey_error_and_warn_never_flip_the_gate():
     assert "REGRESSION" not in html
     assert "**Healthy**" in md and "**REGRESSION**" not in md
     # the observed-only note lives in the info panel
-    assert "Workload survey is observed only." in html
-    assert "Findings represent observed behavior, not a gate result." in html
+    assert "Observed only." in html
+    assert "does not change the nightly" in html
     # each case drills down to its published report link
     for entry in survey:
         assert entry["report_rel"] in html

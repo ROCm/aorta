@@ -2186,7 +2186,7 @@ def test_build_html_expected_warn_and_fail_are_healthy_and_neutral():
     # verdicts are a dot plus the word; the word itself is not recolored
     assert gen._status_html("warn", "warn") in html
     assert gen._status_html("fail", "fail") in html
-    assert "Nightly gate compares each recipe with its baseline." in html
+    assert "Unmatched fails the nightly." in html
     assert "This tab is the regression gate." not in html
     assert html.index("<th>Observed</th>") < html.index("<th>Expected</th>")
     assert html.index("<th>Expected</th>") < html.index("<th>Execution</th>")
@@ -3650,10 +3650,10 @@ def test_survey_intro_is_readable_and_drops_experimental_framing():
     # definitions are page-level cards (both tabs report both sanitizers).
     html = gen.build_html([_healthy_guardrail_run()], survey=[])
     info, survey = html.split("id=panel-survey", 1)
-    assert "Workload survey is observed only." in info
-    assert "does not affect nightly pass/fail status" in info
-    assert "WaitCheck finds" in info and "ConSan finds" in info
-    assert "Findings represent observed behavior, not a gate result." in info
+    assert "Observed only." in info
+    assert "does not change the nightly" in info
+    assert "WaitCheck" in info and "ConSan" in info
+    assert "missing scan is marked report missing" in info
     assert "What You Can Do Here" not in html
     assert "observational only" not in survey
     assert "experimental" not in html.lower()
@@ -3667,7 +3667,7 @@ def test_help_lives_in_the_info_panel_above_the_tabs():
     tabbar = html.index('<div class=tabbar>')
     assert html.index('aria-label="How to read this page"') < tabbar
     assert "toolgrid" not in html and "feature-card" not in html
-    assert "WaitCheck finds" not in html.split("id=panel-survey", 1)[1]
+    assert "Finds <code>s_waitcnt</code>" not in html.split("id=panel-survey", 1)[1]
 
 
 def test_survey_intro_qualifies_the_both_sanitizers_claim():
@@ -3683,7 +3683,7 @@ def test_survey_intro_qualifies_the_both_sanitizers_claim():
     # the old absolute claim is gone; the qualified degraded-path copy is present
     assert "shown under <b>both</b> sanitizers." not in html
     assert "simply does not appear" not in html
-    assert "skipped or missing scan still appears, marked report missing" in html
+    assert "missing scan is marked report missing" in html
     md = gen.build_summary_md([_healthy_guardrail_run()], survey=[])
     assert "shown under both." not in md
     assert "only the sanitizer(s) that ran appear" not in md
@@ -4582,7 +4582,7 @@ def test_build_html_renders_two_self_contained_tabs():
     assert "http://" not in html and "https://" not in html
     # the observed-only note lives in the info panel, not the survey orientation chrome
     info, survey_panel = html.split("id=panel-survey", 1)
-    assert "Workload survey is observed only." in info
+    assert "Observed only." in info
     assert "What You Can Do Here" not in survey_panel
     assert "info-banner" not in html
     # folding is pure HTML disclosure, so the no-JS promise still holds

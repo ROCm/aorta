@@ -154,10 +154,14 @@ _CSS = """
     width:min(420px, calc(100vw - 48px));
     background:var(--panel); border:1px solid var(--border);
     border-radius:var(--radius-sm); padding:14px 16px; box-shadow:var(--shadow); text-align:left; }
-  .pop-title { font-size:13px; font-weight:600; color:var(--text-1); margin:0 0 8px; }
-  .iconpop .pop p { margin:0 0 8px; font-size:13.5px; color:var(--text-2); line-height:1.5; }
-  .iconpop .pop p:last-child { margin-bottom:0; }
+  .pop-title { font-size:13px; font-weight:600; color:var(--text-1); margin:0 0 12px; }
+  .iconpop .pop p { margin:0; font-size:13.5px; color:var(--text-2); line-height:1.5; }
   .iconpop .pop code { font-family:var(--mono); font-size:12.5px; color:var(--text-1); }
+  /* Topic on its own line, explanation under it. Tools and tabs are separate groups. */
+  .iconpop .pop p.infogroup { margin:12px 0 0; font-size:12px; font-weight:500; color:var(--text-3); }
+  .iconpop .pop .infoitem { margin-top:8px; padding-top:8px; border-top:1px solid var(--border); }
+  .iconpop .pop p.infoname { font-weight:600; color:var(--text-1); }
+  .iconpop .pop .infoitem p + p { margin-top:2px; }
 
   .topbar { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:14px; }
   .page-header { display:flex; align-items:center; gap:14px; }
@@ -383,27 +387,66 @@ def _chevron_html() -> str:
     return _svg(_ICON_CHEVRON, size=18, width=2, cls="chevron")
 
 
-# Page-level help. One short sentence per sanitizer, then what each tab means.
-# This replaces the WaitCheck/ConSan cards, the blue banners, and the survey
-# orientation chrome. It is the same text on every page that has a header.
-_INFO_PARAGRAPHS: tuple[str, ...] = (
-    "WaitCheck finds <code>s_waitcnt</code> synchronization hazards by static analysis.",
-    "ConSan finds data races and concurrency issues while a kernel runs.",
-    "AddressSanitizer reports memory errors. Those runs are committed by hand "
-    "and do not move the Healthy pill.",
-    "Nightly gate compares each recipe with its baseline. Unmatched fails the nightly. "
-    "A matched fail, as on daily-consan-racy, is the expected positive control.",
-    "Workload survey is observed only. A fail there does not affect nightly pass/fail "
-    "status. Findings represent observed behavior, not a gate result. A skipped or "
-    "missing scan still appears, marked report missing, and is not a verdict.",
-    "Manual runs are results the nightly image cannot produce yet. They do not move "
-    "the Healthy pill.",
+# Page-level help. Each topic is its own line, with one idea under it. Tools and
+# tabs are separate groups. The Healthy-pill fact is stated once, under Manual
+# runs. This replaces the WaitCheck/ConSan cards, the blue banners, and the
+# survey orientation chrome. It is the same text on every page that has a header.
+_INFO_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Tools",
+        (
+            (
+                "WaitCheck",
+                "Finds <code>s_waitcnt</code> synchronization hazards by static analysis.",
+            ),
+            (
+                "ConSan",
+                "Finds data races and concurrency issues while a kernel runs.",
+            ),
+            (
+                "AddressSanitizer",
+                "Reports memory errors. These runs are committed by hand.",
+            ),
+        ),
+    ),
+    (
+        "Tabs",
+        (
+            (
+                "Nightly gate",
+                "Unmatched fails the nightly. A matched fail on daily-consan-racy "
+                "is the expected control.",
+            ),
+            (
+                "Workload survey",
+                "Observed only. A fail here does not change the nightly, and a "
+                "missing scan is marked report missing.",
+            ),
+            (
+                "Manual runs",
+                "Results the nightly image cannot produce yet. They do not move "
+                "the Healthy pill.",
+            ),
+        ),
+    ),
 )
 
 
 def _info_panel_html() -> str:
-    """The info icon: click opens how to read the page. No JavaScript."""
-    body = "".join(f"<p>{paragraph}</p>" for paragraph in _INFO_PARAGRAPHS)
+    """The info icon: click opens how to read the page. No JavaScript.
+
+    Each topic is a heading line and the sentence under it is the explanation,
+    so the two are not one paragraph.
+    """
+    body = "".join(
+        f'<p class="infogroup">{_esc(group)}</p>'
+        + "".join(
+            '<div class="infoitem">'
+            f'<p class="infoname">{_esc(name)}</p><p>{text}</p></div>'
+            for name, text in items
+        )
+        for group, items in _INFO_GROUPS
+    )
     return (
         '<details class="iconpop">'
         '<summary aria-label="How to read this page" title="How to read this page">'
