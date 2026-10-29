@@ -74,6 +74,37 @@ def test_inprocess_calls_shared_rank_function(monkeypatch) -> None:
     assert result.metrics.get("world_size") == 1
 
 
+def test_cleanup_error_is_recorded_on_the_result(monkeypatch) -> None:
+    from aorta.workloads._base import WorkloadResult
+    from aorta.workloads.distributed_launch import run_training_rank
+
+    class _FakeWorkload:
+        def __init__(self, config: dict) -> None:
+            del config
+
+        def setup(self) -> None:
+            return None
+
+        def run(self) -> WorkloadResult:
+            return WorkloadResult(
+                passed=True,
+                metrics={"world_size": 1, "final_loss": 0.1, "rank": 0},
+            )
+
+        def cleanup(self) -> None:
+            raise RuntimeError("barrier failed")
+
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.TrainingWorkload",
+        _FakeWorkload,
+    )
+    data = run_training_rank({})
+    metrics = data.get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics.get("cleanup_error") == "RuntimeError: barrier failed"
+    assert data.get("passed") is True
+
+
 def test_unknown_launcher_rejected() -> None:
     with pytest.raises(ValueError, match="launcher"):
         TinyTransformerConfig.from_dict({"launcher": "torchrun"})
@@ -218,6 +249,49 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
     assert result.metrics.get("launcher") == "spur"
     assert result.metrics.get("world_size") == 16
     assert result.metrics.get("final_loss") == 5.5
+
+
+def test_unreadable_rank0_result_fails_the_trial(monkeypatch, tmp_path) -> None:
+    del tmp_path
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.pid = 424243
+            self.returncode: int | None = None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def send_signal(self, sig: int) -> None:
+            del sig
+
+    def fake_popen(argv, env=None, **kwargs):
+        del env, kwargs
+        out = Path(argv[argv.index("--results-dir") + 1])
+        trial = out / "trial_d0_m0_t0.json"
+        trial.parent.mkdir(parents=True, exist_ok=True)
+        trial.write_text("{", encoding="utf-8")
+        return _Proc()
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.controller_ipv4",
+        lambda: "10.0.0.8",
+    )
+    result = launch_spur({"steps": 1}, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert result.passed is False
+    errors = [
+        item.get("error")
+        for item in result.failure_details
+        if isinstance(item.get("problems"), list) and "worker_result_unreadable" in item.get("problems", [])
+    ]
+    assert errors
+    assert "trial_d0_m0_t0.json" in str(errors[0])
 
 
 def test_spur_verdict_requires_exit_code_and_rank0() -> None:

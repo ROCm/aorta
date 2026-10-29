@@ -136,21 +136,31 @@ def run_training_rank(config: dict[str, Any]) -> dict[str, Any]:
     """Run one training rank and return its :class:`WorkloadResult` as a dict.
 
     Shared by the in-process path, spur workers, and the Monarch actor.
-    Cleanup still runs when setup or run raises. A cleanup error is logged
-    and does not replace that exception; ``KeyboardInterrupt`` is not caught.
+    Cleanup still runs when setup or run raises. A cleanup error does not
+    replace that exception. When the run itself finished, the error is
+    stored on ``metrics["cleanup_error"]``. ``KeyboardInterrupt`` is not caught.
     """
     if not isinstance(config, dict):
         raise TypeError(f"training config must be a dict, got {type(config).__name__}")
     workload = TrainingWorkload(config)
+    cleanup_error: str | None = None
     try:
         workload.setup()
         result = workload.run()
     finally:
         try:
             workload.cleanup()
-        except Exception:
+        except Exception as exc:
+            cleanup_error = f"{type(exc).__name__}: {exc}"
             log.warning("training rank cleanup failed", exc_info=True)
-    return asdict(result)
+    payload = asdict(result)
+    if cleanup_error is not None:
+        metrics = payload.get("metrics")
+        if isinstance(metrics, dict):
+            metrics["cleanup_error"] = cleanup_error
+        else:
+            payload["metrics"] = {"cleanup_error": cleanup_error}
+    return payload
 
 
 def build_spur_launch(
@@ -242,8 +252,15 @@ def launch_spur(
             if proc is not None and proc.poll() is None:
                 _terminate_process_tree(proc)
         exit_code = proc.returncode if proc is not None and isinstance(proc.returncode, int) else 1
-        rank0 = _read_rank0_result(output)
-        return verdict_from_workers(exit_code, rank0, launcher="spur")
+        rank0, read_error = _read_rank0_result(output)
+        result = verdict_from_workers(exit_code, rank0, launcher="spur")
+        if read_error is not None:
+            result.failure_details.append(
+                {"problems": ["worker_result_unreadable"], "error": read_error}
+            )
+            result.passed = False
+            result.failure_count += 1
+        return result
 
 
 def launch_monarch(
@@ -519,15 +536,18 @@ def _which(name: str) -> str | None:
     return which(name)
 
 
-def _read_rank0_result(output_dir: Path) -> dict[str, Any] | None:
+def _read_rank0_result(output_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Return rank 0's result, and a read error when no result could be parsed."""
     paths = sorted(output_dir.glob("**/trial_*.json"))
     paths.extend(sorted(output_dir.glob("**/result.json")))
     found: list[dict[str, Any]] = []
+    read_errors: list[str] = []
     for path in paths:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("could not read worker result %s: %s", path, exc)
+            read_errors.append(f"{path.name}: {exc}")
             continue
         if not isinstance(payload, dict):
             continue
@@ -540,10 +560,12 @@ def _read_rank0_result(output_dir: Path) -> dict[str, Any] | None:
     for item in found:
         metrics = item.get("metrics")
         if isinstance(metrics, dict) and metrics.get("rank") == 0:
-            return item
+            return item, None
     if found:
-        return found[0]
-    return None
+        return found[0], None
+    if read_errors:
+        return None, "; ".join(read_errors)
+    return None, None
 
 
 def _import_monarch() -> tuple[Any, ...]:
