@@ -4,11 +4,15 @@ Neither launcher is an install dependency. Spur is a subprocess of
 ``spur_bin`` (default ``spur``). Monarch is imported only when
 :func:`launch_monarch` runs.
 
-The spur controller re-execs ``aorta run`` (or the current ``aorta``
-invocation) with ``AORTA_INNER=1``. Each worker maps ``SLURM_PROCID`` to
-``RANK`` and uses an IPv4 ``MASTER_ADDR``: on this cluster a hostname
-resolves to an IPv6 link-local address first. The controller's verdict
-passes only when the worker exit code is 0 and rank 0's result passed.
+The spur controller runs one worker, :func:`run_worker_rank`, with the
+already resolved training config. It does not replay the parent ``aorta``
+command: a triage matrix would otherwise train every cell inside each
+launch, and a library caller would otherwise keep only ``steps``. Each
+worker maps ``SLURM_PROCID`` to ``RANK``. ``MASTER_ADDR`` is rank 0's
+IPv4, because that rank hosts the rendezvous store. Rank 0 writes
+``rank0.json`` under ``AORTA_SHARED_DIR``, a path every node can see.
+The controller's verdict passes only when the worker exit code is 0 and
+that rank-0 result passed.
 
 The monarch controller follows the runs/04 sequence: TCP transport on the
 controller IPv4, one worker per node, a proc mesh, and
@@ -23,11 +27,13 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -52,7 +58,8 @@ _IDENTITY_ENV = (
 )
 
 # Worker-side mapping. spur sets SLURM_PROCID per task; RANK has to be set
-# before ``aorta`` starts because the dispatcher uses it to decide who writes.
+# before the training process starts because the loop reads it to pick a device
+# and to decide who publishes rank0.json.
 SPUR_WORKER_SCRIPT = """\
 set -euo pipefail
 if [ -z "${SLURM_PROCID:-}" ]; then
@@ -72,6 +79,26 @@ _MONARCH_MISSING = (
     "Monarch is not installed. launcher 'monarch' needs the pytorch_monarch "
     "source build (venvs/rocm10.1); import failed: {exc!r}"
 )
+
+# Launcher knobs. They never reach the training loop.
+_CONTROLLER_CONFIG_KEYS = frozenset({"launcher", "nodes", "gpus_per_node", "spur_bin"})
+
+# One rank, one config. Importing the function keeps the worker from
+# rebuilding ``sys.argv`` (a triage parent would rerun every cell).
+_WORKER_BOOTSTRAP = """\
+import json
+import os
+
+from aorta.workloads.distributed_launch import run_worker_rank
+
+with open(os.environ["AORTA_WORKER_CONFIG"], encoding="utf-8") as handle:
+    loaded = json.load(handle)
+if not isinstance(loaded, dict):
+    raise SystemExit("AORTA_WORKER_CONFIG must contain a JSON object")
+run_worker_rank(loaded)
+"""
+
+_LOCAL_RESULT_PREFIXES = (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"))
 
 
 def is_ipv4(value: object) -> bool:
@@ -166,6 +193,99 @@ def run_training_rank(config: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def worker_training_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Training config for one worker, without controller-only keys.
+
+    ``launcher``, mesh shape, and ``spur_bin`` tell the controller how to
+    spawn. Keys starting with ``_aorta_`` are controller metadata. Everything
+    else, including model, optimizer, device, and checks, is the job the
+    caller asked for.
+    """
+    if not isinstance(config, dict):
+        raise TypeError(f"training config must be a dict, got {type(config).__name__}")
+    kept: dict[str, Any] = {}
+    for key, value in config.items():
+        if not isinstance(key, str):
+            continue
+        if key in _CONTROLLER_CONFIG_KEYS or key.startswith("_aorta_"):
+            continue
+        kept[key] = value
+    return kept
+
+
+def resolve_rank0_ipv4(*, spur_bin: str, nodes: int) -> str:
+    """IPv4 of the worker that will be ``RANK=0``.
+
+    That rank starts the rendezvous store, so ``MASTER_ADDR`` has to be its
+    address. ``AORTA_RANK0_IP`` wins. Otherwise one ``spur srun`` prints each
+    node's address and the controller keeps ``SLURM_PROCID`` 0. The
+    controller's own address is not a substitute: the controller may be on
+    another node.
+    """
+    raw = os.environ.get("AORTA_RANK0_IP", "").strip()
+    if raw:
+        if not is_ipv4(raw):
+            raise RuntimeError(f"AORTA_RANK0_IP must be an IPv4 address, got {raw!r}")
+        return raw
+    script = (
+        "set -euo pipefail\n"
+        "ip=$(python3 -c 'import socket; print(socket.gethostbyname(socket.getfqdn()))')\n"
+        'printf "%s %s\\n" "$SLURM_PROCID" "$ip"\n'
+    )
+    argv = [
+        spur_bin,
+        "srun",
+        "-N",
+        str(nodes),
+        "--ntasks-per-node",
+        "1",
+        "bash",
+        "-c",
+        script,
+    ]
+    try:
+        out = subprocess.check_output(argv, text=True, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "Could not resolve rank 0's IPv4 via spur srun. Set AORTA_RANK0_IP "
+            "to the IPv4 of the node that runs RANK=0. "
+            f"Probe failed: {exc}"
+        ) from exc
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or parts[0] != "0":
+            continue
+        if not is_ipv4(parts[1]):
+            raise RuntimeError(f"Rank 0 address {parts[1]!r} is not IPv4. Set AORTA_RANK0_IP.")
+        return parts[1]
+    raise RuntimeError(
+        "spur srun did not report an IPv4 address for SLURM_PROCID 0. "
+        f"Set AORTA_RANK0_IP. Probe output: {out!r}"
+    )
+
+
+def run_worker_rank(config: dict[str, Any]) -> None:
+    """Train this rank and, on rank 0, publish the result where the controller reads it.
+
+    Every rank trains. Only rank 0 writes ``rank0.json``. The file is replaced
+    into ``AORTA_RESULTS_DIR`` after an fsync so a controller on another host
+    sees the finished object, not a partial write.
+    """
+    result = run_training_rank(worker_training_config(config))
+    if os.environ.get("RANK") != "0":
+        return
+    raw_dir = os.environ.get("AORTA_RESULTS_DIR", "").strip()
+    if not raw_dir:
+        raise RuntimeError("rank 0 needs AORTA_RESULTS_DIR to publish its result")
+    dest = Path(raw_dir) / "rank0.json"
+    blob = json.dumps({"result": result})
+    temporary = dest.with_suffix(".json.tmp")
+    temporary.write_text(blob, encoding="utf-8")
+    with temporary.open("rb") as handle:
+        os.fsync(handle.fileno())
+    temporary.replace(dest)
+
+
 def build_spur_launch(
     *,
     spur_bin: str,
@@ -173,9 +293,10 @@ def build_spur_launch(
     gpus_per_node: int,
     master_addr: str,
     master_port: int,
-    inner_argv: list[str],
+    config_path: Path,
+    results_dir: Path,
 ) -> tuple[list[str], dict[str, str]]:
-    """Argv and env for ``spur srun`` re-executing the inner aorta command."""
+    """Argv and env for one ``spur srun`` of :func:`run_worker_rank`."""
     if not is_ipv4(master_addr):
         raise ValueError(f"MASTER_ADDR must be an IPv4 address, got {master_addr!r}")
     if not isinstance(master_port, int) or isinstance(master_port, bool):
@@ -191,7 +312,9 @@ def build_spur_launch(
         "-c",
         SPUR_WORKER_SCRIPT,
         "aorta-inner",
-        *inner_argv,
+        sys.executable,
+        "-c",
+        _WORKER_BOOTSTRAP,
     ]
     env = _worker_env(
         master_addr=master_addr,
@@ -199,24 +322,9 @@ def build_spur_launch(
         world_size=nodes * gpus_per_node,
         gpus_per_node=gpus_per_node,
     )
+    env["AORTA_WORKER_CONFIG"] = str(config_path)
+    env["AORTA_RESULTS_DIR"] = str(results_dir)
     return argv, env
-
-
-def inner_aorta_argv(output_dir: Path, config: dict[str, Any]) -> list[str]:
-    """Re-exec the current ``aorta`` invocation against ``output_dir``.
-
-    A ``triage run`` keeps its recipe and switches ``--output-dir``. A direct
-    ``aorta run`` switches ``--results-dir``. ``--dry-run`` is dropped so
-    workers actually train. Any other parent (a test runner, a library
-    call) falls back to ``aorta run --workload tiny_transformer``.
-    """
-    argv = list(sys.argv)
-    if argv and Path(argv[0]).name == "aorta":
-        argv = _drop_flag(argv, "--dry-run")
-        if "triage" in argv:
-            return _replace_option(argv, "--output-dir", str(output_dir))
-        return _replace_option(argv, "--results-dir", str(output_dir))
-    return _fallback_aorta_run(output_dir, config.get("steps"))
 
 
 def launch_spur(
@@ -226,8 +334,11 @@ def launch_spur(
     gpus_per_node: int,
     spur_bin: str,
 ) -> WorkloadResult:
-    """Spawn ``spur srun`` and return rank 0's verdict gated on the exit code."""
-    master_addr = controller_ipv4()
+    """Spawn ``spur srun`` and return rank 0's verdict gated on the exit code.
+
+    The worker command is one rank of the resolved config. ``MASTER_ADDR`` is
+    rank 0's IPv4. The result file lives under ``AORTA_SHARED_DIR``.
+    """
     raw_port = os.environ.get("AORTA_MASTER_PORT")
     if raw_port is None or raw_port == "":
         raise RuntimeError(
@@ -235,15 +346,27 @@ def launch_spur(
             "An ephemeral port cannot be held until the workers bind it."
         )
     master_port = _tcp_port(raw_port, name="AORTA_MASTER_PORT")
-    with tempfile.TemporaryDirectory(prefix="aorta-tiny-transformer-") as tmp:
-        output = Path(tmp)
+    master_addr = resolve_rank0_ipv4(spur_bin=spur_bin, nodes=nodes)
+    controller = os.environ.get("AORTA_CONTROLLER_IP", "").strip()
+    if controller and controller != master_addr:
+        log.info(
+            "MASTER_ADDR is rank 0 at %s; AORTA_CONTROLLER_IP %s is the controller",
+            master_addr,
+            controller,
+        )
+    work = _shared_workdir()
+    try:
+        payload = worker_training_config(config)
+        config_path = work / "worker_config.json"
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
         argv, env = build_spur_launch(
             spur_bin=spur_bin,
             nodes=nodes,
             gpus_per_node=gpus_per_node,
             master_addr=master_addr,
             master_port=master_port,
-            inner_argv=inner_aorta_argv(output, config),
+            config_path=config_path,
+            results_dir=work,
         )
         log.info(
             "spur launch MASTER_ADDR=%s WORLD_SIZE=%s argv=%s",
@@ -252,16 +375,18 @@ def launch_spur(
             argv,
         )
         proc: subprocess.Popen[str] | None = None
+        pgid: int | None = None
         try:
             proc = subprocess.Popen(argv, env=env, start_new_session=True)
+            pgid = _session_pgid(proc)
             proc.wait()
         except KeyboardInterrupt:
             raise
         finally:
-            if proc is not None and proc.poll() is None:
-                _terminate_process_tree(proc)
+            if proc is not None and _needs_group_cleanup(proc, pgid):
+                _terminate_process_tree(proc, pgid=pgid)
         exit_code = proc.returncode if proc is not None and isinstance(proc.returncode, int) else 1
-        rank0, read_error = _read_rank0_result(output)
+        rank0, read_error = _read_rank0_result(work)
         result = verdict_from_workers(exit_code, rank0, launcher="spur")
         if read_error is not None:
             result.failure_details.append(
@@ -270,6 +395,8 @@ def launch_spur(
             result.passed = False
             result.failure_count += 1
         return result
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def launch_monarch(
@@ -313,21 +440,17 @@ def launch_monarch(
     ]
     log.info("monarch controller tcp://%s hosts=%s", ip, hostnames)
     workers: subprocess.Popen[str] | None = None
+    worker_pgid: int | None = None
     try:
         workers = subprocess.Popen(argv, env=env, start_new_session=True)
+        worker_pgid = _session_pgid(workers)
         hosts = actor_mod.attach_to_workers(
             name="trainers",
             ca="trust_all_connections",
             workers=proc_addrs([f"tcp://{host}:{port}" for host in hostnames], proc_ids),
         )
-        actor_config = {
-            key: value
-            for key, value in config.items()
-            if not (isinstance(key, str) and key.startswith("_aorta_"))
-        }
-        raw = asyncio.run(
-            _monarch_train(hosts, spmd_mod, trainer_cls, gpus_per_node, actor_config)
-        )
+        actor_config = worker_training_config(config)
+        raw = asyncio.run(_monarch_train(hosts, spmd_mod, trainer_cls, gpus_per_node, actor_config))
         return _verdict_from_monarch(raw)
     except KeyboardInterrupt:
         raise
@@ -347,7 +470,7 @@ def launch_monarch(
         )
     finally:
         if workers is not None:
-            _terminate_process_tree(workers)
+            _terminate_process_tree(workers, pgid=worker_pgid)
 
 
 def verdict_from_workers(
@@ -485,93 +608,61 @@ def _tcp_port(raw: str, *, name: str) -> int:
     return port
 
 
-def _drop_flag(argv: list[str], flag: str) -> list[str]:
-    return [token for token in argv if token != flag]
+def _shared_workdir() -> Path:
+    """A fresh directory under ``AORTA_SHARED_DIR`` for this launch's result.
 
-
-def _replace_option(argv: list[str], flag: str, value: str) -> list[str]:
-    replaced = False
-    out: list[str] = []
-    index = 0
-    while index < len(argv):
-        token = argv[index]
-        if token == flag:
-            out.extend([flag, value])
-            replaced = True
-            index += 2 if index + 1 < len(argv) else 1
+    The directory is explicit so rank 0 and the controller name the same
+    path. A node-local default such as ``tempfile``'s ``/tmp`` would make a
+    successful rank-0 write look like a missing result.
+    """
+    raw = os.environ.get("AORTA_SHARED_DIR", "").strip()
+    if not raw:
+        raise RuntimeError(
+            "launcher 'spur' needs AORTA_SHARED_DIR set to a directory that "
+            "every node in the allocation can read and write. Rank 0 writes "
+            "rank0.json there. Node-local directories such as /tmp are not "
+            "visible to a controller on another host."
+        )
+    root = Path(raw)
+    if not root.is_dir():
+        raise RuntimeError(f"AORTA_SHARED_DIR {raw!r} is not a directory")
+    resolved = root.resolve()
+    for prefix in _LOCAL_RESULT_PREFIXES:
+        try:
+            resolved.relative_to(prefix)
+        except ValueError:
             continue
-        if token.startswith(flag + "="):
-            out.append(f"{flag}={value}")
-            replaced = True
-            index += 1
-            continue
-        out.append(token)
-        index += 1
-    if not replaced:
-        out.extend([flag, value])
-    return out
-
-
-def _fallback_aorta_run(output_dir: Path, steps: object) -> list[str]:
-    tail = [
-        "run",
-        "--workload",
-        "tiny_transformer",
-        "--trials",
-        "1",
-        "--results-dir",
-        str(output_dir),
-    ]
-    if isinstance(steps, int) and not isinstance(steps, bool) and steps >= 1:
-        tail.extend(["--steps", str(steps)])
-    aorta = _which("aorta")
-    if aorta:
-        return [aorta, *tail]
-    code = (
-        "import sys\n"
-        "from aorta.cli import main\n"
-        "sys.argv = ['aorta', *sys.argv[1:]]\n"
-        "raise SystemExit(main())\n"
-    )
-    return [sys.executable, "-c", code, *tail]
-
-
-def _which(name: str) -> str | None:
-    from shutil import which
-
-    return which(name)
+        log.warning(
+            "AORTA_SHARED_DIR %s is node-local; rank 0's result will be "
+            "invisible to a controller on another host",
+            resolved,
+        )
+        break
+    return Path(tempfile.mkdtemp(prefix="aorta-tiny-transformer-", dir=resolved))
 
 
 def _read_rank0_result(output_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
-    """Return rank 0's result, and a read error when no result could be parsed."""
-    paths = sorted(output_dir.glob("**/trial_*.json"))
-    paths.extend(sorted(output_dir.glob("**/result.json")))
-    found: list[dict[str, Any]] = []
-    read_errors: list[str] = []
-    for path in paths:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            log.warning("could not read worker result %s: %s", path, exc)
-            read_errors.append(f"{path.name}: {exc}")
-            continue
-        if not isinstance(payload, dict):
-            continue
-        result = payload.get("result")
-        if isinstance(result, dict):
-            found.append(result)
-            continue
-        if isinstance(payload.get("passed"), bool):
-            found.append(payload)
-    for item in found:
-        metrics = item.get("metrics")
-        if isinstance(metrics, dict) and metrics.get("rank") == 0:
-            return item, None
-    if found:
-        return found[0], None
-    if read_errors:
-        return None, "; ".join(read_errors)
-    return None, None
+    """Return rank 0's published result, and a read error when the file is unusable.
+
+    Only ``rank0.json`` counts. A directory of earlier trial files must not
+    supply another cell's verdict.
+    """
+    path = output_dir / "rank0.json"
+    if not path.is_file():
+        return None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("could not read worker result %s: %s", path, exc)
+        return None, f"{path.name}: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"{path.name}: expected a JSON object"
+    result = payload.get("result")
+    if isinstance(result, dict):
+        return result, None
+    if isinstance(payload.get("passed"), bool):
+        return payload, None
+    return None, f"{path.name}: no rank-0 result"
 
 
 def _import_monarch() -> tuple[Any, ...]:
@@ -650,8 +741,7 @@ def _verdict_from_monarch(raw: Any) -> WorkloadResult:
             passed=False,
             failure_count=max(result.failure_count, 1),
             first_failure_iteration=result.first_failure_iteration,
-            failure_details=list(result.failure_details)
-            or [{"problems": ["rank_result_failed"]}],
+            failure_details=list(result.failure_details) or [{"problems": ["rank_result_failed"]}],
             total_iterations=result.total_iterations,
             step_times_ms=list(result.step_times_ms),
             elapsed_sec=result.elapsed_sec,
@@ -683,9 +773,7 @@ def _monarch_hostnames(job_id: str, nodes: int) -> list[str]:
     Order follows ``SLURM_NODEID``. This attaches to ``job_id``; it does
     not submit a new allocation.
     """
-    script = (
-        'echo "$SLURM_NODEID $(python3 -c "import socket; print(socket.gethostname())")"'
-    )
+    script = 'echo "$SLURM_NODEID $(python3 -c "import socket; print(socket.gethostname())")"'
     argv = [
         "srun",
         "--jobid",
@@ -711,28 +799,96 @@ def _monarch_hostnames(job_id: str, nodes: int) -> list[str]:
         pairs.append((int(parts[0]), parts[1]))
     pairs.sort()
     if len(pairs) != nodes:
-        raise RuntimeError(
-            f"srun returned {len(pairs)} hostnames for {nodes} nodes: {out!r}"
-        )
+        raise RuntimeError(f"srun returned {len(pairs)} hostnames for {nodes} nodes: {out!r}")
     return [host for _, host in pairs]
 
 
-def _terminate_process_tree(proc: subprocess.Popen[Any]) -> None:
+def _session_pgid(proc: subprocess.Popen[Any]) -> int | None:
+    """Process group of a ``start_new_session`` child, saved while the leader is alive.
+
+    After the leader exits, ``getpgid`` on its pid fails even when children
+    remain in the group. The caller keeps this value. A pid that is not its
+    own process-group leader is not our session (a recycled pid, or a test
+    double) and is ignored so cleanup cannot signal an unrelated process.
+    """
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return None
+    except OSError as exc:
+        log.warning("getpgid(%s) failed: %s", pid, exc)
+        return None
+    if pgid != pid or pgid == os.getpgrp():
+        return None
+    return pgid
+
+
+def _group_has_members(pgid: int) -> bool:
+    """True when any process in ``pgid`` still exists, including after the leader exits."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        log.warning("killpg(%s, 0) failed: %s", pgid, exc)
+        return False
+    return True
+
+
+def _needs_group_cleanup(proc: subprocess.Popen[Any], pgid: int | None) -> bool:
+    """True when the leader or any of its group is still running."""
+    if proc.poll() is None:
+        return True
+    return pgid is not None and _group_has_members(pgid)
+
+
+def _wait_for_group(proc: subprocess.Popen[Any], pgid: int | None, timeout: float) -> None:
+    """Block until the leader and its group are gone, or ``timeout`` elapses.
+
+    ``Popen.wait`` returns when the leader exits. A child that ignores
+    SIGTERM stays in the group, so the wait continues until ``killpg``
+    reports that the group is empty.
+    """
+    deadline = time.monotonic() + timeout
+    while _needs_group_cleanup(proc, pgid):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        slice_s = min(0.2, remaining)
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=slice_s)
+            except subprocess.TimeoutExpired:
+                pass
+            except OSError as exc:
+                log.warning(
+                    "waiting for child pid %s failed: %s",
+                    getattr(proc, "pid", "?"),
+                    exc,
+                )
+                return
+        else:
+            time.sleep(slice_s)
+
+
+def _terminate_process_tree(proc: subprocess.Popen[Any], pgid: int | None = None) -> None:
     """SIGTERM the child's process group, then SIGKILL, then reap.
 
-    ``KeyboardInterrupt`` during the grace period still SIGKILLs the group
-    and is re-raised. ``ProcessLookupError`` is the group already being
-    gone. Any other ``OSError`` is logged: the tree may still be alive.
+    ``pgid`` is the group captured while the leader was alive. Waiting only
+    on the leader would return while a child that ignores SIGTERM still holds
+    GPUs or ports. ``KeyboardInterrupt`` during the grace period still
+    SIGKILLs the group and is re-raised. ``ProcessLookupError`` is the group
+    already being gone. Any other ``OSError`` is logged: the tree may still
+    be alive.
     """
-    pgid: int | None
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        pgid = None
-    except OSError as exc:
-        log.warning("getpgid(%s) failed: %s", getattr(proc, "pid", "?"), exc)
-        pgid = None
-    if pgid is not None and pgid == os.getpgrp():
+    if pgid is None:
+        pgid = _session_pgid(proc)
+    elif pgid == os.getpgrp():
         pgid = None
 
     def _send(sig: int) -> None:
@@ -761,48 +917,42 @@ def _terminate_process_tree(proc: subprocess.Popen[Any]) -> None:
                 exc,
             )
 
-    def _reap_after_kill() -> None:
+    def _force_kill() -> None:
+        if proc.poll() is not None and pgid is not None and _group_has_members(pgid):
+            log.warning(
+                "process group %s still has members after the leader exited; sending SIGKILL",
+                pgid,
+            )
+        _send(signal.SIGKILL)
         try:
-            proc.wait(timeout=_REAP_AFTER_KILL_SEC)
-        except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
-            pass
+            _wait_for_group(proc, pgid, _REAP_AFTER_KILL_SEC)
         except KeyboardInterrupt:
             pass
+        if _needs_group_cleanup(proc, pgid):
+            log.warning("process group %s still has members after SIGKILL", pgid)
 
     _send(signal.SIGTERM)
     try:
-        proc.wait(timeout=_TERMINATE_GRACE_SEC)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    except ProcessLookupError:
-        return
-    except OSError as exc:
-        log.warning("waiting for child pid %s failed: %s", getattr(proc, "pid", "?"), exc)
-        return
+        _wait_for_group(proc, pgid, _TERMINATE_GRACE_SEC)
     except KeyboardInterrupt:
-        _send(signal.SIGKILL)
-        _reap_after_kill()
+        _force_kill()
         raise
-    _send(signal.SIGKILL)
-    try:
-        proc.wait(timeout=_REAP_AFTER_KILL_SEC)
-    except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
-        pass
-    except KeyboardInterrupt:
-        _reap_after_kill()
-        raise
+    if not _needs_group_cleanup(proc, pgid):
+        return
+    _force_kill()
 
 
 __all__ = [
     "SPUR_WORKER_SCRIPT",
     "build_spur_launch",
     "controller_ipv4",
-    "inner_aorta_argv",
     "is_ipv4",
     "is_launched_rank",
     "launch_monarch",
     "launch_spur",
+    "resolve_rank0_ipv4",
     "run_training_rank",
+    "run_worker_rank",
     "verdict_from_workers",
+    "worker_training_config",
 ]

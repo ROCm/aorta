@@ -5,10 +5,12 @@ This workload only fixes that recipe's shape and chooses how the ranks start:
 
 * ``inprocess`` (default) runs one rank here. World size 1 uses the gloo
   defaults in ``TrainingWorkload``. CI does not need Monarch, Spur, or a GPU.
-* ``spur`` and ``monarch`` spawn workers from the controller process. A
-  process with ``AORTA_INNER=1``, or a torchrun/elastic rank
-  (``TORCHELASTIC_RUN_ID`` plus ``RANK`` and ``WORLD_SIZE``), runs the loop
-  instead of spawning again. ``RANK`` alone does not make this process a worker.
+* ``spur`` and ``monarch`` spawn workers from the controller process. Spur
+  workers call ``run_worker_rank`` with the resolved training config; they
+  do not re-exec the parent command. A process with ``AORTA_INNER=1``, or a
+  torchrun/elastic rank (``TORCHELASTIC_RUN_ID`` plus ``RANK`` and
+  ``WORLD_SIZE``), runs the loop instead of spawning again. ``RANK`` alone
+  does not make this process a worker.
 
 ``launcher`` stays inside ``workload_config``. The recipe loader rejects
 unknown top-level keys.
@@ -87,8 +89,7 @@ class TinyTransformerConfig:
         mesh = nodes * gpus_per_node
         if launcher in ("monarch", "spur") and expected is not None and expected != mesh:
             raise ValueError(
-                f"expected_world_size ({expected}) must equal "
-                f"nodes * gpus_per_node ({mesh})"
+                f"expected_world_size ({expected}) must equal nodes * gpus_per_node ({mesh})"
             )
         return cls(
             launcher=launcher,
@@ -170,8 +171,9 @@ class TinyTransformerWorkload(Workload):
         assert self._payload is not None
         spec = self._spec
         if self._train_here:
-            # Same rank function the Monarch actor calls. Spur workers get
-            # here by re-execing ``aorta`` with ``AORTA_INNER=1``.
+            # Same rank function the Monarch actor and Spur's
+            # ``run_worker_rank`` call. A worker that re-entered this
+            # process with ``AORTA_INNER=1`` trains here instead of spawning.
             return workload_result_from_mapping(
                 run_training_rank(self._payload),
                 launcher=spec.launcher,

@@ -7,15 +7,24 @@ collective. The spur case stubs ``Popen``.
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from aorta.workloads.distributed_launch import (
     SPUR_WORKER_SCRIPT,
+    _group_has_members,
+    _read_rank0_result,
+    _terminate_process_tree,
     is_ipv4,
     launch_monarch,
     launch_spur,
+    run_worker_rank,
     verdict_from_workers,
 )
 from aorta.workloads.tiny_transformer import TinyTransformerConfig, TinyTransformerWorkload
@@ -160,8 +169,13 @@ def test_recipes_load_and_dry_run_does_not_spawn(tmp_path, monkeypatch) -> None:
         run_recipe(recipe, output_dir=tmp_path / name, dry_run=True)
 
 
-def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
+def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["aorta", "triage", "run", "--recipe", "matrix.yaml", "--trials", "5"],
+    )
 
     class _Proc:
         def __init__(self) -> None:
@@ -183,15 +197,10 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
         captured["argv"] = list(argv)
         captured["env"] = dict(env or {})
         captured["start_new_session"] = kwargs.get("start_new_session")
-        if "--results-dir" in argv:
-            out = Path(argv[argv.index("--results-dir") + 1])
-        elif "--output-dir" in argv:
-            out = Path(argv[argv.index("--output-dir") + 1])
-        else:
-            raise AssertionError(f"worker output dir missing from {argv!r}")
-        trial = out / "tiny_transformer" / "trial_d0_m0_t0.json"
-        trial.parent.mkdir(parents=True, exist_ok=True)
-        trial.write_text(
+        config_path = Path(captured["env"]["AORTA_WORKER_CONFIG"])
+        captured["config"] = json.loads(config_path.read_text(encoding="utf-8"))
+        out = Path(captured["env"]["AORTA_RESULTS_DIR"])
+        (out / "rank0.json").write_text(
             json.dumps(
                 {
                     "result": {
@@ -210,13 +219,21 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
         return _Proc()
 
     monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.Popen", fake_popen)
-    monkeypatch.setattr(
-        "aorta.workloads.distributed_launch.controller_ipv4",
-        lambda: "10.190.161.245",
-    )
     monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
+    monkeypatch.setenv("AORTA_RANK0_IP", "10.190.161.245")
+    monkeypatch.setenv("AORTA_CONTROLLER_IP", "10.0.0.9")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
     result = launch_spur(
-        {"steps": 20},
+        {
+            "steps": 20,
+            "device": "cpu",
+            "model": {"kind": "transformer", "hidden_size": 256},
+            "checks": {"fail_on_rank_loss_mismatch": True},
+            "optimizer": {"lr": 0.001},
+            "launcher": "spur",
+            "nodes": 2,
+            "_aorta_cell": "dropped",
+        },
         nodes=2,
         gpus_per_node=8,
         spur_bin="/opt/spur/bin/spur",
@@ -224,8 +241,10 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
 
     argv = captured.get("argv")
     env = captured.get("env")
+    forwarded = captured.get("config")
     assert isinstance(argv, list)
     assert isinstance(env, dict)
+    assert isinstance(forwarded, dict)
     assert argv[:6] == [
         "/opt/spur/bin/spur",
         "srun",
@@ -244,8 +263,18 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
     assert env.get("MASTER_PORT") == "29501"
     assert "RANK" not in env
     inner = argv[argv.index("aorta-inner") + 1 :]
-    assert "run" in inner
-    assert "tiny_transformer" in inner
+    assert inner[1] == "-c"
+    assert "run_worker_rank" in inner[2]
+    assert "matrix.yaml" not in argv
+    assert "triage" not in argv
+    assert forwarded["steps"] == 20
+    assert forwarded["device"] == "cpu"
+    assert forwarded["model"]["hidden_size"] == 256
+    assert forwarded["checks"]["fail_on_rank_loss_mismatch"] is True
+    assert forwarded["optimizer"]["lr"] == 0.001
+    assert "launcher" not in forwarded
+    assert "nodes" not in forwarded
+    assert "_aorta_cell" not in forwarded
     assert captured.get("start_new_session") is True
     assert result.passed is True
     assert result.metrics.get("launcher") == "spur"
@@ -254,8 +283,6 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch) -> None:
 
 
 def test_unreadable_rank0_result_fails_the_trial(monkeypatch, tmp_path) -> None:
-    del tmp_path
-
     class _Proc:
         def __init__(self) -> None:
             self.pid = 424243
@@ -273,28 +300,92 @@ def test_unreadable_rank0_result_fails_the_trial(monkeypatch, tmp_path) -> None:
             del sig
 
     def fake_popen(argv, env=None, **kwargs):
-        del env, kwargs
-        out = Path(argv[argv.index("--results-dir") + 1])
-        trial = out / "trial_d0_m0_t0.json"
-        trial.parent.mkdir(parents=True, exist_ok=True)
-        trial.write_text("{", encoding="utf-8")
+        del argv, kwargs
+        out = Path((env or {})["AORTA_RESULTS_DIR"])
+        (out / "rank0.json").write_text("{", encoding="utf-8")
         return _Proc()
 
     monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.Popen", fake_popen)
-    monkeypatch.setattr(
-        "aorta.workloads.distributed_launch.controller_ipv4",
-        lambda: "10.0.0.8",
-    )
     monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
+    monkeypatch.setenv("AORTA_RANK0_IP", "10.0.0.8")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
     result = launch_spur({"steps": 1}, nodes=1, gpus_per_node=1, spur_bin="spur")
     assert result.passed is False
     errors = [
         item.get("error")
         for item in result.failure_details
-        if isinstance(item.get("problems"), list) and "worker_result_unreadable" in item.get("problems", [])
+        if isinstance(item.get("problems"), list) and "worker_result_unreadable" in item["problems"]
     ]
     assert errors
-    assert "trial_d0_m0_t0.json" in str(errors[0])
+    assert "rank0.json" in str(errors[0])
+
+
+def test_spur_requires_shared_dir(monkeypatch) -> None:
+    monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
+    monkeypatch.setenv("AORTA_RANK0_IP", "10.0.0.8")
+    monkeypatch.delenv("AORTA_SHARED_DIR", raising=False)
+    with pytest.raises(RuntimeError, match="AORTA_SHARED_DIR"):
+        launch_spur({"steps": 1}, nodes=1, gpus_per_node=1, spur_bin="spur")
+
+
+def test_rank0_ip_must_be_ipv4(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
+    monkeypatch.setenv("AORTA_RANK0_IP", "fe80::1")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
+    with pytest.raises(RuntimeError, match="AORTA_RANK0_IP"):
+        launch_spur({"steps": 1}, nodes=1, gpus_per_node=1, spur_bin="spur")
+
+
+def test_run_worker_rank_publishes_only_rank0(monkeypatch, tmp_path) -> None:
+    def fake_rank(config: dict) -> dict:
+        assert config["steps"] == 3
+        return {
+            "passed": True,
+            "failure_count": 0,
+            "metrics": {"world_size": 2, "final_loss": 1.0, "rank": 0},
+        }
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch.run_training_rank", fake_rank)
+    monkeypatch.setenv("AORTA_RESULTS_DIR", str(tmp_path))
+    monkeypatch.setenv("RANK", "1")
+    run_worker_rank({"steps": 3})
+    assert not (tmp_path / "rank0.json").exists()
+
+    monkeypatch.setenv("RANK", "0")
+    run_worker_rank({"steps": 3})
+    parsed, error = _read_rank0_result(tmp_path)
+    assert error is None
+    assert isinstance(parsed, dict)
+    assert parsed.get("passed") is True
+    assert parsed["metrics"]["final_loss"] == 1.0
+
+
+def test_terminate_kills_children_that_survive_the_leader(monkeypatch) -> None:
+    monkeypatch.setattr("aorta.workloads.distributed_launch._TERMINATE_GRACE_SEC", 0.3)
+    monkeypatch.setattr("aorta.workloads.distributed_launch._REAP_AFTER_KILL_SEC", 2.0)
+    code = (
+        "import os, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+        "os._exit(0)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+    pgid = proc.pid
+    try:
+        proc.wait(timeout=5)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not _group_has_members(pgid):
+            time.sleep(0.05)
+        assert _group_has_members(pgid)
+        _terminate_process_tree(proc, pgid=pgid)
+        assert not _group_has_members(pgid)
+    finally:
+        if _group_has_members(pgid):
+            os.killpg(pgid, signal.SIGKILL)
 
 
 def test_spur_requires_explicit_master_port(monkeypatch) -> None:
