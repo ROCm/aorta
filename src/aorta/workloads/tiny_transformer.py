@@ -35,7 +35,8 @@ from aorta.workloads.training import TrainingConfig
 log = logging.getLogger(__name__)
 
 _LAUNCHERS = ("inprocess", "monarch", "spur")
-_LAUNCH_KEYS = ("launcher", "nodes", "gpus_per_node", "spur_bin")
+_SCHEDULERS = ("slurm", "spur")
+_LAUNCH_KEYS = ("launcher", "nodes", "gpus_per_node", "spur_bin", "scheduler")
 
 # Default shape. Recipes can override individual fields; omitted fields keep
 # these values so a bare ``aorta run --workload tiny_transformer`` matches.
@@ -65,6 +66,7 @@ class TinyTransformerConfig:
     nodes: int = 1
     gpus_per_node: int = 1
     spur_bin: str = "spur"
+    scheduler: str = "slurm"
     expected_world_size: int | None = None
 
     @classmethod
@@ -83,6 +85,15 @@ class TinyTransformerConfig:
         spur_bin = raw.get("spur_bin", "spur")
         if not isinstance(spur_bin, str) or not spur_bin.strip():
             raise ValueError("spur_bin must be a non-empty command or path")
+        scheduler = raw.get("scheduler", "slurm")
+        if not isinstance(scheduler, str):
+            raise TypeError(f"scheduler must be a str, got {type(scheduler).__name__}")
+        if scheduler not in _SCHEDULERS:
+            raise ValueError(f"scheduler must be one of {list(_SCHEDULERS)}, got {scheduler!r}")
+        if "scheduler" in raw and launcher != "monarch":
+            raise ValueError(
+                "scheduler applies only to launcher 'monarch'. launcher 'spur' always uses Spur"
+            )
         expected = raw.get("expected_world_size", None)
         if expected is not None:
             expected = _positive_int(expected, "expected_world_size")
@@ -96,6 +107,7 @@ class TinyTransformerConfig:
             nodes=nodes,
             gpus_per_node=gpus_per_node,
             spur_bin=spur_bin,
+            scheduler=scheduler,
             expected_world_size=expected,
         )
 
@@ -159,8 +171,9 @@ class TinyTransformerWorkload(Workload):
         TrainingConfig.from_dict(self._payload)
         self._train_here = self._spec.launcher == "inprocess" or is_launched_rank()
         log.info(
-            "tiny_transformer launcher=%s nodes=%d gpus_per_node=%d train_here=%s",
+            "tiny_transformer launcher=%s scheduler=%s nodes=%d gpus_per_node=%d train_here=%s",
             self._spec.launcher,
+            self._spec.scheduler,
             self._spec.nodes,
             self._spec.gpus_per_node,
             self._train_here,
@@ -190,6 +203,8 @@ class TinyTransformerWorkload(Workload):
                 self._payload,
                 nodes=spec.nodes,
                 gpus_per_node=spec.gpus_per_node,
+                scheduler=spec.scheduler,
+                spur_bin=spec.spur_bin,
             )
         raise RuntimeError(f"unsupported launcher {spec.launcher!r}")
 

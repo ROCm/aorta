@@ -40,6 +40,7 @@ requires_torch = pytest.mark.skipif(torch is None, reason="requires PyTorch")
 _RECIPES = (
     "tiny-transformer.yaml",
     "tiny-transformer-monarch.yaml",
+    "tiny-transformer-monarch-spur.yaml",
     "tiny-transformer-spur.yaml",
 )
 
@@ -338,6 +339,7 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch, tmp_path) -> None:
         "--ntasks-per-node",
         "8",
     ]
+    assert argv[6:8] == ["--ntasks", "16"]
     assert SPUR_WORKER_SCRIPT in argv
     assert 'export RANK="$SLURM_PROCID"' in SPUR_WORKER_SCRIPT
     assert 'export LOCAL_RANK="$SLURM_LOCALID"' in SPUR_WORKER_SCRIPT
@@ -697,6 +699,8 @@ def _install_fake_monarch(monkeypatch, train_result):
     )
     monkeypatch.setenv("AORTA_CONTROLLER_IP", "10.1.2.3")
     monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    monkeypatch.delenv("MONARCH_SLURM_JOB", raising=False)
+    monkeypatch.delenv("SPUR_JOB_ID", raising=False)
     monkeypatch.setenv("MONARCH_PORT", "22222")
     monkeypatch.setenv("RANK", "1")
     monkeypatch.setenv("LOCAL_RANK", "1")
@@ -770,7 +774,7 @@ def test_monarch_launch_failure_stops_workers(monkeypatch) -> None:
 
 
 def test_monarch_srun_requests_one_task_per_node(monkeypatch) -> None:
-    from aorta.workloads.distributed_launch import _monarch_hostnames
+    from aorta.workloads.distributed_launch import _monarch_hostnames, monarch_step_prefix
 
     seen: dict[str, list[str]] = {}
 
@@ -783,10 +787,93 @@ def test_monarch_srun_requests_one_task_per_node(monkeypatch) -> None:
         "aorta.workloads.distributed_launch.subprocess.check_output",
         fake_check_output,
     )
-    assert _monarch_hostnames("99", 2) == ["node-a", "node-b"]
+    monkeypatch.setenv("SLURM_JOB_ID", "99")
+    monkeypatch.delenv("MONARCH_SLURM_JOB", raising=False)
+    monkeypatch.delenv("SPUR_JOB_ID", raising=False)
+    prefix = monarch_step_prefix(scheduler="slurm", nodes=2)
+    assert _monarch_hostnames(prefix, 2) == ["node-a", "node-b"]
     argv = seen["argv"]
+    assert argv[:4] == ["srun", "--jobid", "99", "--overlap"]
     assert "--ntasks=2" in argv
     assert "--ntasks-per-node=1" in argv
+
+
+def test_monarch_spur_prefix_is_a_step_of_the_spur_allocation(monkeypatch) -> None:
+    from aorta.workloads.distributed_launch import monarch_step_prefix
+
+    monkeypatch.setenv("SPUR_JOB_ID", "17")
+    prefix = monarch_step_prefix(scheduler="spur", nodes=2, spur_bin="/opt/spur/bin/spur")
+    assert prefix == [
+        "/opt/spur/bin/spur",
+        "srun",
+        "-N2",
+        "--ntasks=2",
+        "--ntasks-per-node=1",
+    ]
+    assert "--jobid" not in prefix
+    assert "--overlap" not in prefix
+
+
+def test_monarch_spur_needs_a_spur_allocation(monkeypatch) -> None:
+    from aorta.workloads.distributed_launch import monarch_step_prefix
+
+    monkeypatch.delenv("SPUR_JOB_ID", raising=False)
+    with pytest.raises(RuntimeError, match="spur salloc"):
+        monarch_step_prefix(scheduler="spur", nodes=2)
+
+
+def test_monarch_slurm_rejects_a_spur_job_id(monkeypatch) -> None:
+    """Inside a Spur allocation SLURM_JOB_ID is Spur's id, not a Slurm job."""
+    from aorta.workloads.distributed_launch import monarch_step_prefix
+
+    monkeypatch.setenv("SPUR_JOB_ID", "17")
+    monkeypatch.setenv("SLURM_JOB_ID", "17")
+    monkeypatch.delenv("MONARCH_SLURM_JOB", raising=False)
+    with pytest.raises(RuntimeError, match="scheduler: spur"):
+        monarch_step_prefix(scheduler="slurm", nodes=2)
+    monkeypatch.setenv("MONARCH_SLURM_JOB", "4242")
+    assert monarch_step_prefix(scheduler="slurm", nodes=2)[:3] == ["srun", "--jobid", "4242"]
+
+
+def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch) -> None:
+    captured, stopped = _install_fake_monarch(
+        monkeypatch,
+        {"rank0": {"passed": True, "metrics": {"rank": 0, "world_size": 16, "final_loss": 2.0}}},
+    )
+    seen: dict[str, list[str]] = {}
+
+    def fake_hostnames(prefix, nodes):
+        seen["prefix"] = list(prefix)
+        return [f"node-{index}" for index in range(nodes)]
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch._monarch_hostnames", fake_hostnames)
+    monkeypatch.setenv("SPUR_JOB_ID", "17")
+    result = launch_monarch(
+        {"steps": 2, "device": "cpu"},
+        nodes=2,
+        gpus_per_node=8,
+        scheduler="spur",
+        spur_bin="/opt/spur/bin/spur",
+    )
+    assert result.passed is True
+    step = ["/opt/spur/bin/spur", "srun", "-N2", "--ntasks=2", "--ntasks-per-node=1"]
+    assert seen["prefix"] == step
+    argv = captured.get("argv")
+    assert isinstance(argv, list)
+    assert argv[:5] == step
+    assert "--jobid" not in argv
+    assert "--kill-on-bad-exit=1" not in argv
+    assert len(stopped) == 1
+
+
+def test_scheduler_applies_only_to_monarch() -> None:
+    assert TinyTransformerConfig.from_dict({"launcher": "monarch"}).scheduler == "slurm"
+    spec = TinyTransformerConfig.from_dict({"launcher": "monarch", "scheduler": "spur"})
+    assert spec.scheduler == "spur"
+    with pytest.raises(ValueError, match="scheduler"):
+        TinyTransformerConfig.from_dict({"launcher": "monarch", "scheduler": "pbs"})
+    with pytest.raises(ValueError, match="only to launcher 'monarch'"):
+        TinyTransformerConfig.from_dict({"launcher": "spur", "scheduler": "spur"})
 
 
 def test_launcher_subprocess_logs_are_siblings_of_the_trial_log(monkeypatch, tmp_path) -> None:

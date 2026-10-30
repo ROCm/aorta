@@ -18,9 +18,11 @@ that rank-0 result passed.
 
 The monarch controller follows this sequence: TCP transport on the
 controller IPv4, one worker per node, a proc mesh, and
-``setup_torch_elastic_env_async``. The actor calls :func:`run_training_rank`
-instead of an inlined model. A missing ``monarch`` import raises an error
-that says Monarch is not installed.
+``setup_torch_elastic_env_async``. The workers start as one step of the
+current allocation: ``srun --jobid <id> --overlap`` under Slurm, or
+``spur srun`` from inside a Spur allocation (``scheduler: spur``). The actor
+calls :func:`run_training_rank` instead of an inlined model. A missing
+``monarch`` import raises an error that says Monarch is not installed.
 """
 
 from __future__ import annotations
@@ -97,7 +99,9 @@ _MONARCH_MISSING = (
 )
 
 # Launcher knobs. They never reach the training loop.
-_CONTROLLER_CONFIG_KEYS = frozenset({"launcher", "nodes", "gpus_per_node", "spur_bin"})
+_CONTROLLER_CONFIG_KEYS = frozenset(
+    {"launcher", "nodes", "gpus_per_node", "spur_bin", "scheduler"}
+)
 
 # One rank, one config. Importing the function keeps the worker from
 # rebuilding ``sys.argv`` (a triage parent would rerun every cell).
@@ -277,6 +281,8 @@ def resolve_rank0_ipv4(*, spur_bin: str, nodes: int) -> str:
         "srun",
         "-N",
         str(nodes),
+        "--ntasks",
+        str(nodes),
         "--ntasks-per-node",
         "1",
         "bash",
@@ -348,6 +354,8 @@ def build_spur_launch(
         str(nodes),
         "--ntasks-per-node",
         str(gpus_per_node),
+        "--ntasks",
+        str(nodes * gpus_per_node),
         "bash",
         "-c",
         SPUR_WORKER_SCRIPT,
@@ -492,51 +500,80 @@ def launch_spur(
         shutil.rmtree(work, ignore_errors=True)
 
 
-def launch_monarch(
-    config: dict[str, Any],
-    *,
-    nodes: int,
-    gpus_per_node: int,
-) -> WorkloadResult:
-    """Run the training actor under a Monarch proc mesh on an existing allocation.
+def monarch_step_prefix(*, scheduler: str, nodes: int, spur_bin: str = "spur") -> list[str]:
+    """``srun`` arguments for one task on each of ``nodes`` hosts of the current allocation.
 
-    Does not submit a Slurm job. ``SLURM_JOB_ID`` or ``MONARCH_SLURM_JOB``
-    must already name the allocation ``srun --overlap`` attaches to.
+    ``slurm`` attaches to ``MONARCH_SLURM_JOB`` or ``SLURM_JOB_ID`` with
+    ``srun --jobid <id> --overlap``. ``spur`` runs ``<spur_bin> srun`` from a
+    shell inside a Spur allocation (``SPUR_JOB_ID`` set), where it becomes a
+    step of that allocation. Spur's ``--jobid --overlap`` would start one task
+    on one node, so it is not used. ``--ntasks`` is explicit in both: a step
+    otherwise inherits the allocation's task count.
     """
-    imported = _import_monarch()
-    actor_mod, spmd_mod, bootstrap, service_env, alloc_ids, serialize_ids, proc_addrs = imported
-    # Import after Monarch itself imports, so a missing install still raises
-    # the source-build error. The class lives in its own module so workers
-    # unpickle ``aorta.workloads.monarch_trainer.Trainer``.
-    from aorta.workloads.monarch_trainer import Trainer
-
-    ip = controller_ipv4()
-    actor_mod.enable_transport(f"tcp://{ip}:0")
-    job_id = os.environ.get("MONARCH_SLURM_JOB") or os.environ.get("SLURM_JOB_ID")
+    counts = [f"-N{nodes}", f"--ntasks={nodes}", "--ntasks-per-node=1"]
+    if scheduler == "spur":
+        spur_job = os.environ.get("SPUR_JOB_ID", "").strip()
+        if not spur_job:
+            raise RuntimeError(
+                "scheduler 'spur' runs Monarch inside a Spur allocation. Run aorta from "
+                "the shell that `spur salloc` opens, so SPUR_JOB_ID is set. "
+                "This workload does not request the allocation."
+            )
+        return [spur_bin, "srun", *counts]
+    if scheduler != "slurm":
+        raise ValueError(f"scheduler must be 'slurm' or 'spur', got {scheduler!r}")
+    explicit = os.environ.get("MONARCH_SLURM_JOB", "").strip()
+    job_id = explicit or os.environ.get("SLURM_JOB_ID", "").strip()
     if not job_id:
         raise RuntimeError(
             "launcher 'monarch' attaches to an existing allocation. "
             "Set SLURM_JOB_ID or MONARCH_SLURM_JOB. This workload does not submit Slurm jobs."
         )
+    if not explicit and os.environ.get("SPUR_JOB_ID", "").strip() == job_id:
+        raise RuntimeError(
+            f"SLURM_JOB_ID {job_id} is a Spur allocation, not a Slurm one. "
+            "Set scheduler: spur in the recipe, or set MONARCH_SLURM_JOB to the Slurm job id."
+        )
+    return ["srun", "--jobid", job_id, "--overlap", *counts]
+
+
+def launch_monarch(
+    config: dict[str, Any],
+    *,
+    nodes: int,
+    gpus_per_node: int,
+    scheduler: str = "slurm",
+    spur_bin: str = "spur",
+) -> WorkloadResult:
+    """Run the training actor under a Monarch proc mesh on an existing allocation.
+
+    Does not request an allocation. With ``scheduler="slurm"``,
+    ``SLURM_JOB_ID`` or ``MONARCH_SLURM_JOB`` names the Slurm allocation. With
+    ``scheduler="spur"``, the controller runs inside a Spur allocation and the
+    workers are ``spur srun`` steps of it.
+    """
+    imported = _import_monarch()
+    actor_mod, spmd_mod, bootstrap, service_env, alloc_ids, serialize_ids, proc_addrs = imported
+    # Import after Monarch itself imports, so a missing install still raises
+    # the not-installed error. The class lives in its own module so workers
+    # unpickle ``aorta.workloads.monarch_trainer.Trainer``.
+    from aorta.workloads.monarch_trainer import Trainer
+
+    prefix = monarch_step_prefix(scheduler=scheduler, nodes=nodes, spur_bin=spur_bin)
+    ip = controller_ipv4()
+    actor_mod.enable_transport(f"tcp://{ip}:0")
     port = _tcp_port(os.environ.get("MONARCH_PORT", "22222"), name="MONARCH_PORT")
-    hostnames = _monarch_hostnames(str(job_id), nodes)
+    hostnames = _monarch_hostnames(prefix, nodes)
     proc_ids = alloc_ids(nodes)
     env = {**os.environ, service_env: serialize_ids(proc_ids)}
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"):
         env.pop(key, None)
     worker_cmd = [sys.executable, "-c", bootstrap(port, None)]
-    argv = [
-        "srun",
-        "--jobid",
-        str(job_id),
-        "--overlap",
-        f"-N{nodes}",
-        f"--ntasks={nodes}",
-        "--ntasks-per-node=1",
-        "--kill-on-bad-exit=1",
-        *worker_cmd,
-    ]
-    log.info("monarch controller tcp://%s hosts=%s", ip, hostnames)
+    # Spur parses --kill-on-bad-exit but ignores it: its step supervisor always
+    # stops the whole step when one task exits abnormally.
+    kill_flag = ["--kill-on-bad-exit=1"] if scheduler == "slurm" else []
+    argv = [*prefix, *kill_flag, *worker_cmd]
+    log.info("monarch controller tcp://%s scheduler=%s hosts=%s", ip, scheduler, hostnames)
     workers: subprocess.Popen[str] | None = None
     worker_pgid: int | None = None
     stdout_log, stderr_log = _open_subprocess_logs(config)
@@ -859,31 +896,19 @@ def _rank_rows(raw: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _monarch_hostnames(job_id: str, nodes: int) -> list[str]:
+def _monarch_hostnames(prefix: list[str], nodes: int) -> list[str]:
     """Ask each node for the hostname Monarch workers advertise.
 
-    Order follows ``SLURM_NODEID``. This attaches to ``job_id``; it does
-    not submit a new allocation.
+    ``prefix`` comes from :func:`monarch_step_prefix`. Order follows
+    ``SLURM_NODEID``, which Spur also sets. This runs a step of the current
+    allocation; it does not request a new one.
     """
     script = 'echo "$SLURM_NODEID $(python3 -c "import socket; print(socket.gethostname())")"'
-    argv = [
-        "srun",
-        "--jobid",
-        job_id,
-        "--overlap",
-        f"-N{nodes}",
-        f"--ntasks={nodes}",
-        "--ntasks-per-node=1",
-        "bash",
-        "-c",
-        script,
-    ]
+    argv = [*prefix, "bash", "-c", script]
     try:
         out = subprocess.check_output(argv, text=True)
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise RuntimeError(
-            f"Could not list hostnames for Slurm job {job_id} via srun: {exc}"
-        ) from exc
+        raise RuntimeError(f"Could not list hostnames with {' '.join(prefix)}: {exc}") from exc
     pairs: list[tuple[int, str]] = []
     for line in out.splitlines():
         parts = line.split()
@@ -1044,6 +1069,7 @@ __all__ = [
     "spawning_controller",
     "launch_monarch",
     "launch_spur",
+    "monarch_step_prefix",
     "resolve_rank0_ipv4",
     "run_training_rank",
     "run_worker_rank",
