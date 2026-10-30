@@ -13,10 +13,10 @@
 # This recipe does not submit a Slurm job.
 #
 #   # validate only (does not spawn):
-#   aorta triage run --recipe recipes/training/tiny-transformer-spur.yaml --dry-run
+#   aorta sweep run --recipe recipes/training/tiny-transformer-spur.yaml --dry-run
 #
 #   # from the controller node, Spur already up:
-#   aorta triage run --recipe recipes/training/tiny-transformer-spur.yaml
+#   aorta sweep run --recipe recipes/training/tiny-transformer-spur.yaml
 #
 # Pass line: passed: true, one loss, world size 16.
 schema_version: 1

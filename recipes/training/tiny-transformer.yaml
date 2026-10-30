@@ -6,10 +6,10 @@
 # start Monarch, Spur, or a GPU job. There is no `expected_world_size`.
 #
 #   # validate only (no GPUs / no launcher needed):
-#   aorta triage run --recipe recipes/training/tiny-transformer.yaml --dry-run
+#   aorta sweep run --recipe recipes/training/tiny-transformer.yaml --dry-run
 #
 #   # CPU or single-GPU smoke:
-#   aorta triage run --recipe recipes/training/tiny-transformer.yaml
+#   aorta sweep run --recipe recipes/training/tiny-transformer.yaml
 #
 # Pass line: passed: true, one loss, world size 1.
 schema_version: 1

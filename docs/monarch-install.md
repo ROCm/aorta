@@ -134,6 +134,18 @@ Near the top of `build.log`, check for:
 
 If it shows a different ROCm, `monarch-env.sh` was not sourced in that shell. Rebuild after sourcing it.
 
+## Install aorta into the same environment
+
+The aorta command and the Monarch workers run in this environment, so aorta has to be installed in it. For example, from an aorta checkout:
+
+```bash
+source "$MONARCH_ROOT/monarch-env.sh"      # ROCm; on CUDA, activate your environment
+uv pip install /path/to/aorta
+aorta sweep run --recipe /path/to/aorta/recipes/training/tiny-transformer.yaml --dry-run
+```
+
+The dry run prints the recipe's plan and does not train. This installs aorta with its own dependencies. It does not reinstall PyTorch, because aorta does not list PyTorch as a dependency.
+
 ## Check the install
 
 Run this outside the Monarch source directory, so Python imports the installed package:
@@ -210,3 +222,5 @@ The Monarch controller starts one Monarch worker process on each machine, and th
 | `LLVM ERROR: IO failure on output stream`, and one process exits before step 0 | The GPU kernel cache is on a shared home directory. Use the local cache variables in `monarch-env.sh`. |
 | The controller waits about 2 minutes after one process is killed | A known Monarch issue: [meta-pytorch/monarch#5167](https://github.com/meta-pytorch/monarch/issues/5167). Setting `HYPERACTOR_MESH_SUPERVISION_WATCHDOG_TIMEOUT=20s` shortens the wait. |
 | You need the workers' own logs | Monarch writes `/tmp/$USER/monarch_log.log` on each machine. |
+| `logging_option(stream_to_client=True) has no effect` | Harmless. Worker output is not streamed to the controller. Set `HYPERACTOR_MESH_ENABLE_LOG_FORWARDING=true` before the run to stream it. |
+| `No module named 'aorta'` on a worker, or `Workload 'tiny_transformer' not found` | aorta is not installed in the environment the workers run. See [Install aorta into the same environment](#install-aorta-into-the-same-environment). |

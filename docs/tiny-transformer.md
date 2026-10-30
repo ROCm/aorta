@@ -14,7 +14,18 @@ The model is a 4-layer transformer: hidden size 256, 4 attention heads, feed-for
 
 ## How to tell that it passed
 
-Read the result written by rank 0, the first process. The run passed when all of these are true:
+When the run finishes, aorta prints a summary and where it wrote the results:
+
+```text
+Sweep summary: all 1 cell(s) passed.
+Wrote matrix to triage_results/<ticket>/tiny_transformer/<timestamp>
+```
+
+`triage_results` is the default output directory. Use `--output <dir>` to change it. `<ticket>` is the recipe's `ticket`, for example `TINY-TRANSFORMER-MONARCH-SPUR`.
+
+The trial result is in `cells/baseline-local/tiny_transformer/trial_d0_m0_t0.json` under that directory. Rank 0, the first process, produced it. Its `result` object holds the fields below. `matrix.md` in the same directory is a readable summary of the whole run.
+
+The run passed when all of these are true:
 
 - `passed` is `true`.
 - `final_loss` is an ordinary number. `NaN` and infinity are failures.
@@ -42,8 +53,8 @@ If `CUDA_VISIBLE_DEVICES` names one GPU, that is the only GPU the process can se
 Install aorta in the active environment, then run these commands from the repository root:
 
 ```bash
-aorta triage run --recipe recipes/training/tiny-transformer.yaml --dry-run
-aorta triage run --recipe recipes/training/tiny-transformer.yaml
+aorta sweep run --recipe recipes/training/tiny-transformer.yaml --dry-run
+aorta sweep run --recipe recipes/training/tiny-transformer.yaml
 ```
 
 `--dry-run` checks the recipe and does not train. The real run is one process, for 20 steps. `device: auto` uses a GPU when one is visible, and the CPU otherwise.
@@ -62,11 +73,11 @@ export AORTA_MASTER_PORT=29501
 export AORTA_SHARED_DIR=/path/shared/by/every/node
 export AORTA_RANK0_IP=10.x.x.x    # optional; otherwise aorta asks Spur
 
-aorta triage run --recipe recipes/training/tiny-transformer-spur.yaml --dry-run
-aorta triage run --recipe recipes/training/tiny-transformer-spur.yaml
+aorta sweep run --recipe recipes/training/tiny-transformer-spur.yaml --dry-run
+aorta sweep run --recipe recipes/training/tiny-transformer-spur.yaml
 ```
 
-Aorta starts one `spur srun` of the training job. Each GPU runs that job directly. The workers do not run the `aorta triage run` command again.
+Aorta starts one `spur srun` of the training job. Each GPU runs that job directly. The workers do not run the `aorta sweep run` command again.
 
 | Variable | Required | What to set |
 |---|---|---|
@@ -91,8 +102,8 @@ srun --jobid "$SLURM_JOB_ID" --overlap -N1 --pty bash    # a shell on the first 
 source /shared/path/monarch/monarch-env.sh       # ROCm only; see the Monarch install page
 export AORTA_CONTROLLER_IP=10.x.x.x              # optional; see below
 
-aorta triage run --recipe recipes/training/tiny-transformer-monarch.yaml --dry-run
-aorta triage run --recipe recipes/training/tiny-transformer-monarch.yaml
+aorta sweep run --recipe recipes/training/tiny-transformer-monarch.yaml --dry-run
+aorta sweep run --recipe recipes/training/tiny-transformer-monarch.yaml
 ```
 
 The workers connect to the machine running aorta. Aorta looks up that machine's IPv4 address from its hostname. If the lookup fails or gives an address the workers cannot reach, set `AORTA_CONTROLLER_IP` to the right IPv4 address.
@@ -118,8 +129,8 @@ export SPUR_CONTROLLER_ADDR=http://<controller IPv4>:6817
 source /shared/path/monarch/monarch-env.sh       # ROCm only
 export AORTA_CONTROLLER_IP=10.x.x.x              # optional, same as above
 
-aorta triage run --recipe recipes/training/tiny-transformer-monarch-spur.yaml --dry-run
-aorta triage run --recipe recipes/training/tiny-transformer-monarch-spur.yaml
+aorta sweep run --recipe recipes/training/tiny-transformer-monarch-spur.yaml --dry-run
+aorta sweep run --recipe recipes/training/tiny-transformer-monarch-spur.yaml
 exit                                              # releases the Spur allocation
 ```
 
@@ -129,6 +140,27 @@ The recipe sets `scheduler: spur`. Aorta then runs `spur srun -N2 --ntasks=2 --n
 - **Aorta refuses to start without `SPUR_JOB_ID`.** That variable is how aorta knows it is inside a Spur allocation. It does not request one itself.
 - **Use the Slurm recipe inside a Slurm allocation, and this recipe inside a Spur allocation.** Inside a Spur allocation, `SLURM_JOB_ID` is Spur's job id. The Slurm recipe stops with an error there instead of passing that id to Slurm's `srun`.
 - **Worker output appears when the worker step ends.** `spur srun` delivers a step's output at the end. Monarch's own per-machine log is `/tmp/$USER/monarch_log.log`.
+
+To run it without typing in the allocation shell, put the commands in a script and pass the script as `SHELL`. `spur salloc` runs `$SHELL` as the allocation shell and releases the allocation when it exits:
+
+```bash
+cat > run-monarch-spur.sh <<'EOF'
+#!/bin/bash
+source /shared/path/monarch/monarch-env.sh       # ROCm only
+aorta sweep run --recipe recipes/training/tiny-transformer-monarch-spur.yaml
+EOF
+chmod +x run-monarch-spur.sh
+SHELL=$PWD/run-monarch-spur.sh "$SPUR_HOME/bin/spur" salloc -N2 --gpus-per-node=8 --exclusive -t 00:20:00
+```
+
+This recipe was run this way on 2 machines with 8 AMD Instinct MI350X GPUs each, using Spur 0.15.0 and Monarch built from source against ROCm 10.1. It passed with `world_size` 16 and 20 steps, and the `aorta sweep run` command took about 50 seconds.
+
+## Messages you can ignore
+
+These can appear on a passing run:
+
+- `UserWarning: logging_option(stream_to_client=True) has no effect: log forwarding was disabled ...` from Monarch. Worker output is not streamed to the aorta process. The run is not affected. Set `HYPERACTOR_MESH_ENABLE_LOG_FORWARDING=true` before running aorta if you want worker output in the aorta console.
+- `cell 'baseline-local' inherits LD_LIBRARY_PATH from the environment that invoked aorta ...` from aorta. It warns that a library swap through `LD_LIBRARY_PATH` may not take effect. This workload does not swap libraries, so it does not affect the result.
 
 ## If RANK is already set in your shell
 

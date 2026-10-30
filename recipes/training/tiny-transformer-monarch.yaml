@@ -11,10 +11,10 @@
 # when the hostname resolves to IPv6 link-local first.
 #
 #   # validate only (does not spawn):
-#   aorta triage run --recipe recipes/training/tiny-transformer-monarch.yaml --dry-run
+#   aorta sweep run --recipe recipes/training/tiny-transformer-monarch.yaml --dry-run
 #
 #   # inside the existing allocation:
-#   aorta triage run --recipe recipes/training/tiny-transformer-monarch.yaml
+#   aorta sweep run --recipe recipes/training/tiny-transformer-monarch.yaml
 #
 # Pass line: passed: true, one loss, world size 16.
 schema_version: 1
