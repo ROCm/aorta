@@ -27,8 +27,44 @@ CIA_MODEL = "Qwen/Qwen3.8-27B"
 DEFAULT_MODEL = CIA_MODEL
 
 
+def _litellm_endpoint_model() -> str | None:
+    """The configured model when its LiteLLM provider prefix is the route.
+
+    Launch, Watch, and Autopsy otherwise pin :data:`CIA_MODEL`. Behind an
+    endpoint that name has no provider prefix, so :func:`_qualified_model`
+    rewrites it to ``openai/<CIA_MODEL>`` and the request is posted to
+    ``/chat/completions``. An Azure gateway only serves
+    ``azure/<deployment>``, and the rewrite also drops ``api_version``
+    (#556). The same rewrite would discard ``anthropic/...`` or any other
+    prefix this module otherwise keeps. ``openai/`` is the exception: it
+    already selects the OpenAI-compatible route, where Qwen stays pinned.
+    """
+    resolved = chat_provider()
+    if resolved is None:
+        return None
+    base, _key, model, provider = resolved
+    if str(provider or "").strip().lower() != "litellm":
+        return None
+    if not str(base or "").strip():
+        return None
+    model = str(model or "").strip()
+    prefix = _litellm_provider_prefix(model)
+    if prefix is None or prefix == "openai":
+        return None
+    return model
+
+
 def _cia_lm_kwargs() -> dict[str, Any]:
-    """The model and request controls shared by Launch, Watch, and Autopsy."""
+    """The model and request controls shared by Launch, Watch, and Autopsy.
+
+    A LiteLLM endpoint whose model carries a provider prefix other than
+    ``openai/`` is used as configured: an Azure deployment, or
+    ``anthropic/...`` behind a base URL. Qwen's non-thinking body is attached
+    only when that Qwen model is the one being sent.
+    """
+    routed = _litellm_endpoint_model()
+    if routed is not None:
+        return {"model": routed}
     return {
         "model": CIA_MODEL,
         "extra_body": {
@@ -185,7 +221,9 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] 
     their endpoint and credentials: a user who has run
     ``aorta chat config init --profile openai`` should not then have a Watch
     and an Autopsy quietly talking somewhere else. CIA pins its own model and
-    no-thinking request controls through :func:`_cia_lm_kwargs`.
+    no-thinking request controls through :func:`_cia_lm_kwargs`, unless the
+    profile is a LiteLLM endpoint whose model already carries a provider
+    prefix. That name is the route; substituting Qwen would drop it.
 
     Only the settings are read, not the provider layer, so this keeps the
     agents runnable without the chat extras. What it does need is pydantic and
@@ -508,7 +546,13 @@ def build_cia_lm(
     api_key: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> dspy.LM:
-    """Build the fixed, non-thinking LM used by every CIA stage."""
+    """Build the LM used by every CIA stage.
+
+    That is the fixed non-thinking Qwen model, unless the chat profile is a
+    LiteLLM endpoint whose model carries a provider prefix. An Azure
+    deployment is what that gateway can serve; pinning Qwen would post to
+    ``/chat/completions`` and drop ``api_version`` (#556).
+    """
     return build_lm(
         api_base=api_base,
         api_key=api_key,
@@ -632,9 +676,11 @@ def ensure_configured(**kwargs) -> None:
     and Autopsy reasoned at Watch's settings with neither of them able to tell.
 
     With no arguments this installs CIA's Qwen3.8 non-thinking defaults, shared
-    by Launch and Watch. Explicit arguments are no longer accepted quietly
-    once configured. A module whose settings matter should build its own LM
-    with :func:`build_lm` and bind it to its own program, which no other module
+    by Launch and Watch, unless the chat profile names a provider-prefixed
+    LiteLLM model behind an endpoint. That configured model is the route
+    (#556). Explicit arguments are no longer accepted quietly once configured.
+    A module whose settings matter should build its own LM with
+    :func:`build_lm` and bind it to its own program, which no other module
     can then take away.
     """
     global _configured

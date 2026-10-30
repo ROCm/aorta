@@ -33,7 +33,9 @@ class ChatBackend(Protocol):
     A backend may also define ``route_warning() -> str | None``: a request
     path its configuration gets wrong without failing preflight, which
     ``aorta chat doctor`` reports as a warning. Optional, so it is not a
-    member here; only the LiteLLM backend has one.
+    member here; only the LiteLLM backend has one. A hook that raises is
+    not a failed preflight: ``probe`` calls ``preflight``, and doctor turns
+    any exception from ``probe`` into FAIL before its own guard runs.
     """
 
     name: str

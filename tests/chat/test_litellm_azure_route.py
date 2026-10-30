@@ -140,6 +140,22 @@ class TestTheRouteIsCheckedWithoutACall:
             await _backend().preflight()
         assert any("/chat/completions" in r.getMessage() for r in caplog.records)
 
+    async def test_a_raising_hook_does_not_abort_preflight_or_probe(
+        self, azure_gateway, monkeypatch, caplog
+    ):
+        """probe() is preflight(), and doctor turns an exception from probe into FAIL."""
+        import aorta.chat.inference.providers.remote_litellm as mod
+
+        def boom():
+            raise RuntimeError("advisory check broke")
+
+        monkeypatch.setattr(mod, "route_warning", boom)
+        backend = _backend()
+        with caplog.at_level(logging.DEBUG, logger=mod.logger.name):
+            await backend.preflight()
+            await backend.probe()
+        assert any("route_warning raised" in r.getMessage() for r in caplog.records)
+
 
 class _Capture(BaseHTTPRequestHandler):
     """Records the request line and answers like any chat completions server."""
@@ -268,6 +284,20 @@ class TestDoctorReportsTheRoute:
                 raise RuntimeError("advisory check broke")
 
         assert self._check(monkeypatch, _Broken()).status == OK
+
+    @_needs_litellm
+    def test_the_real_backend_does_not_fail_doctor_when_the_hook_raises(
+        self, monkeypatch, azure_gateway
+    ):
+        """The guard in doctor runs after probe(). The hook has to be caught inside preflight."""
+        import aorta.chat.inference.providers.remote_litellm as mod
+        from aorta.chat.doctor import OK
+
+        def boom():
+            raise RuntimeError("advisory check broke")
+
+        monkeypatch.setattr(mod, "route_warning", boom)
+        assert self._check(monkeypatch, mod.RemoteLiteLLMBackend()).status == OK
 
 
 class TestTheAzureOpenAIProfile:

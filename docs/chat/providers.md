@@ -156,7 +156,16 @@ header of its own, such as API Management's `Ocp-Apim-Subscription-Key`, takes
 `aorta chat doctor` warns, and the startup log says the same, when
 `llm_provider = "litellm"` has a base URL and a model with no provider prefix,
 or an `azure/` model whose base URL ends in `/openai`. Neither check makes a
-request.
+request. A failure inside that check is recorded at debug and ignored: it
+is advice, and it must not turn `doctor` into a failure or stop chat from
+starting.
+
+Launch, Watch, and Autopsy send this `azure/<deployment>` model and
+`remote_llm_api_version`. They otherwise pin their own Qwen model, which has
+no provider prefix and would be posted to `/chat/completions`. The same
+applies to any other LiteLLM provider prefix on a base URL (`anthropic/...`,
+and the rest): that configured name is the route. An `openai/` model still
+selects the OpenAI-compatible route, and the agents keep Qwen there.
 
 ### Anthropic, Gemini, Bedrock
 

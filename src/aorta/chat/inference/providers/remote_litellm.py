@@ -193,7 +193,14 @@ class RemoteLiteLLMBackend:
         _require_auth_config()
         _require_model()
         logger.info("Using %s", self.describe())
-        warning = self.route_warning()
+        # Advisory, same as doctor's own call. probe() awaits this method, and
+        # an exception here becomes a FAIL before doctor reaches its guard;
+        # chat startup would abort too. A broken check is not a broken route.
+        try:
+            warning = self.route_warning()
+        except Exception:  # an advisory check must not take startup or doctor down
+            logger.debug("route_warning raised", exc_info=True)
+            warning = None
         if warning:
             logger.warning("%s", warning)
 

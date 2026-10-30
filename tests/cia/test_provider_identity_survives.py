@@ -120,6 +120,113 @@ class TestLitellmBehindAnEndpointKeepsAProviderPrefix:
         assert "api_version" not in lm.kwargs
 
 
+class TestTheAgentPathKeepsTheConfiguredRoute:
+    """Launch, Watch, and Autopsy pin Qwen, which has no provider prefix.
+
+    ``build_lm()`` without a model uses the profile. ``build_cia_lm`` and
+    ``ensure_configured`` do not, so an Azure profile was still posted to
+    ``/chat/completions`` with no ``api_version`` (#556).
+    """
+
+    def _azure(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "sk-x", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        return llm_mod
+
+    def test_build_cia_lm_uses_the_deployment_and_api_version(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == "azure/gpt-4o-mini", lm.model
+        assert lm.kwargs["api_version"] == "2024-10-21"
+        assert "extra_body" not in lm.kwargs
+
+    def test_ensure_configured_uses_the_deployment_and_api_version(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        monkeypatch.setattr(llm_mod, "_configured", False)
+        seen: dict = {}
+        monkeypatch.setattr(llm_mod.dspy, "configure", lambda **kwargs: seen.update(kwargs))
+
+        llm_mod.ensure_configured()
+
+        lm = seen.get("lm")
+        assert lm is not None
+        assert lm.model == "azure/gpt-4o-mini", lm.model
+        assert lm.kwargs.get("api_version") == "2024-10-21"
+        assert "extra_body" not in lm.kwargs
+
+    def test_another_provider_prefix_behind_an_endpoint_is_kept(self, monkeypatch):
+        """The same hole: ``anthropic/...`` would otherwise become ``openai/Qwen/...``."""
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: (
+                "https://api.anthropic.com",
+                "sk-x",
+                "anthropic/claude-example",
+                "litellm",
+            ),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == "anthropic/claude-example", lm.model
+        assert "api_version" not in lm.kwargs
+        assert "extra_body" not in lm.kwargs
+
+    def test_an_openai_prefix_still_pins_qwen(self, monkeypatch):
+        """``openai/`` is the OpenAI-compatible route, not a vendor deployment."""
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "sk-x", "openai/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == f"openai/{llm_mod.CIA_MODEL}", lm.model
+        assert "api_version" not in lm.kwargs
+        extra = lm.kwargs.get("extra_body") or {}
+        assert extra.get("chat_template_kwargs", {}).get("enable_thinking") is False
+
+    def test_a_bare_name_behind_an_endpoint_still_pins_qwen(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("http://proxy:4000/v1", "sk-x", "claude-haiku-4-5", "litellm"),
+        )
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == f"openai/{llm_mod.CIA_MODEL}", lm.model
+
+    def test_no_endpoint_still_pins_qwen(self, monkeypatch):
+        """Without a base URL, LiteLLM owns routing and the Qwen pin stands."""
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("", "sk-x", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == llm_mod.CIA_MODEL, lm.model
+        assert "api_version" not in lm.kwargs
+
+
 class TestASlashIsNotEnoughToNameAProvider:
     def test_a_hugging_face_organization_is_not_a_provider(self):
         assert _litellm_provider_prefix("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct") is None
