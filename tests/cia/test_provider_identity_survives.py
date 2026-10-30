@@ -340,6 +340,29 @@ class TestTheAgentPathSendsGatewayHeaders:
         finally:
             lm.close()
 
+    def test_a_vllm_profile_does_not_inherit_remote_gateway_headers(self, monkeypatch):
+        """Leftover remote headers must not replace the vLLM bearer with ``unused``."""
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("http://vllm:8000/v1", "sk-vllm", "qwen3", "vllm"),
+        )
+        monkeypatch.setattr(
+            llm_mod,
+            "_remote_gateway_auth",
+            lambda: ("Ocp-Apim-Subscription-Key", {"user": "alice"}),
+        )
+        lm = llm_mod.build_cia_lm()
+        try:
+            assert lm.kwargs.get("api_key") == "sk-vllm"
+            default_headers = lm._sync_client.default_headers
+            assert default_headers.get("Ocp-Apim-Subscription-Key") is None
+            assert default_headers.get("user") != "alice"
+        finally:
+            lm.close()
+
 
 class TestASlashIsNotEnoughToNameAProvider:
     def test_a_hugging_face_organization_is_not_a_provider(self):

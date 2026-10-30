@@ -347,10 +347,14 @@ def _gateway_request_auth(
     """The client key and gateway headers for one LM.
 
     An explicit endpoint does not inherit the profile's headers: those name
-    the configured gateway. When the headers do apply, an explicit key is the
-    secret placed in ``remote_llm_auth_header``. Chat's assembly is reused,
-    including the placeholder client key, so the real secret is not also sent
-    as a bearer token. Extra headers alone leave *client_key* as it was.
+    the configured gateway, and only an ``openai`` or ``litellm`` profile.
+    A vLLM profile can still carry leftover remote header settings; applying
+    them would replace its bearer key with the placeholder and send those
+    headers to an unrelated endpoint. When the headers do apply, an explicit
+    key is the secret placed in ``remote_llm_auth_header``. Chat's assembly
+    is reused, including the placeholder client key, so the real secret is
+    not also sent as a bearer token. Extra headers alone leave *client_key*
+    as it was.
     """
     if not apply:
         return client_key, None
@@ -560,14 +564,19 @@ def build_lm(
 
     resolved_base = (api_base or settings_base) or None
     resolved_key = api_key or settings_key or "EMPTY"
-    # An explicit endpoint belongs to the caller, not to the profile's gateway.
+    # Remote gateway headers belong to the openai and litellm profiles. A vLLM
+    # profile can still have leftover remote_llm_auth_header / extra headers;
+    # applying them replaces the vLLM bearer with the placeholder and sends
+    # those headers to an unrelated endpoint. An explicit api_base that is not
+    # the configured one does not inherit them either.
+    provider_name = str(provider or "").strip().lower()
     same_endpoint = not (api_base or "").strip() or (
         (api_base or "").strip().rstrip("/") == (settings_base or "").strip().rstrip("/")
     )
     client_key, gateway_headers = _gateway_request_auth(
         resolved_key,
         real_secret=(api_key or settings_key or "").strip(),
-        apply=same_endpoint,
+        apply=provider_name in {"openai", "litellm"} and same_endpoint,
     )
     qualified_model = _qualified_model(
         model or settings_model or DEFAULT_MODEL,
