@@ -27,8 +27,44 @@ CIA_MODEL = "Qwen/Qwen3.8-27B"
 DEFAULT_MODEL = CIA_MODEL
 
 
+def _litellm_endpoint_model() -> str | None:
+    """The configured model when its LiteLLM provider prefix is the route.
+
+    Launch, Watch, and Autopsy otherwise pin :data:`CIA_MODEL`. Behind an
+    endpoint that name has no provider prefix, so :func:`_qualified_model`
+    rewrites it to ``openai/<CIA_MODEL>`` and the request is posted to
+    ``/chat/completions``. An Azure gateway only serves
+    ``azure/<deployment>``, and the rewrite also drops ``api_version``
+    (#556). The same rewrite would discard ``anthropic/...`` or any other
+    prefix this module otherwise keeps. ``openai/`` is the exception: it
+    already selects the OpenAI-compatible route, where Qwen stays pinned.
+    """
+    resolved = chat_provider()
+    if resolved is None:
+        return None
+    base, _key, model, provider = resolved
+    if str(provider or "").strip().lower() != "litellm":
+        return None
+    if not str(base or "").strip():
+        return None
+    model = str(model or "").strip()
+    prefix = _litellm_provider_prefix(model)
+    if prefix is None or prefix == "openai":
+        return None
+    return model
+
+
 def _cia_lm_kwargs() -> dict[str, Any]:
-    """The model and request controls shared by Launch, Watch, and Autopsy."""
+    """The model and request controls shared by Launch, Watch, and Autopsy.
+
+    A LiteLLM endpoint whose model carries a provider prefix other than
+    ``openai/`` is used as configured: an Azure deployment, or
+    ``anthropic/...`` behind a base URL. Qwen's non-thinking body is attached
+    only when that Qwen model is the one being sent.
+    """
+    routed = _litellm_endpoint_model()
+    if routed is not None:
+        return {"model": routed}
     return {
         "model": CIA_MODEL,
         "extra_body": {
@@ -100,6 +136,7 @@ def _openai_clients(
     api_base: str | None,
     api_key: str,
     verify: str | bool,
+    headers: dict[str, str] | None = None,
 ) -> tuple[Any, Callable[[], Any]]:
     """A sync client and lazy async-client factory with per-LM TLS trust.
 
@@ -116,6 +153,10 @@ def _openai_clients(
     common: dict[str, Any] = {"api_key": api_key}
     if api_base:
         common["base_url"] = api_base
+    if headers:
+        # The OpenAI route is given a concrete client, which is what LiteLLM
+        # sends. A ``headers`` kwarg beside that client does not ride along.
+        common["default_headers"] = headers
     sync_client = OpenAI(
         **common,
         http_client=httpx.Client(
@@ -185,7 +226,9 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] 
     their endpoint and credentials: a user who has run
     ``aorta chat config init --profile openai`` should not then have a Watch
     and an Autopsy quietly talking somewhere else. CIA pins its own model and
-    no-thinking request controls through :func:`_cia_lm_kwargs`.
+    no-thinking request controls through :func:`_cia_lm_kwargs`, unless the
+    profile is a LiteLLM endpoint whose model already carries a provider
+    prefix. That name is the route; substituting Qwen would drop it.
 
     Only the settings are read, not the provider layer, so this keeps the
     agents runnable without the chat extras. What it does need is pydantic and
@@ -275,6 +318,75 @@ def _redaction_enabled() -> bool:
     except ImportError:
         return True
     return bool(getattr(settings, "redact", True))
+
+
+def _remote_gateway_auth() -> tuple[str, dict[str, str]]:
+    """``(auth header name, extra headers)`` from the chat profile.
+
+    The same pair the chat backends send. Empty when the profile names neither,
+    or when the settings cannot be imported: the env fallback covers the header
+    name only, because extra headers are a structured setting.
+    """
+    try:
+        from aorta.chat.config import settings
+    except ImportError:
+        return os.environ.get(f"{_ENV_PREFIX}REMOTE_LLM_AUTH_HEADER", "").strip(), {}
+    header = str(getattr(settings, "remote_llm_auth_header", "") or "").strip()
+    extra = getattr(settings, "remote_llm_extra_headers", None) or {}
+    if not isinstance(extra, dict):
+        extra = {}
+    return header, {str(k): str(v) for k, v in extra.items() if k and v}
+
+
+def _gateway_request_auth(
+    client_key: str,
+    *,
+    real_secret: str,
+    apply: bool,
+) -> tuple[str, dict[str, str] | None]:
+    """The client key and gateway headers for one LM.
+
+    An explicit endpoint does not inherit the profile's headers: those name
+    the configured gateway, and only an ``openai`` or ``litellm`` profile.
+    A vLLM profile can still carry leftover remote header settings; applying
+    them would replace its bearer key with the placeholder and send those
+    headers to an unrelated endpoint. When the headers do apply, an explicit
+    key is the secret placed in ``remote_llm_auth_header``. Chat's assembly
+    is reused, including the placeholder client key, so the real secret is
+    not also sent as a bearer token. Extra headers alone leave *client_key*
+    as it was.
+    """
+    if not apply:
+        return client_key, None
+    header, extra = _remote_gateway_auth()
+    if not header and not extra:
+        return client_key, None
+    if header and not real_secret.strip():
+        raise ValueError(
+            f"remote_llm_auth_header is set to {header!r}, but no API key is "
+            "configured for the agents to put in it.\n"
+            "Set AORTA_CHAT_REMOTE_LLM_API_KEY, or put remote_llm_api_key in "
+            "the chat profile ('aorta chat config init')."
+        )
+    from aorta.chat.remote_auth import build_auth
+
+    returned, headers = build_auth(
+        api_key=real_secret if header else client_key,
+        auth_header=header,
+        extra_headers=extra,
+    )
+    if not header:
+        return client_key, headers
+    return returned, headers
+
+
+def _remote_api_version() -> str:
+    """``remote_llm_api_version`` from the chat settings, or the environment."""
+    try:
+        from aorta.chat.config import settings
+    except ImportError:
+        return os.environ.get(f"{_ENV_PREFIX}REMOTE_LLM_API_VERSION", "").strip()
+    return str(getattr(settings, "remote_llm_api_version", "") or "").strip()
 
 
 def redact(text: str) -> str:
@@ -452,6 +564,20 @@ def build_lm(
 
     resolved_base = (api_base or settings_base) or None
     resolved_key = api_key or settings_key or "EMPTY"
+    # Remote gateway headers belong to the openai and litellm profiles. A vLLM
+    # profile can still have leftover remote_llm_auth_header / extra headers;
+    # applying them replaces the vLLM bearer with the placeholder and sends
+    # those headers to an unrelated endpoint. An explicit api_base that is not
+    # the configured one does not inherit them either.
+    provider_name = str(provider or "").strip().lower()
+    same_endpoint = not (api_base or "").strip() or (
+        (api_base or "").strip().rstrip("/") == (settings_base or "").strip().rstrip("/")
+    )
+    client_key, gateway_headers = _gateway_request_auth(
+        resolved_key,
+        real_secret=(api_key or settings_key or "").strip(),
+        apply=provider_name in {"openai", "litellm"} and same_endpoint,
+    )
     qualified_model = _qualified_model(
         model or settings_model or DEFAULT_MODEL,
         provider,
@@ -462,8 +588,9 @@ def build_lm(
     if qualified_model.startswith("openai/"):
         sync_client, async_client_factory = _openai_clients(
             api_base=resolved_base,
-            api_key=resolved_key,
+            api_key=client_key,
             verify=verify,
+            headers=gateway_headers,
         )
         transport = {
             "sync_client": sync_client,
@@ -478,11 +605,18 @@ def build_lm(
     request_options: dict[str, Any] = {}
     if extra_body is not None:
         request_options["extra_body"] = extra_body
+    api_version = _remote_api_version() if qualified_model.startswith("azure/") else ""
+    if api_version:
+        request_options["api_version"] = api_version
+    if gateway_headers and not qualified_model.startswith("openai/"):
+        # DSPy pops ``headers`` and passes them to LiteLLM. The OpenAI route
+        # already put them on its client, above.
+        request_options["headers"] = gateway_headers
 
     return RedactingLM(
         model=qualified_model,
         api_base=resolved_base,
-        api_key=resolved_key,
+        api_key=client_key,
         max_tokens=max_tokens,
         cache=False,
         **request_options,
@@ -496,7 +630,14 @@ def build_cia_lm(
     api_key: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> dspy.LM:
-    """Build the fixed, non-thinking LM used by every CIA stage."""
+    """Build the LM used by every CIA stage.
+
+    That is the fixed non-thinking Qwen model, unless the chat profile is a
+    LiteLLM endpoint whose model carries a provider prefix. An Azure
+    deployment is what that gateway can serve; pinning Qwen would post to
+    ``/chat/completions`` and drop ``api_version`` (#556). The profile's
+    gateway headers are sent with that deployment, as they are for chat.
+    """
     return build_lm(
         api_base=api_base,
         api_key=api_key,
@@ -520,23 +661,28 @@ def _qualified_model(model: str, provider: str, has_endpoint: bool) -> str:
     not a LiteLLM provider. Returning it unchanged bypasses the ``openai/``
     route required by the configured OpenAI-compatible vLLM endpoint.
 
-    A direct LiteLLM profile still gets to route its own names. Elsewhere an
-    existing prefix is preserved only when LiteLLM says it is a provider, and
-    ``openai/`` is the only prefix that already satisfies an OpenAI-compatible
-    route.
+    A direct LiteLLM profile still gets to route its own names, and so does
+    one behind an endpoint when the name carries a LiteLLM provider prefix:
+    ``azure/<deployment>`` at a gateway needs Azure's deployment path, and
+    ``openai/azure/...`` posted to ``/chat/completions`` instead (#556).
+    Elsewhere an existing prefix is preserved only when LiteLLM says it is a
+    provider, and ``openai/`` is the only prefix that already satisfies an
+    OpenAI-compatible route.
     """
     provider = provider.strip().lower()
+
+    if provider == "litellm" and (not has_endpoint or _litellm_provider_prefix(model)):
+        # No endpoint means LiteLLM itself owns routing, for both qualified and
+        # bare names. In particular, preserve anthropic/... and bedrock/....
+        # Behind an endpoint only a provider prefix routes; a bare name there
+        # is OpenAI-shaped and falls through.
+        return model
 
     # Decide endpoint routing before looking at the slash. ``deepseek-ai`` is
     # an organization, not a provider, and vLLM still needs
     # openai/deepseek-ai/<model> so DSPy sends it to api_base.
     if provider in {"vllm", "openai"} or has_endpoint:
         return model if model.startswith("openai/") else f"openai/{model}"
-
-    if provider == "litellm":
-        # No endpoint means LiteLLM itself owns routing, for both qualified and
-        # bare names. In particular, preserve anthropic/... and bedrock/....
-        return model
 
     prefix = _litellm_provider_prefix(model)
     if prefix is not None:
@@ -615,9 +761,11 @@ def ensure_configured(**kwargs) -> None:
     and Autopsy reasoned at Watch's settings with neither of them able to tell.
 
     With no arguments this installs CIA's Qwen3.8 non-thinking defaults, shared
-    by Launch and Watch. Explicit arguments are no longer accepted quietly
-    once configured. A module whose settings matter should build its own LM
-    with :func:`build_lm` and bind it to its own program, which no other module
+    by Launch and Watch, unless the chat profile names a provider-prefixed
+    LiteLLM model behind an endpoint. That configured model is the route
+    (#556). Explicit arguments are no longer accepted quietly once configured.
+    A module whose settings matter should build its own LM with
+    :func:`build_lm` and bind it to its own program, which no other module
     can then take away.
     """
     global _configured

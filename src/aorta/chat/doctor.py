@@ -1542,6 +1542,18 @@ def _check_backend(report: Report) -> None:
                 "not checked because the vLLM backend did not answer",
             )
         return
+    # Optional on the backend: only one whose model name decides the request
+    # path has anything to say. probe() makes no call on the remote backends,
+    # so a route that 404s would otherwise be reported ok.
+    route_warning = getattr(backend, "route_warning", None)
+    try:
+        warning = route_warning() if callable(route_warning) else None
+    except Exception:  # an advisory check must not take the report down
+        logger.debug("route_warning raised", exc_info=True)
+        warning = None
+    if warning:
+        report.add("llm backend", WARN, backend.describe(), hint=warning)
+        return
     report.add("llm backend", OK, backend.describe())
 
     if not check_native_tools:

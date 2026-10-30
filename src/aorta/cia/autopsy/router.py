@@ -208,11 +208,12 @@ class TriageRouter(dspy.Module):
     #: rationale a reader acts on, which is the longest reasoning in the
     #: pipeline; it runs once per failure where Watch polls throughout. The
     #: ReAct trajectory below has to fit its tool calls *and* its answer inside
-    #: this. Qwen's separate thinking trace is disabled by ``build_cia_lm``.
+    #: this. When ``build_cia_lm`` sends Qwen, it also disables that model's
+    #: separate thinking trace.
     #:
-    #: A budget is all this module pins; the model is ``CIA_MODEL`` via
-    #: ``build_cia_lm``. The chat profile's model still selects ordinary
-    #: ``aorta chat`` turns only.
+    #: A budget is all this module pins. The model comes from ``build_cia_lm``:
+    #: ``CIA_MODEL``, unless the chat profile is a LiteLLM endpoint whose model
+    #: already carries a provider prefix (an Azure deployment, for example).
     MAX_TOKENS = 8192
 
     def __init__(self, bundle_root: Path | str):

@@ -8,8 +8,10 @@ LITELLM_API_BASE / LITELLM_API_KEY / LITELLM_MODEL -- defaulting to
 
 So a user who had run ``aorta chat config init --profile openai`` had chat
 talking to their provider and a Watch and Autopsy talking to a proxy that was
-not running, with nothing to say the two disagreed. CIA now pins its own model
-and request mode while continuing to share the endpoint and credentials.
+not running, with nothing to say the two disagreed. CIA pins its own model
+and request mode while continuing to share the endpoint and credentials,
+except a LiteLLM endpoint whose model carries a provider prefix other than
+``openai/``: that configured name is the route (#556).
 
 The settings are read; the provider layer is not. ``aorta.chat.config`` needs
 pydantic and stdlib and none of the chat extras, so the agents still run on a

@@ -81,6 +81,289 @@ class TestAnOpenAIShapedEndpointStillGetsThePrefix:
         assert _qualified_model("openai/gpt-4o", "vllm", True) == "openai/gpt-4o"
 
 
+class TestLitellmBehindAnEndpointKeepsAProviderPrefix:
+    """#556: ``openai/azure/<deployment>`` posts to /chat/completions and 404s."""
+
+    @pytest.mark.parametrize("model", ["azure/gpt-4o-mini", "anthropic/claude-example"])
+    def test_it_is_passed_through(self, model):
+        assert _qualified_model(model, "litellm", True) == model
+
+    def test_a_namespace_that_is_not_a_provider_still_gets_openai(self):
+        model = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+        assert _qualified_model(model, "litellm", True) == f"openai/{model}"
+
+    def test_the_api_version_reaches_the_lm(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "sk-x", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_lm()
+
+        assert lm.model == "azure/gpt-4o-mini", lm.model
+        assert lm.kwargs["api_version"] == "2024-10-21"
+
+    def test_it_is_not_sent_to_a_model_that_is_not_azure(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("http://proxy:4000/v1", "sk-x", "claude-haiku-4-5", "vllm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_lm()
+
+        assert "api_version" not in lm.kwargs
+
+
+class TestTheAgentPathKeepsTheConfiguredRoute:
+    """Launch, Watch, and Autopsy pin Qwen, which has no provider prefix.
+
+    ``build_lm()`` without a model uses the profile. ``build_cia_lm`` and
+    ``ensure_configured`` do not, so an Azure profile was still posted to
+    ``/chat/completions`` with no ``api_version`` (#556).
+    """
+
+    def _azure(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "sk-x", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        return llm_mod
+
+    def test_build_cia_lm_uses_the_deployment_and_api_version(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == "azure/gpt-4o-mini", lm.model
+        assert lm.kwargs["api_version"] == "2024-10-21"
+        assert "extra_body" not in lm.kwargs
+
+    def test_ensure_configured_uses_the_deployment_and_api_version(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        monkeypatch.setattr(llm_mod, "_configured", False)
+        seen: dict = {}
+        monkeypatch.setattr(llm_mod.dspy, "configure", lambda **kwargs: seen.update(kwargs))
+
+        llm_mod.ensure_configured()
+
+        lm = seen.get("lm")
+        assert lm is not None
+        assert lm.model == "azure/gpt-4o-mini", lm.model
+        assert lm.kwargs.get("api_version") == "2024-10-21"
+        assert "extra_body" not in lm.kwargs
+
+    def test_another_provider_prefix_behind_an_endpoint_is_kept(self, monkeypatch):
+        """The same hole: ``anthropic/...`` would otherwise become ``openai/Qwen/...``."""
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: (
+                "https://api.anthropic.com",
+                "sk-x",
+                "anthropic/claude-example",
+                "litellm",
+            ),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == "anthropic/claude-example", lm.model
+        assert "api_version" not in lm.kwargs
+        assert "extra_body" not in lm.kwargs
+
+    def test_an_openai_prefix_still_pins_qwen(self, monkeypatch):
+        """``openai/`` is the OpenAI-compatible route, not a vendor deployment."""
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "sk-x", "openai/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == f"openai/{llm_mod.CIA_MODEL}", lm.model
+        assert "api_version" not in lm.kwargs
+        extra = lm.kwargs.get("extra_body") or {}
+        assert extra.get("chat_template_kwargs", {}).get("enable_thinking") is False
+
+    def test_a_bare_name_behind_an_endpoint_still_pins_qwen(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("http://proxy:4000/v1", "sk-x", "claude-haiku-4-5", "litellm"),
+        )
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == f"openai/{llm_mod.CIA_MODEL}", lm.model
+
+    def test_no_endpoint_still_pins_qwen(self, monkeypatch):
+        """Without a base URL, LiteLLM owns routing and the Qwen pin stands."""
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("", "sk-x", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        lm = llm_mod.build_cia_lm()
+
+        assert lm.model == llm_mod.CIA_MODEL, lm.model
+        assert "api_version" not in lm.kwargs
+
+
+class TestTheAgentPathSendsGatewayHeaders:
+    """Chat puts the gateway key in ``remote_llm_auth_header``. The agents must too."""
+
+    def _azure(self, monkeypatch, *, header="Ocp-Apim-Subscription-Key", extra=None):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "sk-x", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        monkeypatch.setattr(
+            llm_mod,
+            "_remote_gateway_auth",
+            lambda: (header, {} if extra is None else extra),
+        )
+        return llm_mod
+
+    def test_build_cia_lm_puts_the_key_in_the_configured_header(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch, extra={"user": "alice"})
+        lm = llm_mod.build_cia_lm()
+
+        headers = lm.kwargs.get("headers") or {}
+        assert headers.get("Ocp-Apim-Subscription-Key") == "sk-x"
+        assert headers.get("user") == "alice"
+        assert lm.kwargs.get("api_key") == "unused"
+        assert lm.kwargs.get("api_version") == "2024-10-21"
+        assert lm.model == "azure/gpt-4o-mini"
+
+    def test_ensure_configured_puts_the_key_in_the_configured_header(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        monkeypatch.setattr(llm_mod, "_configured", False)
+        seen: dict = {}
+        monkeypatch.setattr(llm_mod.dspy, "configure", lambda **kwargs: seen.update(kwargs))
+
+        llm_mod.ensure_configured()
+
+        lm = seen.get("lm")
+        assert lm is not None
+        headers = lm.kwargs.get("headers") or {}
+        assert headers.get("Ocp-Apim-Subscription-Key") == "sk-x"
+        assert lm.kwargs.get("api_key") == "unused"
+
+    def test_an_explicit_key_is_the_header_value(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        lm = llm_mod.build_cia_lm(api_key="override")
+
+        headers = lm.kwargs.get("headers") or {}
+        assert headers.get("Ocp-Apim-Subscription-Key") == "override"
+        assert lm.kwargs.get("api_key") == "unused"
+
+    def test_an_explicit_endpoint_does_not_inherit_the_gateway_header(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        lm = llm_mod.build_lm(api_base="http://other.example/v1", api_key="explicit")
+
+        assert "headers" not in lm.kwargs
+        assert lm.kwargs.get("api_key") == "explicit"
+
+    def test_extra_headers_alone_keep_the_client_key(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch, header="", extra={"user": "alice"})
+        lm = llm_mod.build_cia_lm()
+
+        assert (lm.kwargs.get("headers") or {}).get("user") == "alice"
+        assert lm.kwargs.get("api_key") == "sk-x"
+
+    def test_a_header_with_no_key_is_refused(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(
+            llm_mod,
+            "_remote_gateway_auth",
+            lambda: ("Ocp-Apim-Subscription-Key", {}),
+        )
+
+        with pytest.raises(ValueError, match="no API key"):
+            llm_mod.build_cia_lm()
+
+    def test_an_openai_route_puts_the_header_on_the_client(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com/v1", "sk-x", "openai/gpt-4o", "litellm"),
+        )
+        monkeypatch.setattr(
+            llm_mod,
+            "_remote_gateway_auth",
+            lambda: ("Ocp-Apim-Subscription-Key", {"user": "alice"}),
+        )
+        lm = llm_mod.build_lm()
+        try:
+            client = lm._sync_client
+            default_headers = client.default_headers
+            assert default_headers.get("Ocp-Apim-Subscription-Key") == "sk-x"
+            assert default_headers.get("user") == "alice"
+            assert "headers" not in lm.kwargs
+            async_client = lm._async_client_factory()
+            try:
+                async_headers = async_client.default_headers
+                assert async_headers.get("Ocp-Apim-Subscription-Key") == "sk-x"
+                assert async_headers.get("user") == "alice"
+            finally:
+                async_client.close()
+        finally:
+            lm.close()
+
+    def test_a_vllm_profile_does_not_inherit_remote_gateway_headers(self, monkeypatch):
+        """Leftover remote headers must not replace the vLLM bearer with ``unused``."""
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("http://vllm:8000/v1", "sk-vllm", "qwen3", "vllm"),
+        )
+        monkeypatch.setattr(
+            llm_mod,
+            "_remote_gateway_auth",
+            lambda: ("Ocp-Apim-Subscription-Key", {"user": "alice"}),
+        )
+        lm = llm_mod.build_cia_lm()
+        try:
+            assert lm.kwargs.get("api_key") == "sk-vllm"
+            default_headers = lm._sync_client.default_headers
+            assert default_headers.get("Ocp-Apim-Subscription-Key") is None
+            assert default_headers.get("user") != "alice"
+        finally:
+            lm.close()
+
+
 class TestASlashIsNotEnoughToNameAProvider:
     def test_a_hugging_face_organization_is_not_a_provider(self):
         assert _litellm_provider_prefix("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct") is None
