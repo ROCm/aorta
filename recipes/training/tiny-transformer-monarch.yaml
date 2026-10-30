@@ -1,0 +1,61 @@
+# Two-node, 16-GPU tiny transformer launched by Monarch.
+# Usage: docs/tiny-transformer.md
+#
+# Same model and checks as recipes/training/tiny-transformer.yaml.
+# `expected_world_size: 16` fails the trial unless the process group is
+# `nodes * gpus_per_node`. The controller attaches to an allocation that
+# already exists (`SLURM_JOB_ID` or `MONARCH_SLURM_JOB`). It does not submit
+# a Slurm job. Monarch is imported only for this launcher and is not an
+# install dependency. Published torchmonarch wheels are CUDA builds, so a
+# ROCm host needs a ROCm build of Monarch on PYTHONPATH. Set `AORTA_CONTROLLER_IP`
+# when the hostname resolves to IPv6 link-local first.
+#
+#   # validate only (does not spawn):
+#   aorta sweep run --recipe recipes/training/tiny-transformer-monarch.yaml --dry-run
+#
+#   # inside the existing allocation:
+#   aorta sweep run --recipe recipes/training/tiny-transformer-monarch.yaml
+#
+# Pass line: passed: true, one loss, world size 16.
+schema_version: 1
+ticket: TINY-TRANSFORMER-MONARCH
+workload: tiny_transformer
+trials: 1
+steps: 20
+
+workload_config:
+  launcher: monarch
+  nodes: 2
+  gpus_per_node: 8
+  expected_world_size: 16
+  parallelism: ddp
+  seed: 1234
+  device: auto
+  dtype: float32
+  batch_size: 8
+  seq_len: 128
+  warmup_steps: 0
+
+  model:
+    kind: transformer
+    hidden_size: 256
+    num_layers: 4
+    num_heads: 4
+    ffn_size: 512
+    vocab_size: 256
+
+  optimizer:
+    kind: adamw
+    lr: 0.0003
+    weight_decay: 0.01
+
+  checks:
+    fail_on_nan_loss: true
+    fail_on_nan_grad: true
+    fail_on_nonfinite_output: true
+    fail_on_rank_loss_mismatch: true
+
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local

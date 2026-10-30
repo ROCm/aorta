@@ -1213,6 +1213,65 @@ def test_nonzero_rank_does_not_collide_with_rank_zero(
     assert leaves[0].name == "2026-01-01T00-00-00"
 
 
+def test_inherited_rank_controller_keeps_the_matrix(
+    tmp_path, patched_env, patched_run_trials, monkeypatch
+):
+    """A Spur controller that inherited RANK=1 writes the real matrix, not scratch."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.delenv("AORTA_INNER", raising=False)
+    monkeypatch.delenv("TORCHELASTIC_RUN_ID", raising=False)
+    recipe = Recipe(
+        schema_version=1,
+        workload="tiny_transformer",
+        trials=1,
+        steps=5,
+        cells=(
+            Cell(
+                name="a",
+                mitigations=("none",),
+                environment="local",
+                workload_config={"launcher": "spur", "nodes": 2, "gpus_per_node": 8},
+            ),
+        ),
+        ticket="CTRL-1",
+        confound=ConfoundCfg(baseline_cell="a"),
+        workload_config={"launcher": "spur"},
+    )
+    run_dir = runner.run_recipe(
+        recipe, output_dir=tmp_path, timestamp="2026-01-01T00-00-00"
+    )
+    assert (run_dir / "matrix.json").exists()
+    assert tmp_path in run_dir.parents
+
+
+def test_inherited_rank_inprocess_still_uses_scratch(
+    tmp_path, patched_env, patched_run_trials, monkeypatch
+):
+    """An in-process peer with RANK=1 is not a controller and must not write."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    out = tmp_path / "out"
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.delenv("AORTA_INNER", raising=False)
+    monkeypatch.delenv("TORCHELASTIC_RUN_ID", raising=False)
+    recipe = Recipe(
+        schema_version=1,
+        workload="tiny_transformer",
+        trials=1,
+        steps=5,
+        cells=(Cell(name="a", mitigations=("none",), environment="local"),),
+        ticket="PEER-1",
+        confound=ConfoundCfg(baseline_cell="a"),
+        workload_config={"launcher": "inprocess"},
+    )
+    runner.run_recipe(recipe, output_dir=out, timestamp="2026-01-01T00-00-00")
+    assert not out.exists() or not any(out.rglob("matrix.json"))
+
+
 # ---- extra_env recipe-level + cell-level merge ----------------------------
 #
 # The runner merges ``{**recipe.extra_env, **cell.extra_env}`` into

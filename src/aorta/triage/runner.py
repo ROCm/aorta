@@ -166,14 +166,15 @@ def _sidecar_fingerprints(paths: tuple[Path, ...]) -> list[dict[str, str]]:
 
 
 def _is_rank_zero() -> bool:
-    """True if this process should write run artifacts.
+    """True if ``RANK`` is unset, ``0``, or not an integer.
 
-    Mirrors the dispatcher's per-trial write gate (``RANK == 0``): under a
-    distributed launcher every rank runs ``run_recipe`` so the workload's
-    collectives complete on all ranks, but only rank 0 owns the output tree.
-    ``RANK`` is unset for single-process ``aorta triage run`` (treated as
-    rank 0). A non-integer ``RANK`` is treated defensively as rank 0 so a
-    misconfigured launcher writes rather than silently dropping artifacts.
+    Under a distributed launcher every rank runs ``run_recipe`` so the
+    workload's collectives complete on all ranks, but only rank 0 owns the
+    output tree. ``RANK`` is unset for single-process ``aorta triage run``
+    (treated as rank 0). A non-integer ``RANK`` is treated defensively as
+    rank 0 so a misconfigured launcher writes rather than silently dropping
+    artifacts. A Spur or Monarch controller that inherited ``RANK`` is not
+    a peer; :func:`_owns_persisted_output` covers that case.
     """
     raw_rank = os.environ.get("RANK", "0")
     try:
@@ -181,6 +182,33 @@ def _is_rank_zero() -> bool:
     except ValueError:
         log.warning("Ignoring non-integer RANK=%r; treating this process as rank 0.", raw_rank)
         return True
+
+
+def _owns_persisted_output(recipe: Recipe) -> bool:
+    """True when this process should write the matrix, not a scratch directory.
+
+    Rank 0 always writes. A ``tiny_transformer`` Spur or Monarch controller
+    also writes when it only inherited ``RANK``: it launches the workers,
+    and sending its artifacts to an auto-deleted temp dir would drop a
+    successful run. Torchrun and ``AORTA_INNER`` ranks stay on the rank-0 gate.
+    """
+    if _is_rank_zero():
+        return True
+    from aorta.workloads.distributed_launch import spawning_controller
+
+    merged: list[dict[str, Any]] = []
+    if recipe.cells:
+        for cell in recipe.cells:
+            merged.append({**recipe.workload_config, **cell.workload_config})
+    else:
+        merged.append(dict(recipe.workload_config))
+    owns = spawning_controller(recipe.workload, *merged)
+    if owns:
+        log.info(
+            "inherited RANK=%s; this process launches workers and will write results",
+            os.environ.get("RANK"),
+        )
+    return owns
 
 
 def _verbose_active() -> bool:
@@ -1862,7 +1890,7 @@ def run_recipe(
     # in scratch and is discarded; rank 0 gets the real one. Every write site
     # is rooted at ``run_dir``, so a scratch root is sufficient -- no
     # per-site gating needed.
-    should_write = _is_rank_zero()
+    should_write = _owns_persisted_output(recipe)
 
     with contextlib.ExitStack() as stack:
         if should_write:
