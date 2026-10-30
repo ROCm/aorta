@@ -154,18 +154,24 @@ header of its own, such as API Management's `Ocp-Apim-Subscription-Key`, takes
 `AZURE_API_BASE`.
 
 `aorta chat doctor` warns, and the startup log says the same, when
-`llm_provider = "litellm"` has a base URL and a model with no provider prefix,
-or an `azure/` model whose base URL ends in `/openai`. Neither check makes a
-request. A failure inside that check is recorded at debug and ignored: it
-is advice, and it must not turn `doctor` into a failure or stop chat from
-starting.
+`llm_provider = "litellm"` has a base URL and a bare model LiteLLM will send
+to `/chat/completions` (an OpenAI model name such as `gpt-4o-mini`), or a
+bare name LiteLLM does not recognise, or an `azure/` model whose base URL
+ends in `/openai`. A bare name LiteLLM already routes natively, such as
+`claude-sonnet-4-5`, is not warned about: that request uses the provider's
+own path (`/v1/messages` for Anthropic), not `/chat/completions`. Neither
+check makes a request. A failure inside that check is recorded at debug and
+ignored: it is advice, and it must not turn `doctor` into a failure or stop
+chat from starting.
 
-Launch, Watch, and Autopsy send this `azure/<deployment>` model and
-`remote_llm_api_version`. They otherwise pin their own Qwen model, which has
-no provider prefix and would be posted to `/chat/completions`. The same
-applies to any other LiteLLM provider prefix on a base URL (`anthropic/...`,
-and the rest): that configured name is the route. An `openai/` model still
-selects the OpenAI-compatible route, and the agents keep Qwen there.
+Launch, Watch, and Autopsy send this `azure/<deployment>` model,
+`remote_llm_api_version`, and the same gateway headers as chat
+(`remote_llm_auth_header` and `remote_llm_extra_headers`). They otherwise
+pin their own Qwen model, which has no provider prefix and would be posted
+to `/chat/completions`. The same applies to any other LiteLLM provider
+prefix on a base URL (`anthropic/...`, and the rest): that configured name
+is the route. An `openai/` model still selects the OpenAI-compatible route,
+and the agents keep Qwen there.
 
 ### Anthropic, Gemini, Bedrock
 

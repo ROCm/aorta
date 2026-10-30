@@ -107,12 +107,47 @@ class TestTheRouteIsCheckedWithoutACall:
         assert f"{GATEWAY}/chat/completions" in warning
         assert "azure/<deployment>" in warning
 
+    def test_a_known_native_model_is_not_described_as_chat_completions(
+        self, azure_gateway, monkeypatch
+    ):
+        """claude-sonnet-4-5 is Anthropic's /v1/messages even when a base URL is set."""
+        import aorta.chat.inference.providers.remote_litellm as mod
+
+        monkeypatch.setattr(mod, "_inferred_provider", lambda model, api_base: "anthropic")
+        monkeypatch.setattr(settings, "remote_llm_model", "claude-sonnet-4-5")
+        assert _backend().route_warning() is None
+
+    def test_the_shipped_anthropic_default_is_left_on_its_own_route(
+        self, azure_gateway, monkeypatch
+    ):
+        import litellm
+
+        if "claude-sonnet-4-5" not in set(getattr(litellm, "anthropic_models", ())):
+            pytest.skip("this litellm build does not know claude-sonnet-4-5")
+        monkeypatch.setattr(settings, "remote_llm_model", "claude-sonnet-4-5")
+        assert _backend().route_warning() is None
+
+    def test_an_unrecognised_name_does_not_claim_the_openai_path(
+        self, azure_gateway, monkeypatch, capsys
+    ):
+        import aorta.chat.inference.providers.remote_litellm as mod
+
+        monkeypatch.setattr(mod, "_inferred_provider", lambda model, api_base: None)
+        monkeypatch.setattr(settings, "remote_llm_model", "my-deployment")
+        warning = _backend().route_warning()
+        assert warning is not None
+        assert "/chat/completions" not in warning
+        assert "azure/<deployment>" in warning
+        assert capsys.readouterr().out == ""
+
     def test_an_unknown_bare_name_is_flagged_without_printing(
         self, azure_gateway, monkeypatch, capsys, no_network
     ):
         """litellm.get_llm_provider prints a banner for this; --json would carry it."""
         monkeypatch.setattr(settings, "remote_llm_model", "my-deployment")
-        assert _backend().route_warning() is not None
+        warning = _backend().route_warning()
+        assert warning is not None
+        assert "/chat/completions" not in warning
         assert capsys.readouterr().out == ""
 
     @pytest.mark.parametrize(

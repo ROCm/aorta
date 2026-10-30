@@ -136,6 +136,7 @@ def _openai_clients(
     api_base: str | None,
     api_key: str,
     verify: str | bool,
+    headers: dict[str, str] | None = None,
 ) -> tuple[Any, Callable[[], Any]]:
     """A sync client and lazy async-client factory with per-LM TLS trust.
 
@@ -152,6 +153,10 @@ def _openai_clients(
     common: dict[str, Any] = {"api_key": api_key}
     if api_base:
         common["base_url"] = api_base
+    if headers:
+        # The OpenAI route is given a concrete client, which is what LiteLLM
+        # sends. A ``headers`` kwarg beside that client does not ride along.
+        common["default_headers"] = headers
     sync_client = OpenAI(
         **common,
         http_client=httpx.Client(
@@ -313,6 +318,62 @@ def _redaction_enabled() -> bool:
     except ImportError:
         return True
     return bool(getattr(settings, "redact", True))
+
+
+def _remote_gateway_auth() -> tuple[str, dict[str, str]]:
+    """``(auth header name, extra headers)`` from the chat profile.
+
+    The same pair the chat backends send. Empty when the profile names neither,
+    or when the settings cannot be imported: the env fallback covers the header
+    name only, because extra headers are a structured setting.
+    """
+    try:
+        from aorta.chat.config import settings
+    except ImportError:
+        return os.environ.get(f"{_ENV_PREFIX}REMOTE_LLM_AUTH_HEADER", "").strip(), {}
+    header = str(getattr(settings, "remote_llm_auth_header", "") or "").strip()
+    extra = getattr(settings, "remote_llm_extra_headers", None) or {}
+    if not isinstance(extra, dict):
+        extra = {}
+    return header, {str(k): str(v) for k, v in extra.items() if k and v}
+
+
+def _gateway_request_auth(
+    client_key: str,
+    *,
+    real_secret: str,
+    apply: bool,
+) -> tuple[str, dict[str, str] | None]:
+    """The client key and gateway headers for one LM.
+
+    An explicit endpoint does not inherit the profile's headers: those name
+    the configured gateway. When the headers do apply, an explicit key is the
+    secret placed in ``remote_llm_auth_header``. Chat's assembly is reused,
+    including the placeholder client key, so the real secret is not also sent
+    as a bearer token. Extra headers alone leave *client_key* as it was.
+    """
+    if not apply:
+        return client_key, None
+    header, extra = _remote_gateway_auth()
+    if not header and not extra:
+        return client_key, None
+    if header and not real_secret.strip():
+        raise ValueError(
+            f"remote_llm_auth_header is set to {header!r}, but no API key is "
+            "configured for the agents to put in it.\n"
+            "Set AORTA_CHAT_REMOTE_LLM_API_KEY, or put remote_llm_api_key in "
+            "the chat profile ('aorta chat config init')."
+        )
+    from aorta.chat.remote_auth import build_auth
+
+    returned, headers = build_auth(
+        api_key=real_secret if header else client_key,
+        auth_header=header,
+        extra_headers=extra,
+    )
+    if not header:
+        return client_key, headers
+    return returned, headers
 
 
 def _remote_api_version() -> str:
@@ -499,6 +560,15 @@ def build_lm(
 
     resolved_base = (api_base or settings_base) or None
     resolved_key = api_key or settings_key or "EMPTY"
+    # An explicit endpoint belongs to the caller, not to the profile's gateway.
+    same_endpoint = not (api_base or "").strip() or (
+        (api_base or "").strip().rstrip("/") == (settings_base or "").strip().rstrip("/")
+    )
+    client_key, gateway_headers = _gateway_request_auth(
+        resolved_key,
+        real_secret=(api_key or settings_key or "").strip(),
+        apply=same_endpoint,
+    )
     qualified_model = _qualified_model(
         model or settings_model or DEFAULT_MODEL,
         provider,
@@ -509,8 +579,9 @@ def build_lm(
     if qualified_model.startswith("openai/"):
         sync_client, async_client_factory = _openai_clients(
             api_base=resolved_base,
-            api_key=resolved_key,
+            api_key=client_key,
             verify=verify,
+            headers=gateway_headers,
         )
         transport = {
             "sync_client": sync_client,
@@ -528,11 +599,15 @@ def build_lm(
     api_version = _remote_api_version() if qualified_model.startswith("azure/") else ""
     if api_version:
         request_options["api_version"] = api_version
+    if gateway_headers and not qualified_model.startswith("openai/"):
+        # DSPy pops ``headers`` and passes them to LiteLLM. The OpenAI route
+        # already put them on its client, above.
+        request_options["headers"] = gateway_headers
 
     return RedactingLM(
         model=qualified_model,
         api_base=resolved_base,
-        api_key=resolved_key,
+        api_key=client_key,
         max_tokens=max_tokens,
         cache=False,
         **request_options,
@@ -551,7 +626,8 @@ def build_cia_lm(
     That is the fixed non-thinking Qwen model, unless the chat profile is a
     LiteLLM endpoint whose model carries a provider prefix. An Azure
     deployment is what that gateway can serve; pinning Qwen would post to
-    ``/chat/completions`` and drop ``api_version`` (#556).
+    ``/chat/completions`` and drop ``api_version`` (#556). The profile's
+    gateway headers are sent with that deployment, as they are for chat.
     """
     return build_lm(
         api_base=api_base,

@@ -81,14 +81,38 @@ def _provider_prefix(model: str) -> str | None:
     return prefix if prefix in known else None
 
 
+def _inferred_provider(model: str, api_base: str) -> str | None:
+    """The provider LiteLLM selects for a bare *model* at *api_base*, or None.
+
+    A name LiteLLM already knows, such as the shipped ``claude-sonnet-4-5``,
+    is Anthropic even when a base URL is set. ``get_llm_provider`` prints a
+    banner for a name it does not recognise, which would land in ``--json``,
+    so the banner is suppressed for this call and restored afterwards.
+    """
+    import litellm
+
+    previous = litellm.suppress_debug_info
+    litellm.suppress_debug_info = True
+    try:
+        try:
+            _, provider, _, _ = litellm.get_llm_provider(model=model, api_base=api_base)
+        except litellm.exceptions.BadRequestError:
+            return None
+    finally:
+        litellm.suppress_debug_info = previous
+    return provider if isinstance(provider, str) and provider else None
+
+
 def route_warning() -> str | None:
     """Why the configured model will not reach the API behind the base URL, or None.
 
-    Only a base URL makes the model name decide the request path. Without a
-    provider prefix LiteLLM can only treat that URL as OpenAI-compatible and
-    post to ``<base>/chat/completions`` -- a 404 from a gateway that serves
-    Azure deployments only (#556). Legitimate for a gateway that does speak
-    the OpenAI protocol, hence a warning and not a refusal.
+    Only a base URL makes the model name decide the request path. A bare name
+    LiteLLM routes as OpenAI is posted to ``<base>/chat/completions`` -- a 404
+    from a gateway that serves Azure deployments only (#556). A bare name
+    LiteLLM already routes natively (``claude-sonnet-4-5`` is Anthropic's
+    ``/v1/messages``) is not that failure, so it is not described as one.
+    Legitimate for a gateway that does speak the OpenAI protocol, hence a
+    warning and not a refusal.
     """
     base = settings.remote_llm_base_url.strip().rstrip("/")
     model = settings.remote_llm_model.strip()
@@ -96,17 +120,33 @@ def route_warning() -> str | None:
         return None
     prefix = _provider_prefix(model)
     if prefix is None:
-        return (
-            f"remote_llm_model {model!r} has no LiteLLM provider prefix, so LiteLLM "
-            f"treats {base} as an OpenAI-compatible endpoint and posts to\n"
-            f"{base}/chat/completions. A gateway that serves Azure OpenAI deployments "
-            "answers that with 404 'Resource not found'.\n"
-            'If yours does, set remote_llm_model = "azure/<deployment>" and '
-            "remote_llm_api_version, or run\n"
-            "'aorta chat config init --profile azure-openai --force'.\n"
-            "For an OpenAI-compatible gateway, prefix the model with openai/ to "
-            'silence this, or use llm_provider = "openai".'
-        )
+        provider = _inferred_provider(model, base)
+        if provider == "openai":
+            return (
+                f"remote_llm_model {model!r} has no LiteLLM provider prefix, and "
+                f"LiteLLM routes it as OpenAI, so it treats {base} as an "
+                "OpenAI-compatible endpoint and posts to\n"
+                f"{base}/chat/completions. A gateway that serves Azure OpenAI "
+                "deployments answers that with 404 'Resource not found'.\n"
+                'If yours does, set remote_llm_model = "azure/<deployment>" and '
+                "remote_llm_api_version, or run\n"
+                "'aorta chat config init --profile azure-openai --force'.\n"
+                "For an OpenAI-compatible gateway, prefix the model with openai/ to "
+                'silence this, or use llm_provider = "openai".'
+            )
+        if provider is None:
+            return (
+                f"remote_llm_model {model!r} has no LiteLLM provider prefix, and "
+                f"LiteLLM does not recognise it, so it will not send a request to {base}.\n"
+                "An Azure gateway needs the deployment path: set "
+                'remote_llm_model = "azure/<deployment>" and remote_llm_api_version, '
+                "or run\n"
+                "'aorta chat config init --profile azure-openai --force'.\n"
+                "For an OpenAI-compatible gateway, prefix the model with openai/, "
+                'or use llm_provider = "openai".'
+            )
+        # A native provider (Anthropic, and the rest) uses its own path.
+        return None
     if prefix == "azure" and base.endswith("/openai"):
         return (
             "remote_llm_base_url ends in /openai, and LiteLLM appends "

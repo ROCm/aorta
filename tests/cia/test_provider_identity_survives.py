@@ -227,6 +227,120 @@ class TestTheAgentPathKeepsTheConfiguredRoute:
         assert "api_version" not in lm.kwargs
 
 
+class TestTheAgentPathSendsGatewayHeaders:
+    """Chat puts the gateway key in ``remote_llm_auth_header``. The agents must too."""
+
+    def _azure(self, monkeypatch, *, header="Ocp-Apim-Subscription-Key", extra=None):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "sk-x", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(llm_mod, "_remote_api_version", lambda: "2024-10-21")
+        monkeypatch.setattr(
+            llm_mod,
+            "_remote_gateway_auth",
+            lambda: (header, {} if extra is None else extra),
+        )
+        return llm_mod
+
+    def test_build_cia_lm_puts_the_key_in_the_configured_header(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch, extra={"user": "alice"})
+        lm = llm_mod.build_cia_lm()
+
+        headers = lm.kwargs.get("headers") or {}
+        assert headers.get("Ocp-Apim-Subscription-Key") == "sk-x"
+        assert headers.get("user") == "alice"
+        assert lm.kwargs.get("api_key") == "unused"
+        assert lm.kwargs.get("api_version") == "2024-10-21"
+        assert lm.model == "azure/gpt-4o-mini"
+
+    def test_ensure_configured_puts_the_key_in_the_configured_header(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        monkeypatch.setattr(llm_mod, "_configured", False)
+        seen: dict = {}
+        monkeypatch.setattr(llm_mod.dspy, "configure", lambda **kwargs: seen.update(kwargs))
+
+        llm_mod.ensure_configured()
+
+        lm = seen.get("lm")
+        assert lm is not None
+        headers = lm.kwargs.get("headers") or {}
+        assert headers.get("Ocp-Apim-Subscription-Key") == "sk-x"
+        assert lm.kwargs.get("api_key") == "unused"
+
+    def test_an_explicit_key_is_the_header_value(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        lm = llm_mod.build_cia_lm(api_key="override")
+
+        headers = lm.kwargs.get("headers") or {}
+        assert headers.get("Ocp-Apim-Subscription-Key") == "override"
+        assert lm.kwargs.get("api_key") == "unused"
+
+    def test_an_explicit_endpoint_does_not_inherit_the_gateway_header(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch)
+        lm = llm_mod.build_lm(api_base="http://other.example/v1", api_key="explicit")
+
+        assert "headers" not in lm.kwargs
+        assert lm.kwargs.get("api_key") == "explicit"
+
+    def test_extra_headers_alone_keep_the_client_key(self, monkeypatch):
+        llm_mod = self._azure(monkeypatch, header="", extra={"user": "alice"})
+        lm = llm_mod.build_cia_lm()
+
+        assert (lm.kwargs.get("headers") or {}).get("user") == "alice"
+        assert lm.kwargs.get("api_key") == "sk-x"
+
+    def test_a_header_with_no_key_is_refused(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com", "", "azure/gpt-4o-mini", "litellm"),
+        )
+        monkeypatch.setattr(
+            llm_mod,
+            "_remote_gateway_auth",
+            lambda: ("Ocp-Apim-Subscription-Key", {}),
+        )
+
+        with pytest.raises(ValueError, match="no API key"):
+            llm_mod.build_cia_lm()
+
+    def test_an_openai_route_puts_the_header_on_the_client(self, monkeypatch):
+        import aorta.cia.llm as llm_mod
+
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("https://gateway.example.com/v1", "sk-x", "openai/gpt-4o", "litellm"),
+        )
+        monkeypatch.setattr(
+            llm_mod,
+            "_remote_gateway_auth",
+            lambda: ("Ocp-Apim-Subscription-Key", {"user": "alice"}),
+        )
+        lm = llm_mod.build_lm()
+        try:
+            client = lm._sync_client
+            default_headers = client.default_headers
+            assert default_headers.get("Ocp-Apim-Subscription-Key") == "sk-x"
+            assert default_headers.get("user") == "alice"
+            assert "headers" not in lm.kwargs
+            async_client = lm._async_client_factory()
+            try:
+                async_headers = async_client.default_headers
+                assert async_headers.get("Ocp-Apim-Subscription-Key") == "sk-x"
+                assert async_headers.get("user") == "alice"
+            finally:
+                async_client.close()
+        finally:
+            lm.close()
+
+
 class TestASlashIsNotEnoughToNameAProvider:
     def test_a_hugging_face_organization_is_not_a_provider(self):
         assert _litellm_provider_prefix("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct") is None
