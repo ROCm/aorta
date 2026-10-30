@@ -326,7 +326,10 @@ further tab, and `latest_run.png` for the newest run's landing page. The page
 itself carries no preview marking, because history mode shows each run's own
 `meta.json`. Treat the newest run's area as approximate: it is re-rendered from
 the branch (recipe copies, `REPRODUCE.md`, `env.json`), with the container
-image and rocjitsu bundle carried over from what that run recorded.
+image and rocjitsu bundle carried over from what that run recorded. The
+preview passes no survey artifact of its own. The generator then fills the
+Workload survey tab from the newest retained run's published `survey/`
+directory, so the tab shows that nightly's observations.
 
 GitHub can only dispatch a workflow file that already exists on `main`. The PR
 that adds or renames this workflow can't use it, so verify that PR with the
@@ -354,7 +357,6 @@ branch:
 ```bash
 tmp="$(mktemp -d)"
 git clone --depth 1 --branch sanitizer-results https://github.com/ROCm/aorta.git "$tmp"
-rm -rf "$tmp"/dashboard/runs/*/survey
 python scripts/sanitizers/gen_sanitizer_dashboard.py \
   --history-root "$tmp/dashboard/runs" --keep 30 --keep-logs 7 \
   --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
@@ -370,7 +372,9 @@ python scripts/sanitizers/screenshot_dashboard.py \
 Locally the newest run's area loses its container image and rocjitsu bundle
 lines unless `AORTA_CI_IMAGE`, `AORTA_ROCJITSU_COMMIT` and
 `AORTA_ROCJITSU_RUN_URL` are exported first. The workflow sets them from that
-run's `env.json`.
+run's `env.json`. The same command fills Workload survey from
+`$tmp/dashboard/runs/<newest>/survey/`; do not delete those directories before
+rendering.
 
 ## Operating checklist
 

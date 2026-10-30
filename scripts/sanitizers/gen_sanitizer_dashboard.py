@@ -6,11 +6,11 @@ emits, into ``--out-dir``:
 
 * ``index.html`` -- a self-contained (no CDN / no external JS) status page with two
   tabs (a pure CSS ``:checked`` radio toggle -- switching needs no network):
-  **Expected behavior (guardrails)** -- the baseline-checked regression gate:
-  baseline-health banner, latest per-recipe table, **per-kernel detail** (code
+  **Nightly gate** -- the baseline-checked regression gate: a Healthy or Failed
+  pill beside the title, latest per-recipe table, **per-kernel detail** (code
   object / SHA-256 / dispatch count / observed sanitizer verdict / finding count /
   the kernel's fail-closed reason, em dash when it has none),
-  and a cross-run history/trend table; and **Workload survey (observed-only)** --
+  and a cross-run history/trend table; and **Workload survey** --
   kernels drawn from multiple workloads (including aorta-internal-sourced kernels
   supplied via ``--survey`` and the caller-supplied ConSan cases from
   ``--informational-results-dir``, #347) shown with the same kernel-detail shape
@@ -31,9 +31,12 @@ When ``--status`` points at an unhealthy manifest, an error-colored "stale" bann
 rendered at the top of both ``index.html`` and ``summary.md`` so a failed nightly
 never leaves the previous healthy page looking current.
 
-The published page has a third tab, **AddressSanitizer (manual run)**, that this
-nightly never renders: ASan has no nightly lane, so Pages adds it at deploy time from
+The published page has a third tab, **Manual runs**, that this nightly never
+renders: ASan has no nightly lane, so Pages adds it at deploy time from
 committed results (``add_asan_tab`` / ``scripts/sanitizers/add_asan_tab.py``).
+The radio id stays ``tab-asan``. ``add_asan_tab`` splices onto ``tab-survey``
+first, then ``tab-guardrails``. The header's run-details icon describes this
+nightly run, so it is hidden while Manual runs is selected.
 
 Three input shapes are supported:
 
@@ -100,19 +103,18 @@ _DASH = "\u2014"  # em dash; kept as a name so it can sit inside f-string braces
 # Dashboard stylesheet. Kept as a module-level plain string (not part of the
 # f-string body) so CSS braces need no doubling and the design diffs cleanly.
 #
-# Two colour axes that must not be conflated:
-#   identity  -- which sanitizer/stage this is; lives on square icon tiles only
-#                (blue = infrastructure, purple = waitcheck, green = consan)
-#   verdict   -- what was observed; lives on pills only (.v)
-# Green therefore means "consan" on a tile and "pass" on a pill; they never
-# share a surface. Baseline status (.pill) is the only *solid* fill, so the
-# regression-health signal outranks the observed verdict visually.
+# Colour means the result, and only there. A verdict is a small dot plus the word
+# in the normal text colour: green pass, amber warn, red fail. The word itself
+# is not recolored, and tool names are plain text. Baseline match is a separate
+# chip (matched / unmatched), not another verdict dot. The Healthy / Failed pill
+# beside the title is the only solid fill. It is the gate, and it counts only
+# the nightly-gate rows.
 _CSS = """
   :root {
     color-scheme: dark;
     --bg:#0B1220; --panel:#111827; --inset:#0E1626; --raised:#131C2E; --sunken:#0A101C;
     --text-1:#F9FAFB; --text-2:#D1D5DB; --text-3:#94A3B8;
-    --blue:#3B82F6; --purple:#8B5CF6; --green:#22C55E;
+    --blue:#3B82F6; --green:#22C55E;
     --v-warn:#F59E0B; --v-fail:#EF4444;
     --solid-ok:#15803D; --solid-bad:#B91C1C;
     --border:rgba(148,163,184,.13); --border-hover:rgba(148,163,184,.26);
@@ -132,85 +134,82 @@ _CSS = """
 
   .navrow { display:flex; align-items:center; justify-content:space-between; gap:12px;
     font-size:13px; margin-bottom:16px; }
-  .navrow a { color:var(--text-3); } .navrow a:hover { color:var(--text-2); }
+  .navrow > a { color:var(--text-3); } .navrow > a:hover { color:var(--text-2); }
+
+  /* Three same-size outline icons. Info and run details are <details>; raw reports
+     is a link. Popovers hang from the bar, not from each icon: a 420px panel
+     anchored to the info icon runs off the left edge of a phone-width page. */
+  .iconbar { position:relative; display:flex; align-items:center; gap:6px; }
+  .iconbtn, .iconpop > summary {
+    width:32px; height:32px; display:grid; place-items:center; margin:0; padding:0;
+    border:1px solid var(--border); border-radius:8px; color:var(--text-2);
+    background:transparent; cursor:pointer; list-style:none; text-decoration:none; }
+  .iconpop > summary::-webkit-details-marker { display:none; }
+  .iconbtn:hover, .iconpop > summary:hover { border-color:var(--border-hover); color:var(--text-1);
+    text-decoration:none; }
+  .iconbtn:focus-visible, .iconpop > summary:focus-visible {
+    outline:2px solid var(--blue); outline-offset:2px; }
+  .iconpop > .pop {
+    position:absolute; right:0; top:calc(100% + 8px); z-index:4;
+    width:min(420px, calc(100vw - 48px));
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:var(--radius-sm); padding:14px 16px; box-shadow:var(--shadow); text-align:left; }
+  .pop-title { font-size:13px; font-weight:600; color:var(--text-1); margin:0 0 12px; }
+  .iconpop .pop p { margin:0; font-size:13.5px; color:var(--text-2); line-height:1.5; }
+  .iconpop .pop code { font-family:var(--mono); font-size:12.5px; color:var(--text-1); }
+  /* Topic on its own line, explanation under it. Tools and tabs are separate groups. */
+  .iconpop .pop p.infogroup { margin:12px 0 0; font-size:12px; font-weight:500; color:var(--text-3); }
+  .iconpop .pop .infoitem { margin-top:8px; padding-top:8px; border-top:1px solid var(--border); }
+  .iconpop .pop p.infoname { font-weight:600; color:var(--text-1); }
+  .iconpop .pop .infoitem p + p { margin-top:2px; }
 
   .topbar { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:14px; }
   .page-header { display:flex; align-items:center; gap:14px; }
   .brand-tile { width:46px; height:46px; flex:0 0 auto; border-radius:var(--radius);
-    display:grid; place-items:center; color:var(--blue);
-    background:rgba(59,130,246,.12); border:1px solid rgba(59,130,246,.28); }
+    display:grid; place-items:center; color:var(--text-2);
+    background:var(--inset); border:1px solid var(--border); }
   .page-header h1 { font-size:30px; font-weight:600; margin:0; letter-spacing:-.02em; line-height:1.1; }
+  .title-line { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   .page-header .subtitle { font-size:14px; color:var(--text-2); margin:4px 0 0; }
+  .countline { font-size:13px; color:var(--text-3); margin:6px 0 0; }
 
-  .runcard { flex:0 0 auto; width:288px; background:var(--panel);
-    border:1px solid var(--border); border-radius:var(--radius-sm); padding:2px 12px; box-shadow:var(--shadow); }
+  /* The only solid fill on the page: the gate pill beside the title. */
+  .health { display:inline-flex; align-items:center; padding:2px 10px; border-radius:999px;
+    font-size:12px; font-weight:600; color:#fff; line-height:1.5; white-space:nowrap; }
+  .health.ok { background:var(--solid-ok); }
+  .health.bad { background:var(--solid-bad); }
+
   .runrow { display:flex; align-items:baseline; justify-content:space-between; gap:12px;
     padding:5px 0; border-bottom:1px solid var(--border); }
   .runrow:last-child { border-bottom:none; }
   .runrow .k { font-size:10px; text-transform:uppercase; letter-spacing:.06em;
     color:var(--text-3); font-weight:600; white-space:nowrap; }
-  /* .rv, not .v -- .v is the verdict badge and would draw a pill outline here. */
   .runrow .rv { font-family:var(--mono); font-size:11.5px; color:var(--text-2);
     text-align:right; word-break:break-all; }
 
-  .toolgrid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .feature-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
-    padding:16px; box-shadow:var(--shadow); display:flex; gap:14px; align-items:flex-start;
-    transition:border-color .16s ease, transform .16s ease; }
-  .feature-card:hover { border-color:var(--border-hover); transform:translateY(-1px); }
-  .feature-card .tile { width:44px; height:44px; border-radius:var(--radius-sm); }
-  .feature-card .title-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
-  .feature-card h3 { font-size:var(--fs-name); font-weight:700; margin:0; letter-spacing:-.01em; }
-  .feature-card p { font-size:14px; color:var(--text-2); margin:0; line-height:1.5; }
-  .feature-card code { font-family:var(--mono); font-size:13.5px; color:var(--text-1); }
-  .badge { font-size:12px; font-weight:600; padding:2px 9px; border-radius:999px; border:1px solid transparent; }
-  .badge.purple { color:#C4B5FD; background:rgba(139,92,246,.14); border-color:rgba(139,92,246,.30); }
-  .badge.green  { color:#86EFAC; background:rgba(34,197,94,.14);  border-color:rgba(34,197,94,.30); }
-
-  .tile { width:34px; height:34px; flex:0 0 auto; border-radius:9px; display:grid; place-items:center;
-    background:rgba(148,163,184,.07); border:1px solid var(--border); }
-  .tile.blue   { color:var(--blue);   border-color:rgba(59,130,246,.32); background:rgba(59,130,246,.09); }
-  .tile.purple { color:var(--purple); border-color:rgba(139,92,246,.32); background:rgba(139,92,246,.09); }
-  .tile.green  { color:var(--green);  border-color:rgba(34,197,94,.32);  background:rgba(34,197,94,.09); }
-
-  /* Self-contained tabs (no external JS/CSS): radios toggle sibling panels via :checked. */
+  /* Self-contained tabs (no external JS/CSS): radios sit before the header so a
+     :checked rule can also hide the run-details icon. They toggle panels inside
+     the following .tabs via :checked. */
   .tabradio { position:absolute; opacity:0; pointer-events:none; }
   .tabbar { display:flex; gap:4px; border-bottom:1px solid var(--border); margin:18px 0 16px; }
   .tabbar label { cursor:pointer; padding:10px 18px; font-size:14px; font-weight:600; color:var(--text-3);
     border:1px solid transparent; border-bottom:none; border-radius:10px 10px 0 0; margin-bottom:-1px;
     transition:color .15s ease, background .15s ease; }
   .tabbar label:hover { color:var(--text-2); }
-  #tab-guardrails:checked ~ .tabbar label[for="tab-guardrails"],
-  #tab-survey:checked ~ .tabbar label[for="tab-survey"] {
+  #tab-guardrails:checked ~ .tabs .tabbar label[for="tab-guardrails"],
+  #tab-survey:checked ~ .tabs .tabbar label[for="tab-survey"] {
     color:var(--text-1); background:var(--panel);
     border-color:var(--border); border-bottom:1px solid var(--panel); }
   /* The radios are visually hidden (opacity:0) so they show no native focus ring;
      mirror :focus-visible onto the label so keyboard users can see the focused tab. */
-  #tab-guardrails:focus-visible ~ .tabbar label[for="tab-guardrails"],
-  #tab-survey:focus-visible ~ .tabbar label[for="tab-survey"] {
+  #tab-guardrails:focus-visible ~ .tabs .tabbar label[for="tab-guardrails"],
+  #tab-survey:focus-visible ~ .tabs .tabbar label[for="tab-survey"] {
     outline:2px solid var(--blue); outline-offset:-2px; }
   .tabpanel { display:none; }
-  #tab-guardrails:checked ~ #panel-guardrails { display:block; }
-  #tab-survey:checked ~ #panel-survey { display:block; }
-
-  .gate { display:flex; align-items:center; gap:13px; border-radius:var(--radius);
-    padding:14px 16px; margin-bottom:12px; border:1px solid; border-left-width:3px; }
-  .gate .gate-icon { width:30px; height:30px; border-radius:50%; display:grid; place-items:center; flex:0 0 auto; }
-  .gate .gate-text { font-size:14.5px; color:var(--text-2); }
-  .gate .gate-text strong { display:block; font-size:15.5px; font-weight:700; letter-spacing:.02em; margin-bottom:1px; }
-  .gate.ok  { background:rgba(34,197,94,.08); border-color:rgba(34,197,94,.26); border-left-color:var(--green); }
-  .gate.ok .gate-icon { background:rgba(34,197,94,.16); color:var(--green); }
-  .gate.ok .gate-text strong { color:#86EFAC; }
-  .gate.bad { background:rgba(239,68,68,.08); border-color:rgba(239,68,68,.26); border-left-color:var(--v-fail); }
-  .gate.bad .gate-icon { background:rgba(239,68,68,.16); color:var(--v-fail); }
-  .gate.bad .gate-text strong { color:#FCA5A5; }
-
-  .info-banner { display:flex; gap:12px; align-items:flex-start; background:rgba(59,130,246,.07);
-    border:1px solid rgba(59,130,246,.26); border-left:3px solid var(--blue);
-    border-radius:var(--radius); padding:13px 16px; margin-bottom:12px; }
-  .info-banner > svg { flex:0 0 auto; color:var(--blue); margin-top:2px; }
-  .info-banner p { margin:0; font-size:14px; color:var(--text-2); line-height:1.5; }
-  .info-banner strong { color:var(--text-1); font-weight:600; }
+  #tab-guardrails:checked ~ .tabs #panel-guardrails { display:block; }
+  #tab-survey:checked ~ .tabs #panel-survey { display:block; }
+  /* The nightly run id, commit, date, and target do not describe a manual ASan run. */
+  #tab-asan:checked ~ .navrow .rundetails { display:none; }
 
   .stale { display:flex; gap:12px; align-items:flex-start; background:rgba(239,68,68,.10);
     border:1px solid rgba(239,68,68,.30); border-left:3px solid var(--v-fail);
@@ -246,26 +245,26 @@ _CSS = """
   td.empty { color:var(--text-3); font-style:italic; }
   .dash { color:var(--text-3); }
 
-  /* Verdict badge: tinted, never solid. fail and error share one red. */
-  .v { display:inline-block; padding:2px 10px; border-radius:999px;
-    font:600 var(--fs-badge) var(--mono); border:1px solid transparent; white-space:nowrap; }
-  .v.pass  { color:#86EFAC; background:rgba(34,197,94,.13);  border-color:rgba(34,197,94,.32); }
-  .v.warn  { color:#FCD34D; background:rgba(245,158,11,.13); border-color:rgba(245,158,11,.34); }
-  .v.fail, .v.error { color:#FCA5A5; background:rgba(239,68,68,.13); border-color:rgba(239,68,68,.34); }
-  .v.neutral { color:var(--text-3); background:rgba(148,163,184,.10); border-color:rgba(148,163,184,.24); }
-
-  /* Baseline status: the only solid fill on the page. */
-  .pill { display:inline-block; padding:3px 11px; border-radius:999px;
-    font-size:var(--fs-badge); font-weight:600; color:#fff; white-space:nowrap; }
-  .pill.ok, .pill.pass { background:var(--solid-ok); }
-  .pill.bad, .pill.fail { background:var(--solid-bad); }
+  /* Verdicts are a dot, then the word in the surrounding text colour. The cue
+     class paints only the dot. fail and error share one red. Baseline match is
+     not a verdict: it is a chip at the end of the row, so a green matched
+     beside a red fail is not two copies of the same status. */
+  .status { display:inline-flex; align-items:center; gap:6px; color:inherit;
+    white-space:nowrap; vertical-align:middle; }
+  .dot { width:8px; height:8px; border-radius:99px; flex:0 0 auto; display:inline-block; }
+  .dot.pass { background:var(--green); }
+  .dot.warn { background:var(--v-warn); }
+  .dot.fail, .dot.error { background:var(--v-fail); }
+  .dot.neutral { background:var(--text-3); }
+  .match { display:inline-flex; align-items:center; padding:2px 9px; border-radius:999px;
+    font-size:12.5px; font-weight:600; line-height:1.5; white-space:nowrap;
+    border:1px solid transparent; }
+  .match.pass { color:#BBF7D0; background:rgba(34,197,94,.18); border-color:rgba(34,197,94,.45); }
+  .match.fail { color:#FECACA; background:rgba(239,68,68,.16); border-color:rgba(239,68,68,.45); }
 
   .kcard { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm);
     margin-bottom:10px; overflow:hidden; }
   .kcard:last-child { margin-bottom:0; }
-  .kcard.wc { --accent:var(--purple); }
-  .kcard.cs { --accent:var(--green); }
-  .kcard.nu { --accent:var(--blue); }
   .kcard > summary { list-style:none; cursor:pointer; user-select:none; display:flex;
     align-items:center; gap:11px; flex-wrap:wrap; padding:12px 14px; transition:background .14s ease; }
   .kcard > summary::-webkit-details-marker { display:none; }
@@ -329,11 +328,9 @@ _CSS = """
      together; and it was delegated to a `.cap + .table-wrap` adjacency rule, so
      inserting anything between a heading and its table silently deleted the gap.
      24px here makes separation ~3x the binding and independent of what precedes. */
-  .cap { display:flex; align-items:center; gap:9px; font-size:var(--fs-cap); font-weight:700;
+  .cap { display:block; font-size:var(--fs-cap); font-weight:700;
     text-transform:uppercase; letter-spacing:.06em; color:var(--text-1); margin:24px 0 8px; }
   .cap:first-child { margin-top:0; }
-  .cap::before { content:""; width:3px; height:15px; border-radius:2px;
-    background:var(--accent, var(--text-3)); flex:0 0 auto; }
   .card-foot { display:flex; justify-content:flex-end; font-size:13px; }
 
   details.panel { padding:0; }
@@ -346,99 +343,33 @@ _CSS = """
   details.panel > summary .spacer { flex:1 1 auto; }
   .panel-body { padding:16px; }
 
-  .chips { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
-  .chip { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm);
-    padding:13px 15px; display:flex; gap:12px; align-items:center;
-    transition:border-color .16s ease, background .16s ease; }
-  .chip:hover { border-color:var(--border-hover); background:var(--raised); }
-  .chip .circle { width:34px; height:34px; flex:0 0 auto; border-radius:50%; display:grid; place-items:center; }
-  .chip .circle.blue   { background:rgba(59,130,246,.14); color:var(--blue);   box-shadow:0 0 0 1px rgba(59,130,246,.24) inset; }
-  .chip .circle.purple { background:rgba(139,92,246,.14); color:var(--purple); box-shadow:0 0 0 1px rgba(139,92,246,.24) inset; }
-  .chip .circle.green  { background:rgba(34,197,94,.14);  color:var(--green);  box-shadow:0 0 0 1px rgba(34,197,94,.24) inset; }
-  .chip .h { font-size:14px; font-weight:600; color:var(--text-1); display:block; }
-  .chip .d { font-size:13px; color:var(--text-3); display:block; margin-top:2px; line-height:1.4; }
-
-  .two-col { display:grid; grid-template-columns:1.85fr 1fr; gap:12px; align-items:start; margin-bottom:12px; }
-  .two-col > .panel { margin-bottom:0; }
-
-  /* Same reachability rule as .table-wrap: the five steps are fixed-width, so a
-     narrow viewport scrolls the band instead of spilling it out of its panel. */
-  .flow { display:flex; align-items:flex-start; justify-content:space-between; gap:4px;
-    padding:2px 0; overflow-x:auto; }
-  .step { display:flex; flex-direction:column; align-items:center; text-align:center; width:104px; }
-  /* Solid, deepened fills: white on the identity accents at 85% alpha measured
-     2.99:1 for green (WCAG AA needs 4.5:1 for this 11.5px bold text). These
-     opaque shades clear it -- blue 5.2:1, purple 5.7:1, green 5.0:1. */
-  .step-num { width:21px; height:21px; border-radius:50%; display:grid; place-items:center;
-    font-size:11.5px; font-weight:700; margin-bottom:7px; color:#fff; }
-  .step-num.blue { background:#2563EB; }
-  .step-num.purple { background:#7C3AED; }
-  .step-num.green { background:#15803D; }
-  .step .tile { width:46px; height:46px; border-radius:var(--radius-sm); }
-  .step .label { font-size:13px; font-weight:600; color:var(--text-1); margin-top:9px; line-height:1.25; }
-  .step .desc { font-size:12px; color:var(--text-3); margin-top:4px; line-height:1.35; }
-  .flow-arrow { color:rgba(148,163,184,.42); font-size:15px; margin-top:46px; flex:0 0 auto; }
-
-  .panel-note { margin-top:14px; display:flex; align-items:center; gap:10px; background:var(--inset);
-    border:1px solid var(--border); border-radius:var(--radius-sm); padding:11px 14px;
-    font-size:13px; color:var(--text-2); }
-  .panel-note svg { flex:0 0 auto; color:var(--text-3); }
-
-  details.notes > summary { justify-content:space-between; }
-  details.notes ul { list-style:none; margin:0; padding:0 16px 15px; display:flex; flex-direction:column; gap:11px; }
-  details.notes li { display:flex; gap:9px; align-items:flex-start; font-size:13px; color:var(--text-2); line-height:1.45; }
-  .check { flex:0 0 auto; width:17px; height:17px; border-radius:50%; display:grid; place-items:center;
-    margin-top:1px; background:rgba(34,197,94,.14); color:var(--green);
-    box-shadow:0 0 0 1px rgba(34,197,94,.26) inset; }
-
   .statline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:12px; }
   .statline .lead { font-size:14px; color:var(--text-2); margin-right:4px; }
   .kgroup-title .kname { font-family:var(--mono); font-size:16px; }
   .survey-empty { font-size:14px; color:var(--text-2); margin:8px 0; }
 
   @media (max-width:1000px) {
-    .topbar { flex-direction:column; } .runcard { width:100%; }
-    .two-col { grid-template-columns:1fr; }
-    .flow { flex-wrap:wrap; justify-content:center; gap:10px; }
+    .topbar { flex-direction:column; }
   }
-  @media (max-width:720px) { .toolgrid, .chips { grid-template-columns:1fr; } }
 """
 
 
 # Inline SVG icons (Feather/Lucide outline, 1.8-2.0 stroke, never filled). Inline
 # so the page stays self-contained -- no CDN, no sprite sheet, no web font.
-_ICON_ACTIVITY = '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>'
-_ICON_SHIELD = (
-    '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'
-    '<polyline points="9 12 11 14 15 10"/>'
-)
 _ICON_INFO = (
     '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/>'
     '<line x1="12" y1="8" x2="12.01" y2="8"/>'
 )
-_ICON_CHECK = '<polyline points="20 6 9 17 4 12"/>'
 _ICON_CHEVRON = '<polyline points="6 9 12 15 18 9"/>'
 _ICON_FILE = (
     '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
     '<polyline points="14 2 14 8 20 8"/>'
 )
-_ICON_FOLDER = '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>'
-_ICON_CODE = '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>'
-_ICON_LAYOUT = (
-    '<rect x="3" y="3" width="18" height="18" rx="2"/>'
-    '<line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/>'
-)
-_ICON_SEARCH = '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'
-_ICON_BUG = (
-    '<path d="m8 2 1.9 1.9M14.1 3.9 16 2"/><path d="M9 7.1v-1a3 3 0 1 1 6 0v1"/>'
-    '<path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/>'
-    '<path d="M12 20v-9M6 13H2M22 13h-4"/>'
-    '<path d="M6.5 9C4.6 8.8 3 7.1 3 5M21 5c0 2.1-1.6 3.8-3.5 4"/>'
-    '<path d="M3 21c0-2.1 1.7-3.9 3.8-4M17.2 17c2.1.1 3.8 1.9 3.8 4"/>'
-)
-_ICON_REPEAT = (
-    '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>'
-    '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'
+_ICON_LIST = (
+    '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/>'
+    '<line x1="8" y1="18" x2="21" y2="18"/>'
+    '<line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/>'
+    '<line x1="3" y1="18" x2="3.01" y2="18"/>'
 )
 
 
@@ -456,39 +387,92 @@ def _chevron_html() -> str:
     return _svg(_ICON_CHEVRON, size=18, width=2, cls="chevron")
 
 
-def _tool_cards_html() -> str:
-    """WaitCheck / ConSan explainer cards.
+# Page-level help. Each topic is its own line, with one idea under it. Tools and
+# tabs are separate groups. The Healthy-pill fact is stated once, under Manual
+# runs. This replaces the WaitCheck/ConSan cards, the blue banners, and the
+# survey orientation chrome. It is the same text on every page that has a header.
+_INFO_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Tools",
+        (
+            (
+                "WaitCheck",
+                "Finds <code>s_waitcnt</code> synchronization hazards by static analysis.",
+            ),
+            (
+                "ConSan",
+                "Finds data races and concurrency issues while a kernel runs.",
+            ),
+            (
+                "AddressSanitizer",
+                "Reports memory errors. These runs are committed by hand.",
+            ),
+        ),
+    ),
+    (
+        "Tabs",
+        (
+            (
+                "Nightly gate",
+                "Unmatched fails the nightly. A matched fail on daily-consan-racy "
+                "is the expected control.",
+            ),
+            (
+                "Workload survey",
+                "Observed only. A fail here does not change the nightly, and a "
+                "missing scan is marked report missing.",
+            ),
+            (
+                "Manual runs",
+                "Results the nightly image cannot produce yet. They do not move "
+                "the Healthy pill.",
+            ),
+        ),
+    ),
+)
 
-    Page level, above the tab bar: both tabs surface results from both
-    sanitizers, so the definitions are common context. Tab-specific framing
-    (the gate banner, the observed-only banner) lives inside each tab.
+
+def _info_panel_html() -> str:
+    """The info icon: click opens how to read the page. No JavaScript.
+
+    The info icon and the run-details icon share ``name=headerpop``, so opening
+    one closes the other. Both panels hang from the same corner.
     """
+    body = "".join(
+        f'<p class="infogroup">{_esc(group)}</p>'
+        + "".join(
+            '<div class="infoitem">'
+            f'<p class="infoname">{_esc(name)}</p><p>{text}</p></div>'
+            for name, text in items
+        )
+        for group, items in _INFO_GROUPS
+    )
     return (
-        '<section class="toolgrid">'
-        '<article class="feature-card">'
-        f'<div class="tile purple">{_svg(_ICON_SHIELD, size=22, width=1.8)}</div>'
-        "<div>"
-        '<div class="title-row"><h3>WaitCheck</h3>'
-        '<span class="badge purple">Static Analysis</span></div>'
-        "<p>Detects potential <code>s_waitcnt</code> synchronization hazards "
-        "using static code analysis.</p>"
-        "</div></article>"
-        '<article class="feature-card">'
-        f'<div class="tile green">{_svg(_ICON_ACTIVITY, size=22, width=1.8)}</div>'
-        "<div>"
-        '<div class="title-row"><h3>ConSan</h3>'
-        '<span class="badge green">Runtime Analysis</span></div>'
-        "<p>Detects runtime data races and concurrency issues during execution.</p>"
-        "</div></article>"
-        "</section>"
+        '<details class="iconpop" name=headerpop>'
+        '<summary aria-label="How to read this page" title="How to read this page">'
+        f"{_svg(_ICON_INFO, size=16, width=2)}</summary>"
+        f'<div class="pop"><p class="pop-title">How to read this page</p>{body}</div>'
+        "</details>"
     )
 
 
-def _run_card_html(meta: dict[str, Any]) -> str:
-    """Run provenance as a compact top-right card.
+def _raw_reports_icon_html(rel: str | None) -> str:
+    """The document icon. A link to the run directory, not a second panel."""
+    if not rel:
+        return ""
+    return (
+        f'<a class="iconbtn" href="{_esc(rel)}/" aria-label="Raw reports" title="Raw reports">'
+        f"{_svg(_ICON_FILE, size=16, width=2)}</a>"
+    )
 
-    Deliberately *not* a row of bordered chips: bordered boxes in a horizontal
-    row directly above the tab bar read as a second set of tabs.
+
+def _run_details_html(meta: dict[str, Any]) -> str:
+    """The run-details icon: click opens the nightly run id, commit, date, and target.
+
+    Hidden while Manual runs is selected. That tab is a hand-committed ASan
+    result, and this icon describes the nightly run, not that result. The hide
+    rule is ``#tab-asan:checked ~ .navrow .rundetails``, so the radios have to
+    precede this icon in the page.
     """
     rows = (
         ("Run", meta.get("run", "")),
@@ -501,25 +485,70 @@ def _run_card_html(meta: dict[str, Any]) -> str:
         f'<span class="rv">{_esc(str(value))}</span></div>'
         for label, value in rows
     )
-    return f'<aside class="runcard">{body}</aside>'
-
-
-def _gate_hero_html(summary: dict[str, Any]) -> str:
-    """The Tab 1 gate banner: state on one line, detail on the next.
-
-    Lives inside Tab 1, not the page header -- baselines do not exist on the
-    survey tab, so a gate verdict is meaningless there.
-    """
-    cls = "ok" if summary["ok"] else "bad"
-    icon = _ICON_CHECK if summary["ok"] else _ICON_INFO
     return (
-        f'<div class="gate {cls}">'
-        f'<span class="gate-icon">{_svg(icon, size=17, width=3)}</span>'
-        f'<span class="gate-text"><strong>{_esc(summary["label"])}</strong>'
-        f'{_esc(summary["detail"])}</span></div>'
+        '<details class="iconpop rundetails" name=headerpop>'
+        '<summary aria-label="Run details" title="Run details">'
+        f"{_svg(_ICON_LIST, size=16, width=2)}</summary>"
+        f'<div class="pop"><p class="pop-title">This run</p>{body}</div>'
+        "</details>"
     )
 
 
+def _header_tools_html(meta: dict[str, Any] | None, *, reports_rel: str | None) -> str:
+    """Top-right cluster: info, raw reports, run details. Same size, outline only."""
+    run = _run_details_html(meta) if meta is not None else ""
+    return (
+        '<div class="iconbar">'
+        f"{_info_panel_html()}{_raw_reports_icon_html(reports_rel)}{run}"
+        "</div>"
+    )
+
+
+def _health_pill_html(summary: dict[str, Any]) -> str:
+    """The one gate signal: Healthy or Failed, beside the title."""
+    if summary["ok"]:
+        return '<span class="health ok">Healthy</span>'
+    return '<span class="health bad">Failed</span>'
+
+
+def _gate_count_line(rows: dict[str, dict[str, Any]], summary: dict[str, Any]) -> str:
+    """The gray line under the title. Healthy is ``N/N matched``.
+
+    A failed gate names the failure count. A comparator failure whose rows still
+    match has no unmatched row, so the line keeps that check's own detail.
+    Classification stays in ``_gate_summary``; this only shortens the words.
+    """
+    total = len(rows)
+    matched = sum(1 for row in rows.values() if row["match"])
+    mismatches = sum(1 for row in rows.values() if row["present"] and not row["match"])
+    missing = sum(1 for row in rows.values() if not row["present"])
+    if summary["ok"]:
+        return f"{matched}/{total} matched"
+    if summary["label"] == "FAILED":
+        return str(summary["detail"])
+    if mismatches and missing:
+        return f"{mismatches}/{total} unmatched, {missing}/{total} missing"
+    if mismatches:
+        return f"{mismatches}/{total} unmatched"
+    return f"{missing}/{total} missing"
+
+
+def _title_block_html(
+    title: str,
+    summary: dict[str, Any] | None,
+    count_line: str | None,
+    *,
+    subtitle: str = "",
+) -> str:
+    """Title, the Healthy/Failed pill, and the gray count line."""
+    pill = _health_pill_html(summary) if summary is not None else ""
+    count = f'<p class="countline">{_esc(count_line)}</p>' if count_line else ""
+    sub = f'<p class="subtitle">{subtitle}</p>' if subtitle else ""
+    return (
+        '<header class="page-header"><div>'
+        f'<div class="title-line"><h1>{_esc(title)}</h1>{pill}</div>'
+        f"{count}{sub}</div></header>"
+    )
 
 
 def _load(path: Path) -> dict[str, Any] | None:
@@ -3463,64 +3492,100 @@ def _status_banner_md(status: dict[str, Any] | None) -> str:
     )
 
 
-def _baseline_status(row: dict[str, Any]) -> tuple[str, str]:
-    """Return the human-readable baseline status and its emphasis class."""
+def _baseline_cue(row: dict[str, Any]) -> tuple[str, str]:
+    """Baseline word and dot cue. History uses these same words.
+
+    A present match is ``matched`` even when the expected verdict is ``fail``
+    (``daily-consan-racy``). A present disagreement is ``unmatched``. An absent
+    report stays its own word so it is not called a verdict mismatch.
+    """
     if not row["present"]:
-        return "Report missing", "bad"
+        return "report missing", "fail"
     if row["match"]:
-        return "Expected outcome", "ok"
-    return "Unexpected outcome", "bad"
+        return "matched", "pass"
+    return "unmatched", "fail"
 
 
-def _baseline_status_html(row: dict[str, Any], *, history: bool = False) -> str:
-    text, emphasis = _baseline_status(row)
-    if history and row["present"]:
-        text = "Match" if row["match"] else "Mismatch"
-    return f'<span class="pill {emphasis}">{_esc(text)}</span>'
+def _status_html(word: str, cue: str) -> str:
+    """A colored dot and the word in the surrounding text colour."""
+    return f'<span class="status"><span class="dot {cue}"></span>{_esc(word)}</span>'
 
 
-# Verdict badge classes, keyed on the observed verdict string. ``fail`` and
-# ``error`` get distinct class names but share one red in CSS, matching the
-# existing summary.md wording -- splitting the hues later is a CSS-only change.
-# not_checked / unknown / anything unmapped stays neutral grey.
-_VERDICT_CLASS: dict[str, str] = {
+# Markdown has no stylesheet, so the same cues are circle glyphs.
+_MD_DOT = {
+    "pass": "\U0001f7e2",
+    "warn": "\U0001f7e1",
+    "fail": "\U0001f534",
+    "error": "\U0001f534",
+    "neutral": "\u26aa",
+}
+
+
+def _status_md(word: str, cue: str) -> str:
+    return f"{_MD_DOT.get(cue, _MD_DOT['neutral'])} {word}"
+
+
+def _baseline_status_html(row: dict[str, Any]) -> str:
+    """The baseline result as a highlighted chip, not a verdict dot.
+
+    Sits at the end of a gate row. A dot here would look like pass, warn, or
+    fail, which is the observed verdict in an earlier column.
+    """
+    word, cue = _baseline_cue(row)
+    tone = "pass" if cue == "pass" else "fail"
+    return f'<span class="match {tone}">{_esc(word)}</span>'
+
+
+# Verdict dot cues, keyed on the observed verdict string. ``fail`` and ``error``
+# get distinct class names but share one red, matching summary.md. not_checked /
+# unknown / anything unmapped stays a neutral dot. The word is not recolored.
+_VERDICT_CUE: dict[str, str] = {
     "error": "error", "fail": "fail", "warn": "warn", "pass": "pass",
 }
 
 
-def _verdict_html(verdict: Any) -> str:
-    """Render an observed sanitizer verdict as a tinted badge.
-
-    Used by *both* tabs. Verdict colour is descriptive, never a health signal:
-    on the guardrail tab a red ``fail`` sitting beside a solid green "Expected
-    outcome" pill is a positive control behaving as designed. The solid baseline
-    pill is what carries regression health, and it outranks this badge visually.
-    """
+def _verdict_cue(verdict: Any) -> tuple[str, str]:
     text = str(verdict)
-    cls = _VERDICT_CLASS.get(text.strip().lower(), "neutral")
-    return f'<span class="v {cls}">{_esc(text)}</span>'
+    return text, _VERDICT_CUE.get(text.strip().lower(), "neutral")
+
+
+def _verdict_html(verdict: Any) -> str:
+    """An observed verdict as a dot and the word.
+
+    Used by both tabs, kernel details, history, and the per-run page. The colour
+    describes that column only. On the nightly gate a red ``fail`` is the
+    observed verdict; the highlighted baseline chip at the end of the row is
+    what says the row matched.
+    """
+    text, cue = _verdict_cue(verdict)
+    return _status_html(text, cue)
+
+
+def _verdict_md(verdict: Any) -> str:
+    text, cue = _verdict_cue(verdict)
+    return _status_md(text, cue)
 
 
 def _execution_html(execution: Any, *, observed: bool = False) -> str:
-    """Execution status: plain when complete, otherwise flagged.
+    """Execution status: plain when complete, otherwise a red dot and the word.
 
     ``observed=True`` (the survey tab) renders a non-complete status as plain
     text. Tab 2 promises observed-only rendering, and the committed ConSan
     survey reports carry ``execution_status: "error"``; that is an observation,
-    not a regression, so it must not get the guardrail tab's red badge.
+    not a regression, so it must not get the nightly gate's red dot.
     """
     text = str(execution)
     if text == "complete" or observed:
         return _esc(text)
-    return f'<span class="v fail">{_esc(text)}</span>'
+    return _status_html(text, "fail")
 
 
 def _execution_md(execution: Any) -> str:
-    """Markdown twin of ``_execution_html``: neutral when complete, else emphasized."""
+    """Markdown twin of ``_execution_html``: neutral when complete, else a red dot."""
     text = str(execution)
     if text == "complete":
         return text
-    return f"\u274c **{text}**"
+    return _status_md(text, "fail")
 
 
 def _gate_summary(
@@ -3575,31 +3640,27 @@ def _history_case_html(row: dict[str, Any]) -> str:
     expected = ""
     if row["present"] and not row["match"]:
         expected = f' <span class="dash">expected</span> {_verdict_html(row["expected"])}'
-    return (
-        f"{_baseline_status_html(row, history=True)} "
-        f'{_verdict_html(row["verdict"])}{expected}'
-    )
+    return f"{_verdict_html(row['verdict'])}{expected} {_baseline_status_html(row)}"
 
 
 def _history_gate_html(run: dict[str, Any]) -> str:
-    summary = _gate_summary(run["rows"], recorded_gate=run["meta"].get("gate"))
-    emphasis = "pass" if run["gate"] else "fail"
-    return f'<td><span class="pill {emphasis}">{_esc(summary["short"])}</span></td>'
+    word, cue = ("healthy", "pass") if run["gate"] else ("failed", "fail")
+    return f"<td>{_status_html(word, cue)}</td>"
 
 
-def _baseline_status_md(row: dict[str, Any], *, history: bool = False) -> str:
-    text, _emphasis = _baseline_status(row)
-    if history and row["present"]:
-        text = "Match" if row["match"] else "Mismatch"
-    icon = "\u2705" if row["present"] and row["match"] else "\u274c"
-    return f"{icon} **{text}**"
+def _baseline_status_md(row: dict[str, Any]) -> str:
+    word, cue = _baseline_cue(row)
+    return f"**{_status_md(word, cue)}**"
 
 
 def _history_case_md(row: dict[str, Any]) -> str:
     expected = ""
     if row["present"] and not row["match"]:
-        expected = f"; expected `{row['expected']}`"
-    return f"{_baseline_status_md(row, history=True)}<br>" f"Observed: `{row['verdict']}`{expected}"
+        expected = f"; expected {_verdict_md(row['expected'])}"
+    return (
+        f"Observed: {_verdict_md(row['verdict'])}{expected}"
+        f"<br>{_baseline_status_md(row)}"
+    )
 
 
 def _report_link_html(report_rel: str | None) -> str:
@@ -3778,61 +3839,41 @@ def _tone_for(verdict: Any) -> str:
 
     Returns "" for pass and for anything unmapped, so a healthy or unknown
     observation keeps the neutral grey callout rather than being tinted.
+    The status word itself stays in the normal text colour; this only tints
+    the observation callout's border.
     """
-    cls = _VERDICT_CLASS.get(str(verdict).strip().lower(), "")
+    cls = _VERDICT_CUE.get(str(verdict).strip().lower(), "")
     return "" if cls == "pass" else cls
 
 
-def _sanitizer_accent(backend_label: str) -> str:
-    """Identity accent class for a case: purple = waitcheck, green = consan."""
-    label = backend_label.lower()
-    if "waitcheck" in label:
-        return "wc"
-    if "consan" in label:
-        return "cs"
-    return "nu"
-
-
-def _card_summary_html(
-    *,
-    accent: str,
-    icon: str,
-    name: str,
-    kind: str,
-    trailing: str,
-) -> str:
+def _card_summary_html(*, name: str, kind: str, trailing: str, end: str = "") -> str:
     """The collapsed card's triage row.
 
-    Every card ships closed, so this row has to carry enough status that a
-    reader can decide what to open without opening anything: identity icon,
-    name, kind, then the caller's status badges.
+    Every card ships closed. The row is the name, the tool as plain text, and
+    the caller's status dots. ``end`` is the baseline chip, after the spacer,
+    so it is the last thing on the row. No identity tile and no accent colour.
     """
-    tile = {"wc": "purple", "cs": "green"}.get(accent, "blue")
+    kind_html = f'<span class="kind">{_esc(kind)}</span>' if kind else ""
     return (
-        f'<summary><span class="tile {tile}">{_svg(icon, size=17, width=1.9)}</span>'
+        "<summary>"
         f'<span class="name">{_esc(name)}</span>'
-        f'<span class="kind">{_esc(kind)}</span>'
-        f'{trailing}<span class="spacer"></span>{_chevron_html()}</summary>'
+        f"{kind_html}{trailing}<span class=\"spacer\"></span>{end}{_chevron_html()}</summary>"
     )
 
 
 def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
-    """Tab 1 (guardrails): expected-vs-observed kernel detail with baseline status.
+    """Nightly gate: expected-vs-observed kernel detail with baseline status.
 
     One collapsed ``<details>`` card per recipe. Pure HTML disclosure -- no JS,
-    matching the CSS-radio tabs.
+    matching the CSS-radio tabs. Tool names are plain text.
     """
     blocks: list[str] = []
     for case, _key, label, backend_label in CASES:
         row = rows[case]
-        accent = _sanitizer_accent(backend_label)
-        icon = _ICON_SHIELD if accent == "wc" else _ICON_ACTIVITY
-        trailing = (
-            f"{_baseline_status_html(row)}{_verdict_html(row['verdict'])}"
-            f"{_findings_chip_html(row)}"
-        )
+        trailing = f"{_verdict_html(row['verdict'])}{_findings_chip_html(row)}"
         summary = _card_summary_html(
-            accent=accent, icon=icon, name=label, kind=backend_label, trailing=trailing
+            name=label, kind=backend_label, trailing=trailing,
+            end=_baseline_status_html(row),
         )
         tone = _tone_for(row["verdict"])
         if not row["present"]:
@@ -3842,8 +3883,8 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
                 _facts_html(
                     row,
                     extra=(
-                        ("Observed", _esc(str(row["verdict"]))),
-                        ("Expected", _esc(str(row["expected"] or _DASH))),
+                        ("Observed", _verdict_html(row["verdict"])),
+                        ("Expected", _verdict_html(row["expected"] or _DASH)),
                     ),
                 )
                 + _observation_html(row, tone=tone)
@@ -3851,89 +3892,10 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
                 + _raw_link_html(row.get("report_rel"))
             )
         blocks.append(
-            f'<details class="kcard {accent}">{summary}'
+            f'<details class="kcard">{summary}'
             f'<div class="kcard-body">{body}</div></details>'
         )
     return "".join(blocks)
-
-
-_SURVEY_CHIPS: tuple[tuple[str, str, str, str], ...] = (
-    ("blue", _ICON_SEARCH, "Understand kernel behavior",
-     "See how real kernels behave under sanitizers."),
-    ("purple", _ICON_BUG, "Investigate sanitizer findings",
-     "Review issues detected by WaitCheck or ConSan."),
-    ("green", _ICON_REPEAT, "Reproduce issues locally",
-     "Use provided commands to reproduce runs."),
-)
-
-# Workload -> kernel -> waitcheck -> consan -> dashboard, as a horizontal band.
-# Numbered, with a one-line description per node so the diagram needs no legend.
-_SURVEY_FLOW: tuple[tuple[str, str, str, str], ...] = (
-    ("blue", _ICON_FOLDER, "Workload", "Run a workload or test recipe"),
-    ("blue", _ICON_CODE, "Kernel Generated", "GPU kernel is compiled / extracted"),
-    ("purple", _ICON_SHIELD, "WaitCheck Analysis", "Static scan for s_waitcnt hazards"),
-    ("green", _ICON_ACTIVITY, "ConSan Analysis", "Runtime data-race / concurrency check"),
-    ("blue", _ICON_LAYOUT, "Dashboard Results", "Reports shown under each sanitizer"),
-)
-
-_SURVEY_NOTES: tuple[str, ...] = (
-    "This tab is informational only and does not affect nightly pass/fail status.",
-    "Findings represent observed behavior, not regressions.",
-    "Where both sanitizers produced a report the kernel appears under each; "
-    "a skipped or missing scan still appears, marked report missing with no verdict.",
-    "Every case lists the recipe that produced the kernel and a reproducible command.",
-)
-
-
-def _survey_flow_html() -> str:
-    parts: list[str] = []
-    for index, (accent, icon, label, desc) in enumerate(_SURVEY_FLOW, start=1):
-        if parts:
-            parts.append('<span class="flow-arrow">&#8594;</span>')
-        parts.append(
-            f'<div class="step"><span class="step-num {accent}">{index}</span>'
-            f'<div class="tile {accent}">{_svg(icon, size=22, width=1.85)}</div>'
-            f'<div class="label">{_esc(label)}</div>'
-            f'<div class="desc">{_esc(desc)}</div></div>'
-        )
-    return f'<div class="flow">{"".join(parts)}</div>'
-
-
-def _survey_note_html() -> str:
-    """The workload-survey tab's orientation panel.
-
-    States plainly that Tab 2 is observed-only / non-gating, lists what the tab
-    is for, and shows how a result is produced. The WaitCheck / ConSan
-    definitions are *not* here -- they are page-level cards shown above the tab
-    bar, because Tab 1 reports the same two sanitizers and needs them too.
-    """
-    chips = "".join(
-        f'<div class="chip"><span class="circle {accent}">{_svg(icon, size=16, width=1.95)}</span>'
-        f'<span><span class="h">{_esc(head)}</span>'
-        f'<span class="d">{_esc(desc)}</span></span></div>'
-        for accent, icon, head, desc in _SURVEY_CHIPS
-    )
-    notes = "".join(
-        f'<li><span class="check">{_svg(_ICON_CHECK, size=10, width=3.5)}</span>{_esc(note)}</li>'
-        for note in _SURVEY_NOTES
-    )
-    return (
-        '<div class="info-banner">'
-        f"{_svg(_ICON_INFO, size=18, width=2)}"
-        "<p><strong>This tab is observational only.</strong> Results do not affect "
-        "nightly pass/fail status and should be interpreted independently.</p></div>"
-        f'<section class="panel"><h2>What You Can Do Here</h2>'
-        f'<div class="chips">{chips}</div></section>'
-        '<div class="two-col">'
-        '<div class="panel"><h2>How Results Are Produced</h2>'
-        f"{_survey_flow_html()}"
-        f'<div class="panel-note">{_svg(_ICON_FILE, size=16, width=1.8)}'
-        "Each result includes the workload/recipe and a copy-paste command to "
-        "reproduce the run.</div></div>"
-        '<details class="panel notes" open><summary>Important Notes'
-        f"{_chevron_html()}</summary><ul>{notes}</ul></details>"
-        "</div>"
-    )
 
 
 def _sanitizer_name(entry: dict[str, Any]) -> str:
@@ -4199,7 +4161,13 @@ def _survey_headline(stats: dict[str, Any]) -> str:
     sum to the sanitizer-run count for honest arithmetic.
     """
     verdicts = stats.get("verdicts", {})
-    parts = [f"{n} {bucket}" for bucket in _SURVEY_VERDICT_BUCKETS if (n := verdicts.get(bucket, 0))]
+    parts = []
+    for bucket in _SURVEY_VERDICT_BUCKETS:
+        n = verdicts.get(bucket, 0)
+        if not n:
+            continue
+        cue = _VERDICT_CUE.get(bucket, "neutral")
+        parts.append(f"{_MD_DOT.get(cue, _MD_DOT['neutral'])} {n} {bucket}")
     breakdown = " \u00b7 ".join(parts) if parts else "no sanitizer runs"
     workloads = int(stats.get("workloads", 0))
     kernels = int(stats.get("kernels", 0))
@@ -4228,11 +4196,14 @@ def _survey_headline_html(stats: dict[str, Any]) -> str:
         f"{'' if runs == 1 else 's'}</b></span>"
     )
     badges = "".join(
-        f'<span class="v {_VERDICT_CLASS.get(bucket, "neutral")}">{n} {_esc(bucket)}</span>'
+        _status_html(
+            f"{n} {bucket}",
+            _VERDICT_CUE.get(bucket, "neutral"),
+        )
         for bucket in _SURVEY_VERDICT_BUCKETS
         if (n := verdicts.get(bucket, 0))
     )
-    return lead + (badges or '<span class="v neutral">no sanitizer runs</span>')
+    return lead + (badges or _status_html("no sanitizer runs", "neutral"))
 
 
 def _survey_group_by_sanitizer(
@@ -4329,20 +4300,15 @@ def _survey_summary_table_html(
 def _survey_case_html(entry: dict[str, Any], *, heading: str, kind: str = "") -> str:
     """One observed-only survey case as a collapsed ``<details>`` card.
 
-    The summary row carries the verdict badge and findings count so a reader can
+    The summary row carries the verdict dot and findings count so a reader can
     triage every case without expanding any of them. The body holds the facts
     grid, the inline finding/reason, the reproduce command and the tables. An
     absent report keeps its originating workload but drops the facts that would
-    describe a report that was never produced.
+    describe a report that was never produced. The tool name is plain text.
     """
     row = entry["summary"]
-    san = str(entry.get("sanitizer") or "").strip().lower()
-    accent = {"waitcheck": "wc", "consan": "cs"}.get(san, "nu")
-    icon = _ICON_SHIELD if accent == "wc" else _ICON_ACTIVITY
     trailing = f"{_verdict_html(row['verdict'])}{_findings_chip_html(row)}"
-    summary = _card_summary_html(
-        accent=accent, icon=icon, name=heading, kind=kind, trailing=trailing
-    )
+    summary = _card_summary_html(name=heading, kind=kind, trailing=trailing)
     workload = entry.get("workload")
     extra: tuple[tuple[str, str], ...] = (
         (("Source", _esc(str(workload))),) if workload else ()
@@ -4368,7 +4334,7 @@ def _survey_case_html(entry: dict[str, Any], *, heading: str, kind: str = "") ->
             + _raw_link_html(entry.get("report_rel"), staged=bool(entry.get("staged")))
         )
     return (
-        f'<details class="kcard {accent}">{summary}'
+        f'<details class="kcard">{summary}'
         f'<div class="kcard-body">{body}</div></details>'
     )
 
@@ -4379,17 +4345,15 @@ def _survey_detail_html(survey: list[dict[str, Any]]) -> str:
     Cases sharing a ``group`` key (e.g. the same kernel run under both waitcheck and
     ConSan) render under one kernel-group heading with a sanitizer sub-block each
     (waitcheck first, then ConSan). A lone case renders on its own. Verdicts are
-    solid color-coded chips and the actual message is shown inline (#374 C/D/E).
+    dots plus the word, and the actual message is shown inline (#374 C/D/E).
+    How to read the tab lives in the page info panel, not in this panel.
     """
     if not survey:
-        return (
-            f"{_survey_note_html()}"
-            '<p class="survey-empty">No workload-survey kernels in this run.</p>'
-        )
+        return '<p class="survey-empty">No workload-survey kernels in this run.</p>'
     grouped = _group_survey_entries(survey)
-    # Roll-up summary (headline + one row per kernel) sits above the detail blocks
+    # Roll-up summary (headline + one row per workload) sits above the detail blocks
     # so the reader sees coverage + outcomes at a glance without scrolling.
-    blocks: list[str] = [_survey_note_html(), _survey_summary_table_html(grouped)]
+    blocks: list[str] = [_survey_summary_table_html(grouped)]
     for key, entries in grouped:
         ordered = sorted(
             entries, key=lambda e: _SANITIZER_RANK.get(str(e.get("sanitizer")), 99)
@@ -4435,12 +4399,10 @@ def build_html(
             f"<title>{_esc(title)}</title>\n"
             f"<style>{_CSS}</style></head>\n"
             "<body><div class=wrap>\n"
-            '<div class=navrow><a href="../">&larr; back to CI dashboard</a></div>\n'
+            '<div class=navrow><a href="../">&larr; back to CI dashboard</a>'
+            f"{_header_tools_html(None, reports_rel=None)}</div>\n"
             f"{banner}"
-            '<header class="page-header"><div class="brand-tile">'
-            f"{_svg(_ICON_ACTIVITY, size=24, width=2)}</div><div>\n"
-            f"<h1>{_esc(title)}</h1>\n"
-            '<p class="subtitle">No runs yet</p></div></header>\n'
+            f"{_title_block_html(title, None, None, subtitle='No runs yet')}\n"
             '<section class="panel"><p>No sanitizer runs yet. This page will '
             "populate after the first successful sanitizer nightly.</p></section>\n"
             "</div></body></html>\n"
@@ -4451,22 +4413,20 @@ def build_html(
 
     latest_rows = "".join(
         f"<tr><td class=mono>{_esc(label)}</td><td>{_esc(backend)}</td>"
-        f"<td>{_baseline_status_html(latest['rows'][case])}</td>"
         f"<td>{_verdict_html(latest['rows'][case]['verdict'])}</td>"
         f"<td>{_verdict_html(latest['rows'][case]['expected'] or _DASH)}</td>"
         f"<td>{_execution_html(latest['rows'][case]['execution'])}</td>"
         f"<td class=num>{latest['rows'][case]['findings']}</td>"
         f"<td class=mono>{_esc(latest['rows'][case]['coverage']) or '<span class=dash>&mdash;</span>'}</td>"
-        f"<td>{_report_link_html(latest['rows'][case].get('report_rel'))}</td></tr>"
+        f"<td>{_report_link_html(latest['rows'][case].get('report_rel'))}</td>"
+        f"<td>{_baseline_status_html(latest['rows'][case])}</td></tr>"
         for case, _key, label, backend in CASES
     )
     # Link to the whole run area (co-located raw reports) when published there.
     latest_rel = latest.get("rel")
-    run_area_link = (
-        f'<a href="{_esc(latest_rel)}/">{_svg(_ICON_FILE, size=14, width=2)} raw reports</a>'
-        if latest_rel
-        else "<span></span>"
-    )
+    tools = _header_tools_html(meta, reports_rel=latest_rel)
+    count_line = _gate_count_line(latest["rows"], summary)
+    heading = _title_block_html(title, summary, count_line)
 
     hist_head = "".join(f"<th>{_esc(label)}</th>" for _c, _k, label, _b in CASES)
     hist_rows = "".join(
@@ -4479,10 +4439,8 @@ def build_html(
         for run in runs
     )
     run_count = len(runs)
-    hist_gate = (
-        f'<span class="pill {"ok" if latest["gate"] else "bad"}">'
-        f'latest: {_esc(summary["short"])}</span>'
-    )
+    gate_word, gate_cue = ("healthy", "pass") if latest["gate"] else ("failed", "fail")
+    hist_gate = f"latest: {_status_html(gate_word, gate_cue)}"
 
     return f"""<!doctype html>
 <html lang=en><head><meta charset=utf-8>
@@ -4490,44 +4448,29 @@ def build_html(
 <title>{_esc(title)}</title>
 <style>{_CSS}</style></head>
 <body><div class=wrap>
-  <div class=navrow>
-    <a href="../">&larr; back to CI dashboard</a>
-    {run_area_link}
-  </div>
-  {banner}
-  <div class=topbar>
-    <header class="page-header">
-      <div class="brand-tile">{_svg(_ICON_ACTIVITY, size=24, width=2)}</div>
-      <div>
-        <h1>{_esc(title)}</h1>
-        <p class="subtitle">GPU sanitizer guardrails and workload survey</p>
-      </div>
-    </header>
-    {_run_card_html(meta)}
-  </div>
-
-  {_tool_cards_html()}
-
-  <div class=tabs>
   <input type=radio name=santab id=tab-guardrails class=tabradio checked>
   <input type=radio name=santab id=tab-survey class=tabradio>
+  <div class=navrow>
+    <a href="../">&larr; back to CI dashboard</a>
+    {tools}
+  </div>
+  {banner}
+  {heading}
+
+  <div class=tabs>
   <div class=tabbar>
-    <label for="tab-guardrails">Expected behavior (guardrails)</label>
-    <label for="tab-survey">Workload survey (observed-only)</label>
+    <label for="tab-guardrails">Nightly gate</label>
+    <label for="tab-survey">Workload survey</label>
   </div>
 
   <section class=tabpanel id=panel-guardrails>
-  {_gate_hero_html(summary)}
-  <div class="info-banner">{_svg(_ICON_INFO, size=18, width=2)}
-    <p><strong>This tab is the regression gate.</strong> Baseline status column
-       will determine if regression failed or passed.</p></div>
 
   <section class="panel">
     <h2>Latest run <span class=count>{len(CASES)} recipes</span></h2>
     <div class="table-wrap"><table><thead>
-      <tr><th>Recipe</th><th>Backend</th><th>Baseline status</th><th>Observed</th>
+      <tr><th>Recipe</th><th>Backend</th><th>Observed</th>
           <th>Expected</th><th>Execution</th><th class=num>Findings</th>
-          <th>Coverage</th><th>Report</th></tr></thead>
+          <th>Coverage</th><th>Report</th><th>Baseline</th></tr></thead>
       <tbody>{latest_rows}</tbody>
     </table></div>
   </section>
@@ -4571,15 +4514,31 @@ _ASAN_VERDICTS: dict[str, str] = {
     "not_checked": "not checked",
 }
 
-_ASAN_TAB_LABEL = "AddressSanitizer (manual run)"
+_ASAN_TAB_LABEL = "Manual runs"
 
 _ASAN_TAB_CSS = """
+  /* Both DOM shapes Pages still joins: radios before .tabs (this generator),
+     and radios inside .tabs beside .tabbar (a page rendered before that move). */
+  #tab-asan:checked ~ .tabs .tabbar label[for="tab-asan"],
   #tab-asan:checked ~ .tabbar label[for="tab-asan"] {
     color:var(--text-1); background:var(--panel);
     border-color:var(--border); border-bottom:1px solid var(--panel); }
+  #tab-asan:focus-visible ~ .tabs .tabbar label[for="tab-asan"],
   #tab-asan:focus-visible ~ .tabbar label[for="tab-asan"] {
     outline:2px solid var(--blue); outline-offset:-2px; }
+  #tab-asan:checked ~ .tabs #panel-asan,
   #tab-asan:checked ~ #panel-asan { display:block; }
+  #tab-asan:checked ~ .navrow .rundetails { display:none; }
+  /* Pages splices this tab onto a dashboard rendered before these rules existed.
+     That page has the colour variables but no .status/.dot, so a manual-run
+     result would be an uncolored word. */
+  .status { display:inline-flex; align-items:center; gap:6px; color:inherit;
+    white-space:nowrap; vertical-align:middle; }
+  .dot { width:8px; height:8px; border-radius:99px; flex:0 0 auto; display:inline-block; }
+  .dot.pass { background:var(--green); }
+  .dot.warn { background:var(--v-warn); }
+  .dot.fail, .dot.error { background:var(--v-fail); }
+  .dot.neutral { background:var(--text-3); }
   .asan-intro { font-size:14px; color:var(--text-2); margin:0 0 12px; line-height:1.55; }
   .asan-intro a { color:var(--blue); }
   .asan-heading { font-size:20px; font-weight:600; margin:24px 0 12px; }
@@ -4587,10 +4546,6 @@ _ASAN_TAB_CSS = """
   .asan-row > span { display:block; max-width:60ch; font-size:13px; color:var(--text-3); margin-top:4px;
     word-break:break-word; }
   .table-wrap + .asan-intro { margin:12px 0 0; }
-  .asan-r { font-weight:600; white-space:nowrap; }
-  .asan-r.pass { color:#86EFAC; }
-  .asan-r.warn { color:#FCD34D; }
-  .asan-r.fail { color:#FCA5A5; }
 """
 
 _ASAN_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
@@ -4777,7 +4732,7 @@ def _asan_run_html(run: Mapping[str, Any]) -> str:
         )
         body.append(
             f'<tr><td><details class="asan-row"><summary>{name}</summary>{report}</details></td>'
-            f'<td><span class="asan-r {cls}">{_esc(word)}</span></td>'
+            f'<td>{_status_html(word, cls)}</td>'
             f"<td class=num>{kernels['checked']} of {kernels['dispatched']}</td>"
             f"<td>{_esc(_asan_note(row))}</td></tr>"
         )
@@ -4959,9 +4914,16 @@ def build_run_index_html(
     # Reuse the shared aggregate classifier so a missing report reads as
     # INCOMPLETE rather than a misleading "verdict mismatch" (mirrors build_html).
     summary = _gate_summary(rows, recorded_gate=run["meta"].get("gate"))
+    count_line = _gate_count_line(rows, summary)
     run_url = meta.get("run_url", "")
     run_link = (
         f'<a href="{_esc(run_url)}">workflow run</a>' if run_url else "<span></span>"
+    )
+    subtitle = (
+        f"run {_esc(str(meta.get('run', '')))}"
+        f" &middot; {_esc(str(meta.get('commit', '')))}"
+        f" &middot; {_esc(format_instant(meta.get('date', '')))}"
+        f" &middot; {_esc(str(meta.get('gpu', '')))}"
     )
 
     def _cell(case: str, present: bool) -> str:
@@ -4977,9 +4939,10 @@ def build_run_index_html(
 
     report_rows = "".join(
         f"<tr><td class=mono>{_esc(label)}</td>"
-        f"<td>{_baseline_status_html(rows[case])} {_verdict_html(rows[case]['verdict'])}</td>"
+        f"<td>{_verdict_html(rows[case]['verdict'])}</td>"
         f"<td>{_cell(case, rows[case]['present'])}</td>"
-        f"<td>{_area_cell(case, rows[case]['present'])}</td></tr>"
+        f"<td>{_area_cell(case, rows[case]['present'])}</td>"
+        f"<td>{_baseline_status_html(rows[case])}</td></tr>"
         for case, _key, label, _backend in CASES
     )
     # Shares the dashboard stylesheet so a drill-down does not look like a
@@ -4994,17 +4957,10 @@ def build_run_index_html(
         "<body><div class=wrap>\n"
         '<div class=navrow><a href="../../">&larr; back to sanitizer dashboard</a>\n'
         f"{run_link}</div>\n"
-        '<div class=topbar>\n'
-        '<header class="page-header"><div class="brand-tile">'
-        f"{_svg(_ICON_ACTIVITY, size=24, width=2)}</div><div>\n"
-        f"<h1>{_esc(title)}</h1>\n"
-        f'<p class="subtitle">run {_esc(meta.get("run", ""))}</p></div></header>\n'
-        f"{_run_card_html(meta)}\n"
-        "</div>\n"
-        f"{_gate_hero_html(summary)}\n"
+        f"{_title_block_html(title, summary, count_line, subtitle=subtitle)}\n"
         '<section class="panel"><h2>Raw reports</h2><div class="table-wrap"><table>\n'
-        "<thead><tr><th>Recipe</th><th>Baseline status</th><th>Raw report</th>"
-        "<th>Files</th></tr></thead>\n"
+        "<thead><tr><th>Recipe</th><th>Observed</th><th>Raw report</th>"
+        "<th>Files</th><th>Baseline</th></tr></thead>\n"
         f"<tbody>{report_rows}</tbody>\n"
         "</table></div></section>\n"
         f"{_run_index_survey_html(survey)}"
@@ -5031,7 +4987,7 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
         row = (entry or {}).get("summary") or {}
         if entry is None or not row.get("present"):
             return _DASH
-        return f"`{row.get('verdict')}`"
+        return _verdict_md(row.get("verdict"))
 
     lines = [
         _survey_headline(stats),
@@ -5059,7 +5015,7 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
 def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
     """Tab 2 mirror for the GitHub job summary: observed-only, non-gating."""
     lines = [
-        "## Workload survey (observed-only)",
+        "## Workload survey",
         "",
         "How real GPU kernels behave under AMD's sanitizers \u2014 **waitcheck** (static "
         "`s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where "
@@ -5067,7 +5023,7 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
         "skipped or whose report is missing still appears, marked report missing with "
         "no verdict. **No "
         "expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here "
-        "is an observation of how the kernel behaved, not a regression. Each case lists "
+        "is an observation of how the kernel behaved, not a gate result. Each case lists "
         "a copy-paste command to reproduce the run.",
         "",
     ]
@@ -5080,7 +5036,7 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
         workload = f" \u00b7 source `{entry['workload']}`" if entry.get("workload") else ""
         lines.append(
             f"<details><summary><b>{entry['label']}</b> \u2014 observed "
-            f"`{r['verdict']}`</summary>"
+            f"{_verdict_md(r['verdict'])}</summary>"
         )
         lines += ["", f"Observation: {r.get('observation', '')}{workload}"]
         message = _survey_message_md(r)
@@ -5100,7 +5056,7 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
         for k in r["kernels"]:
             detail = (k.get("detail") or "").replace("|", "\\|")
             lines.append(
-                f"| `{k['name']}` | {k['dispatch']} | `{k['verdict']}` | {k['findings']} | "
+                f"| `{k['name']}` | {k['dispatch']} | {_verdict_md(k['verdict'])} | {k['findings']} | "
                 f"`{k['code_object'] or _DASH}` | `{k['sha'] or _DASH}` | {detail or _DASH} |"
             )
         lines += ["", "</details>", ""]
@@ -5122,8 +5078,9 @@ def build_summary_md(
     latest = runs[0]
     meta = latest["meta"]
     summary = _gate_summary(latest["rows"], recorded_gate=latest["meta"].get("gate"))
-    icon = "\u2705" if summary["ok"] else "\u274c"
-    gate = f"{icon} **{summary['label']}** \u2014 {summary['detail']}"
+    mark = _MD_DOT["pass"] if summary["ok"] else _MD_DOT["fail"]
+    word = "Healthy" if summary["ok"] else "Failed"
+    gate = f"{mark} **{word}** \u2014 {_gate_count_line(latest['rows'], summary)}"
     lines = ["# Sanitizers Nightly \u00b7 gfx950", ""]
     if banner:
         lines += [banner, ""]
@@ -5133,37 +5090,40 @@ def build_summary_md(
         "",
         gate,
         "",
-        "Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. "
-        "Baseline status is the regression-health signal.",
+        "Observed `warn` or `fail` verdicts may be expected positive-control outcomes. "
+        "A matched row is healthy even when the verdict is fail. "
+        "Baseline status is matched or unmatched.",
         "",
-        "| Recipe | Backend | Baseline status | Observed | Expected | Execution | Findings | Coverage |",
-        "|---|---|---|---|---|---|--:|---|",
+        "| Recipe | Backend | Observed | Expected | Execution | Findings | Coverage | Baseline |",
+        "|---|---|---|---|---|--:|---|---|",
     ]
     for case, _key, label, backend in CASES:
         r = latest["rows"][case]
         lines.append(
-            f"| {label} | {backend} | {_baseline_status_md(r)} | `{r['verdict']}` | "
-            f"`{r['expected'] or _DASH}` | "
-            f"{_execution_md(r['execution'])} | {r['findings']} | {r['coverage'] or _DASH} |"
+            f"| {label} | {backend} | {_verdict_md(r['verdict'])} | "
+            f"{_verdict_md(r['expected'] or _DASH)} | "
+            f"{_execution_md(r['execution'])} | {r['findings']} | {r['coverage'] or _DASH} | "
+            f"{_baseline_status_md(r)} |"
         )
 
     lines += [
         "",
-        "Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate) "
-        "and **Workload survey (observed-only)** (non-gating).",
+        "Two views below: **Nightly gate** (baseline-checked, the gate) "
+        "and **Workload survey** (observed only, non-gating).",
         "",
-        "## Expected behavior (guardrails) \u00b7 Kernel details",
+        "## Nightly gate \u00b7 Kernel details",
         "",
     ]
     for case, _key, label, _backend in CASES:
         r = latest["rows"][case]
         lines.append(
-            f"<details><summary><b>{label}</b> \u2014 " f"{_baseline_status_md(r)}</summary>"
+            f"<details><summary><b>{label}</b> \u2014 "
+            f"{_verdict_md(r['verdict'])} \u2014 {_baseline_status_md(r)}</summary>"
         )
         lines.append("")
         if not r["present"]:
             lines += [
-                f"Observed sanitizer verdict: `{r['verdict']}`",
+                f"Observed {_verdict_md(r['verdict'])}",
                 "",
                 f"Observation: {r.get('observation', '')}",
                 "",
@@ -5175,7 +5135,7 @@ def build_summary_md(
         wl = r["worklist"]
         backend_name = b["name"] if b else _DASH
         lines.append(
-            f"Observed sanitizer verdict `{r['verdict']}` \u00b7 expected `{r['expected'] or _DASH}`"
+            f"Observed {_verdict_md(r['verdict'])} \u00b7 expected {_verdict_md(r['expected'] or _DASH)}"
         )
         lines.append(f"Observation: {r.get('observation', '')}")
         lines.append(
@@ -5195,7 +5155,7 @@ def build_summary_md(
             sha = k["sha"] or _DASH
             detail = (k.get("detail") or "").replace("|", "\\|")
             lines.append(
-                f"| `{k['name']}` | {k['dispatch']} | `{k['verdict']}` | {k['findings']} | "
+                f"| `{k['name']}` | {k['dispatch']} | {_verdict_md(k['verdict'])} | {k['findings']} | "
                 f"`{code_object}` | `{sha}` | {detail or _DASH} |"
             )
         if r["finding_groups"]:
@@ -5223,7 +5183,7 @@ def build_summary_md(
         cells = " | ".join(_history_case_md(run["rows"][c]) for c, _k, _l, _b in CASES)
         lines.append(
             f"| {run['meta'].get('run', '')} | `{run['meta'].get('commit', '')}` | {cells} | "
-            f"{_gate_summary(run['rows'], recorded_gate=run['meta'].get('gate'))['short']} |"
+            f"{_status_md('healthy' if run['gate'] else 'failed', 'pass' if run['gate'] else 'fail')} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -5380,8 +5340,16 @@ def main() -> int:
     # reconstructs. A published ``survey/`` has the same <case>/sanitizer_report.json
     # layout an informational results dir does, so the newest run's list is rebuilt
     # from the areas already published under it, at full card fidelity.
+    #
+    # That rebuild also covers a re-render that brought no survey of its own: the
+    # preview workflow, and a nightly whose survey artifact is absent. Both treat
+    # the newest retained run as current and would otherwise publish an empty
+    # Workload survey tab over areas the data branch already holds. A job that did
+    # pass ``--survey`` or ``--informational-results-dir`` keeps that input, even
+    # when it loaded no cases, so a failed sweep stays an empty tab.
     displayed_survey = survey
-    if runs and current_index != 0 and args.history_root is not None:
+    live_survey = args.survey is not None or args.informational_results_dir is not None
+    if runs and args.history_root is not None and (current_index != 0 or not live_survey):
         displayed_survey = survey_cases_from_informational_dir(
             args.history_root / str(runs[0]["meta"].get("run", "")) / "survey",
             rel=runs[0].get("rel"),
@@ -5552,11 +5520,15 @@ def main() -> int:
                     logs=keep_logs,
                     current=False,
                 )
+            # This job's own survey list only when it actually supplied one. A
+            # re-render with no survey input still lists the areas published under
+            # the run, including the newest one the preview treats as current.
+            if current and live_survey:
+                index_survey = survey
+            else:
+                index_survey = survey_entries_from_published(run_out)
             (run_out / "index.html").write_text(
-                build_run_index_html(
-                    run,
-                    survey=survey if current else survey_entries_from_published(run_out),
-                ),
+                build_run_index_html(run, survey=index_survey),
                 encoding="utf-8",
             )
         # Co-publish each caller-supplied ConSan report (#347) under the survey area
