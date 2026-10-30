@@ -1,4 +1,4 @@
-# One-rank smoke for the runs/04 tiny transformer.
+# One-rank smoke for the tiny transformer.
 # Usage: docs/tiny-transformer.md
 #
 # `tiny_transformer` delegates to the `training` loop. `launcher: inprocess`

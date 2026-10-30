@@ -105,7 +105,7 @@ def test_cleanup_error_is_recorded_on_the_result(monkeypatch) -> None:
             raise RuntimeError("barrier failed")
 
     monkeypatch.setattr(
-        "aorta.workloads.distributed_launch.TrainingWorkload",
+        "aorta.workloads.training.TrainingWorkload",
         _FakeWorkload,
     )
     data = run_training_rank({})
@@ -134,7 +134,7 @@ def test_failed_rank_does_not_enter_the_cleanup_barrier(monkeypatch) -> None:
             calls.append(collective)
 
     monkeypatch.setattr(
-        "aorta.workloads.distributed_launch.TrainingWorkload",
+        "aorta.workloads.training.TrainingWorkload",
         _FakeWorkload,
     )
     with pytest.raises(RuntimeError, match="oom during forward"):
@@ -177,6 +177,26 @@ def test_monarch_trainer_class_is_module_scoped() -> None:
         encoding="utf-8"
     )
     assert 'globals()["Trainer"]' not in launch
+
+
+def test_launcher_import_does_not_load_training() -> None:
+    """Classifying a controller must not import the training module at import time."""
+    import ast
+
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "aorta"
+        / "workloads"
+        / "distributed_launch.py"
+    )
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    top_level = [
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+    ]
+    assert "aorta.workloads.training" not in top_level
 
 
 def test_unknown_launcher_rejected() -> None:
@@ -595,7 +615,7 @@ def test_monarch_launcher_names_source_build_when_missing(monkeypatch) -> None:
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", guarded)
-    with pytest.raises(RuntimeError, match="pytorch_monarch source build"):
+    with pytest.raises(RuntimeError, match="pytorch_monarch"):
         launch_monarch({"steps": 1}, nodes=2, gpus_per_node=8)
 
 
@@ -666,6 +686,8 @@ def _install_fake_monarch(monkeypatch, train_result):
         captured["argv"] = list(argv)
         captured["env"] = dict(env or {})
         captured["start_new_session"] = kwargs.get("start_new_session")
+        captured["stdout"] = kwargs.get("stdout")
+        captured["stderr"] = kwargs.get("stderr")
         return _Proc()
 
     monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.Popen", fake_popen)
@@ -711,12 +733,13 @@ def test_monarch_launch_selects_rank0_and_stops_workers(monkeypatch) -> None:
     env = captured.get("env")
     assert isinstance(argv, list)
     assert isinstance(env, dict)
-    assert argv[:6] == [
+    assert argv[:7] == [
         "srun",
         "--jobid",
         "4242",
         "--overlap",
         "-N2",
+        "--ntasks=2",
         "--ntasks-per-node=1",
     ]
     assert "--kill-on-bad-exit=1" in argv
@@ -743,6 +766,95 @@ def test_monarch_launch_failure_stops_workers(monkeypatch) -> None:
             problems.extend(found)
     assert "monarch_launch" in problems
     assert result.metrics.get("launcher") == "monarch"
+    assert len(stopped) == 1
+
+
+def test_monarch_srun_requests_one_task_per_node(monkeypatch) -> None:
+    from aorta.workloads.distributed_launch import _monarch_hostnames
+
+    seen: dict[str, list[str]] = {}
+
+    def fake_check_output(argv, text=True):
+        del text
+        seen["argv"] = list(argv)
+        return "0 node-a\n1 node-b\n"
+
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.subprocess.check_output",
+        fake_check_output,
+    )
+    assert _monarch_hostnames("99", 2) == ["node-a", "node-b"]
+    argv = seen["argv"]
+    assert "--ntasks=2" in argv
+    assert "--ntasks-per-node=1" in argv
+
+
+def test_launcher_subprocess_logs_are_siblings_of_the_trial_log(monkeypatch, tmp_path) -> None:
+    """Child output goes to ``<prefix>.subprocess.*.log``, left open until the child is gone."""
+    prefix = tmp_path / "trial_d0_m0_t0"
+    config = {
+        "steps": 1,
+        "device": "cpu",
+        "_aorta_save_logs": True,
+        "_aorta_log_prefix": str(prefix),
+    }
+
+    class _Proc:
+        pid = None
+        returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+        def send_signal(self, sig: int) -> None:
+            raise AssertionError(sig)
+
+    def fake_popen(argv, env=None, stdout=None, stderr=None, **kwargs):
+        del argv, env, kwargs
+        assert stdout is not None and stderr is not None
+        assert not stdout.closed
+        stdout.write("spur worker\n")
+        stdout.flush()
+        out = Path(env_holder["results"])
+        (out / "rank0.json").write_text(
+            json.dumps({"result": {"passed": True, "failure_count": 0, "metrics": {}}}),
+            encoding="utf-8",
+        )
+        return _Proc()
+
+    env_holder: dict[str, str] = {}
+
+    def recording_popen(argv, env=None, stdout=None, stderr=None, **kwargs):
+        env_holder["results"] = env["AORTA_RESULTS_DIR"]
+        return fake_popen(argv, env, stdout, stderr, **kwargs)
+
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.subprocess.Popen",
+        recording_popen,
+    )
+    monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
+    monkeypatch.setenv("AORTA_RANK0_IP", "10.0.0.8")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
+    result = launch_spur(config, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert result.passed is True
+    stdout_path = Path(f"{prefix}.subprocess.stdout.log")
+    stderr_path = Path(f"{prefix}.subprocess.stderr.log")
+    assert stdout_path.read_text(encoding="utf-8") == "spur worker\n"
+    assert stderr_path.is_file()
+    assert not Path(f"{prefix}.stdout.log").exists()
+
+    captured, stopped = _install_fake_monarch(monkeypatch, {"rank0": {"passed": True, "metrics": {"rank": 0}}})
+    monarch = launch_monarch(config, nodes=2, gpus_per_node=8)
+    assert monarch.passed is True
+    monarch_out = captured.get("stdout")
+    monarch_err = captured.get("stderr")
+    assert getattr(monarch_out, "name", None) == str(stdout_path)
+    assert getattr(monarch_err, "name", None) == str(stderr_path)
+    assert getattr(monarch_out, "closed", False) is True
     assert len(stopped) == 1
 
 

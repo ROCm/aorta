@@ -16,11 +16,11 @@ every node can see.
 The controller's verdict passes only when the worker exit code is 0 and
 that rank-0 result passed.
 
-The monarch controller follows the runs/04 sequence: TCP transport on the
+The monarch controller follows this sequence: TCP transport on the
 controller IPv4, one worker per node, a proc mesh, and
 ``setup_torch_elastic_env_async``. The actor calls :func:`run_training_rank`
 instead of an inlined model. A missing ``monarch`` import raises an error
-that names the pytorch_monarch source build.
+that says Monarch is not installed.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Any
 
 from aorta.workloads._base import WorkloadResult
-from aorta.workloads.training import TrainingWorkload
 
 log = logging.getLogger(__name__)
 
@@ -92,8 +91,9 @@ exec "$@"
 """
 
 _MONARCH_MISSING = (
-    "Monarch is not installed. launcher 'monarch' needs the pytorch_monarch "
-    "source build (venvs/rocm10.1); import failed: {exc!r}"
+    "Monarch is not installed. launcher 'monarch' needs a pytorch_monarch "
+    "build that imports on this host (published torchmonarch wheels are "
+    "CUDA-only); import failed: {exc!r}"
 )
 
 # Launcher knobs. They never reach the training loop.
@@ -158,7 +158,7 @@ def controller_ipv4() -> str:
     if not is_ipv4(ip):
         raise RuntimeError(
             f"Controller address {ip!r} is not IPv4. Set AORTA_CONTROLLER_IP "
-            "(hostnames on this cluster resolve to IPv6 link-local first)."
+            "to the controller's IPv4 address."
         )
     return ip
 
@@ -206,6 +206,10 @@ def run_training_rank(config: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(config, dict):
         raise TypeError(f"training config must be a dict, got {type(config).__name__}")
+    # Imported here so a controller that only classifies a launcher does not
+    # load PyTorch. ``run_trials`` imports this module for every workload.
+    from aorta.workloads.training import TrainingWorkload
+
     workload = TrainingWorkload(config)
     cleanup_error: str | None = None
     finished = False
@@ -363,6 +367,51 @@ def build_spur_launch(
     return argv, env
 
 
+def _open_subprocess_logs(config: Mapping[str, Any]) -> tuple[Any, Any]:
+    """Open sibling logs for a launcher child, or ``(None, None)``.
+
+    The dispatcher already holds ``<prefix>.stdout.log`` and
+    ``<prefix>.stderr.log`` for the Python process. A child inherits the
+    OS streams, so those files miss its output. The sibling files are
+    ``<prefix>.subprocess.stdout.log`` and ``<prefix>.subprocess.stderr.log``.
+    Callers keep the handles open until the child and its process group
+    are gone, then close them.
+    """
+    if not config.get("_aorta_save_logs"):
+        return None, None
+    prefix = config.get("_aorta_log_prefix")
+    if not isinstance(prefix, str) or not prefix:
+        return None, None
+    opened: list[Any] = []
+    try:
+        for suffix in ("stdout", "stderr"):
+            opened.append(
+                open(
+                    f"{prefix}.subprocess.{suffix}.log",
+                    "w",
+                    encoding="utf-8",
+                    errors="backslashreplace",
+                )
+            )
+    except OSError as exc:
+        for handle in opened:
+            handle.close()
+        log.warning("could not open subprocess logs under %s: %s", prefix, exc)
+        return None, None
+    return opened[0], opened[1]
+
+
+def _close_subprocess_logs(*handles: Any) -> None:
+    """Close launcher log files. A close error is logged and does not replace the result."""
+    for handle in handles:
+        if handle is None:
+            continue
+        try:
+            handle.close()
+        except OSError as exc:
+            log.warning("could not close subprocess log: %s", exc)
+
+
 def launch_spur(
     config: dict[str, Any],
     *,
@@ -391,6 +440,7 @@ def launch_spur(
             controller,
         )
     work = _shared_workdir()
+    stdout_log, stderr_log = _open_subprocess_logs(config)
     try:
         payload = worker_training_config(config)
         config_path = work / "worker_config.json"
@@ -413,7 +463,13 @@ def launch_spur(
         proc: subprocess.Popen[str] | None = None
         pgid: int | None = None
         try:
-            proc = subprocess.Popen(argv, env=env, start_new_session=True)
+            proc = subprocess.Popen(
+                argv,
+                env=env,
+                start_new_session=True,
+                stdout=stdout_log,
+                stderr=stderr_log,
+            )
             pgid = _session_pgid(proc)
             proc.wait()
         except KeyboardInterrupt:
@@ -432,6 +488,7 @@ def launch_spur(
             result.failure_count += 1
         return result
     finally:
+        _close_subprocess_logs(stdout_log, stderr_log)
         shutil.rmtree(work, ignore_errors=True)
 
 
@@ -474,6 +531,7 @@ def launch_monarch(
         str(job_id),
         "--overlap",
         f"-N{nodes}",
+        f"--ntasks={nodes}",
         "--ntasks-per-node=1",
         "--kill-on-bad-exit=1",
         *worker_cmd,
@@ -481,8 +539,15 @@ def launch_monarch(
     log.info("monarch controller tcp://%s hosts=%s", ip, hostnames)
     workers: subprocess.Popen[str] | None = None
     worker_pgid: int | None = None
+    stdout_log, stderr_log = _open_subprocess_logs(config)
     try:
-        workers = subprocess.Popen(argv, env=env, start_new_session=True)
+        workers = subprocess.Popen(
+            argv,
+            env=env,
+            start_new_session=True,
+            stdout=stdout_log,
+            stderr=stderr_log,
+        )
         worker_pgid = _session_pgid(workers)
         hosts = actor_mod.attach_to_workers(
             name="trainers",
@@ -511,6 +576,7 @@ def launch_monarch(
     finally:
         if workers is not None:
             _terminate_process_tree(workers, pgid=worker_pgid)
+        _close_subprocess_logs(stdout_log, stderr_log)
 
 
 def verdict_from_workers(
@@ -706,7 +772,7 @@ def _read_rank0_result(output_dir: Path) -> tuple[dict[str, Any] | None, str | N
 
 
 def _import_monarch() -> tuple[Any, ...]:
-    """Import Monarch. Any failure names the source build the cluster uses."""
+    """Import Monarch. Any failure says it is not installed."""
     try:
         import monarch.actor as actor_mod
         import monarch.spmd as spmd_mod
@@ -806,6 +872,7 @@ def _monarch_hostnames(job_id: str, nodes: int) -> list[str]:
         job_id,
         "--overlap",
         f"-N{nodes}",
+        f"--ntasks={nodes}",
         "--ntasks-per-node=1",
         "bash",
         "-c",

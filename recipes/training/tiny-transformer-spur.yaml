@@ -8,8 +8,8 @@
 # `AORTA_RANK0_IP`, or the controller probes it. Set `AORTA_MASTER_PORT` to
 # a free TCP port; the controller does not guess one. Set `AORTA_SHARED_DIR`
 # to a directory every node can read and write (not node-local `/tmp`);
-# rank 0 writes `rank0.json` there. Spur is not on PATH on this cluster:
-# set `workload_config.spur_bin` to the overlay binary (default `spur`).
+# rank 0 writes `rank0.json` there. If `spur` is not on PATH, set
+# `workload_config.spur_bin` to that binary (default `spur`).
 # This recipe does not submit a Slurm job.
 #
 #   # validate only (does not spawn):

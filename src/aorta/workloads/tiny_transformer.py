@@ -1,4 +1,4 @@
-"""``tiny_transformer`` workload: the runs/04 transformer through training.
+"""``tiny_transformer`` workload: a small transformer through training.
 
 The model and the training loop live in :class:`aorta.workloads.training.TrainingWorkload`.
 This workload only fixes that recipe's shape and chooses how the ranks start:
@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 _LAUNCHERS = ("inprocess", "monarch", "spur")
 _LAUNCH_KEYS = ("launcher", "nodes", "gpus_per_node", "spur_bin")
 
-# runs/04 shape. Recipes can override individual fields; omitted fields keep
+# Default shape. Recipes can override individual fields; omitted fields keep
 # these values so a bare ``aorta run --workload tiny_transformer`` matches.
 _MODEL_DEFAULTS: dict[str, Any] = {
     "kind": "transformer",
@@ -101,7 +101,7 @@ class TinyTransformerConfig:
 
 
 def training_payload(raw: dict[str, Any]) -> dict[str, Any]:
-    """Training config with the runs/04 model filled in for omitted fields.
+    """Training config with the default transformer filled in for omitted fields.
 
     Launcher keys are removed so :class:`TrainingConfig` does not warn about
     them. ``expected_world_size`` stays; the training loop enforces it.
@@ -132,7 +132,7 @@ def training_payload(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 class TinyTransformerWorkload(Workload):
-    """Runs/04 tiny transformer, launched in-process, by Spur, or by Monarch.
+    """Small transformer, launched in-process, by Spur, or by Monarch.
 
     ``launch_mode = "distributed"`` and ``min_world_size = 1`` match
     :class:`TrainingWorkload`: a bare ``aorta run`` is a one-rank smoke.

@@ -5,8 +5,9 @@
 # `expected_world_size: 16` fails the trial unless the process group is
 # `nodes * gpus_per_node`. The controller attaches to an allocation that
 # already exists (`SLURM_JOB_ID` or `MONARCH_SLURM_JOB`). It does not submit
-# a Slurm job. Monarch is imported only for this launcher; install the
-# pytorch_monarch source build (venvs/rocm10.1). Set `AORTA_CONTROLLER_IP`
+# a Slurm job. Monarch is imported only for this launcher and is not an
+# install dependency. Published torchmonarch wheels are CUDA builds, so a
+# ROCm host needs a ROCm build of Monarch on PYTHONPATH. Set `AORTA_CONTROLLER_IP`
 # when the hostname resolves to IPv6 link-local first.
 #
 #   # validate only (does not spawn):
