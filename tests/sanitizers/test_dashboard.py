@@ -3673,6 +3673,11 @@ def test_help_lives_in_the_info_panel_above_the_tabs():
     css = gen._CSS.replace(" ", "")
     assert ".iconbar{position:relative;" in css
     assert ".iconpop{position:relative" not in css
+    # The two header panels occupy the same corner, so they share a details
+    # name and opening one closes the other. In-flow disclosures do not.
+    assert html.count('name=headerpop') == 2
+    assert 'class="kcard" name=headerpop' not in html
+    assert 'class="panel" name=headerpop' not in html
 
 
 def test_survey_intro_qualifies_the_both_sanitizers_claim():

@@ -435,8 +435,8 @@ _INFO_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 def _info_panel_html() -> str:
     """The info icon: click opens how to read the page. No JavaScript.
 
-    Each topic is a heading line and the sentence under it is the explanation,
-    so the two are not one paragraph.
+    The info icon and the run-details icon share ``name=headerpop``, so opening
+    one closes the other. Both panels hang from the same corner.
     """
     body = "".join(
         f'<p class="infogroup">{_esc(group)}</p>'
@@ -448,7 +448,7 @@ def _info_panel_html() -> str:
         for group, items in _INFO_GROUPS
     )
     return (
-        '<details class="iconpop">'
+        '<details class="iconpop" name=headerpop>'
         '<summary aria-label="How to read this page" title="How to read this page">'
         f"{_svg(_ICON_INFO, size=16, width=2)}</summary>"
         f'<div class="pop"><p class="pop-title">How to read this page</p>{body}</div>'
@@ -486,7 +486,7 @@ def _run_details_html(meta: dict[str, Any]) -> str:
         for label, value in rows
     )
     return (
-        '<details class="iconpop rundetails">'
+        '<details class="iconpop rundetails" name=headerpop>'
         '<summary aria-label="Run details" title="Run details">'
         f"{_svg(_ICON_LIST, size=16, width=2)}</summary>"
         f'<div class="pop"><p class="pop-title">This run</p>{body}</div>'
