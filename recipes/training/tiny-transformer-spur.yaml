@@ -1,4 +1,5 @@
 # Two-node, 16-GPU tiny transformer launched by Spur.
+# Usage: docs/tiny-transformer.md
 #
 # Same model and checks as recipes/training/tiny-transformer.yaml.
 # `launcher: spur` runs one `spur srun -N 2 --ntasks-per-node 8` of the

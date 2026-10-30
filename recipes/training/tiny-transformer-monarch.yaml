@@ -1,4 +1,5 @@
 # Two-node, 16-GPU tiny transformer launched by Monarch.
+# Usage: docs/tiny-transformer.md
 #
 # Same model and checks as recipes/training/tiny-transformer.yaml.
 # `expected_world_size: 16` fails the trial unless the process group is

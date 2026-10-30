@@ -166,20 +166,23 @@ def run_training_rank(config: dict[str, Any]) -> dict[str, Any]:
     """Run one training rank and return its :class:`WorkloadResult` as a dict.
 
     Shared by the in-process path, spur workers, and the Monarch actor.
-    Cleanup still runs when setup or run raises. A cleanup error does not
-    replace that exception. When the run itself finished, the error is
-    stored on ``metrics["cleanup_error"]``. ``KeyboardInterrupt`` is not caught.
+    Cleanup still runs when setup or run raises, but that path does not
+    enter ``dist.barrier``. A cleanup error does not replace the original
+    exception. When the run itself finished, a cleanup error is stored on
+    ``metrics["cleanup_error"]``. ``KeyboardInterrupt`` is not caught.
     """
     if not isinstance(config, dict):
         raise TypeError(f"training config must be a dict, got {type(config).__name__}")
     workload = TrainingWorkload(config)
     cleanup_error: str | None = None
+    finished = False
     try:
         workload.setup()
         result = workload.run()
+        finished = True
     finally:
         try:
-            workload.cleanup()
+            workload.cleanup(collective=finished)
         except Exception as exc:
             cleanup_error = f"{type(exc).__name__}: {exc}"
             log.warning("training rank cleanup failed", exc_info=True)
@@ -412,7 +415,11 @@ def launch_monarch(
     """
     imported = _import_monarch()
     actor_mod, spmd_mod, bootstrap, service_env, alloc_ids, serialize_ids, proc_addrs = imported
-    trainer_cls = _trainer_class(actor_mod.Actor, actor_mod.endpoint)
+    # Import after Monarch itself imports, so a missing install still raises
+    # the source-build error. The class lives in its own module so workers
+    # unpickle ``aorta.workloads.monarch_trainer.Trainer``.
+    from aorta.workloads.monarch_trainer import Trainer
+
     ip = controller_ipv4()
     actor_mod.enable_transport(f"tcp://{ip}:0")
     job_id = os.environ.get("MONARCH_SLURM_JOB") or os.environ.get("SLURM_JOB_ID")
@@ -450,7 +457,7 @@ def launch_monarch(
             workers=proc_addrs([f"tcp://{host}:{port}" for host in hostnames], proc_ids),
         )
         actor_config = worker_training_config(config)
-        raw = asyncio.run(_monarch_train(hosts, spmd_mod, trainer_cls, gpus_per_node, actor_config))
+        raw = asyncio.run(_monarch_train(hosts, spmd_mod, Trainer, gpus_per_node, actor_config))
         return _verdict_from_monarch(raw)
     except KeyboardInterrupt:
         raise
@@ -689,20 +696,6 @@ def _import_monarch() -> tuple[Any, ...]:
             serialize_service_proc_ids,
             service_proc_addrs,
         )
-
-
-def _trainer_class(actor_base: type, endpoint: Any) -> type:
-    class Trainer(actor_base):
-        @endpoint
-        def train(self, config: dict) -> dict:
-            if not isinstance(config, dict):
-                raise TypeError(f"train config must be a dict, got {type(config).__name__}")
-            return run_training_rank(config)
-
-    Trainer.__module__ = __name__
-    Trainer.__qualname__ = "Trainer"
-    globals()["Trainer"] = Trainer
-    return Trainer
 
 
 async def _monarch_train(

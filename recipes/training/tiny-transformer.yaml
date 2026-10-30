@@ -1,4 +1,5 @@
 # One-rank smoke for the runs/04 tiny transformer.
+# Usage: docs/tiny-transformer.md
 #
 # `tiny_transformer` delegates to the `training` loop. `launcher: inprocess`
 # runs that loop in this process (world size 1, gloo on CPU). It does not

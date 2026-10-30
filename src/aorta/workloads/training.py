@@ -411,6 +411,35 @@ def _build_model(spec: ModelSpec, seq_len: int) -> "nn.Module":
 # --------------------------------------------------------------------------- #
 # Workload
 # --------------------------------------------------------------------------- #
+def _abort_process_group() -> None:
+    """Ask the backend to abandon the group without waiting for other ranks.
+
+    ``barrier`` and ``destroy_process_group`` are collectives. A rank that is
+    already failing uses ``abort`` when the process group implements it, then
+    returns. The process then exits, and the launcher cancels the peers.
+    """
+    try:
+        import torch.distributed as dist
+        from torch.distributed import distributed_c10d
+    except Exception as exc:
+        log.warning("distributed import failed during abandon: %s", exc)
+        return
+    if not dist.is_initialized():
+        return
+    try:
+        group = distributed_c10d._get_default_group()
+    except Exception as exc:
+        log.warning("could not read the process group to abort it: %s", exc)
+        return
+    abort = getattr(group, "abort", None)
+    if not callable(abort):
+        return
+    try:
+        abort()
+    except Exception as exc:
+        log.warning("process group abort failed: %s", exc)
+
+
 class TrainingWorkload(Workload):
     """Real PyTorch training loop with selectable DDP / FSDP parallelism.
 
@@ -658,12 +687,22 @@ class TrainingWorkload(Workload):
             },
         )
 
-    def cleanup(self) -> None:
-        import torch.distributed as dist
+    def cleanup(self, *, collective: bool = True) -> None:
+        """Drop local training state.
 
+        The barrier runs only after ``run()`` returns. A rank that is already
+        raising must not enter it: peers may still be inside another collective,
+        and this rank has to exit so the launcher can cancel them. ``abort``,
+        when the backend provides it, is not a collective.
+        """
         self._model = None
         self._optimizer = None
         self._scheduler = None
+        if not collective:
+            _abort_process_group()
+            return
+        import torch.distributed as dist
+
         if dist.is_initialized():
             dist.barrier()
 

@@ -100,7 +100,8 @@ def test_cleanup_error_is_recorded_on_the_result(monkeypatch) -> None:
                 metrics={"world_size": 1, "final_loss": 0.1, "rank": 0},
             )
 
-        def cleanup(self) -> None:
+        def cleanup(self, *, collective: bool = True) -> None:
+            del collective
             raise RuntimeError("barrier failed")
 
     monkeypatch.setattr(
@@ -112,6 +113,70 @@ def test_cleanup_error_is_recorded_on_the_result(monkeypatch) -> None:
     assert isinstance(metrics, dict)
     assert metrics.get("cleanup_error") == "RuntimeError: barrier failed"
     assert data.get("passed") is True
+
+
+def test_failed_rank_does_not_enter_the_cleanup_barrier(monkeypatch) -> None:
+    from aorta.workloads.distributed_launch import run_training_rank
+
+    calls: list[bool] = []
+
+    class _FakeWorkload:
+        def __init__(self, config: dict) -> None:
+            del config
+
+        def setup(self) -> None:
+            return None
+
+        def run(self) -> dict:
+            raise RuntimeError("oom during forward")
+
+        def cleanup(self, *, collective: bool = True) -> None:
+            calls.append(collective)
+
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.TrainingWorkload",
+        _FakeWorkload,
+    )
+    with pytest.raises(RuntimeError, match="oom during forward"):
+        run_training_rank({"steps": 1})
+    assert calls == [False]
+
+
+@requires_torch
+def test_cleanup_barrier_runs_only_after_success(monkeypatch) -> None:
+    import torch.distributed as dist
+    import torch.distributed.distributed_c10d as c10d
+
+    from aorta.workloads.training import TrainingWorkload
+
+    calls: list[str] = []
+
+    class _Group:
+        def abort(self) -> None:
+            calls.append("abort")
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "barrier", lambda: calls.append("barrier"))
+    monkeypatch.setattr(c10d, "_get_default_group", lambda: _Group())
+    workload = TrainingWorkload({})
+    workload.cleanup(collective=False)
+    assert calls == ["abort"]
+    workload.cleanup()
+    assert calls == ["abort", "barrier"]
+
+
+def test_monarch_trainer_class_is_module_scoped() -> None:
+    import ast
+
+    root = Path(__file__).resolve().parents[2]
+    trainer = root / "src" / "aorta" / "workloads" / "monarch_trainer.py"
+    tree = ast.parse(trainer.read_text(encoding="utf-8"))
+    classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+    assert classes == ["Trainer"]
+    launch = (root / "src" / "aorta" / "workloads" / "distributed_launch.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'globals()["Trainer"]' not in launch
 
 
 def test_unknown_launcher_rejected() -> None:
