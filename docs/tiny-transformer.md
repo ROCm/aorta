@@ -30,7 +30,9 @@ Otherwise it uses `LOCAL_RANK`.
 
 A process with `AORTA_INNER=1`, or a torchrun rank (`TORCHELASTIC_RUN_ID`
 plus `RANK` and `WORLD_SIZE`), trains instead of spawning again. `RANK` alone
-does not make the process a worker.
+does not make the process a worker. A controller that inherited `RANK` from
+an earlier shell still saves the trial: the rank-0 write gate does not treat
+that process as a peer.
 
 ## In-process smoke
 
@@ -52,8 +54,11 @@ above rather than `recipes/training/tiny-transformer.yaml`.
 
 The controller runs one `spur srun` of the resolved training config. It does
 not replay the parent `aorta` command. Workers map `SLURM_PROCID` to `RANK`.
-`MASTER_ADDR` is the IPv4 address of the node that will be rank 0, because
-that rank hosts the rendezvous store.
+`LOCAL_RANK` is `SLURM_LOCALID` when Spur sets it, so cyclic placement does
+not point two tasks on the same node at one GPU. `RANK % gpus_per_node` is
+only the fallback when `SLURM_LOCALID` is unset. `MASTER_ADDR` is the IPv4
+address of the node that will be rank 0, because that rank hosts the
+rendezvous store.
 
 Bring the Spur overlay up first. This recipe does not start it and does not
 submit Slurm. Point `workload_config.spur_bin` at the overlay binary. On this

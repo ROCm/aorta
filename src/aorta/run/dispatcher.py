@@ -718,7 +718,18 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             raw_rank,
         )
         rank = 0
-    should_write = rank == 0
+    # A Spur or Monarch controller can inherit RANK from an earlier shell.
+    # It launches the mesh itself, so it is the process that owns the trial
+    # JSON. A real peer rank (torchrun or AORTA_INNER) stays rank-0-only.
+    from aorta.workloads.distributed_launch import spawning_controller
+
+    owns_output = spawning_controller(request.workload, request.config_overrides)
+    if rank != 0 and owns_output:
+        logger.info(
+            "inherited RANK=%s; this process launches workers and will write results",
+            raw_rank,
+        )
+    should_write = rank == 0 or owns_output
     # The operator owns ``--results-dir``; the workload name below it is
     # payload-controlled state left by earlier attempts. Canonicalize only the
     # operator boundary -- folding away the operator's own links above it -- then

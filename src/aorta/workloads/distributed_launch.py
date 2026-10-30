@@ -8,9 +8,11 @@ The spur controller runs one worker, :func:`run_worker_rank`, with the
 already resolved training config. It does not replay the parent ``aorta``
 command: a triage matrix would otherwise train every cell inside each
 launch, and a library caller would otherwise keep only ``steps``. Each
-worker maps ``SLURM_PROCID`` to ``RANK``. ``MASTER_ADDR`` is rank 0's
-IPv4, because that rank hosts the rendezvous store. Rank 0 writes
-``rank0.json`` under ``AORTA_SHARED_DIR``, a path every node can see.
+worker maps ``SLURM_PROCID`` to ``RANK`` and ``SLURM_LOCALID`` to
+``LOCAL_RANK`` (``RANK % gpus`` is only the block-placement fallback).
+``MASTER_ADDR`` is rank 0's IPv4, because that rank hosts the rendezvous
+store. Rank 0 writes ``rank0.json`` under ``AORTA_SHARED_DIR``, a path
+every node can see.
 The controller's verdict passes only when the worker exit code is 0 and
 that rank-0 result passed.
 
@@ -34,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -68,7 +71,20 @@ if [ -z "${SLURM_PROCID:-}" ]; then
 fi
 export RANK="$SLURM_PROCID"
 gpus="${AORTA_GPUS_PER_NODE:?AORTA_GPUS_PER_NODE is required}"
-export LOCAL_RANK=$(( RANK % gpus ))
+# SLURM_LOCALID is this task's index on the node. RANK % gpus matches that
+# only for block placement. Cyclic placement puts global ranks 0 and 2 on
+# one node, and both would select GPU 0.
+if [ -n "${SLURM_LOCALID:-}" ]; then
+  case "$SLURM_LOCALID" in
+    *[!0-9]*)
+      echo "spur worker: SLURM_LOCALID must be an integer, got ${SLURM_LOCALID}" >&2
+      exit 2
+      ;;
+  esac
+  export LOCAL_RANK="$SLURM_LOCALID"
+else
+  export LOCAL_RANK=$(( RANK % gpus ))
+fi
 : "${WORLD_SIZE:?WORLD_SIZE is required}"
 : "${MASTER_ADDR:?MASTER_ADDR is required}"
 : "${AORTA_INNER:?AORTA_INNER is required}"
@@ -160,6 +176,23 @@ def is_launched_rank() -> bool:
     if not os.environ.get("TORCHELASTIC_RUN_ID"):
         return False
     return "RANK" in os.environ and "WORLD_SIZE" in os.environ
+
+
+def spawning_controller(workload: str, *configs: Mapping[str, Any] | None) -> bool:
+    """True when this process launches workers and must keep the trial output.
+
+    A shell can inherit ``RANK`` from an earlier allocation. Spur and Monarch
+    still launch from that process. The dispatcher and the triage runner
+    otherwise treat a nonzero ``RANK`` as a peer and discard the result.
+    An in-process rank, including one under torchrun or ``AORTA_INNER``,
+    stays on the rank-0 write gate.
+    """
+    if workload != "tiny_transformer" or is_launched_rank():
+        return False
+    for config in configs:
+        if isinstance(config, dict) and config.get("launcher") in {"spur", "monarch"}:
+            return True
+    return False
 
 
 def run_training_rank(config: dict[str, Any]) -> dict[str, Any]:
@@ -941,6 +974,7 @@ __all__ = [
     "controller_ipv4",
     "is_ipv4",
     "is_launched_rank",
+    "spawning_controller",
     "launch_monarch",
     "launch_spur",
     "resolve_rank0_ipv4",

@@ -320,6 +320,7 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch, tmp_path) -> None:
     ]
     assert SPUR_WORKER_SCRIPT in argv
     assert 'export RANK="$SLURM_PROCID"' in SPUR_WORKER_SCRIPT
+    assert 'export LOCAL_RANK="$SLURM_LOCALID"' in SPUR_WORKER_SCRIPT
     assert env.get("AORTA_INNER") == "1"
     master = env.get("MASTER_ADDR")
     assert master == "10.190.161.245"
@@ -523,6 +524,66 @@ def test_spur_verdict_requires_exit_code_and_rank0() -> None:
     assert missing.metrics.get("world_size") is None
 
 
+def _spur_worker_local_rank(env: dict[str, str]) -> str:
+    """Run the worker prologue and print the LOCAL_RANK it exports."""
+    cleaned = dict(os.environ)
+    for key in (
+        "RANK",
+        "LOCAL_RANK",
+        "WORLD_SIZE",
+        "MASTER_ADDR",
+        "SLURM_PROCID",
+        "SLURM_LOCALID",
+        "AORTA_INNER",
+        "AORTA_GPUS_PER_NODE",
+    ):
+        cleaned.pop(key, None)
+    cleaned.update(env)
+    proc = subprocess.run(
+        ["bash", "-c", SPUR_WORKER_SCRIPT, "aorta-inner", "bash", "-c", 'printf %s "$LOCAL_RANK"'],
+        env=cleaned,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_spur_local_rank_uses_slurm_localid_under_cyclic_placement() -> None:
+    """Global ranks 0 and 2 share a node under cyclic 2x2; local ids stay distinct."""
+    common = {
+        "WORLD_SIZE": "4",
+        "MASTER_ADDR": "10.0.0.8",
+        "AORTA_INNER": "1",
+        "AORTA_GPUS_PER_NODE": "2",
+    }
+    assert _spur_worker_local_rank({**common, "SLURM_PROCID": "0", "SLURM_LOCALID": "0"}) == "0"
+    assert _spur_worker_local_rank({**common, "SLURM_PROCID": "2", "SLURM_LOCALID": "1"}) == "1"
+    # Block fallback when the scheduler did not publish a local id.
+    assert _spur_worker_local_rank({**common, "SLURM_PROCID": "2"}) == "0"
+
+
+def test_spur_worker_rejects_a_non_numeric_local_id() -> None:
+    proc = subprocess.run(
+        ["bash", "-c", SPUR_WORKER_SCRIPT, "aorta-inner", "true"],
+        env={
+            **os.environ,
+            "SLURM_PROCID": "0",
+            "SLURM_LOCALID": "gpu0",
+            "AORTA_GPUS_PER_NODE": "2",
+            "WORLD_SIZE": "2",
+            "MASTER_ADDR": "10.0.0.8",
+            "AORTA_INNER": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+    assert "SLURM_LOCALID" in proc.stderr
+
+
 def test_monarch_launcher_names_source_build_when_missing(monkeypatch) -> None:
     import builtins
 
@@ -536,6 +597,238 @@ def test_monarch_launcher_names_source_build_when_missing(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", guarded)
     with pytest.raises(RuntimeError, match="pytorch_monarch source build"):
         launch_monarch({"steps": 1}, nodes=2, gpus_per_node=8)
+
+
+def _install_fake_monarch(monkeypatch, train_result):
+    """Replace the Monarch import and the srun child. ``train_result`` is returned or raised."""
+    import types
+
+    stopped: list[object] = []
+    captured: dict[str, object] = {}
+
+    class _Actor:
+        def enable_transport(self, url: str) -> None:
+            captured["transport"] = url
+
+        def attach_to_workers(self, **kwargs: object) -> str:
+            captured["attach"] = kwargs
+            return "hosts"
+
+    def bootstrap(port: int, _auth: object) -> str:
+        return f"boot-{port}"
+
+    trainer_mod = types.ModuleType("aorta.workloads.monarch_trainer")
+    trainer_mod.Trainer = type("Trainer", (), {})  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "aorta.workloads.monarch_trainer", trainer_mod)
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch._import_monarch",
+        lambda: (
+            _Actor(),
+            object(),
+            bootstrap,
+            "SERVICE_PROC_IDS",
+            lambda nodes: [f"id-{index}" for index in range(nodes)],
+            lambda ids: ",".join(ids),
+            lambda addrs, ids: list(zip(addrs, ids, strict=True)),
+        ),
+    )
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch._monarch_hostnames",
+        lambda job_id, nodes: [f"node-{index}" for index in range(nodes)],
+    )
+
+    async def fake_train(hosts, spmd_mod, trainer_cls, gpus_per_node, config):
+        del hosts, spmd_mod, trainer_cls
+        captured["gpus_per_node"] = gpus_per_node
+        captured["config"] = config
+        if isinstance(train_result, Exception):
+            raise train_result
+        return train_result
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch._monarch_train", fake_train)
+
+    class _Proc:
+        pid = None
+        returncode = None
+
+        def poll(self) -> None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+        def send_signal(self, sig: int) -> None:
+            raise AssertionError(f"monarch test signalled a process ({sig})")
+
+    def fake_popen(argv, env=None, **kwargs):
+        captured["argv"] = list(argv)
+        captured["env"] = dict(env or {})
+        captured["start_new_session"] = kwargs.get("start_new_session")
+        return _Proc()
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch._terminate_process_tree",
+        lambda proc, pgid=None: stopped.append(proc),
+    )
+    monkeypatch.setenv("AORTA_CONTROLLER_IP", "10.1.2.3")
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    monkeypatch.setenv("MONARCH_PORT", "22222")
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    return captured, stopped
+
+
+def test_monarch_launch_selects_rank0_and_stops_workers(monkeypatch) -> None:
+    captured, stopped = _install_fake_monarch(
+        monkeypatch,
+        {
+            "later-rank": {
+                "passed": True,
+                "failure_count": 0,
+                "metrics": {"rank": 1, "world_size": 16, "final_loss": 9.0},
+            },
+            "rank-zero": {
+                "passed": True,
+                "failure_count": 0,
+                "metrics": {"rank": 0, "world_size": 16, "final_loss": 1.25},
+            },
+        },
+    )
+    result = launch_monarch(
+        {"steps": 4, "device": "cpu", "launcher": "monarch", "nodes": 2},
+        nodes=2,
+        gpus_per_node=8,
+    )
+    assert result.passed is True
+    assert result.metrics.get("final_loss") == 1.25
+    assert result.metrics.get("world_size") == 16
+    assert result.metrics.get("launcher") == "monarch"
+    argv = captured.get("argv")
+    env = captured.get("env")
+    assert isinstance(argv, list)
+    assert isinstance(env, dict)
+    assert argv[:6] == [
+        "srun",
+        "--jobid",
+        "4242",
+        "--overlap",
+        "-N2",
+        "--ntasks-per-node=1",
+    ]
+    assert "--kill-on-bad-exit=1" in argv
+    assert captured.get("transport") == "tcp://10.1.2.3:0"
+    assert captured.get("gpus_per_node") == 8
+    forwarded = captured.get("config")
+    assert isinstance(forwarded, dict)
+    assert forwarded.get("steps") == 4
+    assert "launcher" not in forwarded
+    assert "RANK" not in env
+    assert "LOCAL_RANK" not in env
+    assert "WORLD_SIZE" not in env
+    assert len(stopped) == 1
+
+
+def test_monarch_launch_failure_stops_workers(monkeypatch) -> None:
+    _captured, stopped = _install_fake_monarch(monkeypatch, RuntimeError("mesh failed"))
+    result = launch_monarch({"steps": 1, "device": "cpu"}, nodes=2, gpus_per_node=8)
+    assert result.passed is False
+    problems: list[object] = []
+    for item in result.failure_details:
+        found = item.get("problems")
+        if isinstance(found, list):
+            problems.extend(found)
+    assert "monarch_launch" in problems
+    assert result.metrics.get("launcher") == "monarch"
+    assert len(stopped) == 1
+
+
+def test_inherited_rank_controller_still_writes_the_trial(tmp_path, monkeypatch) -> None:
+    """RANK inherited from an old shell must not drop the controller's trial JSON."""
+    from unittest.mock import MagicMock, patch
+
+    from aorta.run.dispatcher import RunRequest, run_trials
+    from aorta.workloads._base import WorkloadResult
+
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.delenv("AORTA_INNER", raising=False)
+    monkeypatch.delenv("TORCHELASTIC_RUN_ID", raising=False)
+    monkeypatch.setattr(
+        "aorta.workloads.tiny_transformer.launch_spur",
+        lambda *_args, **_kwargs: WorkloadResult(
+            passed=True,
+            total_iterations=1,
+            elapsed_sec=0.1,
+            metrics={"launcher": "spur", "world_size": 16, "final_loss": 1.0},
+        ),
+    )
+    mock_ep = MagicMock()
+    mock_ep.name = "tiny_transformer"
+    mock_ep.load.return_value = TinyTransformerWorkload
+    mock_eps = MagicMock()
+    mock_eps.select.return_value = [mock_ep]
+    with patch("importlib.metadata.entry_points", return_value=mock_eps):
+        results = run_trials(
+            RunRequest(
+                workload="tiny_transformer",
+                trials=1,
+                results_dir=tmp_path,
+                config_overrides={
+                    "launcher": "spur",
+                    "nodes": 2,
+                    "gpus_per_node": 8,
+                    "device": "cpu",
+                },
+            )
+        )
+    assert len(results) == 1
+    assert results[0].exit_status == "ok"
+    assert list(tmp_path.rglob("trial_*.json"))
+
+
+def test_elastic_peer_rank_does_not_write_the_trial(tmp_path, monkeypatch) -> None:
+    """A real torchrun rank still leaves the trial file to rank 0."""
+    from unittest.mock import MagicMock, patch
+
+    from aorta.run.dispatcher import RunRequest, run_trials
+
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.setenv("TORCHELASTIC_RUN_ID", "elastic-1")
+    monkeypatch.delenv("AORTA_INNER", raising=False)
+    monkeypatch.setattr(
+        "aorta.workloads.tiny_transformer.run_training_rank",
+        lambda _config: {
+            "passed": True,
+            "failure_count": 0,
+            "metrics": {"world_size": 16, "final_loss": 1.0, "rank": 1},
+        },
+    )
+    mock_ep = MagicMock()
+    mock_ep.name = "tiny_transformer"
+    mock_ep.load.return_value = TinyTransformerWorkload
+    mock_eps = MagicMock()
+    mock_eps.select.return_value = [mock_ep]
+    with patch("importlib.metadata.entry_points", return_value=mock_eps):
+        results = run_trials(
+            RunRequest(
+                workload="tiny_transformer",
+                trials=1,
+                results_dir=tmp_path,
+                config_overrides={
+                    "launcher": "spur",
+                    "nodes": 2,
+                    "gpus_per_node": 8,
+                    "device": "cpu",
+                },
+            )
+        )
+    assert len(results) == 1
+    assert not list(tmp_path.rglob("trial_*.json"))
 
 
 def test_single_rank_loss_is_not_a_mismatch() -> None:
