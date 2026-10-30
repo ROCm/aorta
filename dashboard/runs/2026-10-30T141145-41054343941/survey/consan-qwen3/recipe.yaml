@@ -1,0 +1,21 @@
+# Model-kernel survey inventory: Qwen3 (workload survey, non-gating).
+#
+# Same contract as gpt-oss.yaml: every kept (kernel, scenario) pair is launched
+# once and scanned by waitcheck, and one scenario per kernel is dispatched under
+# ConSan. The sources come from the aorta-model-kernels release asset pinned in
+# .github/workflows/sanitizers-nightly.yml.
+schema_version: 1
+model: qwen3
+asset_version: "1"
+specs:
+  - qwen3.json
+roles:
+  - launched
+  - conditional
+expected_pairs: 7
+consan:
+  timeout_seconds: 900
+  exclude:
+    # Runs cleanly without ConSan; under ConSan the C0 launch hangs the GPU
+    # until the case timeout, and a wedged device costs every case after it.
+    _topk_topp_kernel: hangs the GPU under ConSan (runs cleanly without it)

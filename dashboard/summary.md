@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-10-29T141105-40872193672` · commit `b78967101935` · 2026-10-29 14:11:05 UTC
+Run `2026-10-30T141145-41054343941` · commit `b78967101935` · 2026-10-30 14:11:45 UTC
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -58,7 +58,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `sampled_conflict` | race | 1 | [rocjitsu-dbi-hooks] ConSan conflict reader=101958268917808 first_index=7 second_index=12 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 gener… |
+| consan | `sampled_conflict` | race | 1 | [rocjitsu-dbi-hooks] ConSan conflict reader=110266711188896 first_index=3 second_index=8 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 genera… |
 
 </details>
 
@@ -71,7 +71,7 @@ Surveyed 3 workloads (59 kernels) across 6 sanitizer runs — 2 pass · 1 warn �
 | Workload | Kernels | waitcheck | ConSan | Findings | Note |
 |---|--:|---|---|--:|---|
 | gemm | 1 | `warn` | `error` | 32 | combined_hook_timeout |
-| gpt oss | 55 | `pass` | `fail` | 45 | sampled_conflict |
+| gpt oss | 55 | `pass` | `fail` | 50 | sampled_conflict |
 | qwen3 | 3 | `pass` | `not_checked` | 0 | 1 of 2 kernels not checked (1x consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object) |
 
 <details><summary><b>consan-gemm</b> — observed `error`</summary>
@@ -90,24 +90,23 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml`
 
 <details><summary><b>consan-gpt-oss</b> — observed `fail`</summary>
 
-Observation: consan fail; _post_update_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_pos_seq_lens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_prefill_inputs_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _rope_kernel_cached_thd_2c_gqa_onehead_fwd: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _combine_sampled_and_draft_tokens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _compute_slot_mappings_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _gather_block_tables_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _get_num_sampled_and_rejected_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _masked_compaction: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object; 45 finding(s) (sampled_conflict); preflight pass
+Observation: consan fail; _post_update_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_pos_seq_lens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_prefill_inputs_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _rope_kernel_cached_thd_2c_gqa_onehead_fwd: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _combine_sampled_and_draft_tokens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _compute_slot_mappings_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _gather_block_tables_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _get_num_sampled_and_rejected_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _masked_compaction: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object; 50 finding(s) (sampled_conflict); preflight pass
 
-Finding: `[rocjitsu-dbi-hooks] ConSan conflict reader=796437296 first_index=16 second_index=16 first_kind=2 second_kind=2 first_owner=0 second_owner=0 epoch=1 generation…`
+Finding: `[rocjitsu-dbi-hooks] ConSan conflict reader=446518800 first_index=16 second_index=16 first_kind=2 second_kind=2 first_owner=1 second_owner=1 epoch=1 generation…`
 
 Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sanitizers/models/gpt-oss.yaml --out results`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1` | 1 | `pass` | 0 | `dispatched.hsaco` | `8b64fa68f3` | — |
 | `_post_update_kernel` | 1 | `not_checked` | 0 | `dispatched.hsaco` | `d39ae3b1c4` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
 | `_prepare_pos_seq_lens_kernel` | 1 | `not_checked` | 0 | `dispatched.hsaco` | `6eb8b8627f` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
 | `_prepare_prefill_inputs_kernel` | 1 | `not_checked` | 0 | `dispatched.hsaco` | `fa4bd10847` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
 | `_rms_norm_kernel` | 1 | `fail` | 8 | `dispatched.hsaco` | `b6dcdd21dd` | — |
 | `_rope_kernel_cached_thd_2c_gqa_fwd` | 1 | `pass` | 0 | `dispatched.hsaco` | `44472db069` | — |
 | `_rope_kernel_cached_thd_2c_gqa_onehead_fwd` | 1 | `not_checked` | 0 | `dispatched.hsaco` | `d5458dc446` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
-| `_stage2_pow2` | 1 | `fail` | 3 | `dispatched.hsaco` | `e6acd0c33b` | — |
+| `_stage2_pow2` | 1 | `fail` | 5 | `dispatched.hsaco` | `e6acd0c33b` | — |
 | `_swiglu_bf16xbf16_16x128` | 1 | `pass` | 0 | `dispatched.hsaco` | `6860ae4cbc` | — |
-| `_topk_forward` | 1 | `pass` | 0 | `dispatched.hsaco` | `d46a6cefb7` | — |
+| `_topk_forward` | 1 | `fail` | 3 | `dispatched.hsaco` | `d46a6cefb7` | — |
 | `_topk_topp_kernel` | 1 | `fail` | 9 | `dispatched.hsaco` | `b7b68ee37b` | — |
 | `kernel_unified_attention_2d` | 1 | `pass` | 0 | `dispatched.hsaco` | `05e205ab8f` | — |
 | `kernel_unified_attention_3d` | 1 | `pass` | 0 | `dispatched.hsaco` | `6d038c64ca` | — |
@@ -121,6 +120,7 @@ Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sa
 | `_get_num_sampled_and_rejected_kernel` | 1 | `not_checked` | 0 | `dispatched.hsaco` | `cb7a82decf` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
 | `_masked_compaction` | 1 | `not_checked` | 0 | `dispatched.hsaco` | `a3e32aef6c` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
 | `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu` | 1 | `pass` | 0 | `dispatched.hsaco` | `02170daa86` | — |
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1` | 1 | `pass` | 0 | `dispatched.hsaco` | `8b64fa68f3` | — |
 
 </details>
 
@@ -134,8 +134,8 @@ Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sa
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `_compute_slot_mapping_kernel` | 1 | `not_checked` | 0 | `dispatched.hsaco` | `2b4432007a` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
 | `_fwd_kernel` | 1 | `pass` | 0 | `dispatched.hsaco` | `336ef011aa` | — |
+| `_compute_slot_mapping_kernel` | 1 | `not_checked` | 0 | `dispatched.hsaco` | `2b4432007a` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
 
 </details>
 
@@ -237,6 +237,7 @@ Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sa
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-10-30T141145-41054343941 | `b78967101935` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-29T141105-40872193672 | `b78967101935` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-28T140907-40686657660 | `4fb536db06a8` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-27T155149-40503613953 | `4fb536db06a8` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
@@ -266,4 +267,3 @@ Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sa
 | 2026-10-06T141219-37463222089 | `1f59e2040535` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-10-05T163143-37309782694 | `b306c32cf2b8` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-10-05T161430-37207730800 | `77d4fbb48a5d` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | ❌ **Report missing**<br>Observed: `—` | Incomplete |
-| 2026-10-03T153513-37127429854 | `77d4fbb48a5d` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
