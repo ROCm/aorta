@@ -1,0 +1,28 @@
+{
+  "model": "qwen3",
+  "inventory": "qwen3.yaml",
+  "night": "2026-10-31",
+  "budget_seconds": 3600,
+  "case_timeout_seconds": 900,
+  "ran": [
+    {
+      "kernel": "_compute_slot_mapping_kernel",
+      "scenario": "C0",
+      "returncode": 1,
+      "same_object_as_waitcheck": true,
+      "verdict": "not_checked"
+    },
+    {
+      "kernel": "_fwd_kernel",
+      "scenario": "C0",
+      "returncode": 0,
+      "same_object_as_waitcheck": true,
+      "verdict": "pass"
+    }
+  ],
+  "not_scheduled_tonight": [],
+  "excluded": {
+    "_topk_topp_kernel": "hangs the GPU under ConSan (runs cleanly without it)"
+  },
+  "not_launched": {}
+}
