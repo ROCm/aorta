@@ -138,7 +138,7 @@ cia = [
     # resolves dspy 3.4.0. Lift both once the injected client survives that
     # deepcopy; tests/cia/test_tls_trust.py fails under 3.4 until it does.
     "dspy-ai>=2.5,<3.4",
-    "dspy<3.4",
+    "dspy<3.5",
     # The agents read the shared chat profile. tomllib is stdlib from 3.11;
     # tomli keeps the same profile available on supported Python 3.10 rather
     # than silently falling back to environment-only configuration.
