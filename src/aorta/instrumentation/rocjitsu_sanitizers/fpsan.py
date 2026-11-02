@@ -66,6 +66,7 @@ def fpsan_environment(environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def run_fpsan(
+    worklist: KernelWorklist,
     *,
     command: Path,
     target: str,
@@ -73,25 +74,34 @@ def run_fpsan(
     timeout_seconds: float = 900.0,
     execute: ProcessExecutor = run_argv,
 ) -> CheckResult:
-    """Run one recipe FpSan command and judge its ``AORTA_FPSAN_RESULT`` line."""
+    """Run one recipe FpSan command and judge its ``AORTA_FPSAN_RESULT`` line.
+
+    The command, not the worklist, decides which two kernels run; the selected
+    kernels are recorded in ``backend`` so a verdict names what it was run for,
+    and an empty selection is not checked rather than passed.
+    """
 
     policy = support(FPSAN, target)
     if policy["level"] == "none":
         return _not_checked(f"fpsan_target_unsupported: {policy['note']}")
+    if not worklist.kernels:
+        return _not_checked("empty_worklist")
     if not command.is_file():
         return _not_checked("fpsan_command_not_found")
 
+    backend = {
+        "command": str(command),
+        "command_sha256": _sha256_file(command),
+        "result_marker": RESULT_MARKER,
+        "selected_kernels": ", ".join(item.identity.name for item in worklist.kernels),
+        "triton_instrumentation_mode": TRITON_INSTRUMENTATION_MODE,
+    }
     output_dir.mkdir(parents=True, exist_ok=True)
     env = fpsan_environment(os.environ)
     process = execute((str(command),), timeout_seconds=timeout_seconds, env=env)
     (output_dir / "fpsan.log").write_text(f"{process.stdout}\n{process.stderr}", encoding="utf-8")
     check = evaluate_fpsan_output(process, sanitizer=FPSAN, target=target)
-    backend = {
-        "command": str(command),
-        "command_sha256": _sha256_file(command),
-        "result_marker": RESULT_MARKER,
-        "triton_instrumentation_mode": TRITON_INSTRUMENTATION_MODE,
-    }
+    backend.update(check.backend)
     return replace(check, backend=tuple(sorted(backend.items())))
 
 

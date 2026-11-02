@@ -127,13 +127,32 @@ def parse_fpsan_result(stdout: str) -> FpsanResult:
     )
 
 
-def _error(sanitizer: str, reason: str, *, returncode: int | None = None) -> CheckResult:
+def _error(
+    sanitizer: str,
+    reason: str,
+    *,
+    returncode: int | None = None,
+    backend: tuple[tuple[str, str], ...] = (),
+) -> CheckResult:
     return CheckResult(
         sanitizer=sanitizer,
         state=ExecutionState.ERROR,
         verdict=Verdict.ERROR,
         reason=reason,
         returncode=returncode,
+        backend=backend,
+    )
+
+
+def _reported(result: FpsanResult) -> tuple[tuple[str, str], ...]:
+    """What the command reported, kept in the check's backend on every verdict."""
+
+    return (
+        ("candidate_digest", result.candidate_digest),
+        ("candidate_instrumented", str(result.candidate_instrumented).lower()),
+        ("reference_digest", result.reference_digest),
+        ("reference_instrumented", str(result.reference_instrumented).lower()),
+        ("reported_target", result.target or "absent"),
     )
 
 
@@ -151,6 +170,11 @@ def evaluate_fpsan_output(
     Everything else -- a timeout, a launch failure, a non-zero exit, a missing,
     repeated or malformed line, an uninstrumented side, or a line for another
     target -- is ``error``: a harness problem, not evidence about the kernel.
+
+    Process failures are reasoned under ``sanitizer`` (``hip_fpsan_timeout``);
+    result-line failures keep the ``fpsan_`` prefix of the shared contract. Once
+    the line parses, both digests and flags are kept in ``backend``, so a pass
+    records what matched.
     """
 
     if process.timed_out:
@@ -174,6 +198,7 @@ def evaluate_fpsan_output(
         result = parse_fpsan_result(process.stdout)
     except ValueError as exc:
         return _error(sanitizer, str(exc), returncode=process.returncode)
+    reported = _reported(result)
     if not result.instrumented:
         return _error(
             sanitizer,
@@ -182,6 +207,7 @@ def evaluate_fpsan_output(
             f"candidate_instrumented={str(result.candidate_instrumented).lower()}; "
             "both kernels must run under FpSan for their digests to be comparable",
             returncode=process.returncode,
+            backend=reported,
         )
     if result.target is not None and result.target != target:
         return _error(
@@ -189,6 +215,7 @@ def evaluate_fpsan_output(
             f"fpsan_target_mismatch: the command reported target {result.target!r}, "
             f"the recipe requested {target!r}",
             returncode=process.returncode,
+            backend=reported,
         )
     if result.digests_match:
         return CheckResult(
@@ -196,6 +223,7 @@ def evaluate_fpsan_output(
             state=ExecutionState.RAN,
             verdict=Verdict.PASS,
             returncode=process.returncode,
+            backend=reported,
         )
     finding = Finding(
         sanitizer=sanitizer,
@@ -223,4 +251,5 @@ def evaluate_fpsan_output(
         reason=MISMATCH_CODE,
         returncode=process.returncode,
         findings=(finding,),
+        backend=reported,
     )

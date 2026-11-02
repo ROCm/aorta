@@ -33,6 +33,7 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     evaluate_fpsan_output,
     execute_sanitizer_run,
     parse_fpsan_result,
+    pipeline,
     read_report,
     run_fpsan,
     run_sanitizers,
@@ -226,6 +227,10 @@ class TestEvaluate:
 # --------------------------------------------------------------------------- #
 
 
+def _never_run(*_a, **_kw):
+    raise AssertionError("the command must not run")
+
+
 class TestRunFpsan:
     def test_it_runs_the_command_with_fpsan_on_and_keeps_the_log(self, tmp_path):
         command = _script(tmp_path, "match.txt")
@@ -236,6 +241,7 @@ class TestRunFpsan:
             return _process(_fixture("match.txt"))
 
         check = run_fpsan(
+            _worklist(),
             command=command,
             target="gfx950",
             output_dir=tmp_path / "out",
@@ -243,31 +249,79 @@ class TestRunFpsan:
             execute=execute,
         )
         assert check.verdict is Verdict.PASS
-        assert seen["argv"] == (str(command),)
-        assert seen["timeout"] == 12.0
-        assert seen["env"]["TRITON_INSTRUMENTATION_MODE"] == "fpsan"
+        assert seen.get("argv") == (str(command),)
+        assert seen.get("timeout") == 12.0
+        assert (seen.get("env") or {}).get("TRITON_INSTRUMENTATION_MODE") == "fpsan"
         assert "AORTA_FPSAN_RESULT" in (tmp_path / "out" / "fpsan.log").read_text()
         backend = dict(check.backend)
-        assert backend["command"] == str(command)
-        assert len(backend["command_sha256"]) == 64
-        assert backend["result_marker"] == "AORTA_FPSAN_RESULT"
+        assert backend.get("command") == str(command)
+        assert len(backend.get("command_sha256", "")) == 64
+        assert backend.get("result_marker") == "AORTA_FPSAN_RESULT"
+        assert backend.get("selected_kernels") == "matmul_fused"
+
+    def test_a_pass_records_the_digests_that_matched(self, tmp_path):
+        check = run_fpsan(
+            _worklist(),
+            command=_script(tmp_path, "match.txt"),
+            target="gfx950",
+            output_dir=tmp_path / "out",
+            execute=lambda *_a, **_kw: _process(_fixture("match.txt")),
+        )
+        backend = dict(check.backend)
+        assert backend.get("reference_digest") == backend.get("candidate_digest") == DIGEST_A
+        assert backend.get("reference_instrumented") == "true"
+        assert backend.get("reported_target") == "gfx950"
+
+    def test_an_inherited_instrumentation_mode_is_overridden(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRITON_INSTRUMENTATION_MODE", "consan")
+        seen = {}
+
+        def execute(argv, *, timeout_seconds, env=None):
+            seen.update(env=env)
+            return _process(_fixture("match.txt"))
+
+        run_fpsan(
+            _worklist(),
+            command=_script(tmp_path, "match.txt"),
+            target="gfx950",
+            output_dir=tmp_path / "out",
+            execute=execute,
+        )
+        assert (seen.get("env") or {}).get("TRITON_INSTRUMENTATION_MODE") == "fpsan"
 
     def test_a_missing_command_file_is_not_checked(self, tmp_path):
-        check = run_fpsan(command=tmp_path / "absent", target="gfx950", output_dir=tmp_path)
+        check = run_fpsan(
+            _worklist(),
+            command=tmp_path / "absent",
+            target="gfx950",
+            output_dir=tmp_path,
+            execute=_never_run,
+        )
         assert (check.state, check.reason) == (
             ExecutionState.NOT_CHECKED,
             "fpsan_command_not_found",
         )
 
-    def test_an_unsupported_target_is_not_checked_and_nothing_runs(self, tmp_path):
-        def execute(*_a, **_kw):
-            raise AssertionError("must not run on an unsupported target")
-
+    def test_an_empty_worklist_is_not_checked_rather_than_passed(self, tmp_path):
+        empty = KernelWorklist(
+            requirement=SelectionRequirement.TOP_DISPATCH_COUNT, top_n=1, kernels=()
+        )
         check = run_fpsan(
+            empty,
+            command=_script(tmp_path, "match.txt"),
+            target="gfx950",
+            output_dir=tmp_path / "out",
+            execute=_never_run,
+        )
+        assert (check.state, check.reason) == (ExecutionState.NOT_CHECKED, "empty_worklist")
+
+    def test_an_unsupported_target_is_not_checked_and_nothing_runs(self, tmp_path):
+        check = run_fpsan(
+            _worklist("gfx1100"),
             command=_script(tmp_path, "match.txt"),
             target="gfx1100",
             output_dir=tmp_path / "out",
-            execute=execute,
+            execute=_never_run,
         )
         assert check.state is ExecutionState.NOT_CHECKED
         assert check.reason.startswith("fpsan_target_unsupported:")
@@ -290,6 +344,32 @@ def test_support_matrix():
 
 
 class TestPipeline:
+    def test_the_pipeline_threads_its_arguments_to_the_runner(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake(worklist, **kwargs):
+            seen.update(worklist=worklist, **kwargs)
+            return evaluate_fpsan_output(
+                _process(_fixture("mismatch.txt")), sanitizer="fpsan", target="gfx950"
+            )
+
+        monkeypatch.setattr(pipeline, "run_fpsan", fake)
+        worklist = _worklist()
+        report = run_sanitizers(
+            worklist,
+            target="gfx950",
+            sanitizers=("fpsan",),
+            output_dir=tmp_path / "out",
+            fpsan_command=tmp_path / "cmd",
+            timeout_seconds=42.0,
+        )
+        assert report.overall_verdict is Verdict.FAIL
+        assert seen.get("worklist") is worklist
+        assert seen.get("command") == tmp_path / "cmd"
+        assert seen.get("target") == "gfx950"
+        assert seen.get("timeout_seconds") == 42.0
+        assert seen.get("output_dir") == tmp_path / "out" / "fpsan"
+
     def test_fpsan_without_a_command_is_not_checked(self, tmp_path):
         report = run_sanitizers(
             _worklist(), target="gfx950", sanitizers=("fpsan",), output_dir=tmp_path
@@ -466,8 +546,8 @@ class TestClassification:
         artifact = _collect(tmp_path, _report(_FAILED))
         assert artifact.signals == [SIGNAL_FPSAN_MISMATCH]
         (evidence,) = artifact.evidence
-        assert evidence["signal"] == SIGNAL_FPSAN_MISMATCH
-        assert "fpsan_digest_mismatch" in evidence["excerpt"]
+        assert evidence.get("signal") == SIGNAL_FPSAN_MISMATCH
+        assert "fpsan_digest_mismatch" in evidence.get("excerpt", "")
         assert artifact.tooling_gaps == []
 
     def test_a_check_that_did_not_run_is_not_checked_and_names_the_command(self, tmp_path):
@@ -486,9 +566,9 @@ class TestClassification:
         )
         assert artifact.signals == [SIGNAL_NOT_CHECKED]
         (gap,) = artifact.tooling_gaps
-        assert "fpsan_command" in gap["description"]
-        assert "AORTA_FPSAN_RESULT" in gap["description"]
-        assert gap["missing_signal"] == SIGNAL_FPSAN_MISMATCH
+        assert "fpsan_command" in gap.get("description", "")
+        assert "AORTA_FPSAN_RESULT" in gap.get("description", "")
+        assert gap.get("missing_signal") == SIGNAL_FPSAN_MISMATCH
 
     def test_a_harness_error_is_a_gap_not_a_mismatch(self, tmp_path):
         artifact = _collect(

@@ -110,6 +110,7 @@ def run_sanitizers(
             if fpsan_command is not None:
                 results.append(
                     run_fpsan(
+                        worklist,
                         command=fpsan_command,
                         target=target,
                         output_dir=output_dir / "fpsan",
