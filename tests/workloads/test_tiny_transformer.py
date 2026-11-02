@@ -1201,7 +1201,7 @@ def test_subprocess_log_writes_through_the_frozen_root(tmp_path) -> None:
 
 def test_cancel_names_only_the_owned_step(monkeypatch) -> None:
     """``scancel`` gets ``job.step`` for the token, never the allocation id."""
-    from aorta.workloads.distributed_launch import _OwnedStep, _cancel_scheduler_step
+    from aorta.workloads.distributed_launch import _cancel_scheduler_step, _OwnedStep
 
     calls: list[list[str]] = []
 

@@ -675,7 +675,9 @@ def launch_spur(
     """Spawn ``spur srun`` and return rank 0's verdict gated on the exit code.
 
     The worker command is one rank of the resolved config. ``MASTER_ADDR`` is
-    rank 0's IPv4. The result file lives under ``AORTA_SHARED_DIR``.
+    rank 0's IPv4. The result file lives under ``AORTA_SHARED_DIR``. If the
+    local client is abandoned, the owned step is stopped through a cancel
+    file and ``job.step``. The allocation id is never a cancel target.
     """
     raw_port = os.environ.get("AORTA_MASTER_PORT")
     if raw_port is None or raw_port == "":
@@ -805,7 +807,9 @@ def launch_monarch(
     Does not request an allocation. With ``scheduler="slurm"``,
     ``SLURM_JOB_ID`` or ``MONARCH_SLURM_JOB`` names the Slurm allocation. With
     ``scheduler="spur"``, the controller runs inside a Spur allocation and the
-    workers are ``spur srun`` steps of it.
+    workers are ``spur srun`` steps of it. The host mesh is shut down on the
+    training event loop. The step is cancelled only when that shutdown does
+    not finish, and only as ``job.step``.
     """
     imported = _import_monarch()
     actor_mod, spmd_mod, bootstrap, service_env, alloc_ids, serialize_ids, proc_addrs = imported
