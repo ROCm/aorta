@@ -847,7 +847,7 @@ def test_monarch_slurm_rejects_a_spur_job_id(monkeypatch) -> None:
     assert monarch_step_prefix(scheduler="slurm", nodes=2)[:3] == ["srun", "--jobid", "4242"]
 
 
-def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch) -> None:
+def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch, tmp_path) -> None:
     captured, stopped = _install_fake_monarch(
         monkeypatch,
         {"rank0": {"passed": True, "metrics": {"rank": 0, "world_size": 16, "final_loss": 2.0}}},
@@ -860,6 +860,7 @@ def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch) -> None:
 
     monkeypatch.setattr("aorta.workloads.distributed_launch._monarch_hostnames", fake_hostnames)
     monkeypatch.setenv("SPUR_JOB_ID", "17")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
     result = launch_monarch(
         {"steps": 2, "device": "cpu"},
         nodes=2,
@@ -875,6 +876,13 @@ def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch) -> None:
     assert argv[:5] == step
     assert "--jobid" not in argv
     assert "--kill-on-bad-exit=1" not in argv
+    script = next(arg for arg in argv if isinstance(arg, str) and "aorta-owned-step" in arg)
+    assert "AORTA_STEP_CANCEL" in script
+    assert 'exec "$@"' not in script
+    worker_env = captured.get("env")
+    assert isinstance(worker_env, dict)
+    cancel = worker_env.get("AORTA_STEP_CANCEL")
+    assert isinstance(cancel, str) and cancel.endswith("aorta-step-cancel")
     assert len(stopped) == 1
 
 
@@ -1240,11 +1248,72 @@ def test_cancel_names_only_the_owned_step(monkeypatch) -> None:
     assert cancelled == ["4242.3", "17.3"]
 
 
+def test_spur_launch_requests_gpus_unless_the_device_is_cpu(tmp_path) -> None:
+    """A standalone GPU job reserves devices. A CPU job does not."""
+    from aorta.workloads.distributed_launch import build_spur_launch
+
+    common = {
+        "spur_bin": "spur",
+        "nodes": 2,
+        "gpus_per_node": 8,
+        "master_port": 29501,
+        "config_path": tmp_path / "worker_config.json",
+        "results_dir": tmp_path,
+        "step_token": "aorta-1-abcd",
+    }
+    gpu_argv, gpu_env = build_spur_launch(**common, master_addr="", device="auto")
+    assert gpu_argv[gpu_argv.index("--gpus-per-node") + 1] == "8"
+    assert "MASTER_ADDR" not in gpu_env
+    cpu_argv, cpu_env = build_spur_launch(**common, master_addr="10.0.0.8", device="cpu")
+    assert "--gpus-per-node" not in cpu_argv
+    assert cpu_env.get("MASTER_ADDR") == "10.0.0.8"
+
+
+def test_spur_worker_publishes_rank0_address(tmp_path) -> None:
+    """Rank 0 of the training step publishes MASTER_ADDR; another rank reads it."""
+    env = {
+        **os.environ,
+        "SLURM_PROCID": "0",
+        "SLURM_LOCALID": "0",
+        "AORTA_GPUS_PER_NODE": "1",
+        "WORLD_SIZE": "1",
+        "AORTA_INNER": "1",
+        "AORTA_RESULTS_DIR": str(tmp_path),
+    }
+    env.pop("MASTER_ADDR", None)
+    rank0 = subprocess.run(
+        ["bash", "-c", SPUR_WORKER_SCRIPT, "aorta-inner", "bash", "-c", 'printf %s "$MASTER_ADDR"'],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert rank0.returncode == 0
+    published = (tmp_path / "rank0.addr").read_text(encoding="utf-8").strip()
+    assert is_ipv4(published)
+    assert rank0.stdout.strip() == published
+
+    env["SLURM_PROCID"] = "1"
+    env["SLURM_LOCALID"] = "1"
+    rank1 = subprocess.run(
+        ["bash", "-c", SPUR_WORKER_SCRIPT, "aorta-inner", "bash", "-c", 'printf %s "$MASTER_ADDR"'],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert rank1.returncode == 0
+    assert rank1.stdout.strip() == published
+
+
 def test_spur_abandon_cancels_the_step_before_deleting_its_files(monkeypatch, tmp_path) -> None:
-    """Ctrl-C publishes the cancel file, then names the step, before rmtree."""
+    """Ctrl-C publishes the cancel file, then deletes it only after the step is gone."""
     from aorta.workloads import distributed_launch
 
     calls: list[list[str]] = []
+    shows = {"n": 0}
 
     class _Proc:
         def __init__(self) -> None:
@@ -1275,13 +1344,13 @@ def test_spur_abandon_cancels_the_step_before_deleting_its_files(monkeypatch, tm
         command = " ".join(str(part) for part in calls[0])
         token = command.split("# aorta-owned-step ", 1)[1].split()[0]
         if "show" in argv:
-            stdout = f"StepId=17.2 StepName=bash -c # aorta-owned-step {token}\n"
-            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
-        cancel = Path(os.environ["AORTA_SHARED_DIR"])
-        # The work directory is a child of the shared dir. The file has to
-        # exist at cancel time, which is before that directory is removed.
-        found = list(cancel.glob("*/aorta-step-cancel"))
-        assert found and found[0].is_file()
+            shows["n"] += 1
+            found = list(Path(os.environ["AORTA_SHARED_DIR"]).glob("*/aorta-step-cancel"))
+            assert found and found[0].is_file()
+            if shows["n"] == 1:
+                stdout = f"StepId=17.2 StepName=bash -c # aorta-owned-step {token}\n"
+                return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
@@ -1294,7 +1363,57 @@ def test_spur_abandon_cancels_the_step_before_deleting_its_files(monkeypatch, tm
         launch_spur({"steps": 1}, nodes=1, gpus_per_node=1, spur_bin="/opt/spur/bin/spur")
     assert calls[1] == ["/opt/spur/bin/spur", "scontrol", "show", "step", "17"]
     assert calls[2] == ["/opt/spur/bin/spur", "scancel", "--quiet", "17.2"]
+    assert shows["n"] >= 2
     assert not list(tmp_path.glob("*/aorta-step-cancel"))
+
+
+def test_spur_abandon_keeps_the_cancel_file_while_the_step_is_listed(monkeypatch, tmp_path) -> None:
+    """A step that stays listed keeps the marker a late poll can still see."""
+    from aorta.workloads import distributed_launch
+
+    launched: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.pid = None
+            self.returncode: int | None = None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            if self.returncode is None:
+                raise KeyboardInterrupt
+            return self.returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def send_signal(self, sig: int) -> None:
+            self.returncode = -int(sig)
+
+    def fake_popen(argv, env=None, **kwargs):
+        del kwargs
+        launched.append(list(argv))
+        out = Path((env or {})["AORTA_RESULTS_DIR"])
+        (out / "rank0.json").write_text("{}", encoding="utf-8")
+        return _Proc()
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        token = " ".join(launched[0]).split("# aorta-owned-step ", 1)[1].split()[0]
+        if "show" in argv:
+            stdout = f"StepId=17.2 StepName=# aorta-owned-step {token}\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(distributed_launch, "_STEP_GONE_TIMEOUT_SEC", 0)
+    monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(distributed_launch, "_run_scheduler", runner)
+    monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
+    monkeypatch.setenv("AORTA_RANK0_IP", "10.0.0.8")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
+    monkeypatch.setenv("SPUR_JOB_ID", "17")
+    with pytest.raises(KeyboardInterrupt):
+        launch_spur({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert list(tmp_path.glob("*/aorta-step-cancel"))
 
 
 def test_monarch_cancels_its_step_when_mesh_shutdown_fails(monkeypatch) -> None:

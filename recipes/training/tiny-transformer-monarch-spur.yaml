@@ -5,8 +5,9 @@
 # `scheduler: spur` starts the Monarch workers as `spur srun` steps of the
 # Spur allocation this shell is in. Run aorta from the shell that
 # `spur salloc -N2 --gpus-per-node=8 --exclusive` opens, so SPUR_JOB_ID is
-# set. This recipe does not request the allocation. If `spur` is not on PATH,
-# set `spur_bin` to that binary.
+# set. This recipe does not request the allocation. Set `AORTA_SHARED_DIR`
+# to a directory every node can read and write; aorta writes the worker-step
+# cancel file there. If `spur` is not on PATH, set `spur_bin` to that binary.
 #
 #   # validate only (does not spawn):
 #   aorta sweep run --recipe recipes/training/tiny-transformer-monarch-spur.yaml --dry-run

@@ -71,20 +71,20 @@ Run aorta from a machine that can execute the `spur` binary. Set `spur_bin` in t
 export SPUR_CONTROLLER_ADDR=http://<controller IPv4>:6817
 export AORTA_MASTER_PORT=29501
 export AORTA_SHARED_DIR=/path/shared/by/every/node
-export AORTA_RANK0_IP=10.x.x.x    # optional; otherwise aorta asks Spur
+export AORTA_RANK0_IP=10.x.x.x    # optional; otherwise rank 0 of the training step publishes it
 
 aorta sweep run --recipe recipes/training/tiny-transformer-spur.yaml --dry-run
 aorta sweep run --recipe recipes/training/tiny-transformer-spur.yaml
 ```
 
-Aorta starts one `spur srun` of the training job. Each GPU runs that job directly. The workers do not run the `aorta sweep run` command again.
+Aorta starts one `spur srun` of the training job. When `device` is not `cpu`, that command includes `--gpus-per-node` from the recipe, so the job reserves the GPUs instead of leaving them unrequested. `device: cpu` does not request GPUs. Each GPU runs that job directly. The workers do not run the `aorta sweep run` command again. Rank 0 of this same step writes its IPv4 address where the other ranks read it. Aorta does not run a second `spur srun` to look the address up.
 
 | Variable | Required | What to set |
 |---|---|---|
 | `SPUR_CONTROLLER_ADDR` | yes, unless the controller is on `localhost:6817` | Address of the Spur controller. Every `spur` command uses it. |
 | `AORTA_MASTER_PORT` | yes | A free TCP port. The other processes connect to rank 0 on this port. Aorta does not pick a port for you. |
 | `AORTA_SHARED_DIR` | yes | A directory that every node can read and write. Rank 0 writes `rank0.json` there, and the aorta process reads it back. A directory that exists only on one machine, such as that machine's `/tmp`, is not visible to the others. |
-| `AORTA_RANK0_IP` | no | IPv4 address of the machine that will run rank 0. That machine is where the others connect. If you leave this unset, aorta asks Spur for the address. |
+| `AORTA_RANK0_IP` | no | IPv4 address of the machine that will run rank 0. That machine is where the others connect. If you leave this unset, rank 0 of the training step publishes its address and the other ranks of that step read it. |
 | `spur_bin` in the recipe | no | Path to the Spur binary. The default is `spur`. |
 
 If one process fails during training, it exits instead of waiting for the others. Spur then stops the rest of the step, so the remaining processes do not hold the GPUs until a timeout.
@@ -127,6 +127,7 @@ export SPUR_CONTROLLER_ADDR=http://<controller IPv4>:6817
 
 # In the new shell. SPUR_JOB_ID is now set.
 source /shared/path/monarch/monarch-env.sh       # ROCm only
+export AORTA_SHARED_DIR=/path/shared/by/every/node   # cancel file for the worker step
 export AORTA_CONTROLLER_IP=10.x.x.x              # optional, same as above
 
 aorta sweep run --recipe recipes/training/tiny-transformer-monarch-spur.yaml --dry-run
@@ -138,6 +139,7 @@ The recipe sets `scheduler: spur`. Aorta then runs `spur srun -N2 --ntasks=2 --n
 
 - **Run aorta from `spur salloc`, not from `spur sbatch`.** Spur runs a multi-machine batch script on every machine, so `spur sbatch` would start one aorta controller on each machine. `spur salloc` opens one shell on the machine where you run it.
 - **Aorta refuses to start without `SPUR_JOB_ID`.** That variable is how aorta knows it is inside a Spur allocation. It does not request one itself.
+- **Set `AORTA_SHARED_DIR` to a directory every machine can read and write.** Spur cannot cancel one step of the allocation. If the worker step has to be stopped, aorta writes a cancel file there and each worker stops only the process it started. A directory that exists only on one machine, such as that machine's `/tmp`, is not visible to the others.
 - **Use the Slurm recipe inside a Slurm allocation, and this recipe inside a Spur allocation.** Inside a Spur allocation, `SLURM_JOB_ID` is Spur's job id. The Slurm recipe stops with an error there instead of passing that id to Slurm's `srun`.
 - **Worker output appears when the worker step ends.** `spur srun` delivers a step's output at the end. Monarch's own per-machine log is `/tmp/$USER/monarch_log.log`.
 
@@ -147,6 +149,7 @@ To run it without typing in the allocation shell, put the commands in a script a
 cat > run-monarch-spur.sh <<'EOF'
 #!/bin/bash
 source /shared/path/monarch/monarch-env.sh       # ROCm only
+export AORTA_SHARED_DIR=/path/shared/by/every/node
 aorta sweep run --recipe recipes/training/tiny-transformer-monarch-spur.yaml
 EOF
 chmod +x run-monarch-spur.sh

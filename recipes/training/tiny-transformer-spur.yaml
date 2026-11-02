@@ -4,9 +4,11 @@
 # Same model and checks as recipes/training/tiny-transformer.yaml.
 # `launcher: spur` runs one `spur srun -N 2 --ntasks-per-node 8` of the
 # resolved training config. It does not replay this command. Workers map
-# `SLURM_PROCID` to `RANK`. `MASTER_ADDR` is rank 0's IPv4: set
-# `AORTA_RANK0_IP`, or the controller probes it. Set `AORTA_MASTER_PORT` to
-# a free TCP port; the controller does not guess one. Set `AORTA_SHARED_DIR`
+# `SLURM_PROCID` to `RANK`. `MASTER_ADDR` is rank 0 of this step: set
+# `AORTA_RANK0_IP`, or that rank publishes it for the other ranks. A GPU
+# `device` (`auto` or `cuda`) adds `--gpus-per-node`; `device: cpu` does not.
+# Set `AORTA_MASTER_PORT` to a free TCP port; the controller does not guess
+# one. Set `AORTA_SHARED_DIR`
 # to a directory every node can read and write (not node-local `/tmp`);
 # rank 0 writes `rank0.json` there. If `spur` is not on PATH, set
 # `workload_config.spur_bin` to that binary (default `spur`).

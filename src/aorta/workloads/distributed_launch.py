@@ -10,9 +10,10 @@ command: a triage matrix would otherwise train every cell inside each
 launch, and a library caller would otherwise keep only ``steps``. Each
 worker maps ``SLURM_PROCID`` to ``RANK`` and ``SLURM_LOCALID`` to
 ``LOCAL_RANK`` (``RANK % gpus`` is only the block-placement fallback).
-``MASTER_ADDR`` is rank 0's IPv4, because that rank hosts the rendezvous
-store. Rank 0 writes ``rank0.json`` under ``AORTA_SHARED_DIR``, a path
-every node can see.
+``MASTER_ADDR`` is the training step's own rank 0. That rank publishes its
+IPv4 under ``AORTA_SHARED_DIR``; the other ranks of the same step read it.
+``AORTA_RANK0_IP`` overrides the published address. Rank 0 also writes
+``rank0.json`` there, a path every node can see.
 The controller's verdict passes only when the worker exit code is 0 and
 that rank-0 result passed.
 
@@ -91,15 +92,49 @@ else
   export LOCAL_RANK=$(( RANK % gpus ))
 fi
 : "${WORLD_SIZE:?WORLD_SIZE is required}"
-: "${MASTER_ADDR:?MASTER_ADDR is required}"
 : "${AORTA_INNER:?AORTA_INNER is required}"
-# A buffered step keeps running after the local client dies. The controller
-# publishes this file to stop the training process this task started.
+# Rank 0 of this step publishes the address. A separate spur srun would be
+# another allocation, and its rank 0 can be a different host.
+if [ -z "${MASTER_ADDR:-}" ]; then
+  : "${AORTA_RESULTS_DIR:?AORTA_RESULTS_DIR is required to learn the rank 0 address}"
+  _aorta_addr="${AORTA_RESULTS_DIR}/rank0.addr"
+  if [ "$RANK" = "0" ]; then
+    _aorta_ip=$(python3 -c 'import socket; print(socket.gethostbyname(socket.getfqdn()))')
+    case "$_aorta_ip" in
+      *.*.*.*) ;;
+      *)
+        echo "spur worker: rank 0 address ${_aorta_ip} is not IPv4" >&2
+        exit 2
+        ;;
+    esac
+    printf '%s\\n' "$_aorta_ip" > "${_aorta_addr}.tmp"
+    mv "${_aorta_addr}.tmp" "$_aorta_addr"
+  else
+    _aorta_deadline=$((SECONDS + 60))
+    while [ ! -s "$_aorta_addr" ]; do
+      if [ "$SECONDS" -ge "$_aorta_deadline" ]; then
+        echo "spur worker: rank 0 did not publish its address" >&2
+        exit 2
+      fi
+      sleep 0.2
+    done
+  fi
+  MASTER_ADDR=$(cat "$_aorta_addr")
+  export MASTER_ADDR
+fi
+"""
+
+# Background the task and stop it when the controller publishes the cancel
+# file. Spur rejects ``scancel job.step``; this is what ends the remote task.
+_STEP_WATCH = """\
 "$@" &
 _aorta_child=$!
 _aorta_status=0
-if [ -n "${AORTA_RESULTS_DIR:-}" ]; then
+_aorta_cancel=${AORTA_STEP_CANCEL:-}
+if [ -z "$_aorta_cancel" ] && [ -n "${AORTA_RESULTS_DIR:-}" ]; then
   _aorta_cancel="${AORTA_RESULTS_DIR}/aorta-step-cancel"
+fi
+if [ -n "$_aorta_cancel" ]; then
   (
     while [ ! -e "$_aorta_cancel" ]; do
       sleep 0.2
@@ -118,12 +153,16 @@ fi
 exit "$_aorta_status"
 """
 
+SPUR_WORKER_SCRIPT += _STEP_WATCH
+
 # First line of a launched command, so ``scontrol show step`` can see which
 # step this process created. The marker stays inside the 256-byte step name.
 _OWNED_STEP_MARK = "aorta-owned-step"
 _STEP_CANCEL_NAME = "aorta-step-cancel"
 _STEP_TOKEN_RE = re.compile(r"\Aaorta-\d+-[0-9a-f]+\Z")
 _STEP_ID_RE = re.compile(r"StepId=(\d+)\.(\d+)\b")
+_STEP_GONE_TIMEOUT_SEC = 15.0
+_STEP_POLL_SEC = 0.2
 _LOG_TEXT = {"encoding": "utf-8", "errors": "backslashreplace"}
 
 _MONARCH_MISSING = (
@@ -291,57 +330,24 @@ def worker_training_config(config: dict[str, Any]) -> dict[str, Any]:
     return kept
 
 
-def resolve_rank0_ipv4(*, spur_bin: str, nodes: int) -> str:
-    """IPv4 of the worker that will be ``RANK=0``.
-
-    That rank starts the rendezvous store, so ``MASTER_ADDR`` has to be its
-    address. ``AORTA_RANK0_IP`` wins. Otherwise one ``spur srun`` prints each
-    node's address and the controller keeps ``SLURM_PROCID`` 0. The
-    controller's own address is not a substitute: the controller may be on
-    another node.
-    """
+def _explicit_rank0_ipv4() -> str:
+    """``AORTA_RANK0_IP`` when set, else ``""`` so this step's rank 0 publishes it."""
     raw = os.environ.get("AORTA_RANK0_IP", "").strip()
-    if raw:
-        if not is_ipv4(raw):
-            raise RuntimeError(f"AORTA_RANK0_IP must be an IPv4 address, got {raw!r}")
-        return raw
-    script = (
-        "set -euo pipefail\n"
-        "ip=$(python3 -c 'import socket; print(socket.gethostbyname(socket.getfqdn()))')\n"
-        'printf "%s %s\\n" "$SLURM_PROCID" "$ip"\n'
-    )
-    argv = [
-        spur_bin,
-        "srun",
-        "-N",
-        str(nodes),
-        "--ntasks",
-        str(nodes),
-        "--ntasks-per-node",
-        "1",
-        "bash",
-        "-c",
-        script,
-    ]
-    try:
-        out = subprocess.check_output(argv, text=True, stderr=subprocess.STDOUT)
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise RuntimeError(
-            "Could not resolve rank 0's IPv4 via spur srun. Set AORTA_RANK0_IP "
-            "to the IPv4 of the node that runs RANK=0. "
-            f"Probe failed: {exc}"
-        ) from exc
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) != 2 or parts[0] != "0":
-            continue
-        if not is_ipv4(parts[1]):
-            raise RuntimeError(f"Rank 0 address {parts[1]!r} is not IPv4. Set AORTA_RANK0_IP.")
-        return parts[1]
-    raise RuntimeError(
-        "spur srun did not report an IPv4 address for SLURM_PROCID 0. "
-        f"Set AORTA_RANK0_IP. Probe output: {out!r}"
-    )
+    if not raw:
+        return ""
+    if not is_ipv4(raw):
+        raise RuntimeError(f"AORTA_RANK0_IP must be an IPv4 address, got {raw!r}")
+    return raw
+
+
+def _requests_gpus(device: object) -> bool:
+    """Reserve GPUs unless the recipe asked for CPU.
+
+    ``device: auto`` still requests them. Without a GPU request a standalone
+    ``spur srun`` can leave the workers on unreserved devices, and ``auto``
+    then trains on CPU while ``expected_world_size`` still passes.
+    """
+    return device != "cpu"
 
 
 def run_worker_rank(config: dict[str, Any]) -> None:
@@ -376,9 +382,14 @@ def build_spur_launch(
     config_path: Path,
     results_dir: Path,
     step_token: str,
+    device: object = "auto",
 ) -> tuple[list[str], dict[str, str]]:
-    """Argv and env for one ``spur srun`` of :func:`run_worker_rank`."""
-    if not is_ipv4(master_addr):
+    """Argv and env for one ``spur srun`` of :func:`run_worker_rank`.
+
+    An empty ``master_addr`` is left unset so rank 0 of this step publishes
+    it. ``device`` other than ``cpu`` adds ``--gpus-per-node``.
+    """
+    if master_addr and not is_ipv4(master_addr):
         raise ValueError(f"MASTER_ADDR must be an IPv4 address, got {master_addr!r}")
     if not isinstance(master_port, int) or isinstance(master_port, bool):
         raise TypeError(f"master_port must be an int, got {type(master_port).__name__}")
@@ -392,14 +403,20 @@ def build_spur_launch(
         str(gpus_per_node),
         "--ntasks",
         str(nodes * gpus_per_node),
-        "bash",
-        "-c",
-        script,
-        "aorta-inner",
-        sys.executable,
-        "-c",
-        _WORKER_BOOTSTRAP,
     ]
+    if _requests_gpus(device):
+        argv.extend(["--gpus-per-node", str(gpus_per_node)])
+    argv.extend(
+        [
+            "bash",
+            "-c",
+            script,
+            "aorta-inner",
+            sys.executable,
+            "-c",
+            _WORKER_BOOTSTRAP,
+        ]
+    )
     env = _worker_env(
         master_addr=master_addr,
         master_port=master_port,
@@ -505,7 +522,7 @@ def _marked_command(token: str, command: list[str]) -> list[str]:
     return [
         "bash",
         "-c",
-        f"# {_OWNED_STEP_MARK} {token}\nexec \"$@\"",
+        f"# {_OWNED_STEP_MARK} {token}\n{_STEP_WATCH}",
         "aorta-owned",
         *command,
     ]
@@ -625,6 +642,42 @@ def _cancel_scheduler_step(step: _OwnedStep) -> None:
             log.warning("could not cancel scheduler step %s (%s)", target, detail or "no output")
 
 
+def _owned_step_listed(step: _OwnedStep) -> bool | None:
+    """Whether ``scontrol`` still lists this step.
+
+    ``False`` means the listing succeeded and the token is absent. ``None``
+    means the listing could not be read, which is not proof the step ended.
+    """
+    shown = _run_scheduler(_show_step_argv(step))
+    if shown is None or shown.returncode != 0:
+        return None
+    ids = _matching_step_ids(
+        f"{shown.stdout}\n{shown.stderr}",
+        job_id=step.job_id,
+        token=step.token,
+    )
+    return bool(ids)
+
+
+def _wait_owned_step_gone(step: _OwnedStep | None) -> bool:
+    """True once the owned step is no longer listed.
+
+    A missing scheduler or a step that stays listed returns ``False``. The
+    caller then keeps the cancel file, so a worker still between polls can
+    observe it.
+    """
+    if step is None:
+        return False
+    deadline = time.monotonic() + _STEP_GONE_TIMEOUT_SEC
+    while True:
+        listed = _owned_step_listed(step)
+        if listed is False:
+            return True
+        if listed is None or time.monotonic() >= deadline:
+            return False
+        time.sleep(_STEP_POLL_SEC)
+
+
 def _stop_owned_step(step: _OwnedStep | None, cancel_file: Path | None) -> None:
     """Ask the owned step to exit, before its files are deleted.
 
@@ -675,9 +728,11 @@ def launch_spur(
     """Spawn ``spur srun`` and return rank 0's verdict gated on the exit code.
 
     The worker command is one rank of the resolved config. ``MASTER_ADDR`` is
-    rank 0's IPv4. The result file lives under ``AORTA_SHARED_DIR``. If the
-    local client is abandoned, the owned step is stopped through a cancel
-    file and ``job.step``. The allocation id is never a cancel target.
+    this step's rank 0, published into ``AORTA_SHARED_DIR`` unless
+    ``AORTA_RANK0_IP`` is set. If the local client is abandoned, the owned
+    step is stopped through a cancel file and ``job.step``. The shared
+    directory stays until that step is confirmed gone. The allocation id is
+    never a cancel target.
     """
     raw_port = os.environ.get("AORTA_MASTER_PORT")
     if raw_port is None or raw_port == "":
@@ -686,9 +741,9 @@ def launch_spur(
             "An ephemeral port cannot be held until the workers bind it."
         )
     master_port = _tcp_port(raw_port, name="AORTA_MASTER_PORT")
-    master_addr = resolve_rank0_ipv4(spur_bin=spur_bin, nodes=nodes)
+    master_addr = _explicit_rank0_ipv4()
     controller = os.environ.get("AORTA_CONTROLLER_IP", "").strip()
-    if controller and controller != master_addr:
+    if master_addr and controller and controller != master_addr:
         log.info(
             "MASTER_ADDR is rank 0 at %s; AORTA_CONTROLLER_IP %s is the controller",
             master_addr,
@@ -698,6 +753,7 @@ def launch_spur(
     step_token = _new_step_token()
     owned = _owned_step("spur", spur_bin=spur_bin, token=step_token)
     stdout_log, stderr_log = _open_subprocess_logs(config)
+    keep_work = False
     try:
         payload = worker_training_config(config)
         config_path = work / "worker_config.json"
@@ -711,6 +767,7 @@ def launch_spur(
             config_path=config_path,
             results_dir=work,
             step_token=step_token,
+            device=config.get("device", "auto"),
         )
         log.info(
             "spur launch MASTER_ADDR=%s WORLD_SIZE=%s argv=%s",
@@ -734,11 +791,18 @@ def launch_spur(
             raise
         finally:
             # Publish the cancel file and name the step before signalling the
-            # local client. Killing that client does not stop a buffered step,
-            # and the work directory is removed once this function returns.
+            # local client. Killing that client does not stop a buffered step.
+            # The directory stays while the step is still listed, so a worker
+            # between polls still sees the marker.
             try:
                 if proc is not None and _client_abandoned(proc, pgid):
                     _stop_owned_step(owned, work / _STEP_CANCEL_NAME)
+                    if not _wait_owned_step_gone(owned):
+                        keep_work = True
+                        log.warning(
+                            "keeping %s; the owned step was not confirmed stopped",
+                            work,
+                        )
             finally:
                 if proc is not None and _needs_group_cleanup(proc, pgid):
                     _terminate_process_tree(proc, pgid=pgid)
@@ -754,7 +818,8 @@ def launch_spur(
         return result
     finally:
         _close_subprocess_logs(stdout_log, stderr_log)
-        shutil.rmtree(work, ignore_errors=True)
+        if not keep_work:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def monarch_step_prefix(*, scheduler: str, nodes: int, spur_bin: str = "spur") -> list[str]:
@@ -807,9 +872,12 @@ def launch_monarch(
     Does not request an allocation. With ``scheduler="slurm"``,
     ``SLURM_JOB_ID`` or ``MONARCH_SLURM_JOB`` names the Slurm allocation. With
     ``scheduler="spur"``, the controller runs inside a Spur allocation and the
-    workers are ``spur srun`` steps of it. The host mesh is shut down on the
-    training event loop. The step is cancelled only when that shutdown does
-    not finish, and only as ``job.step``.
+    workers are ``spur srun`` steps of it. Those workers watch
+    ``AORTA_STEP_CANCEL`` under ``AORTA_SHARED_DIR``, because Spur rejects
+    ``scancel job.step``. The host mesh is shut down on the training event
+    loop. The step is cancelled only when that shutdown does not finish, and
+    only as ``job.step``. The cancel directory stays until the step is
+    confirmed gone.
     """
     imported = _import_monarch()
     actor_mod, spmd_mod, bootstrap, service_env, alloc_ids, serialize_ids, proc_addrs = imported
@@ -829,6 +897,14 @@ def launch_monarch(
         env.pop(key, None)
     step_token = _new_step_token()
     owned = _owned_step(scheduler, spur_bin=spur_bin, token=step_token)
+    cancel_dir: Path | None = None
+    cancel_file: Path | None = None
+    if scheduler == "spur":
+        # Spur has no step-scoped scancel. The workers watch this file, which
+        # has to live on a directory every node can see.
+        cancel_dir = _shared_workdir()
+        cancel_file = cancel_dir / _STEP_CANCEL_NAME
+        env["AORTA_STEP_CANCEL"] = str(cancel_file)
     worker_cmd = _marked_command(step_token, [sys.executable, "-c", bootstrap(port, None)])
     # Spur parses --kill-on-bad-exit but ignores it: its step supervisor always
     # stops the whole step when one task exits abnormally.
@@ -841,6 +917,7 @@ def launch_monarch(
     # True until a mesh exists and its shutdown does not finish. An interrupt
     # during shutdown leaves this false so the step is still cancelled.
     mesh_ok = True
+    keep_cancel = False
     stdout_log, stderr_log = _open_subprocess_logs(config)
     try:
         workers = subprocess.Popen(
@@ -899,11 +976,19 @@ def launch_monarch(
         # cancels only that step. The allocation is not a cancel target.
         try:
             if not mesh_ok or (hosts is None and workers is not None):
-                _stop_owned_step(owned, None)
+                _stop_owned_step(owned, cancel_file)
+                if cancel_file is not None and not _wait_owned_step_gone(owned):
+                    keep_cancel = True
+                    log.warning(
+                        "keeping %s; the owned step was not confirmed stopped",
+                        cancel_dir,
+                    )
         finally:
             if workers is not None:
                 _terminate_process_tree(workers, pgid=worker_pgid)
             _close_subprocess_logs(stdout_log, stderr_log)
+            if cancel_dir is not None and not keep_cancel:
+                shutil.rmtree(cancel_dir, ignore_errors=True)
 
 
 def verdict_from_workers(
@@ -1019,7 +1104,8 @@ def _worker_env(
     for key in _IDENTITY_ENV:
         env.pop(key, None)
     env["AORTA_INNER"] = "1"
-    env["MASTER_ADDR"] = master_addr
+    if master_addr:
+        env["MASTER_ADDR"] = master_addr
     env["MASTER_PORT"] = str(master_port)
     env["WORLD_SIZE"] = str(world_size)
     env["AORTA_GPUS_PER_NODE"] = str(gpus_per_node)
@@ -1051,7 +1137,7 @@ def _shared_workdir() -> Path:
     raw = os.environ.get("AORTA_SHARED_DIR", "").strip()
     if not raw:
         raise RuntimeError(
-            "launcher 'spur' needs AORTA_SHARED_DIR set to a directory that "
+            "this launch needs AORTA_SHARED_DIR set to a directory that "
             "every node in the allocation can read and write. Rank 0 writes "
             "rank0.json there. Node-local directories such as /tmp are not "
             "visible to a controller on another host."
@@ -1360,7 +1446,6 @@ __all__ = [
     "launch_monarch",
     "launch_spur",
     "monarch_step_prefix",
-    "resolve_rank0_ipv4",
     "run_training_rank",
     "run_worker_rank",
     "verdict_from_workers",
