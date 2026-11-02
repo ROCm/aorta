@@ -126,9 +126,13 @@ fi
 
 # Background the task and stop it when the controller publishes the cancel
 # file. Spur rejects ``scancel job.step``; this is what ends the remote task.
+# ``set -m`` puts the task in its own process group, so a signal reaches the
+# processes it started, not only the first one.
 _STEP_WATCH = """\
+set -m
 "$@" &
 _aorta_child=$!
+set +m
 _aorta_status=0
 _aorta_cancel=${AORTA_STEP_CANCEL:-}
 if [ -z "$_aorta_cancel" ] && [ -n "${AORTA_RESULTS_DIR:-}" ]; then
@@ -139,13 +143,24 @@ if [ -n "$_aorta_cancel" ]; then
     while [ ! -e "$_aorta_cancel" ]; do
       sleep 0.2
     done
-    kill -TERM "$_aorta_child" 2>/dev/null || true
+    kill -TERM -- "-$_aorta_child" 2>/dev/null || true
     sleep 1
-    kill -KILL "$_aorta_child" 2>/dev/null || true
+    kill -KILL -- "-$_aorta_child" 2>/dev/null || true
   ) >/dev/null 2>&1 &
   _aorta_watcher=$!
 fi
 wait "$_aorta_child" || _aorta_status=$?
+# The first process can exit while its children run on. Stop the rest of
+# the group here; the watcher is killed below, before its own SIGKILL.
+if kill -0 -- "-$_aorta_child" 2>/dev/null; then
+  kill -TERM -- "-$_aorta_child" 2>/dev/null || true
+  _aorta_tries=0
+  while [ "$_aorta_tries" -lt 10 ] && kill -0 -- "-$_aorta_child" 2>/dev/null; do
+    sleep 0.2
+    _aorta_tries=$((_aorta_tries + 1))
+  done
+  kill -KILL -- "-$_aorta_child" 2>/dev/null || true
+fi
 if [ -n "${_aorta_watcher:-}" ]; then
   kill "$_aorta_watcher" 2>/dev/null || true
   wait "$_aorta_watcher" 2>/dev/null || true
@@ -155,8 +170,9 @@ exit "$_aorta_status"
 
 SPUR_WORKER_SCRIPT += _STEP_WATCH
 
-# First line of a launched command, so ``scontrol show step`` can see which
-# step this process created. The marker stays inside the 256-byte step name.
+# First line of a launched command, so Spur's ``scontrol show step`` can see
+# which step this process created. The marker stays inside the 256-byte step
+# name. Slurm names a step after its executable, so it gets ``--job-name``.
 _OWNED_STEP_MARK = "aorta-owned-step"
 _STEP_CANCEL_NAME = "aorta-step-cancel"
 _STEP_TOKEN_RE = re.compile(r"\Aaorta-\d+-[0-9a-f]+\Z")
@@ -909,7 +925,10 @@ def launch_monarch(
     # Spur parses --kill-on-bad-exit but ignores it: its step supervisor always
     # stops the whole step when one task exits abnormally.
     kill_flag = ["--kill-on-bad-exit=1"] if scheduler == "slurm" else []
-    argv = [*prefix, *kill_flag, *worker_cmd]
+    # Slurm lists a step as ``Name=<executable>``, which would be ``bash``.
+    # The token has to be the step name for the cancel lookup to find it.
+    name_flag = [f"--job-name={step_token}"] if scheduler == "slurm" else []
+    argv = [*prefix, *kill_flag, *name_flag, *worker_cmd]
     log.info("monarch controller tcp://%s scheduler=%s hosts=%s", ip, scheduler, hostnames)
     hosts: Any = None
     workers: subprocess.Popen[str] | None = None

@@ -6,6 +6,7 @@ collective. The spur case stubs ``Popen``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -758,6 +759,8 @@ def test_monarch_launch_selects_rank0_and_stops_workers(monkeypatch) -> None:
         "--ntasks-per-node=1",
     ]
     assert "--kill-on-bad-exit=1" in argv
+    names = [arg for arg in argv if str(arg).startswith("--job-name=")]
+    assert len(names) == 1 and str(names[0]).startswith("--job-name=aorta-")
     assert captured.get("transport") == "tcp://10.1.2.3:0"
     assert captured.get("gpus_per_node") == 8
     forwarded = captured.get("config")
@@ -876,6 +879,7 @@ def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch, tmp_path) -> None:
     assert argv[:5] == step
     assert "--jobid" not in argv
     assert "--kill-on-bad-exit=1" not in argv
+    assert not any(str(arg).startswith("--job-name=") for arg in argv)
     script = next(arg for arg in argv if isinstance(arg, str) and "aorta-owned-step" in arg)
     assert "AORTA_STEP_CANCEL" in script
     assert 'exec "$@"' not in script
@@ -1216,12 +1220,27 @@ def test_cancel_names_only_the_owned_step(monkeypatch) -> None:
     def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(list(argv))
         job = argv[-1]
+        if "show" in argv and argv[0] == "scontrol":
+            # Slurm's multi-line block. The step name is ``Name=``.
+            stdout = "\n".join(
+                [
+                    f"StepId={job}.3 UserId=1 StartTime=now TimeLimit=UNLIMITED",
+                    "   Nodes=2 CPUs=2 Tasks=2 Name=aorta-9-abcd Network=(null)",
+                    f"StepId={job}.4 UserId=1 StartTime=now TimeLimit=UNLIMITED",
+                    "   Nodes=2 CPUs=2 Tasks=2 Name=bash Network=(null)",
+                    "StepId=99.3 UserId=1 StartTime=now TimeLimit=UNLIMITED",
+                    "   Nodes=1 CPUs=1 Tasks=1 Name=aorta-9-abcd Network=(null)",
+                    f"StepId={job}.batch UserId=1 StartTime=now TimeLimit=UNLIMITED",
+                    "   Nodes=1 CPUs=1 Tasks=1 Name=batch Network=(null)",
+                ]
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
         if "show" in argv:
             stdout = "\n".join(
                 [
-                    f"StepId={job}.3 StepName=# aorta-owned-step aorta-9-abcd",
+                    f"StepId={job}.3 StepName=bash -c # aorta-owned-step aorta-9-abcd",
                     f"StepId={job}.4 StepName=other-step",
-                    "StepId=99.3 StepName=# aorta-owned-step aorta-9-abcd",
+                    "StepId=99.3 StepName=bash -c # aorta-owned-step aorta-9-abcd",
                     f"StepId={job}.batch StepName=allocation",
                 ]
             )
@@ -1427,12 +1446,18 @@ def test_monarch_cancels_its_step_when_mesh_shutdown_fails(monkeypatch) -> None:
 
     def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(list(argv))
-        command = " ".join(str(part) for part in captured["argv"])  # type: ignore[arg-type]
-        token = command.split("# aorta-owned-step ", 1)[1].split()[0]
+        launched = captured.get("argv")
+        assert isinstance(launched, list)
+        names = [arg for arg in launched if str(arg).startswith("--job-name=")]
+        assert len(names) == 1
+        token = str(names[0]).split("=", 1)[1]
         if "show" in argv:
+            # Slurm names the step after ``--job-name``; the probe step is ``bash``.
             stdout = (
-                f"StepId=4242.8 Command=# aorta-owned-step {token}\n"
-                "StepId=4242.1 Command=hostname\n"
+                "StepId=4242.1 UserId=1 StartTime=now TimeLimit=UNLIMITED\n"
+                "   Nodes=1 CPUs=1 Tasks=1 Name=bash Network=(null)\n"
+                "StepId=4242.8 UserId=1 StartTime=now TimeLimit=UNLIMITED\n"
+                f"   Nodes=1 CPUs=1 Tasks=1 Name={token} Network=(null)\n"
             )
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -1471,3 +1496,64 @@ def test_spur_worker_stops_when_the_cancel_file_appears(tmp_path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
+
+
+def _pid_gone(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _run_owned(tmp_path: Path, task: str, *, cancel: bool) -> tuple[int, int]:
+    """Run ``task`` under the owned-step wrapper; return its exit and a descendant pid."""
+    from aorta.workloads.distributed_launch import _marked_command
+
+    cancel_file = tmp_path / "aorta-step-cancel"
+    env = {**os.environ, "AORTA_STEP_CANCEL": str(cancel_file)}
+    env.pop("AORTA_RESULTS_DIR", None)
+    argv = _marked_command("aorta-1-abcd", ["bash", "-c", task])
+    proc = subprocess.Popen(argv, env=env, cwd=tmp_path)
+    pid_file = tmp_path / "descendant.pid"
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.is_file() or not pid_file.read_text(encoding="utf-8").strip():
+            assert time.monotonic() < deadline, "the task never started its descendant"
+            time.sleep(0.05)
+        descendant = int(pid_file.read_text(encoding="utf-8"))
+        if cancel:
+            cancel_file.write_text("1\n", encoding="utf-8")
+        code = proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+    return code, descendant
+
+
+def test_owned_step_cancel_reaches_a_descendant_that_ignores_sigterm(tmp_path) -> None:
+    """The first process exits on SIGTERM; its child ignores it and is still killed."""
+    task = "(trap '' TERM; exec sleep 30) & echo $! > descendant.pid; wait"
+    code, descendant = _run_owned(tmp_path, task, cancel=True)
+    try:
+        assert code != 0
+        assert _pid_gone(descendant, timeout=3)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(descendant, signal.SIGKILL)
+
+
+def test_owned_step_reaps_a_descendant_left_by_a_clean_exit(tmp_path) -> None:
+    """A task that exits 0 while its child runs on does not leave that child behind."""
+    task = "sleep 30 & echo $! > descendant.pid; exit 0"
+    code, descendant = _run_owned(tmp_path, task, cancel=False)
+    try:
+        assert code == 0
+        assert _pid_gone(descendant, timeout=3)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(descendant, signal.SIGKILL)

@@ -139,7 +139,7 @@ The recipe sets `scheduler: spur`. Aorta then runs `spur srun -N2 --ntasks=2 --n
 
 - **Run aorta from `spur salloc`, not from `spur sbatch`.** Spur runs a multi-machine batch script on every machine, so `spur sbatch` would start one aorta controller on each machine. `spur salloc` opens one shell on the machine where you run it.
 - **Aorta refuses to start without `SPUR_JOB_ID`.** That variable is how aorta knows it is inside a Spur allocation. It does not request one itself.
-- **Set `AORTA_SHARED_DIR` to a directory every machine can read and write.** Spur cannot cancel one step of the allocation. If the worker step has to be stopped, aorta writes a cancel file there and each worker stops only the process it started. A directory that exists only on one machine, such as that machine's `/tmp`, is not visible to the others.
+- **Set `AORTA_SHARED_DIR` to a directory every machine can read and write.** Spur cannot cancel one step of the allocation. If the worker step has to be stopped, aorta writes a cancel file there and each worker stops the processes it started, including their child processes. The rest of the allocation is not cancelled. A directory that exists only on one machine, such as that machine's `/tmp`, is not visible to the others.
 - **Use the Slurm recipe inside a Slurm allocation, and this recipe inside a Spur allocation.** Inside a Spur allocation, `SLURM_JOB_ID` is Spur's job id. The Slurm recipe stops with an error there instead of passing that id to Slurm's `srun`.
 - **Worker output appears when the worker step ends.** `spur srun` delivers a step's output at the end. Monarch's own per-machine log is `/tmp/$USER/monarch_log.log`.
 
