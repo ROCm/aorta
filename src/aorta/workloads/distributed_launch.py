@@ -28,9 +28,13 @@ calls :func:`run_training_rank` instead of an inlined model. A missing
 from __future__ import annotations
 
 import asyncio
+import errno
+import inspect
 import json
 import logging
 import os
+import re
+import secrets
 import shutil
 import signal
 import socket
@@ -39,7 +43,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +93,38 @@ fi
 : "${WORLD_SIZE:?WORLD_SIZE is required}"
 : "${MASTER_ADDR:?MASTER_ADDR is required}"
 : "${AORTA_INNER:?AORTA_INNER is required}"
-exec "$@"
+# A buffered step keeps running after the local client dies. The controller
+# publishes this file to stop the training process this task started.
+"$@" &
+_aorta_child=$!
+_aorta_status=0
+if [ -n "${AORTA_RESULTS_DIR:-}" ]; then
+  _aorta_cancel="${AORTA_RESULTS_DIR}/aorta-step-cancel"
+  (
+    while [ ! -e "$_aorta_cancel" ]; do
+      sleep 0.2
+    done
+    kill -TERM "$_aorta_child" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$_aorta_child" 2>/dev/null || true
+  ) >/dev/null 2>&1 &
+  _aorta_watcher=$!
+fi
+wait "$_aorta_child" || _aorta_status=$?
+if [ -n "${_aorta_watcher:-}" ]; then
+  kill "$_aorta_watcher" 2>/dev/null || true
+  wait "$_aorta_watcher" 2>/dev/null || true
+fi
+exit "$_aorta_status"
 """
+
+# First line of a launched command, so ``scontrol show step`` can see which
+# step this process created. The marker stays inside the 256-byte step name.
+_OWNED_STEP_MARK = "aorta-owned-step"
+_STEP_CANCEL_NAME = "aorta-step-cancel"
+_STEP_TOKEN_RE = re.compile(r"\Aaorta-\d+-[0-9a-f]+\Z")
+_STEP_ID_RE = re.compile(r"StepId=(\d+)\.(\d+)\b")
+_LOG_TEXT = {"encoding": "utf-8", "errors": "backslashreplace"}
 
 _MONARCH_MISSING = (
     "Monarch is not installed. launcher 'monarch' needs a pytorch_monarch "
@@ -341,12 +375,14 @@ def build_spur_launch(
     master_port: int,
     config_path: Path,
     results_dir: Path,
+    step_token: str,
 ) -> tuple[list[str], dict[str, str]]:
     """Argv and env for one ``spur srun`` of :func:`run_worker_rank`."""
     if not is_ipv4(master_addr):
         raise ValueError(f"MASTER_ADDR must be an IPv4 address, got {master_addr!r}")
     if not isinstance(master_port, int) or isinstance(master_port, bool):
         raise TypeError(f"master_port must be an int, got {type(master_port).__name__}")
+    script = _marked_worker_script(step_token)
     argv = [
         spur_bin,
         "srun",
@@ -358,7 +394,7 @@ def build_spur_launch(
         str(nodes * gpus_per_node),
         "bash",
         "-c",
-        SPUR_WORKER_SCRIPT,
+        script,
         "aorta-inner",
         sys.executable,
         "-c",
@@ -373,6 +409,33 @@ def build_spur_launch(
     env["AORTA_WORKER_CONFIG"] = str(config_path)
     env["AORTA_RESULTS_DIR"] = str(results_dir)
     return argv, env
+
+
+def _open_subprocess_log(config: Mapping[str, Any], target: Path) -> Any:
+    """Open one sibling log without following a link out of the results root.
+
+    The dispatcher threads ``_aorta_results_root`` and its inode. A plain
+    ``open`` of ``<prefix>.subprocess.stdout.log`` follows a symlink planted
+    at the workload directory or at the filename and truncates whatever it
+    names. Descent from that frozen anchor refuses both, the same way the
+    trial logs do. A caller that did not thread the anchor keeps a plain
+    ``open``; there is no operator boundary to pin.
+    """
+    from aorta.run import _fsafe
+    from aorta.run.collectors import trusted_collector_anchor
+
+    root = config.get("_aorta_results_root")
+    if not _fsafe.HAVE_FD_TRAVERSAL or not isinstance(root, str) or not root:
+        return open(target, "w", **_LOG_TEXT)
+    anchor = trusted_collector_anchor(config, target.parent)
+    components = _fsafe.relative_components(anchor.path, target.parent)
+    if components is None:
+        raise _fsafe.UnsafePathError(
+            errno.EINVAL,
+            f"subprocess log {target} is outside trusted root {anchor.path}",
+        )
+    with _fsafe.open_dir_nofollow(anchor, components) as dir_fd:
+        return _fsafe.open_write_nofollow(dir_fd, target.name, **_LOG_TEXT)
 
 
 def _open_subprocess_logs(config: Mapping[str, Any]) -> tuple[Any, Any]:
@@ -393,14 +456,7 @@ def _open_subprocess_logs(config: Mapping[str, Any]) -> tuple[Any, Any]:
     opened: list[Any] = []
     try:
         for suffix in ("stdout", "stderr"):
-            opened.append(
-                open(
-                    f"{prefix}.subprocess.{suffix}.log",
-                    "w",
-                    encoding="utf-8",
-                    errors="backslashreplace",
-                )
-            )
+            opened.append(_open_subprocess_log(config, Path(f"{prefix}.subprocess.{suffix}.log")))
     except OSError as exc:
         for handle in opened:
             handle.close()
@@ -418,6 +474,195 @@ def _close_subprocess_logs(*handles: Any) -> None:
             handle.close()
         except OSError as exc:
             log.warning("could not close subprocess log: %s", exc)
+
+
+@dataclass(frozen=True)
+class _OwnedStep:
+    """The scheduler step this process created, never the enclosing allocation."""
+
+    scheduler: str
+    job_id: str
+    token: str
+    spur_bin: str
+
+
+def _new_step_token() -> str:
+    """A token that is safe to embed in a shell command and unique to this launch."""
+    return f"aorta-{os.getpid()}-{secrets.token_hex(4)}"
+
+
+def _marked_worker_script(token: str) -> str:
+    """Worker script whose first line names the step this launch owns."""
+    if _STEP_TOKEN_RE.fullmatch(token) is None:
+        raise ValueError(f"step token must match {_STEP_TOKEN_RE.pattern}, got {token!r}")
+    return f"# {_OWNED_STEP_MARK} {token}\n{SPUR_WORKER_SCRIPT}"
+
+
+def _marked_command(token: str, command: list[str]) -> list[str]:
+    """Run ``command`` under a shell line that carries the owned-step token."""
+    if _STEP_TOKEN_RE.fullmatch(token) is None:
+        raise ValueError(f"step token must match {_STEP_TOKEN_RE.pattern}, got {token!r}")
+    return [
+        "bash",
+        "-c",
+        f"# {_OWNED_STEP_MARK} {token}\nexec \"$@\"",
+        "aorta-owned",
+        *command,
+    ]
+
+
+def _numeric_job_id(scheduler: str) -> str | None:
+    """Allocation id for ``scheduler``, or ``None`` when this process has none.
+
+    A Spur step belongs to ``SPUR_JOB_ID``. A Slurm step belongs to
+    ``MONARCH_SLURM_JOB`` or ``SLURM_JOB_ID``. Anything else is refused so a
+    cancel cannot be aimed at a flag or at the wrong allocation.
+    """
+    if scheduler == "spur":
+        raw = os.environ.get("SPUR_JOB_ID", "").strip()
+    else:
+        raw = os.environ.get("MONARCH_SLURM_JOB", "").strip() or os.environ.get(
+            "SLURM_JOB_ID", ""
+        ).strip()
+    if raw.isdigit():
+        return raw
+    return None
+
+
+def _owned_step(scheduler: str, *, spur_bin: str, token: str) -> _OwnedStep | None:
+    job_id = _numeric_job_id(scheduler)
+    if job_id is None:
+        return None
+    return _OwnedStep(scheduler=scheduler, job_id=job_id, token=token, spur_bin=spur_bin)
+
+
+def _matching_step_ids(text: str, *, job_id: str, token: str) -> list[str]:
+    """Step numbers of ``job_id`` whose ``scontrol`` block contains ``token``.
+
+    ``StepId=17.batch`` is not a user step and does not match. A step of
+    another job does not match, even when the token appears beside it.
+    """
+    found: list[str] = []
+    matches = list(_STEP_ID_RE.finditer(text))
+    token_at = re.compile(rf"(?<![A-Za-z0-9-]){re.escape(token)}(?![A-Za-z0-9-])")
+    for index, match in enumerate(matches):
+        if match.group(1) != job_id:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        if token_at.search(text[match.start() : end]) is None:
+            continue
+        found.append(match.group(2))
+    return found
+
+
+def _run_scheduler(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+    """Run one scheduler query. A missing tool or a timeout is logged, not raised."""
+    try:
+        return subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("scheduler command %s failed: %s", argv, exc)
+        return None
+
+
+def _show_step_argv(step: _OwnedStep) -> list[str]:
+    if step.scheduler == "spur":
+        return [step.spur_bin, "scontrol", "show", "step", step.job_id]
+    return ["scontrol", "show", "step", step.job_id]
+
+
+def _scancel_argv(step: _OwnedStep, target: str) -> list[str]:
+    """Cancel ``job.step`` only. A bare job id would cancel the allocation."""
+    if "." not in target or target.split(".", 1)[0] != step.job_id:
+        raise ValueError(f"refusing to cancel {target!r}; expected {step.job_id}.<step>")
+    if step.scheduler == "spur":
+        # Spur's scancel takes whole job ids. ``job.step`` is rejected by its
+        # parser, which is safer than cancelling the allocation. Slurm accepts
+        # the step target and stops only that step.
+        return [step.spur_bin, "scancel", "--quiet", target]
+    return ["scancel", "--quiet", target]
+
+
+def _cancel_scheduler_step(step: _OwnedStep) -> None:
+    """Cancel the step whose command carries ``step.token``.
+
+    The lookup is ``scontrol show step <job>``. Only a block that contains
+    the token is cancelled, so another step of the same allocation is left
+    alone. Spur may reject the step target; the cancel file is what stops
+    those tasks.
+    """
+    shown = _run_scheduler(_show_step_argv(step))
+    if shown is None or shown.returncode != 0:
+        detail = "" if shown is None else (shown.stderr or shown.stdout).strip()
+        log.warning(
+            "could not list steps of job %s (%s); remote tasks may still be running",
+            step.job_id,
+            detail or "no output",
+        )
+        return
+    step_ids = _matching_step_ids(
+        f"{shown.stdout}\n{shown.stderr}",
+        job_id=step.job_id,
+        token=step.token,
+    )
+    if not step_ids:
+        log.warning(
+            "no step of job %s carries %s; remote tasks may still be running",
+            step.job_id,
+            step.token,
+        )
+        return
+    for step_id in step_ids:
+        target = f"{step.job_id}.{step_id}"
+        done = _run_scheduler(_scancel_argv(step, target))
+        if done is None or done.returncode != 0:
+            detail = "" if done is None else (done.stderr or done.stdout).strip()
+            log.warning("could not cancel scheduler step %s (%s)", target, detail or "no output")
+
+
+def _stop_owned_step(step: _OwnedStep | None, cancel_file: Path | None) -> None:
+    """Ask the owned step to exit, before its files are deleted.
+
+    The cancel file is on the shared work directory, which every task of a
+    Spur step polls. ``scancel`` then names the same step. Neither call
+    uses the allocation id alone.
+    """
+    if cancel_file is not None:
+        try:
+            cancel_file.write_text("1\n", encoding="utf-8")
+        except OSError as exc:
+            log.warning("could not publish %s: %s", cancel_file, exc)
+    if step is not None:
+        _cancel_scheduler_step(step)
+
+
+def _client_abandoned(proc: subprocess.Popen[Any], pgid: int | None) -> bool:
+    """True when the local client is gone or dying and the remote step may not be.
+
+    A zero exit means the step finished. A signalled client, or ``spur srun``
+    exiting 130 on Ctrl-C, leaves a buffered step running.
+    """
+    if _needs_group_cleanup(proc, pgid):
+        return True
+    code = proc.returncode
+    return isinstance(code, int) and not isinstance(code, bool) and (code < 0 or code == 130)
+
+
+async def _await_mesh_shutdown(hosts: Any) -> None:
+    """Shut down an owned host mesh. ``KeyboardInterrupt`` propagates.
+
+    Monarch's ``shutdown`` may return a Future or a coroutine. A mesh with
+    no ``shutdown`` raises ``AttributeError``, which the caller treats as a
+    failed teardown and cancels the step instead.
+    """
+    result = hosts.shutdown()
+    if inspect.isawaitable(result):
+        await result
 
 
 def launch_spur(
@@ -448,6 +693,8 @@ def launch_spur(
             controller,
         )
     work = _shared_workdir()
+    step_token = _new_step_token()
+    owned = _owned_step("spur", spur_bin=spur_bin, token=step_token)
     stdout_log, stderr_log = _open_subprocess_logs(config)
     try:
         payload = worker_training_config(config)
@@ -461,6 +708,7 @@ def launch_spur(
             master_port=master_port,
             config_path=config_path,
             results_dir=work,
+            step_token=step_token,
         )
         log.info(
             "spur launch MASTER_ADDR=%s WORLD_SIZE=%s argv=%s",
@@ -483,8 +731,15 @@ def launch_spur(
         except KeyboardInterrupt:
             raise
         finally:
-            if proc is not None and _needs_group_cleanup(proc, pgid):
-                _terminate_process_tree(proc, pgid=pgid)
+            # Publish the cancel file and name the step before signalling the
+            # local client. Killing that client does not stop a buffered step,
+            # and the work directory is removed once this function returns.
+            try:
+                if proc is not None and _client_abandoned(proc, pgid):
+                    _stop_owned_step(owned, work / _STEP_CANCEL_NAME)
+            finally:
+                if proc is not None and _needs_group_cleanup(proc, pgid):
+                    _terminate_process_tree(proc, pgid=pgid)
         exit_code = proc.returncode if proc is not None and isinstance(proc.returncode, int) else 1
         rank0, read_error = _read_rank0_result(work)
         result = verdict_from_workers(exit_code, rank0, launcher="spur")
@@ -568,14 +823,20 @@ def launch_monarch(
     env = {**os.environ, service_env: serialize_ids(proc_ids)}
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"):
         env.pop(key, None)
-    worker_cmd = [sys.executable, "-c", bootstrap(port, None)]
+    step_token = _new_step_token()
+    owned = _owned_step(scheduler, spur_bin=spur_bin, token=step_token)
+    worker_cmd = _marked_command(step_token, [sys.executable, "-c", bootstrap(port, None)])
     # Spur parses --kill-on-bad-exit but ignores it: its step supervisor always
     # stops the whole step when one task exits abnormally.
     kill_flag = ["--kill-on-bad-exit=1"] if scheduler == "slurm" else []
     argv = [*prefix, *kill_flag, *worker_cmd]
     log.info("monarch controller tcp://%s scheduler=%s hosts=%s", ip, scheduler, hostnames)
+    hosts: Any = None
     workers: subprocess.Popen[str] | None = None
     worker_pgid: int | None = None
+    # True until a mesh exists and its shutdown does not finish. An interrupt
+    # during shutdown leaves this false so the step is still cancelled.
+    mesh_ok = True
     stdout_log, stderr_log = _open_subprocess_logs(config)
     try:
         workers = subprocess.Popen(
@@ -592,7 +853,26 @@ def launch_monarch(
             workers=proc_addrs([f"tcp://{host}:{port}" for host in hostnames], proc_ids),
         )
         actor_config = worker_training_config(config)
-        raw = asyncio.run(_monarch_train(hosts, spmd_mod, Trainer, gpus_per_node, actor_config))
+
+        async def _train_and_close() -> Any:
+            nonlocal mesh_ok
+            try:
+                return await _monarch_train(
+                    hosts, spmd_mod, Trainer, gpus_per_node, actor_config
+                )
+            finally:
+                # Same loop as training. A second ``asyncio.run`` would build
+                # a new runtime after Monarch's services were bound to this one.
+                closed = False
+                try:
+                    await _await_mesh_shutdown(hosts)
+                    closed = True
+                except Exception as exc:
+                    log.warning("monarch host mesh shutdown failed: %s", exc)
+                finally:
+                    mesh_ok = closed
+
+        raw = asyncio.run(_train_and_close())
         return _verdict_from_monarch(raw)
     except KeyboardInterrupt:
         raise
@@ -611,9 +891,15 @@ def launch_monarch(
             metrics={"launcher": "monarch", "world_size": None, "final_loss": None},
         )
     finally:
-        if workers is not None:
-            _terminate_process_tree(workers, pgid=worker_pgid)
-        _close_subprocess_logs(stdout_log, stderr_log)
+        # A failed shutdown, or a step that started before the mesh existed,
+        # cancels only that step. The allocation is not a cancel target.
+        try:
+            if not mesh_ok or (hosts is None and workers is not None):
+                _stop_owned_step(owned, None)
+        finally:
+            if workers is not None:
+                _terminate_process_tree(workers, pgid=worker_pgid)
+            _close_subprocess_logs(stdout_log, stderr_log)
 
 
 def verdict_from_workers(

@@ -340,7 +340,8 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch, tmp_path) -> None:
         "8",
     ]
     assert argv[6:8] == ["--ntasks", "16"]
-    assert SPUR_WORKER_SCRIPT in argv
+    script = next(arg for arg in argv if isinstance(arg, str) and SPUR_WORKER_SCRIPT in arg)
+    assert script.startswith("# aorta-owned-step aorta-")
     assert 'export RANK="$SLURM_PROCID"' in SPUR_WORKER_SCRIPT
     assert 'export LOCAL_RANK="$SLURM_LOCALID"' in SPUR_WORKER_SCRIPT
     assert env.get("AORTA_INNER") == "1"
@@ -632,9 +633,19 @@ def _install_fake_monarch(monkeypatch, train_result):
         def enable_transport(self, url: str) -> None:
             captured["transport"] = url
 
-        def attach_to_workers(self, **kwargs: object) -> str:
+        def attach_to_workers(self, **kwargs: object) -> object:
             captured["attach"] = kwargs
-            return "hosts"
+
+            class _Hosts:
+                def shutdown(self) -> object:
+                    captured["shutdowns"] = int(captured.get("shutdowns", 0)) + 1
+
+                    async def _done() -> None:
+                        return None
+
+                    return _done()
+
+            return _Hosts()
 
     def bootstrap(port: int, _auth: object) -> str:
         return f"boot-{port}"
@@ -757,6 +768,7 @@ def test_monarch_launch_selects_rank0_and_stops_workers(monkeypatch) -> None:
     assert "LOCAL_RANK" not in env
     assert "WORLD_SIZE" not in env
     assert len(stopped) == 1
+    assert captured.get("shutdowns") == 1
 
 
 def test_monarch_launch_failure_stops_workers(monkeypatch) -> None:
@@ -943,6 +955,7 @@ def test_launcher_subprocess_logs_are_siblings_of_the_trial_log(monkeypatch, tmp
     assert getattr(monarch_err, "name", None) == str(stderr_path)
     assert getattr(monarch_out, "closed", False) is True
     assert len(stopped) == 1
+    assert captured.get("shutdowns") == 1
 
 
 def test_inherited_rank_controller_still_writes_the_trial(tmp_path, monkeypatch) -> None:
@@ -1109,3 +1122,233 @@ def test_run_records_rank_loss_mismatch(monkeypatch) -> None:
     passed = wl.run()
     assert passed.passed is True
     assert passed.metrics.get("world_size") == 2
+
+
+def test_subprocess_log_refuses_a_symlink_leaf(tmp_path) -> None:
+    """A planted log name must not truncate the file it points at."""
+    from aorta.run._fsafe import TrustedAnchor
+    from aorta.workloads.distributed_launch import _open_subprocess_logs
+
+    root = tmp_path / "results"
+    workload = root / "tiny_transformer"
+    workload.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    prefix = workload / "trial_d0_m0_t0"
+    (workload / "trial_d0_m0_t0.subprocess.stdout.log").symlink_to(outside)
+    anchor = TrustedAnchor.freeze(root)
+    opened = _open_subprocess_logs(
+        {
+            "_aorta_save_logs": True,
+            "_aorta_log_prefix": str(prefix),
+            "_aorta_results_root": str(anchor.path),
+            "_aorta_results_root_id": list(anchor.identity or ()),
+        }
+    )
+    assert opened == (None, None)
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+
+def test_subprocess_log_refuses_a_symlink_directory(tmp_path) -> None:
+    """A workload directory that is a symlink must not receive the child log."""
+    from aorta.run._fsafe import TrustedAnchor
+    from aorta.workloads.distributed_launch import _open_subprocess_logs
+
+    root = tmp_path / "results"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "trial_d0_m0_t0.subprocess.stdout.log"
+    secret.write_text("keep", encoding="utf-8")
+    (root / "tiny_transformer").symlink_to(outside, target_is_directory=True)
+    anchor = TrustedAnchor.freeze(root)
+    opened = _open_subprocess_logs(
+        {
+            "_aorta_save_logs": True,
+            "_aorta_log_prefix": str(root / "tiny_transformer" / "trial_d0_m0_t0"),
+            "_aorta_results_root": str(anchor.path),
+            "_aorta_results_root_id": list(anchor.identity or ()),
+        }
+    )
+    assert opened == (None, None)
+    assert secret.read_text(encoding="utf-8") == "keep"
+
+
+def test_subprocess_log_writes_through_the_frozen_root(tmp_path) -> None:
+    from aorta.run._fsafe import TrustedAnchor
+    from aorta.workloads.distributed_launch import _open_subprocess_logs
+
+    root = tmp_path / "results"
+    workload = root / "tiny_transformer"
+    workload.mkdir(parents=True)
+    prefix = workload / "trial_d0_m0_t0"
+    anchor = TrustedAnchor.freeze(root)
+    stdout, stderr = _open_subprocess_logs(
+        {
+            "_aorta_save_logs": True,
+            "_aorta_log_prefix": str(prefix),
+            "_aorta_results_root": str(anchor.path),
+            "_aorta_results_root_id": list(anchor.identity or ()),
+        }
+    )
+    assert stdout is not None and stderr is not None
+    stdout.write("child\n")
+    stdout.close()
+    stderr.close()
+    written = workload / "trial_d0_m0_t0.subprocess.stdout.log"
+    assert written.read_text(encoding="utf-8") == "child\n"
+
+
+def test_cancel_names_only_the_owned_step(monkeypatch) -> None:
+    """``scancel`` gets ``job.step`` for the token, never the allocation id."""
+    from aorta.workloads.distributed_launch import _OwnedStep, _cancel_scheduler_step
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        job = argv[-1]
+        if "show" in argv:
+            stdout = "\n".join(
+                [
+                    f"StepId={job}.3 StepName=# aorta-owned-step aorta-9-abcd",
+                    f"StepId={job}.4 StepName=other-step",
+                    "StepId=99.3 StepName=# aorta-owned-step aorta-9-abcd",
+                    f"StepId={job}.batch StepName=allocation",
+                ]
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch._run_scheduler", runner)
+    _cancel_scheduler_step(
+        _OwnedStep(scheduler="slurm", job_id="4242", token="aorta-9-abcd", spur_bin="spur")
+    )
+    _cancel_scheduler_step(
+        _OwnedStep(
+            scheduler="spur",
+            job_id="17",
+            token="aorta-9-abcd",
+            spur_bin="/opt/spur/bin/spur",
+        )
+    )
+    assert calls[0] == ["scontrol", "show", "step", "4242"]
+    assert calls[1] == ["scancel", "--quiet", "4242.3"]
+    assert calls[2] == ["/opt/spur/bin/spur", "scontrol", "show", "step", "17"]
+    assert calls[3] == ["/opt/spur/bin/spur", "scancel", "--quiet", "17.3"]
+    cancelled = [argv[-1] for argv in calls if "scancel" in argv]
+    assert cancelled == ["4242.3", "17.3"]
+
+
+def test_spur_abandon_cancels_the_step_before_deleting_its_files(monkeypatch, tmp_path) -> None:
+    """Ctrl-C publishes the cancel file, then names the step, before rmtree."""
+    from aorta.workloads import distributed_launch
+
+    calls: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.pid = None
+            self.returncode: int | None = None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            if self.returncode is None:
+                raise KeyboardInterrupt
+            return self.returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def send_signal(self, sig: int) -> None:
+            self.returncode = -int(sig)
+
+    def fake_popen(argv, env=None, **kwargs):
+        del kwargs
+        calls.append(["popen", *argv])
+        out = Path((env or {})["AORTA_RESULTS_DIR"])
+        (out / "rank0.json").write_text("{}", encoding="utf-8")
+        return _Proc()
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        command = " ".join(str(part) for part in calls[0])
+        token = command.split("# aorta-owned-step ", 1)[1].split()[0]
+        if "show" in argv:
+            stdout = f"StepId=17.2 StepName=bash -c # aorta-owned-step {token}\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        cancel = Path(os.environ["AORTA_SHARED_DIR"])
+        # The work directory is a child of the shared dir. The file has to
+        # exist at cancel time, which is before that directory is removed.
+        found = list(cancel.glob("*/aorta-step-cancel"))
+        assert found and found[0].is_file()
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(distributed_launch, "_run_scheduler", runner)
+    monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
+    monkeypatch.setenv("AORTA_RANK0_IP", "10.0.0.8")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
+    monkeypatch.setenv("SPUR_JOB_ID", "17")
+    with pytest.raises(KeyboardInterrupt):
+        launch_spur({"steps": 1}, nodes=1, gpus_per_node=1, spur_bin="/opt/spur/bin/spur")
+    assert calls[1] == ["/opt/spur/bin/spur", "scontrol", "show", "step", "17"]
+    assert calls[2] == ["/opt/spur/bin/spur", "scancel", "--quiet", "17.2"]
+    assert not list(tmp_path.glob("*/aorta-step-cancel"))
+
+
+def test_monarch_cancels_its_step_when_mesh_shutdown_fails(monkeypatch) -> None:
+    from aorta.workloads import distributed_launch
+
+    captured, _stopped = _install_fake_monarch(
+        monkeypatch,
+        {"rank0": {"passed": True, "metrics": {"rank": 0, "world_size": 2, "final_loss": 1.0}}},
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        command = " ".join(str(part) for part in captured["argv"])  # type: ignore[arg-type]
+        token = command.split("# aorta-owned-step ", 1)[1].split()[0]
+        if "show" in argv:
+            stdout = (
+                f"StepId=4242.8 Command=# aorta-owned-step {token}\n"
+                "StepId=4242.1 Command=hostname\n"
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    async def _shutdown_fails(_hosts: object) -> None:
+        raise RuntimeError("shutdown failed")
+
+    monkeypatch.setattr(distributed_launch, "_await_mesh_shutdown", _shutdown_fails)
+    monkeypatch.setattr(distributed_launch, "_run_scheduler", runner)
+    result = launch_monarch({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=1)
+    assert result.passed is True
+    assert calls[0] == ["scontrol", "show", "step", "4242"]
+    assert calls[1] == ["scancel", "--quiet", "4242.8"]
+    assert [argv[-1] for argv in calls if "scancel" in argv] == ["4242.8"]
+
+
+def test_spur_worker_stops_when_the_cancel_file_appears(tmp_path) -> None:
+    env = {
+        **os.environ,
+        "SLURM_PROCID": "0",
+        "SLURM_LOCALID": "0",
+        "AORTA_GPUS_PER_NODE": "1",
+        "WORLD_SIZE": "1",
+        "MASTER_ADDR": "10.0.0.8",
+        "AORTA_INNER": "1",
+        "AORTA_RESULTS_DIR": str(tmp_path),
+    }
+    proc = subprocess.Popen(
+        ["bash", "-c", SPUR_WORKER_SCRIPT, "aorta-inner", "sleep", "30"],
+        env=env,
+    )
+    try:
+        (tmp_path / "aorta-step-cancel").write_text("1\n", encoding="utf-8")
+        assert proc.wait(timeout=5) != 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
