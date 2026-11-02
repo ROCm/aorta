@@ -1501,6 +1501,24 @@ def test_spur_client_failure_cancels_a_step_that_is_still_listed(monkeypatch, tm
     assert list(tmp_path.glob("*/aorta-step-cancel"))
 
 
+def test_standalone_spur_failure_publishes_the_cancel_file(monkeypatch, tmp_path) -> None:
+    """Without ``SPUR_JOB_ID`` there is no step to look up, so termination is unconfirmed."""
+    from aorta.workloads import distributed_launch
+
+    fake_popen, _launched = _spur_client(1)
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"no step identity, so no scheduler query: {argv}")
+
+    monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(distributed_launch, "_run_scheduler", runner)
+    _spur_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("SPUR_JOB_ID", raising=False)
+    result = launch_spur({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert result.passed is False
+    assert list(tmp_path.glob("*/aorta-step-cancel"))
+
+
 def test_spur_step_failure_that_finished_removes_its_files(monkeypatch, tmp_path) -> None:
     """A nonzero exit whose step is no longer listed is an ordinary failure."""
     from aorta.workloads import distributed_launch

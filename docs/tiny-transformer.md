@@ -83,7 +83,7 @@ Aorta starts one `spur srun` of the training job. When `device` is not `cpu`, th
 |---|---|---|
 | `SPUR_CONTROLLER_ADDR` | yes, unless the controller is on `localhost:6817` | Address of the Spur controller. Every `spur` command uses it. |
 | `AORTA_MASTER_PORT` | yes | A free TCP port. The other processes connect to rank 0 on this port. Aorta does not pick a port for you. |
-| `AORTA_SHARED_DIR` | yes | A directory that every node can read and write. Rank 0 writes `rank0.json` there, and the aorta process reads it back. A directory that exists only on one machine, such as that machine's `/tmp`, is not visible to the others. |
+| `AORTA_SHARED_DIR` | yes | A directory that every node can read and write. Rank 0 writes `rank0.json` there, and the aorta process reads it back. A directory that exists only on one machine, such as that machine's `/tmp`, is not visible to the others. If the `spur srun` command fails and aorta cannot confirm its processes stopped, aorta writes a cancel file and leaves that run's directory in place, so any process still running sees it and exits. Without `SPUR_JOB_ID`, every failed run is in this case. The log names the directory; remove it once nothing from that run is running. |
 | `AORTA_RANK0_IP` | no | IPv4 address of the machine that will run rank 0. That machine is where the others connect. If you leave this unset, rank 0 of the training step publishes its address and the other ranks of that step read it. |
 | `spur_bin` in the recipe | no | Path to the Spur binary. The default is `spur`. |
 

@@ -730,13 +730,16 @@ def _step_may_outlive_client(
     An abandoned client is one case. A nonzero exit is the other: ``spur srun``
     also exits nonzero when it loses the controller, and the buffered step
     keeps running. A step the scheduler no longer lists has finished. A
-    listing that cannot be read counts as still running.
+    listing that cannot be read counts as still running, and so does a
+    standalone launch with no step identity to look up.
     """
     if _client_abandoned(proc, pgid):
         return True
     code = proc.returncode
-    if step is None or not isinstance(code, int) or isinstance(code, bool) or code == 0:
+    if not isinstance(code, int) or isinstance(code, bool) or code == 0:
         return False
+    if step is None:
+        return True
     return _owned_step_listed(step) is not False
 
 
@@ -764,8 +767,9 @@ def launch_spur(
     The worker command is one rank of the resolved config. ``MASTER_ADDR`` is
     this step's rank 0, published into ``AORTA_SHARED_DIR`` unless
     ``AORTA_RANK0_IP`` is set. If the local client is abandoned, or exits
-    nonzero while the scheduler still lists the owned step, that step is
-    stopped through a cancel file and ``job.step``. The shared directory
+    nonzero while the scheduler still lists the owned step or there is no
+    step identity (no ``SPUR_JOB_ID``), the cancel file is published and the
+    step is cancelled as ``job.step`` when it has one. The shared directory
     stays until that step is confirmed gone, including when the wait is
     interrupted. The allocation id is never a cancel target.
     """
@@ -837,7 +841,8 @@ def launch_spur(
                         keep_work = False
                     else:
                         log.warning(
-                            "keeping %s; the owned step was not confirmed stopped",
+                            "keeping %s with its cancel file; the owned step was not "
+                            "confirmed stopped. Remove it once no task of this launch runs.",
                             work,
                         )
             finally:
@@ -1025,7 +1030,8 @@ def launch_monarch(
                         keep_cancel = False
                     else:
                         log.warning(
-                            "keeping %s; the owned step was not confirmed stopped",
+                            "keeping %s with its cancel file; the owned step was not "
+                            "confirmed stopped. Remove it once no task of this launch runs.",
                             cancel_dir,
                         )
         finally:
