@@ -1,6 +1,6 @@
 # Reproduce `waitcheck-gpt-oss`
 
-Sanitizer case `waitcheck-gpt-oss` from run `2026-10-27T135759-40500801889` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. See `index.html` for every file actually published here.
+Sanitizer case `waitcheck-gpt-oss` from run `2026-10-27T135759-40500801889` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. Its logs, recipe copy and inputs were pruned for falling outside the nightly's log-retention window. See `index.html` for every file actually published here.
 
 ## Run
 
@@ -46,4 +46,4 @@ python scripts/sanitizers/model_survey.py run --inventory recipes/sanitizers/mod
 
 ## Files here
 
-See `index.html` for the browsable list. Logs are gzipped; `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
+See `index.html` for the browsable list. `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
