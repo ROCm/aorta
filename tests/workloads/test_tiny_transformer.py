@@ -307,7 +307,7 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.Popen", fake_popen)
     monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
-    monkeypatch.setenv("AORTA_RANK0_IP", "10.190.161.245")
+    monkeypatch.setenv("AORTA_RANK0_IP", "10.0.0.7")
     monkeypatch.setenv("AORTA_CONTROLLER_IP", "10.0.0.9")
     monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
     result = launch_spur(
@@ -347,7 +347,7 @@ def test_spur_launch_sets_inner_rank_and_ipv4(monkeypatch, tmp_path) -> None:
     assert 'export LOCAL_RANK="$SLURM_LOCALID"' in SPUR_WORKER_SCRIPT
     assert env.get("AORTA_INNER") == "1"
     master = env.get("MASTER_ADDR")
-    assert master == "10.190.161.245"
+    assert master == "10.0.0.7"
     assert is_ipv4(master)
     assert env.get("WORLD_SIZE") == "16"
     assert env.get("MASTER_PORT") == "29501"
@@ -667,8 +667,8 @@ def _install_fake_monarch(monkeypatch, train_result):
         ),
     )
     monkeypatch.setattr(
-        "aorta.workloads.distributed_launch._monarch_hostnames",
-        lambda job_id, nodes: [f"node-{index}" for index in range(nodes)],
+        "aorta.workloads.distributed_launch._monarch_nodes",
+        lambda job_id, nodes: [(f"n{index}", f"node-{index}") for index in range(nodes)],
     )
 
     async def fake_train(hosts, spmd_mod, trainer_cls, gpus_per_node, config):
@@ -761,6 +761,7 @@ def test_monarch_launch_selects_rank0_and_stops_workers(monkeypatch) -> None:
     assert "--kill-on-bad-exit=1" in argv
     names = [arg for arg in argv if str(arg).startswith("--job-name=")]
     assert len(names) == 1 and str(names[0]).startswith("--job-name=aorta-")
+    assert argv[argv.index("-w") + 1] == "n0,n1"
     assert captured.get("transport") == "tcp://10.1.2.3:0"
     assert captured.get("gpus_per_node") == 8
     forwarded = captured.get("config")
@@ -789,14 +790,14 @@ def test_monarch_launch_failure_stops_workers(monkeypatch) -> None:
 
 
 def test_monarch_srun_requests_one_task_per_node(monkeypatch) -> None:
-    from aorta.workloads.distributed_launch import _monarch_hostnames, monarch_step_prefix
+    from aorta.workloads.distributed_launch import _monarch_nodes, monarch_step_prefix
 
     seen: dict[str, list[str]] = {}
 
     def fake_check_output(argv, text=True):
         del text
         seen["argv"] = list(argv)
-        return "0 node-a\n1 node-b\n"
+        return "1 nb node-b\n0 na node-a\n"
 
     monkeypatch.setattr(
         "aorta.workloads.distributed_launch.subprocess.check_output",
@@ -806,11 +807,29 @@ def test_monarch_srun_requests_one_task_per_node(monkeypatch) -> None:
     monkeypatch.delenv("MONARCH_SLURM_JOB", raising=False)
     monkeypatch.delenv("SPUR_JOB_ID", raising=False)
     prefix = monarch_step_prefix(scheduler="slurm", nodes=2)
-    assert _monarch_hostnames(prefix, 2) == ["node-a", "node-b"]
+    assert _monarch_nodes(prefix, 2) == [("na", "node-a"), ("nb", "node-b")]
     argv = seen["argv"]
     assert argv[:4] == ["srun", "--jobid", "99", "--overlap"]
     assert "--ntasks=2" in argv
     assert "--ntasks-per-node=1" in argv
+
+
+def test_monarch_probe_refuses_a_node_without_a_scheduler_name(monkeypatch) -> None:
+    """Without ``SLURMD_NODENAME`` the worker step cannot be pinned, so the probe fails."""
+    from aorta.workloads.distributed_launch import _monarch_nodes
+
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.subprocess.check_output",
+        lambda argv, text=True: "0 na node-a\n1 node-b\n",
+    )
+    with pytest.raises(RuntimeError, match="SLURMD_NODENAME"):
+        _monarch_nodes(["srun"], 2)
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.subprocess.check_output",
+        lambda argv, text=True: "0 na node-a\n1 na node-a\n",
+    )
+    with pytest.raises(RuntimeError, match="distinct"):
+        _monarch_nodes(["srun"], 2)
 
 
 def test_monarch_spur_prefix_is_a_step_of_the_spur_allocation(monkeypatch) -> None:
@@ -857,11 +876,11 @@ def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch, tmp_path) -> None:
     )
     seen: dict[str, list[str]] = {}
 
-    def fake_hostnames(prefix, nodes):
+    def fake_nodes(prefix, nodes):
         seen["prefix"] = list(prefix)
-        return [f"node-{index}" for index in range(nodes)]
+        return [(f"n{index}", f"node-{index}") for index in range(nodes)]
 
-    monkeypatch.setattr("aorta.workloads.distributed_launch._monarch_hostnames", fake_hostnames)
+    monkeypatch.setattr("aorta.workloads.distributed_launch._monarch_nodes", fake_nodes)
     monkeypatch.setenv("SPUR_JOB_ID", "17")
     monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
     result = launch_monarch(
@@ -877,6 +896,7 @@ def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch, tmp_path) -> None:
     argv = captured.get("argv")
     assert isinstance(argv, list)
     assert argv[:5] == step
+    assert argv[argv.index("-w") + 1] == "n0,n1"
     assert "--jobid" not in argv
     assert "--kill-on-bad-exit=1" not in argv
     assert not any(str(arg).startswith("--job-name=") for arg in argv)
@@ -1435,8 +1455,11 @@ def test_spur_abandon_keeps_the_cancel_file_while_the_step_is_listed(monkeypatch
     assert list(tmp_path.glob("*/aorta-step-cancel"))
 
 
-def _spur_client(returncode: int | None):
-    """Fake ``spur srun`` client: exits with ``returncode``, or Ctrl-C when ``None``."""
+def _spur_client(returncode: int | None, rank0: str | None = "{}"):
+    """Fake ``spur srun`` client: exits with ``returncode``, or Ctrl-C when ``None``.
+
+    ``rank0`` is what rank 0 publishes; ``None`` publishes nothing.
+    """
 
     class _Proc:
         def __init__(self) -> None:
@@ -1462,11 +1485,47 @@ def _spur_client(returncode: int | None):
     def fake_popen(argv, env=None, **kwargs):
         del kwargs
         launched.append(list(argv))
-        out = Path((env or {})["AORTA_RESULTS_DIR"])
-        (out / "rank0.json").write_text("{}", encoding="utf-8")
+        if rank0 is not None:
+            out = Path((env or {})["AORTA_RESULTS_DIR"])
+            (out / "rank0.json").write_text(rank0, encoding="utf-8")
         return _Proc()
 
     return fake_popen, launched
+
+
+def _problems(result: object) -> list[object]:
+    found: list[object] = []
+    for item in getattr(result, "failure_details", []):
+        listed = item.get("problems") if isinstance(item, dict) else None
+        if isinstance(listed, list):
+            found.extend(listed)
+    return found
+
+
+def test_spur_clean_exit_without_rank0_result_fails(monkeypatch, tmp_path) -> None:
+    """Exit 0 is not a pass when rank 0 published nothing."""
+    from aorta.workloads import distributed_launch
+
+    fake_popen, _launched = _spur_client(0, rank0=None)
+    monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
+    _spur_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("SPUR_JOB_ID", raising=False)
+    result = launch_spur({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert result.passed is False
+    assert "missing_rank0_result" in _problems(result)
+
+
+def test_spur_rank0_passed_must_be_a_real_bool(monkeypatch, tmp_path) -> None:
+    """``"passed": "false"`` is a string, not a pass."""
+    from aorta.workloads import distributed_launch
+
+    payload = json.dumps({"result": {"passed": "false", "failure_count": 0, "metrics": {}}})
+    fake_popen, _launched = _spur_client(0, rank0=payload)
+    monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
+    _spur_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("SPUR_JOB_ID", raising=False)
+    result = launch_spur({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert result.passed is False
 
 
 def _spur_env(monkeypatch, tmp_path) -> None:
@@ -1584,8 +1643,8 @@ def test_second_interrupt_during_monarch_cancel_keeps_the_file(monkeypatch, tmp_
     )
     monkeypatch.setattr(distributed_launch, "_wait_owned_step_gone", interrupted)
     monkeypatch.setattr(
-        "aorta.workloads.distributed_launch._monarch_hostnames",
-        lambda _prefix, nodes: [f"node-{index}" for index in range(nodes)],
+        "aorta.workloads.distributed_launch._monarch_nodes",
+        lambda _prefix, nodes: [(f"n{index}", f"node-{index}") for index in range(nodes)],
     )
     monkeypatch.setenv("SPUR_JOB_ID", "17")
     monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
@@ -1710,6 +1769,57 @@ def test_owned_step_cancel_reaches_a_descendant_that_ignores_sigterm(tmp_path) -
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(descendant, signal.SIGKILL)
+
+
+@pytest.mark.parametrize(("sig", "code"), [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
+def test_owned_step_passes_a_group_signal_to_the_task(tmp_path, sig, code) -> None:
+    """A signal to the wrapper's group (Spur without cgroups) reaches the task's own group."""
+    from aorta.workloads.distributed_launch import _marked_command
+
+    env = {**os.environ, "AORTA_STEP_CANCEL": str(tmp_path / "aorta-step-cancel")}
+    env.pop("AORTA_RESULTS_DIR", None)
+    task = "echo $$ > descendant.pid; exec sleep 300"
+    proc = subprocess.Popen(
+        _marked_command("aorta-1-abcd", ["bash", "-c", task]),
+        env=env,
+        cwd=tmp_path,
+        start_new_session=True,
+    )
+    pid_file = tmp_path / "descendant.pid"
+    descendant = 0
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.is_file() or not pid_file.read_text(encoding="utf-8").strip():
+            assert time.monotonic() < deadline, "the task never started"
+            time.sleep(0.05)
+        descendant = int(pid_file.read_text(encoding="utf-8"))
+        assert os.getpgid(descendant) != proc.pid
+        os.killpg(proc.pid, sig)
+        assert proc.wait(timeout=10) == code
+        assert _pid_gone(descendant, timeout=3)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        if descendant:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(descendant, signal.SIGKILL)
+
+
+def test_owned_step_keeps_the_task_exit_code(tmp_path) -> None:
+    from aorta.workloads.distributed_launch import _marked_command
+
+    env = {**os.environ}
+    env.pop("AORTA_RESULTS_DIR", None)
+    env.pop("AORTA_STEP_CANCEL", None)
+    proc = subprocess.run(
+        _marked_command("aorta-1-abcd", ["bash", "-c", "exit 7"]),
+        env=env,
+        cwd=tmp_path,
+        timeout=10,
+        check=False,
+    )
+    assert proc.returncode == 7
 
 
 def test_owned_step_reaps_a_descendant_left_by_a_clean_exit(tmp_path) -> None:

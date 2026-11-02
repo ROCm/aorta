@@ -127,12 +127,16 @@ fi
 # Background the task and stop it when the controller publishes the cancel
 # file. Spur rejects ``scancel job.step``; this is what ends the remote task.
 # ``set -m`` puts the task in its own process group, so a signal reaches the
-# processes it started, not only the first one.
+# processes it started, not only the first one. That group is not the one
+# the scheduler signals: without cgroups, Spur's step supervisor signals the
+# wrapper's group only. The trap passes TERM, INT, and HUP on to the task's
+# group; the reap below escalates to SIGKILL.
 _STEP_WATCH = """\
 set -m
 "$@" &
 _aorta_child=$!
 set +m
+trap 'kill -TERM -- "-$_aorta_child" 2>/dev/null || true' TERM INT HUP
 _aorta_status=0
 _aorta_cancel=${AORTA_STEP_CANCEL:-}
 if [ -z "$_aorta_cancel" ] && [ -n "${AORTA_RESULTS_DIR:-}" ]; then
@@ -932,7 +936,8 @@ def launch_monarch(
     ip = controller_ipv4()
     actor_mod.enable_transport(f"tcp://{ip}:0")
     port = _tcp_port(os.environ.get("MONARCH_PORT", "22222"), name="MONARCH_PORT")
-    hostnames = _monarch_hostnames(prefix, nodes)
+    placed = _monarch_nodes(prefix, nodes)
+    hostnames = [host for _node, host in placed]
     proc_ids = alloc_ids(nodes)
     env = {**os.environ, service_env: serialize_ids(proc_ids)}
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"):
@@ -948,13 +953,15 @@ def launch_monarch(
         cancel_file = cancel_dir / _STEP_CANCEL_NAME
         env["AORTA_STEP_CANCEL"] = str(cancel_file)
     worker_cmd = _marked_command(step_token, [sys.executable, "-c", bootstrap(port, None)])
-    # Spur parses --kill-on-bad-exit but ignores it: its step supervisor always
-    # stops the whole step when one task exits abnormally.
+    # Spur parses --kill-on-bad-exit but does not implement it.
     kill_flag = ["--kill-on-bad-exit=1"] if scheduler == "slurm" else []
     # Slurm lists a step as ``Name=<executable>``, which would be ``bash``.
     # The token has to be the step name for the cancel lookup to find it.
     name_flag = [f"--job-name={step_token}"] if scheduler == "slurm" else []
-    argv = [*prefix, *kill_flag, *name_flag, *worker_cmd]
+    # The probe is its own step. In an allocation larger than ``nodes`` the
+    # worker step could land elsewhere, so it is pinned to the probed nodes.
+    node_flag = ["-w", ",".join(node for node, _host in placed)]
+    argv = [*prefix, *kill_flag, *name_flag, *node_flag, *worker_cmd]
     log.info("monarch controller tcp://%s scheduler=%s hosts=%s", ip, scheduler, hostnames)
     hosts: Any = None
     workers: subprocess.Popen[str] | None = None
@@ -1323,29 +1330,37 @@ def _rank_rows(raw: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _monarch_hostnames(prefix: list[str], nodes: int) -> list[str]:
-    """Ask each node for the hostname Monarch workers advertise.
+def _monarch_nodes(prefix: list[str], nodes: int) -> list[tuple[str, str]]:
+    """Scheduler node name and advertised hostname of each probed node.
 
     ``prefix`` comes from :func:`monarch_step_prefix`. Order follows
-    ``SLURM_NODEID``, which Spur also sets. This runs a step of the current
+    ``SLURM_NODEID``, which Spur also sets. The node name is
+    ``SLURMD_NODENAME``, which both schedulers set per task, so the worker
+    step can be pinned with ``-w``. This runs a step of the current
     allocation; it does not request a new one.
     """
-    script = 'echo "$SLURM_NODEID $(python3 -c "import socket; print(socket.gethostname())")"'
+    script = (
+        'echo "$SLURM_NODEID ${SLURMD_NODENAME:-} '
+        '$(python3 -c "import socket; print(socket.gethostname())")"'
+    )
     argv = [*prefix, "bash", "-c", script]
     try:
         out = subprocess.check_output(argv, text=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(f"Could not list hostnames with {' '.join(prefix)}: {exc}") from exc
-    pairs: list[tuple[int, str]] = []
+    rows: list[tuple[int, str, str]] = []
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) != 2 or not parts[0].isdigit():
+        if len(parts) != 3 or not parts[0].isdigit() or "," in parts[1]:
             continue
-        pairs.append((int(parts[0]), parts[1]))
-    pairs.sort()
-    if len(pairs) != nodes:
-        raise RuntimeError(f"srun returned {len(pairs)} hostnames for {nodes} nodes: {out!r}")
-    return [host for _, host in pairs]
+        rows.append((int(parts[0]), parts[1], parts[2]))
+    rows.sort()
+    if len(rows) != nodes or len({node for _, node, _ in rows}) != nodes:
+        raise RuntimeError(
+            f"srun returned {len(rows)} distinct nodes with SLURMD_NODENAME for "
+            f"{nodes} nodes: {out!r}"
+        )
+    return [(node, host) for _, node, host in rows]
 
 
 def _session_pgid(proc: subprocess.Popen[Any]) -> int | None:

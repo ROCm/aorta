@@ -1216,7 +1216,12 @@ def test_nonzero_rank_does_not_collide_with_rank_zero(
 def test_inherited_rank_controller_keeps_the_matrix(
     tmp_path, patched_env, patched_run_trials, monkeypatch
 ):
-    """A Spur controller that inherited RANK=1 writes the real matrix, not scratch."""
+    """A Spur controller that inherited RANK=1 writes the real matrix, not scratch.
+
+    ``launcher`` is set only on the recipe, the way the shipped multi-rank
+    recipes set it. A cell-level copy would hide a check that ignored the
+    recipe-level config.
+    """
     from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
 
     monkeypatch.setenv("RANK", "1")
@@ -1228,17 +1233,10 @@ def test_inherited_rank_controller_keeps_the_matrix(
         workload="tiny_transformer",
         trials=1,
         steps=5,
-        cells=(
-            Cell(
-                name="a",
-                mitigations=("none",),
-                environment="local",
-                workload_config={"launcher": "spur", "nodes": 2, "gpus_per_node": 8},
-            ),
-        ),
+        cells=(Cell(name="a", mitigations=("none",), environment="local"),),
         ticket="CTRL-1",
         confound=ConfoundCfg(baseline_cell="a"),
-        workload_config={"launcher": "spur"},
+        workload_config={"launcher": "spur", "nodes": 2, "gpus_per_node": 8},
     )
     run_dir = runner.run_recipe(
         recipe, output_dir=tmp_path, timestamp="2026-01-01T00-00-00"

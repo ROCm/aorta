@@ -368,3 +368,83 @@ def test_stubbed_multi_rank_run(monkeypatch) -> None:
     assert result.metrics["world_size"] == 2
     assert result.metrics["rank"] == 1
     assert result.total_iterations == 2
+
+
+_GLOO_RANK = """\
+import json
+import sys
+
+from aorta.workloads.distributed_launch import run_training_rank
+
+print("AORTA_RESULT " + json.dumps(run_training_rank(json.loads(sys.argv[1]))))
+"""
+
+
+@requires_torch
+def test_two_gloo_ranks_agree_when_the_loss_check_is_on() -> None:
+    """A healthy 2-rank run passes ``fail_on_rank_loss_mismatch``.
+
+    The check compares final losses, so both ranks must see the same batches.
+    A per-rank batch seed makes this run fail with ``rank_loss_mismatch``.
+    """
+    import json
+    import os
+    import socket
+    import subprocess
+    import sys
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    config = {
+        "parallelism": "ddp",
+        "device": "cpu",
+        "dtype": "float32",
+        "batch_size": 2,
+        "seq_len": 8,
+        "steps": 3,
+        "warmup_steps": 0,
+        "expected_world_size": 2,
+        "model": {"kind": "mlp", "hidden_size": 16, "num_layers": 1, "vocab_size": 32},
+        "checks": {"fail_on_rank_loss_mismatch": True},
+    }
+    procs = []
+    for rank in range(2):
+        env = {
+            **os.environ,
+            "RANK": str(rank),
+            "LOCAL_RANK": str(rank),
+            "WORLD_SIZE": "2",
+            "MASTER_ADDR": "127.0.0.1",
+            "MASTER_PORT": str(port),
+        }
+        env.pop("TORCHELASTIC_RUN_ID", None)
+        procs.append(
+            subprocess.Popen(
+                [sys.executable, "-c", _GLOO_RANK, json.dumps(config)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        )
+    results = []
+    try:
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            assert proc.returncode == 0, err[-2000:]
+            line = next(row for row in out.splitlines() if row.startswith("AORTA_RESULT "))
+            results.append(json.loads(line.removeprefix("AORTA_RESULT ")))
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+    for result in results:
+        problems = [
+            problem
+            for item in result.get("failure_details", [])
+            for problem in item.get("problems", [])
+        ]
+        assert result.get("passed") is True, problems
+        assert result.get("metrics", {}).get("world_size") == 2
