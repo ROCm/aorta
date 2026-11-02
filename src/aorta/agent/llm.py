@@ -259,7 +259,7 @@ class LLMProposer(Protocol):
 # Tokens that say *which tool* found something, and tokens that say the finding
 # is inside one kernel. `barrier` and a bare sanitizer name are each ambiguous
 # on their own -- see `_is_kernel_race_id`.
-_SANITIZER_TOKENS = frozenset({"consan", "waitcheck", "rocjitsu"})
+_SANITIZER_TOKENS = frozenset({"consan", "waitcheck", "rocjitsu", "fpsan"})
 _INTRA_KERNEL_TOKENS = frozenset({"race", "waitcnt", "barrier", "hazard", "lds"})
 
 

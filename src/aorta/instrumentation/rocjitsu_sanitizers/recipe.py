@@ -38,7 +38,7 @@ _SUPPORTED_SOURCE_KINDS = frozenset(
     {"gemm_csv", "dispatch_csv", "rocprof_trace", "consan_repro", "kernel_list", "kernel"}
 )
 _SUPPORTED_REQUIREMENTS = frozenset({"top_time", "top_dispatch_count"})
-_SUPPORTED_SANITIZERS = frozenset({"waitcheck", "consan", "asan"})
+_SUPPORTED_SANITIZERS = frozenset({"waitcheck", "consan", "asan", "fpsan"})
 _SUPPORTED_SCOPES = frozenset({"kernel"})
 _SUPPORTED_CONSAN_POLICIES = frozenset({"strict", "lenient"})
 # Whether the ConSan command dispatches the kernel or only loads its code
@@ -187,6 +187,7 @@ class SanitizerRecipe:
     expected_error: str | None = None
     asan_command: Path | None = None
     asan_objects: tuple[Path, ...] = ()
+    fpsan_command: Path | None = None
 
     @property
     def recipe_dir(self) -> Path | None:
@@ -427,6 +428,17 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
             )
         asan_objects = tuple(_resolve_path(item.strip(), recipe_path=path) for item in raw_objects)
 
+    # FpSan compares a reference kernel to a candidate, so only the recipe's own
+    # command can name both; without one the check is not_checked.
+    fpsan_command: Path | None = None
+    if "fpsan_command" in source:
+        if "fpsan" not in sanitizers:
+            raise RecipeSchemaError(
+                "sanitizer_plan.source.fpsan_command is set but fpsan is not in "
+                "sanitizer_plan.sanitizers, so it would never run"
+            )
+        fpsan_command = _resolve_path(_require_str(source, "fpsan_command"), recipe_path=path)
+
     if "isa_dir" in source:
         isa_dir = _resolve_path(_require_str(source, "isa_dir"), recipe_path=path)
     if source_kind == "gemm_csv" and isa_dir is None:
@@ -472,6 +484,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         expected_error=expected_error,
         asan_command=asan_command,
         asan_objects=asan_objects,
+        fpsan_command=fpsan_command,
     )
 
 
@@ -596,5 +609,6 @@ def execute_sanitizer_run(
         waitcheck_max_diagnostics=recipe.waitcheck_max_diagnostics,
         asan_command=recipe.asan_command,
         asan_objects=recipe.asan_objects,
+        fpsan_command=recipe.fpsan_command,
     )
     return report_path

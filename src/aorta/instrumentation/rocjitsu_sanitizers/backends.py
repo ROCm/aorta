@@ -25,6 +25,7 @@ _CONSAN_PARTIAL: frozenset[str] = frozenset()
 # TheRock publishes ASan-instrumented ROCm for gfx942 and gfx950 only.
 _ASAN_DEVICE = frozenset({"gfx908", "gfx90a", "gfx940", "gfx941", "gfx942", "gfx950"})
 _ASAN_PREBUILT = frozenset({"gfx942", "gfx950"})
+_FPSAN_FULL = frozenset({"gfx942", "gfx950", "gfx1250"})
 
 
 def support(sanitizer: str, target: str) -> dict[str, object]:
@@ -93,5 +94,23 @@ def support(sanitizer: str, target: str) -> dict[str, object]:
             "runnable": False,
             "requires": "hardware-or-simulator",
             "note": f"device ASan not supported on {target}: no xnack+ code object target",
+        }
+    if sanitizer == "fpsan":
+        if target in _FPSAN_FULL:
+            return {
+                "level": "full",
+                "runnable": True,
+                "requires": "hardware-or-simulator",
+                "note": (
+                    f"{target} Triton FpSan: the recipe's fpsan_command runs a reference "
+                    "and a candidate kernel under TRITON_INSTRUMENTATION_MODE=fpsan and "
+                    "compares their sanitized output digests"
+                ),
+            }
+        return {
+            "level": "none",
+            "runnable": False,
+            "requires": "hardware-or-simulator",
+            "note": f"Triton FpSan not supported on {target}",
         }
     raise ValueError(f"unknown sanitizer {sanitizer!r}")
