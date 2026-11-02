@@ -722,6 +722,24 @@ def _client_abandoned(proc: subprocess.Popen[Any], pgid: int | None) -> bool:
     return isinstance(code, int) and not isinstance(code, bool) and (code < 0 or code == 130)
 
 
+def _step_may_outlive_client(
+    proc: subprocess.Popen[Any], pgid: int | None, step: _OwnedStep | None
+) -> bool:
+    """True when the owned step may still run after the local client returned.
+
+    An abandoned client is one case. A nonzero exit is the other: ``spur srun``
+    also exits nonzero when it loses the controller, and the buffered step
+    keeps running. A step the scheduler no longer lists has finished. A
+    listing that cannot be read counts as still running.
+    """
+    if _client_abandoned(proc, pgid):
+        return True
+    code = proc.returncode
+    if step is None or not isinstance(code, int) or isinstance(code, bool) or code == 0:
+        return False
+    return _owned_step_listed(step) is not False
+
+
 async def _await_mesh_shutdown(hosts: Any) -> None:
     """Shut down an owned host mesh. ``KeyboardInterrupt`` propagates.
 
@@ -745,10 +763,11 @@ def launch_spur(
 
     The worker command is one rank of the resolved config. ``MASTER_ADDR`` is
     this step's rank 0, published into ``AORTA_SHARED_DIR`` unless
-    ``AORTA_RANK0_IP`` is set. If the local client is abandoned, the owned
-    step is stopped through a cancel file and ``job.step``. The shared
-    directory stays until that step is confirmed gone. The allocation id is
-    never a cancel target.
+    ``AORTA_RANK0_IP`` is set. If the local client is abandoned, or exits
+    nonzero while the scheduler still lists the owned step, that step is
+    stopped through a cancel file and ``job.step``. The shared directory
+    stays until that step is confirmed gone, including when the wait is
+    interrupted. The allocation id is never a cancel target.
     """
     raw_port = os.environ.get("AORTA_MASTER_PORT")
     if raw_port is None or raw_port == "":
@@ -808,13 +827,15 @@ def launch_spur(
         finally:
             # Publish the cancel file and name the step before signalling the
             # local client. Killing that client does not stop a buffered step.
-            # The directory stays while the step is still listed, so a worker
-            # between polls still sees the marker.
+            # The directory is kept from here on, and released only once the
+            # step is no longer listed. A second Ctrl-C during the wait keeps it.
             try:
-                if proc is not None and _client_abandoned(proc, pgid):
+                if proc is not None and _step_may_outlive_client(proc, pgid, owned):
+                    keep_work = True
                     _stop_owned_step(owned, work / _STEP_CANCEL_NAME)
-                    if not _wait_owned_step_gone(owned):
-                        keep_work = True
+                    if _wait_owned_step_gone(owned):
+                        keep_work = False
+                    else:
                         log.warning(
                             "keeping %s; the owned step was not confirmed stopped",
                             work,
@@ -995,13 +1016,18 @@ def launch_monarch(
         # cancels only that step. The allocation is not a cancel target.
         try:
             if not mesh_ok or (hosts is None and workers is not None):
+                # Kept until the step is confirmed gone, including when a
+                # second Ctrl-C interrupts the wait below.
+                keep_cancel = cancel_file is not None
                 _stop_owned_step(owned, cancel_file)
-                if cancel_file is not None and not _wait_owned_step_gone(owned):
-                    keep_cancel = True
-                    log.warning(
-                        "keeping %s; the owned step was not confirmed stopped",
-                        cancel_dir,
-                    )
+                if cancel_file is not None:
+                    if _wait_owned_step_gone(owned):
+                        keep_cancel = False
+                    else:
+                        log.warning(
+                            "keeping %s; the owned step was not confirmed stopped",
+                            cancel_dir,
+                        )
         finally:
             if workers is not None:
                 _terminate_process_tree(workers, pgid=worker_pgid)

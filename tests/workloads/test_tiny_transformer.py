@@ -1435,6 +1435,153 @@ def test_spur_abandon_keeps_the_cancel_file_while_the_step_is_listed(monkeypatch
     assert list(tmp_path.glob("*/aorta-step-cancel"))
 
 
+def _spur_client(returncode: int | None):
+    """Fake ``spur srun`` client: exits with ``returncode``, or Ctrl-C when ``None``."""
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.pid = None
+            self.returncode: int | None = None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            if self.returncode is None:
+                if returncode is None:
+                    raise KeyboardInterrupt
+                self.returncode = returncode
+            return self.returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def send_signal(self, sig: int) -> None:
+            self.returncode = -int(sig)
+
+    launched: list[list[str]] = []
+
+    def fake_popen(argv, env=None, **kwargs):
+        del kwargs
+        launched.append(list(argv))
+        out = Path((env or {})["AORTA_RESULTS_DIR"])
+        (out / "rank0.json").write_text("{}", encoding="utf-8")
+        return _Proc()
+
+    return fake_popen, launched
+
+
+def _spur_env(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AORTA_MASTER_PORT", "29501")
+    monkeypatch.setenv("AORTA_RANK0_IP", "10.0.0.8")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
+    monkeypatch.setenv("SPUR_JOB_ID", "17")
+
+
+def test_spur_client_failure_cancels_a_step_that_is_still_listed(monkeypatch, tmp_path) -> None:
+    """``spur srun`` exiting 1 is not proof the buffered step ended."""
+    from aorta.workloads import distributed_launch
+
+    fake_popen, launched = _spur_client(1)
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        token = " ".join(launched[0]).split("# aorta-owned-step ", 1)[1].split()[0]
+        if "show" in argv:
+            stdout = f"StepId=17.2 StepName=bash -c # aorta-owned-step {token}\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(distributed_launch, "_STEP_GONE_TIMEOUT_SEC", 0)
+    monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(distributed_launch, "_run_scheduler", runner)
+    _spur_env(monkeypatch, tmp_path)
+    result = launch_spur({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert result.passed is False
+    assert ["spur", "scancel", "--quiet", "17.2"] in calls
+    assert list(tmp_path.glob("*/aorta-step-cancel"))
+
+
+def test_spur_step_failure_that_finished_removes_its_files(monkeypatch, tmp_path) -> None:
+    """A nonzero exit whose step is no longer listed is an ordinary failure."""
+    from aorta.workloads import distributed_launch
+
+    fake_popen, _launched = _spur_client(1)
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(distributed_launch, "_run_scheduler", runner)
+    _spur_env(monkeypatch, tmp_path)
+    result = launch_spur({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert result.passed is False
+    assert not any("scancel" in argv for argv in calls)
+    assert not list(tmp_path.iterdir())
+
+
+def test_second_interrupt_during_spur_cancel_keeps_the_files(monkeypatch, tmp_path) -> None:
+    """Ctrl-C while waiting for the step must not delete the marker it waits on."""
+    from aorta.workloads import distributed_launch
+
+    fake_popen, _launched = _spur_client(None)
+
+    def interrupted(_step: object) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(distributed_launch.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        distributed_launch,
+        "_run_scheduler",
+        lambda argv: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(distributed_launch, "_wait_owned_step_gone", interrupted)
+    _spur_env(monkeypatch, tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        launch_spur({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=1, spur_bin="spur")
+    assert list(tmp_path.glob("*/aorta-step-cancel"))
+
+
+def test_second_interrupt_during_monarch_cancel_keeps_the_file(monkeypatch, tmp_path) -> None:
+    """Monarch on Spur keeps its cancel file if the confirmation wait is interrupted."""
+    from aorta.workloads import distributed_launch
+
+    _install_fake_monarch(
+        monkeypatch,
+        {"rank0": {"passed": True, "metrics": {"rank": 0, "world_size": 2, "final_loss": 1.0}}},
+    )
+
+    async def _shutdown_fails(_hosts: object) -> None:
+        raise RuntimeError("shutdown failed")
+
+    def interrupted(_step: object) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(distributed_launch, "_await_mesh_shutdown", _shutdown_fails)
+    monkeypatch.setattr(
+        distributed_launch,
+        "_run_scheduler",
+        lambda argv: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(distributed_launch, "_wait_owned_step_gone", interrupted)
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch._monarch_hostnames",
+        lambda _prefix, nodes: [f"node-{index}" for index in range(nodes)],
+    )
+    monkeypatch.setenv("SPUR_JOB_ID", "17")
+    monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))
+    with pytest.raises(KeyboardInterrupt):
+        launch_monarch(
+            {"steps": 1, "device": "cpu"},
+            nodes=1,
+            gpus_per_node=1,
+            scheduler="spur",
+            spur_bin="spur",
+        )
+    assert list(tmp_path.glob("*/aorta-step-cancel"))
+
+
 def test_monarch_cancels_its_step_when_mesh_shutdown_fails(monkeypatch) -> None:
     from aorta.workloads import distributed_launch
 
