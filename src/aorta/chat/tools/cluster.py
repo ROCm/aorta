@@ -184,6 +184,40 @@ def _fmt_tools_used(result: dict) -> list[str]:
     return lines
 
 
+def _fmt_rocjitsu_expert(result: dict) -> list[str]:
+    job_dir = Path(str(result.get("job_dir") or ""))
+    report_path = _within_jobs_root(job_dir, "rj_expert/report.json")
+    if report_path is None or not report_path.is_file():
+        return []
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["rocjitsu expert: report is unreadable"]
+    answer = report.get("answer") or {}
+    lines = ["rocjitsu expert (advisory; separate from Autopsy):"]
+    if report.get("live_job_input_analyzed") is not True:
+        lines.append("  scope: recorded archive demo; this CIA job input was not analyzed")
+    lines.append(f"  status: {report.get('status', '?')}")
+    if answer:
+        lines.append(
+            "  hypothesis: "
+            f"class={answer.get('class', '?')}, kernel={answer.get('kernel', '?')}, "
+            f"offset={answer.get('offset', '?')}"
+        )
+    comparison_path = _within_jobs_root(job_dir, "rj_expert/shadow_comparison.json")
+    if comparison_path is not None and comparison_path.is_file():
+        try:
+            comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            lines.append("  verification: comparison is unreadable")
+        else:
+            lines.append(f"  verification: {comparison.get('status', '?')}")
+            if comparison.get("rationale"):
+                lines.append(f"  note: {comparison['rationale']}")
+    lines.append(f"  report: {report_path}")
+    return lines
+
+
 #: Written into the result when a sweep came back without the report it owed,
 #: and read again by the cache guards. One string, because a run that did not
 #: check anything must not be remembered as a diagnosis -- and the check for
@@ -251,6 +285,11 @@ def _format_result(result: dict, label: str, *, expect_sanitizer: bool = False) 
     else:
         lines.append("")
         lines.append(f"No Autopsy report produced. {result.get('warning', '')}")
+
+    expert = _fmt_rocjitsu_expert(result)
+    if expert:
+        lines.append("")
+        lines.extend(expert)
 
     return "\n".join(lines)
 
@@ -1069,6 +1108,9 @@ def list_cluster_jobs(limit: int = 10) -> str:
 
         lines.append(f"  {job_dir.name}  recipe={recipe}  status={status}  verdict={verdict}")
         lines.append(f"      bundle: {job_dir / 'bundle'}")
+        expert = _within_jobs_root(job_dir, "rj_expert/report.json")
+        if expert is not None and expert.is_file():
+            lines.append(f"      rocjitsu expert: {expert}")
     return "\n".join(lines)
 
 
@@ -1103,3 +1145,29 @@ def read_autopsy_report(job_id: str) -> str:
     if len(text) > 8000:
         text = text[:8000] + f"\n... (truncated, {len(text)} total chars)"
     return f"Autopsy report {report}:\n{text}"
+
+
+@tool
+def read_rocjitsu_expert_report(job_id: str) -> str:
+    """Read the separate advisory rocjitsu expert report for a CIA job.
+
+    Args:
+        job_id: The CIA job id, e.g. cia-20260819-232554-6ec890.
+
+    Returns:
+        The bounded expert report JSON. This is not an Autopsy verdict.
+    """
+    try:
+        report = resolve_within(
+            settings.jobs_root,
+            f"{job_id}/rj_expert/report.json",
+            JOBS_ROOT_LABEL,
+        )
+    except ValueError as exc:
+        return tool_failure(f"Error: {exc}")
+    if not report.is_file():
+        return tool_failure(f"Error: no rocjitsu expert report at {report}.")
+    text = report.read_text(encoding="utf-8", errors="replace")
+    if len(text) > 8000:
+        text = text[:8000] + f"\n... (truncated, {len(text)} total chars)"
+    return f"rocjitsu expert report {report}:\n{text}"

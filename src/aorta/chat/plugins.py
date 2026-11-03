@@ -86,6 +86,7 @@ OPTIONAL_CHAT_TOOLS: dict[str, BaseTool] = {
 _DIAGNOSTIC_READ_TOOLS = (
     "list_cluster_jobs",
     "read_autopsy_report",
+    "read_rocjitsu_expert_report",
 )
 
 #: Submitting work. These write outside the source root and run pasted source

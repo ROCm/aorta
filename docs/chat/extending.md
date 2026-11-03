@@ -66,7 +66,8 @@ provider's function-calling API: a tool the model is never told about is one no
 prompt-injected text can talk it into reaching for.
 
 Reading what a past job already produced — `list_cluster_jobs`,
-`read_autopsy_report` — stays available, because it is the same shape as the
+`read_autopsy_report`, `read_rocjitsu_expert_report` — stays available, because
+it is the same shape as the
 file tools on a different root: bounded to `jobs_root`, nothing submitted.
 
 If you are writing a tool of your own that needs this much reach, the honest
