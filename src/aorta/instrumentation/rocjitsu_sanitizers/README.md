@@ -477,12 +477,13 @@ printed a result, mismatch included: a non-zero exit is a harness failure.
 |---|---|
 | `pass` | exit 0, one result line, both sides instrumented, digests equal |
 | `fail` | one result line, both sides instrumented, digests differ (`fpsan_digest_mismatch`) |
-| `error` | timeout, launch failure, non-zero exit, no result line, more than one, a malformed one, a side not instrumented, or another target |
-| `not_checked` | no `source.fpsan_command` (`fpsan_command_not_provisioned`), a target outside the GPU list (`fpsan_target_unsupported`), or an empty selection (`empty_worklist`) |
+| `error` | timeout, launch failure, non-zero exit, no result line, more than one, a malformed one (duplicate JSON keys included), the SHA-256 of empty input (`fpsan_result_empty_output`), a side not instrumented, or another target |
+| `not_checked` | no `source.fpsan_command` (`fpsan_command_not_provisioned`), a target outside the GPU list (`fpsan_target_unsupported`), an empty selection (`empty_worklist`), or more than one selected kernel (`fpsan_requires_one_candidate_kernel`) |
 
-The check's `backend` records the command and its SHA-256, the selected
-kernels, and, once the line parses, both digests and flags, so a `pass` says
-what matched. A `fail` is the finding: one `fpsan_digest_mismatch` finding
+The check's `backend` records the command and its SHA-256, the one selected
+kernel, and, once the line parses, both digests and flags, so a `pass` says
+what matched. A selection of more than one kernel is `not_checked` and the
+command does not run. A `fail` is the finding: one `fpsan_digest_mismatch` finding
 carrying both digests, which CIA autopsy reports as `SAN_FPSAN_MISMATCH` (`numeric_silent`). An
 `error` is not stored as a kernel bug, and a `not_checked` is a tooling gap
 (`SAN_NOT_CHECKED`); `aorta sweep run` exits non-zero on either, as it does for a
@@ -514,7 +515,9 @@ The command prints the same `AORTA_FPSAN_RESULT` line.
   runtime could not report, or a clean exit without the selected kernel's
   dispatch → `error`.
 - FpSan reference/candidate digest mismatch → `fail`; a missing, repeated or
-  malformed result line, or an uninstrumented side → `error`.
+  malformed result line, duplicate JSON keys, the SHA-256 of empty input, or
+  an uninstrumented side → `error`. More than one selected kernel →
+  `not_checked`.
 - Backend timeout, launch failure, unexpected exit, missing verdict, or
   incomplete coverage → `error`.
 - Missing backend or unsupported worklist scoping → `not_checked`.

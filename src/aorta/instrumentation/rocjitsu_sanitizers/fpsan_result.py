@@ -26,6 +26,9 @@ RESULT_MARKER = "AORTA_FPSAN_RESULT"
 # AgentKernelArena's marker. Recognised only to say why it was refused.
 _FOREIGN_MARKER = "AKA_FPSAN_RESULT"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# SHA-256 of zero bytes. Two empty output files hash to this on both sides and
+# would otherwise compare equal, so a command that hashed nothing would pass.
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _REQUIRED_FIELDS = frozenset(
     {"reference_digest", "candidate_digest", "reference_instrumented", "candidate_instrumented"}
 )
@@ -63,9 +66,24 @@ def _marked(lines: list[str], marker: str) -> list[str]:
     return payloads
 
 
+def _object_without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """``json.loads`` object hook that refuses a repeated field.
+
+    The stdlib keeps the last value of a duplicate key, so a second
+    ``candidate_digest`` could overwrite a mismatch and the run would pass.
+    """
+
+    record: dict[str, object] = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError(f"fpsan_result_unparsable: duplicate field {key!r}")
+        record[key] = value
+    return record
+
+
 def _record(payload: str) -> Mapping[str, object]:
     try:
-        value = json.loads(payload)
+        value = json.loads(payload, object_pairs_hook=_object_without_duplicate_keys)
     except json.JSONDecodeError as exc:
         raise ValueError(f"fpsan_result_unparsable: {exc}") from exc
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
@@ -77,9 +95,9 @@ def parse_fpsan_result(stdout: str) -> FpsanResult:
     """Parse the single ``AORTA_FPSAN_RESULT`` line out of a command's stdout.
 
     Raises ``ValueError`` whose message starts with the report reason: no line,
-    more than one, a payload that is not a JSON object, an unknown or missing
-    field, a digest that is not 64 lowercase hex characters, or an
-    instrumentation flag that is not a boolean.
+    more than one, a payload that is not a JSON object, a duplicate field, an
+    unknown or missing field, a digest that is not 64 lowercase hex characters,
+    the SHA-256 of empty input, or an instrumentation flag that is not a boolean.
     """
 
     lines = stdout.splitlines()
@@ -108,6 +126,11 @@ def parse_fpsan_result(stdout: str) -> FpsanResult:
         value = record[key]
         if not isinstance(value, str) or not _SHA256.fullmatch(value):
             raise ValueError(f"fpsan_result_unparsable: {key} must be 64 lowercase hex characters")
+        if value == _EMPTY_SHA256:
+            raise ValueError(
+                "fpsan_result_empty_output: "
+                f"{key} is the SHA-256 of empty input, so that side produced no bytes"
+            )
         digests[key] = value
     flags = {}
     for key in ("reference_instrumented", "candidate_instrumented"):
@@ -168,8 +191,9 @@ def evaluate_fpsan_output(
     and equal digests; equal digests with a side uninstrumented compared nothing.
     Unequal digests from two instrumented kernels are the finding, ``fail``.
     Everything else -- a timeout, a launch failure, a non-zero exit, a missing,
-    repeated or malformed line, an uninstrumented side, or a line for another
-    target -- is ``error``: a harness problem, not evidence about the kernel.
+    repeated or malformed line, a duplicate field, the SHA-256 of empty input,
+    an uninstrumented side, or a line for another target -- is ``error``: a
+    harness problem, not evidence about the kernel.
 
     Process failures are reasoned under ``sanitizer`` (``hip_fpsan_timeout``);
     result-line failures keep the ``fpsan_`` prefix of the shared contract. Once

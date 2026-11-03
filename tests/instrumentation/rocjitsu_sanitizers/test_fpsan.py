@@ -46,6 +46,10 @@ from aorta.triage.recipe import RecipeSchemaError
 FIXTURES = Path(__file__).parent / "fixtures" / "fpsan"
 DIGEST_A = "4dfe96464b850fae836ced6ef7177049a67ed5f67ad63f31c6cca93dbb2779b3"
 DIGEST_B = "e986a6ed5ab5c6794224330f7f8caa9abac54a995ce4e3ee3dc28c2ee964a5c4"
+# Shares DIGEST_A's first 16 hex characters, which is all the finding message prints.
+DIGEST_PREFIX = DIGEST_A[:16] + "0" * 48
+# SHA-256 of b"".
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 def _fixture(name: str) -> str:
@@ -139,6 +143,20 @@ class TestParse:
         with pytest.raises(ValueError, match="fpsan_result_missing"):
             parse_fpsan_result("AORTA_FPSAN_RESULTS " + _line()[len("AORTA_FPSAN_RESULT ") :])
 
+    def test_a_duplicate_field_cannot_overwrite_a_mismatch(self):
+        payload = (
+            '{"reference_digest":"' + DIGEST_A + '",'
+            '"candidate_digest":"' + DIGEST_B + '",'
+            '"reference_instrumented":true,"candidate_instrumented":true,'
+            '"candidate_digest":"' + DIGEST_A + '"}'
+        )
+        with pytest.raises(ValueError, match="duplicate field 'candidate_digest'"):
+            parse_fpsan_result("AORTA_FPSAN_RESULT " + payload + "\n")
+
+    def test_the_sha256_of_empty_input_is_refused(self):
+        with pytest.raises(ValueError, match="fpsan_result_empty_output"):
+            parse_fpsan_result(_line(reference_digest=EMPTY_SHA256, candidate_digest=EMPTY_SHA256))
+
 
 class TestEvaluate:
     def test_equal_digests_from_two_instrumented_kernels_pass(self):
@@ -158,6 +176,18 @@ class TestEvaluate:
         )
         metadata = dict(finding.metadata)
         assert (metadata["reference_digest"], metadata["candidate_digest"]) == (DIGEST_A, DIGEST_B)
+
+    def test_digests_that_share_the_printed_prefix_still_fail(self):
+        check = _evaluate(_line(candidate_digest=DIGEST_PREFIX))
+        assert check.verdict is Verdict.FAIL
+        metadata = dict(check.findings[0].metadata)
+        assert metadata["reference_digest"] == DIGEST_A
+        assert metadata["candidate_digest"] == DIGEST_PREFIX
+
+    def test_empty_outputs_are_an_error_rather_than_a_pass(self):
+        check = _evaluate(_line(reference_digest=EMPTY_SHA256, candidate_digest=EMPTY_SHA256))
+        assert check.verdict is Verdict.ERROR
+        assert check.reason.startswith("fpsan_result_empty_output")
 
     def test_an_uninstrumented_side_is_an_error_even_with_equal_digests(self):
         check = _evaluate(_fixture("candidate_not_instrumented.txt"))
@@ -238,7 +268,7 @@ class TestRunFpsan:
 
         def execute(argv, *, timeout_seconds, env=None):
             seen.update(argv=argv, timeout=timeout_seconds, env=env)
-            return _process(_fixture("match.txt"))
+            return _process(_fixture("match.txt"), stderr="compiler warning\n")
 
         check = run_fpsan(
             _worklist(),
@@ -252,7 +282,9 @@ class TestRunFpsan:
         assert seen.get("argv") == (str(command),)
         assert seen.get("timeout") == 12.0
         assert (seen.get("env") or {}).get("TRITON_INSTRUMENTATION_MODE") == "fpsan"
-        assert "AORTA_FPSAN_RESULT" in (tmp_path / "out" / "fpsan.log").read_text()
+        log = (tmp_path / "out" / "fpsan.log").read_text()
+        assert "AORTA_FPSAN_RESULT" in log
+        assert "compiler warning" in log
         backend = dict(check.backend)
         assert backend.get("command") == str(command)
         assert len(backend.get("command_sha256", "")) == 64
@@ -314,6 +346,29 @@ class TestRunFpsan:
             execute=_never_run,
         )
         assert (check.state, check.reason) == (ExecutionState.NOT_CHECKED, "empty_worklist")
+
+    def test_more_than_one_selected_kernel_is_not_checked(self, tmp_path):
+        several = KernelWorklist(
+            requirement=SelectionRequirement.TOP_DISPATCH_COUNT,
+            top_n=3,
+            kernels=tuple(
+                KernelObservation(
+                    identity=KernelIdentity(name=name, target="gfx950"),
+                    dispatch_count=1,
+                    sources=("test",),
+                )
+                for name in ("k_alpha", "k_beta", "k_gamma")
+            ),
+        )
+        check = run_fpsan(
+            several,
+            command=_script(tmp_path, "match.txt"),
+            target="gfx950",
+            output_dir=tmp_path / "out",
+            execute=_never_run,
+        )
+        assert (check.state, check.verdict) == (ExecutionState.NOT_CHECKED, Verdict.NOT_CHECKED)
+        assert check.reason == "fpsan_requires_one_candidate_kernel"
 
     def test_an_unsupported_target_is_not_checked_and_nothing_runs(self, tmp_path):
         check = run_fpsan(

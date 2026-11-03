@@ -76,9 +76,11 @@ def run_fpsan(
 ) -> CheckResult:
     """Run one recipe FpSan command and judge its ``AORTA_FPSAN_RESULT`` line.
 
-    The command, not the worklist, decides which two kernels run; the selected
-    kernels are recorded in ``backend`` so a verdict names what it was run for,
-    and an empty selection is not checked rather than passed.
+    The worklist must name exactly one candidate, as ASan and ConSan require.
+    The command still owns the reference kernel and the comparison; the selected
+    name is recorded in ``backend`` so a verdict names what it was run for.
+    An empty selection, or more than one, is not checked rather than passed:
+    the result line carries one comparison and cannot cover a second candidate.
     """
 
     policy = support(FPSAN, target)
@@ -86,6 +88,8 @@ def run_fpsan(
         return _not_checked(f"fpsan_target_unsupported: {policy['note']}")
     if not worklist.kernels:
         return _not_checked("empty_worklist")
+    if len(worklist.kernels) != 1:
+        return _not_checked("fpsan_requires_one_candidate_kernel")
     if not command.is_file():
         return _not_checked("fpsan_command_not_found")
 
