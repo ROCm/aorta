@@ -830,3 +830,22 @@ python -m aorta.rocjitsu.evaluate \
 
 Archive-demo reports are marked not applicable because they did not analyse the
 bound CIA job's live input.
+
+### Reviewed feedback export
+
+User feedback is stored as an immutable report, not used directly as an RL
+reward. Mark an outcome verified only after a reproducer, ConSan run, or
+engineer review establishes what happened:
+
+```bash
+python -m aorta.rocjitsu.feedback record \
+  --jobs-root <cia-jobs-root> --job-id <job-id> \
+  --outcome fixed --verified --verified-by "reproducer rerun"
+
+python -m aorta.rocjitsu.feedback export \
+  --jobs-root <cia-jobs-root> --output <training>/verified.jsonl \
+  --include-operations
+```
+
+Unverified feedback is never exported. Export also refuses an expert report
+that changed after feedback was recorded.
