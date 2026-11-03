@@ -801,3 +801,15 @@ bound CIA job's live input, confirm or alter Autopsy, inspect live architecture,
 or claim a live output check. Its report says so explicitly and lives under
 `<job>/rj_expert/`, outside the Autopsy bundle. The CIA job must already be
 terminal, and an existing attachment is never overwritten.
+
+### Live-recorder contracts
+
+`aorta.rocjitsu.recording` defines the factual boundary for the later
+live-kernel prototype. It reads architecture and kernel names from the code
+object, records the requested architecture separately, refuses unsupported or
+oversized inputs as not applicable, pins the rocjitsu build commit, and makes
+output-check state explicit. An output check with zero checked items cannot be
+recorded as passing; unavailable and unrun checks render as `no output check`.
+
+This module does not yet execute the simulator or attach itself to Chat. Those
+consumers build on the versioned recording contract in follow-up PRs.
