@@ -1,0 +1,40 @@
+# Model-kernel survey inventory: Triton tutorial kernels (workload survey, non-gating).
+#
+# FpSan reference/candidate pairs taken from upstream Triton's python/tutorials
+# (MIT) and packed into the aorta-model-kernels asset from v2 by
+# scripts/sanitizers/build_model_kernel_asset.py, which also writes their
+# launch spec. Each candidate (spec role "launched") is compared under FpSan
+# with another spec entry (role "reference") at the same scenario; both pass
+# the same tensors, and every tile that reduces over a dimension divides it,
+# so the two must agree exactly. Same launch and waitcheck/ConSan contract as
+# gpt-oss.yaml.
+#
+# Not runnable until model-kernels-v2 is published and model_survey.py pins it.
+schema_version: 1
+model: triton-tutorials
+asset_version: "2"
+specs:
+  - tutorials.json
+roles:
+  - launched
+expected_pairs: 5
+consan:
+  timeout_seconds: 900
+  exclude: {}
+fpsan:
+  timeout_seconds: 900
+  exclude: {}
+  reference:
+    # 09-persistent-matmul against 03-matrix-multiplication: a persistent
+    # tile loop with 128x128x64 tiles against one program per 64x64x32 tile.
+    matmul_kernel_persistent:
+      kernel: matmul_kernel
+    # A persistent row loop over 32 programs against one program per row.
+    softmax_kernel:
+      kernel: softmax_kernel@row_per_program
+    # One 4096-wide block per row against eight 512-wide chunks.
+    _layer_norm_fwd_fused:
+      kernel: _layer_norm_fwd_fused@chunked
+    # 1024-element blocks against 128-element blocks.
+    add_kernel:
+      kernel: add_kernel@block128

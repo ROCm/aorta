@@ -8,7 +8,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -48,21 +50,36 @@ def _inventories() -> list[Path]:
     return sorted(_MODELS.glob("*.yaml"))
 
 
-def test_every_committed_inventory_loads_and_names_the_pinned_asset():
-    assert [p.stem for p in _inventories()] == ["gpt-oss", "qwen3"]
+def _live_models() -> set[str]:
+    """Inventories of the pinned asset; one naming a later asset waits for its release."""
+    return {p.stem for p in _inventories() if ms.load_inventory(p).asset_version == ms.ASSET_VERSION}
+
+
+def test_every_committed_inventory_loads_and_names_the_pinned_asset_or_a_later_one():
+    assert [p.stem for p in _inventories()] == ["gpt-oss", "qwen3", "triton-tutorials"]
+    assert _live_models() == {"gpt-oss", "qwen3"}
     for path in _inventories():
         inv = ms.load_inventory(path)
         assert inv.model == path.stem
-        assert inv.asset_version == ms.ASSET_VERSION
-        assert inv.roles == {"launched", "conditional"}
+        assert int(inv.asset_version) >= int(ms.ASSET_VERSION)
+        assert inv.fpsan is not None
+        if inv.model in _live_models():
+            assert inv.roles == {"launched", "conditional"}
 
 
 def test_dashboard_and_workflow_name_exactly_the_committed_models():
-    models = {p.stem for p in _inventories()}
-    assert set(gen._MODEL_SURVEY_GROUPS) == models
+    models = _live_models()
+    assert models <= set(gen._MODEL_SURVEY_GROUPS) <= {p.stem for p in _inventories()}
     workflow = (_REPO / ".github" / "workflows" / "sanitizers-nightly.yml").read_text(encoding="utf-8")
     listed = re.search(r'^\s*MODELS="([^"]+)"', workflow, re.MULTILINE)
     assert listed and set(listed.group(1).split()) == models
+
+
+def test_an_inventory_for_an_unpublished_asset_is_refused_by_the_pinned_one(tmp_path):
+    inv = ms.load_inventory(_MODELS / "triton-tutorials.yaml")
+    _manifest(tmp_path)
+    with pytest.raises(ms.SurveyError, match=f"v{ms.ASSET_VERSION}"):
+        ms.check_asset(tmp_path, inv)
 
 
 def test_the_asset_url_names_the_asset_version():
@@ -107,6 +124,65 @@ def _write_inventory(tmp_path: Path, name: str = "toy", **overrides) -> Path:
 def test_a_malformed_inventory_is_refused(tmp_path, overrides):
     with pytest.raises(ms.SurveyError):
         ms.load_inventory(_write_inventory(tmp_path, **overrides))
+
+
+_FPSAN = {"timeout_seconds": 60, "exclude": {}}
+
+
+@pytest.mark.parametrize(
+    "fpsan",
+    [
+        [],
+        {"exclude": {}},
+        {**_FPSAN, "retries": 2},
+        {**_FPSAN, "exclude": {"k": ""}},
+        {**_FPSAN, "reference": {"k": {}}},
+        {**_FPSAN, "reference": {"k": {"num_warps": 0}}},
+        {**_FPSAN, "reference": {"k": {"num_stages": True}}},
+        {**_FPSAN, "reference": {"k": {"kernel": ""}}},
+        {**_FPSAN, "reference": {"k": {"block": 64}}},
+        {**_FPSAN, "reference": {"k": {"constexprs": {"BLOCK_K": [64]}}}},
+        {**_FPSAN, "reference": {"k": {"grid": [1, 1]}}},
+        {**_FPSAN, "reference": {"k": {"grid": [1, 0, 1]}}},
+    ],
+)
+def test_a_malformed_fpsan_block_is_refused(tmp_path, fpsan):
+    with pytest.raises(ms.SurveyError, match="fpsan"):
+        ms.load_inventory(_write_inventory(tmp_path, fpsan=fpsan))
+
+
+def test_a_scenario_reference_replaces_its_kernels(tmp_path):
+    inv = ms.load_inventory(_write_inventory(tmp_path, fpsan={**_FPSAN, "reference": {
+        "k": {"constexprs": {"BLOCK_K": 64}},
+        "k/S1": {"num_warps": 8},
+    }}))
+    assert inv.fpsan is not None
+    assert inv.fpsan.reference_for(ms.Pair("toy.json", "k", "S0")) == {"constexprs": {"BLOCK_K": 64}}
+    assert inv.fpsan.reference_for(ms.Pair("toy.json", "k", "S1")) == {"num_warps": 8}
+    assert inv.fpsan.reference_for(ms.Pair("toy.json", "other", "S0")) == {}
+    assert ms.load_inventory(_write_inventory(tmp_path)).fpsan is None
+
+
+def test_fpsan_reference_args_name_every_override_for_the_driver():
+    assert ms.fpsan_reference_args({}) == []
+    assert ms.fpsan_reference_args({
+        "kernel": "matmul_kernel", "num_warps": 8, "num_stages": 1,
+        "constexprs": {"BLOCK_K": 64, "ACTIVATION": ""}, "grid": [4, 2, 1],
+    }) == [
+        "--reference-kernel", "matmul_kernel",
+        "--reference-num-warps", "8", "--reference-num-stages", "1",
+        "--reference-constexpr", 'ACTIVATION=""', "--reference-constexpr", "BLOCK_K=64",
+        "--reference-grid", "4,2,1",
+    ]
+
+
+def test_parse_sanitizers_keeps_the_survey_order_and_refuses_unknown_names():
+    import argparse
+
+    assert ms.parse_sanitizers("fpsan, waitcheck,fpsan") == ("waitcheck", "fpsan")
+    for bad in ("", "asan", "fpsan,tsan"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            ms.parse_sanitizers(bad)
 
 
 # ---------------------------------------------------------------- the asset
@@ -244,6 +320,55 @@ def test_generated_recipes_load_through_the_aorta_recipe_loader(tmp_path):
     recipe = load_sanitizer_recipe(cs)
     assert recipe.sanitizers == ("consan",)
     assert recipe.consan_driver == "dispatch"
+
+    shim = items[0].case_dir / "fpsan" / "fpsan.sh"
+    shim.parent.mkdir()
+    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    fp = tmp_path / "fpsan.yaml"
+    fp.write_text(ms.fpsan_recipe("toy", items[0], command=shim, timeout=60), encoding="utf-8")
+    recipe = load_sanitizer_recipe(fp)
+    assert recipe.sanitizers == ("fpsan",)
+    assert recipe.fpsan_command == shim
+    assert yaml.safe_load(fp.read_text())["sanitizer_plan"]["source"]["kernel"]["name"] == "a_sym"
+
+
+def test_the_fpsan_shim_runs_the_driver_over_the_asset_harness(tmp_path):
+    shim = tmp_path / "fpsan.sh"
+    model = tmp_path / "gpt oss"
+    ms.write_fpsan_shim(
+        shim,
+        model_dir=model,
+        pair=ms.Pair("moe.json", "_matmul_ogs@w2", "P1"),
+        work=tmp_path / "work",
+        record=tmp_path / "record.json",
+        python="/opt/venv/bin/python",
+        timeout=900,
+        reference={"constexprs": {"BLOCK_K": 64}},
+    )
+    lines = shim.read_text().splitlines()
+    assert lines[2] == f"cd '{model / 'roofline'}'"
+    argv = shlex.split(lines[3])
+    assert argv[:3] == ["exec", "/opt/venv/bin/python", str(ms.FPSAN_COMPARE)]
+    opts = dict(zip(argv[3::2], argv[4::2], strict=True))
+    assert opts["--launch"] == str(model / "roofline" / "harness" / "launch.py")
+    assert opts["--spec"] == str(model / "roofline" / "specs" / "moe.json")
+    assert (opts["--kernel"], opts["--scenario"]) == ("_matmul_ogs@w2", "P1")
+    assert (opts["--flat-dir"], opts["--pkg-src"]) == (str(model / "kernels"), str(model / "pkg_src"))
+    assert (opts["--arch"], opts["--record"]) == ("gfx950", str(tmp_path / "record.json"))
+    # Two sides and the driver's own work must fit inside the sweep's timeout.
+    assert int(opts["--side-timeout"]) * 2 + ms._FPSAN_SIDE_SLACK_SECONDS <= 900
+    assert opts["--reference-constexpr"] == "BLOCK_K=64"
+    assert shim.stat().st_mode & 0o111
+
+
+def test_pair_rotation_takes_every_pair_and_starts_one_pair_later_each_night(tmp_path):
+    items = [_warmed(tmp_path, k, s) for k, s in (("b", "S0"), ("a", "S1"), ("a", "S0"))]
+    night = dt.date(2026, 10, 22)
+    first = [(w.pair.kernel, w.pair.scenario) for w in ms.pair_rotation(items, night)]
+    second = [(w.pair.kernel, w.pair.scenario) for w in ms.pair_rotation(items, night + dt.timedelta(days=1))]
+    assert sorted(first) == [("a", "S0"), ("a", "S1"), ("b", "S0")]
+    assert second == first[1:] + first[:1]
+    assert ms.pair_rotation([], night) == []
 
 
 def test_the_shim_runs_the_harness_against_the_case_cache(tmp_path):
@@ -415,6 +540,150 @@ def test_merge_counts_a_timed_out_kernel_as_not_completed():
     )
 
 
+_REF, _CAND = "1" * 64, "2" * 64
+
+
+def _fpsan_report(name: str, verdict: str, *, cand: str = _REF) -> dict:
+    """One FpSan case report the way ``evaluate_fpsan_output`` shapes it."""
+    found = [
+        {"sanitizer": "fpsan", "severity": "error", "code": "fpsan_digest_mismatch",
+         "message": "reference and candidate kernels disagree", "kernel_name": None,
+         "code_object": None, "entry_offset": None,
+         "metadata": {"reference_digest": _REF, "candidate_digest": cand, "target": "gfx950"}}
+    ] if verdict == "fail" else []
+    check = {
+        "sanitizer": "fpsan", "state": "ran", "verdict": verdict,
+        "reason": "fpsan_digest_mismatch" if verdict == "fail" else None,
+        "returncode": 0, "findings": found, "coverage": [], "kernel_results": [],
+        "backend": {"reference_digest": _REF, "candidate_digest": cand,
+                    "reference_instrumented": "true", "candidate_instrumented": "true",
+                    "reported_target": "gfx950"},
+    }
+    return SanitizerReport.from_dict({
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "worklist": {"schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+                     "top_n": 1, "kernel_count": 1,
+                     "kernels": [{"identity": _identity(name), "total_time_ms": 0.0,
+                                  "dispatch_count": 1, "sources": ["kernel"]}]},
+        "checks": [check],
+        "overall_verdict": verdict,
+        "execution_status": "complete",
+    }).to_dict()
+
+
+def test_fpsan_merge_keeps_one_result_per_pair_and_says_which_pair_disagreed(tmp_path, monkeypatch):
+    # Both scenarios of `k` compiled the same object: listed once, compared twice.
+    error = ms.error_case_report(_warmed(tmp_path, "j"), "fpsan_case_timed_out: 900s", sanitizer="fpsan")
+    merged = ms.merge_fpsan([
+        (ms.Pair("toy.json", "k", "S0"), _fpsan_report("k", "pass")),
+        (ms.Pair("toy.json", "k", "S1"), _fpsan_report("k", "fail", cand=_CAND)),
+        (ms.Pair("toy.json", "j", "S0"), error),
+    ])
+    SanitizerReport.from_dict(merged)
+    assert [c["sanitizer"] for c in merged["checks"]] == ["fpsan"]
+    fpsan = merged["checks"][0]
+    assert merged["overall_verdict"] == "fail"
+    assert merged["worklist"]["kernel_count"] == 2
+    assert [kr["verdict"] for kr in fpsan["kernel_results"]] == ["pass", "fail", "error"]
+    (finding,) = fpsan["findings"]
+    assert finding["kernel_name"] == "k"
+    assert (finding["metadata"]["kernel"], finding["metadata"]["scenario"]) == ("k", "S1")
+    assert finding["metadata"]["candidate_digest"] == _CAND
+    backend = fpsan["backend"]
+    assert backend["result_marker"] == "AORTA_FPSAN_RESULT"
+    assert backend["triton_instrumentation_mode"] == "fpsan"
+    assert (backend["k/S0.verdict"], backend["k/S1.verdict"], backend["j/S0.verdict"]) == ("pass", "fail", "error")
+    assert backend["k/S0.candidate_digest"] == _REF and backend["k/S1.candidate_digest"] == _CAND
+    assert "j/S0.reference_digest" not in backend
+    # Each pair keeps its own reason; a pass has none to record.
+    assert backend["k/S1.reason"] == "fpsan_digest_mismatch"
+    assert backend["j/S0.reason"] == "fpsan_case_timed_out: 900s"
+    assert "k/S0.reason" not in backend
+
+    passing = ms.merge_fpsan([(ms.Pair("toy.json", "k", "S0"), _fpsan_report("k", "pass"))])
+    case = tmp_path / "informational" / "fpsan-toy"
+    case.mkdir(parents=True)
+    (case / "sanitizer_report.json").write_text(json.dumps(passing), encoding="utf-8")
+    monkeypatch.chdir(_REPO)
+    assert comparator.main(["prog", "--vacuous-only", "--require", "informational/fpsan-toy", str(tmp_path)]) == 0
+
+
+def test_the_later_model_hold_covers_only_the_selected_sanitizers(tmp_path):
+    inv = ms.load_inventory(_write_inventory(tmp_path, fpsan={**_FPSAN, "timeout_seconds": 120}))
+    warm, scan = ms.WARM_TIMEOUT_SECONDS, ms.SCAN_TIMEOUT_SECONDS
+    assert ms._later_reserve([inv]) == warm + scan + 60
+    assert ms._later_reserve([inv], ("fpsan",)) == warm + 120
+    assert ms._later_reserve([inv, inv], ms.SANITIZERS) == 2 * (warm + scan + 60 + 120)
+    assert ms._wave_holds(ms.load_inventory(_write_inventory(tmp_path)), ms.SANITIZERS) == (60.0, 0.0)
+
+
+# ------------------------------------------------------- tutorial pairs
+
+builder = _load("build_model_kernel_asset_for_models", "scripts/sanitizers/build_model_kernel_asset.py")
+
+
+def test_every_tutorial_candidate_has_a_reference_at_the_same_scenarios_and_tensors():
+    inv = ms.load_inventory(_MODELS / "triton-tutorials.yaml")
+    assert inv.fpsan is not None
+    assert inv.asset_version == "2" and inv.specs == (builder.TUTORIAL_SPEC,)
+    entries = {e["kernel"]: e for e in builder.tutorial_entries()}
+    launched = [e for e in entries.values() if e["role"] in inv.roles]
+    assert inv.expected_pairs == sum(len(e["scenarios"]) for e in launched)
+    assert sorted(inv.fpsan.reference) == sorted(e["kernel"] for e in launched)
+    assert builder.REFERENCE_ROLE not in inv.roles
+
+    def layout(launch: dict) -> list:
+        return [(a["dtype"], a["shape"], a.get("init")) for a in launch["args"] if a["kind"] == "tensor"]
+
+    for entry in launched:
+        ref = entries[inv.fpsan.reference[entry["kernel"]]["kernel"]]
+        assert ref["role"] == builder.REFERENCE_ROLE
+        assert sorted(ref["scenarios"]) == sorted(entry["scenarios"])
+        for name, scenario in entry["scenarios"].items():
+            assert layout(ref["scenarios"][name]["launch"]) == layout(scenario["launch"])
+
+
+def test_a_tutorial_kernel_file_is_the_function_and_its_helpers_as_plain_jit():
+    source = (
+        "import triton\nimport triton.language as tl\n\n"
+        "@triton.jit\ndef _helper(x):\n    return x * 2\n\n"
+        "def host():\n    pass\n\n"
+        "@triton.autotune(configs=[], key=[])\n@triton.jit(launch_metadata=host)\n"
+        "def kern(x_ptr, N: tl.constexpr):\n    tl.store(x_ptr, _helper(tl.load(x_ptr)))\n"
+    )
+    text = builder.extract_kernel(source, "kern", origin="triton_tutorials/x.py")
+    assert text.startswith("# kernel: kern\n# origin: triton_tutorials/x.py:13\n")
+    assert "autotune(" not in text and "launch_metadata=" not in text and "def host" not in text
+    assert text.index("def _helper") < text.index("def kern")
+    assert text.count("@triton.jit\n") == 2
+    with pytest.raises(SystemExit, match="BLOCK"):
+        builder.extract_kernel(
+            source + "\n@triton.jit\ndef uses_global(x):\n    return x + BLOCK\n",
+            "uses_global", origin="triton_tutorials/x.py",
+        )
+
+
+@pytest.mark.skipif(not os.environ.get("AORTA_MODEL_KERNELS_DIR"),
+                    reason="set AORTA_MODEL_KERNELS_DIR to an extracted aorta-model-kernels root")
+def test_every_committed_fpsan_reference_is_a_valid_reference_for_the_real_asset():
+    compare = _load("fpsan_compare_for_models", "scripts/sanitizers/fpsan_compare.py")
+    root = Path(os.environ["AORTA_MODEL_KERNELS_DIR"])
+    for path in _inventories():
+        inv = ms.load_inventory(path)
+        if not (root / inv.model).is_dir():
+            continue
+        for pair in ms.model_pairs(inv, root / inv.model):
+            if inv.fpsan is None or pair.kernel in inv.fpsan.exclude:
+                continue
+            ref = inv.fpsan.reference_for(pair)
+            entries = json.loads((root / inv.model / "roofline" / "specs" / pair.spec).read_text())
+            compare.reference_spec(
+                entries, kernel=pair.kernel, scenario=pair.scenario,
+                reference_kernel=ref.get("kernel"), num_warps=ref.get("num_warps"),
+                num_stages=ref.get("num_stages"), constexprs=ref.get("constexprs"), grid=ref.get("grid"),
+            )
+
+
 # --------------------------------------------------------------- dashboard
 
 
@@ -473,7 +742,7 @@ kernel = opts["--kernel"]
 '''
 
 
-def _toy_asset(tmp_path: Path, *, consan_timeout: int = 60) -> None:
+def _toy_asset(tmp_path: Path, *, consan_timeout: int = 60, fpsan: dict | None = None) -> None:
     root = tmp_path / "asset" / "aorta-model-kernels"
     model = root / "toy"
     (model / "roofline" / "harness").mkdir(parents=True)
@@ -489,7 +758,8 @@ def _toy_asset(tmp_path: Path, *, consan_timeout: int = 60) -> None:
     _manifest(root)
     (tmp_path / "recipes").mkdir()
     _write_inventory(tmp_path / "recipes", expected_pairs=4,
-                     consan={"timeout_seconds": consan_timeout, "exclude": {}})
+                     consan={"timeout_seconds": consan_timeout, "exclude": {}},
+                     **({"fpsan": fpsan} if fpsan is not None else {}))
 
 
 def _fake_sweep(recipe: Path, out_dir: Path, *, env=None, timeout=None) -> int:
@@ -868,3 +1138,85 @@ def test_a_timed_out_waitcheck_is_reported_and_consan_still_runs(tmp_path, monke
     assert "sweep timed out" in (tmp_path / "results/informational/waitcheck-toy/sweep.log").read_text()
     merged = json.loads((tmp_path / "results/informational/consan-toy/sanitizer_report.json").read_text())
     assert merged["checks"][0]["kernel_results"]
+
+
+_TOY_FPSAN = {"timeout_seconds": 120, "exclude": {"c": "writes through a pointer table"},
+              "reference": {"a/S1": {"num_warps": 8}}}
+
+
+def _fpsan_sweep(recipe: Path, out_dir: Path, *, env=None, timeout=None) -> int:
+    """Stand-in for `aorta sweep run` on an FpSan recipe: a passes, b writes nothing."""
+    plan = yaml.safe_load(recipe.read_text())["sanitizer_plan"]
+    assert plan["sanitizers"] == ["fpsan"], "only the FpSan wave was selected"
+    argv = shlex.split(Path(plan["source"]["fpsan_command"]).read_text().splitlines()[3])
+    opts = dict(zip(argv[3::2], argv[4::2], strict=True))
+    name = plan["source"]["kernel"]["name"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if name == "b_sym":
+        return 1
+    Path(opts["--record"]).write_text(json.dumps({
+        "kernel": opts["--kernel"], "scenario": opts["--scenario"], "seconds": 1.0,
+        "reference": {"kernel": opts["--kernel"], "changes": [opts.get("--reference-num-warps", "")]},
+        "differing_tensors": [],
+        "result": {"reference_digest": _REF, "candidate_digest": _REF, "reference_instrumented": True,
+                   "candidate_instrumented": True, "target": "gfx950"},
+    }))
+    (out_dir / "sanitizer_report.json").write_text(json.dumps(_fpsan_report(name, "pass")))
+    return 0
+
+
+def test_an_fpsan_only_survey_compares_every_launched_pair_and_writes_one_row(tmp_path, monkeypatch):
+    _toy_asset(tmp_path, fpsan=_TOY_FPSAN)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ms, "sweep", _fpsan_sweep)
+    assert ms.main(["run", "--inventory", "recipes/toy.yaml", "--out", "results/informational",
+                    "--work", "work", "--asset-dir", "asset/aorta-model-kernels", "--gpus", "0",
+                    "--sanitizers", "fpsan"]) == 0
+    informational = tmp_path / "results" / "informational"
+    assert sorted(p.name for p in informational.iterdir()) == ["fpsan-toy"]
+    merged = json.loads((informational / "fpsan-toy" / "sanitizer_report.json").read_text())
+    SanitizerReport.from_dict(merged)
+    fpsan = merged["checks"][0]
+    results = [(kr["identity"]["name"], kr["verdict"], kr.get("reason")) for kr in fpsan["kernel_results"]]
+    assert sorted(results) == [
+        ("a_sym", "pass", None), ("a_sym", "pass", None),
+        ("b_sym", "error", "fpsan_case_produced_no_report: aorta sweep exited 1"),
+    ]
+    assert merged["overall_verdict"] == "error"
+    assert fpsan["backend"]["a/S1.reference_digest"] == _REF
+    selection = json.loads((informational / "fpsan-toy" / "model_survey.json").read_text())
+    assert selection["excluded"] == {"c": "writes through a pointer table"}
+    assert selection["not_scheduled_tonight"] == [] and selection["not_launched"] == {}
+    ran = {(r["kernel"], r["scenario"]): r for r in selection["ran"]}
+    assert sorted(ran) == [("a", "S0"), ("a", "S1"), ("b", "S0")]
+    assert ran[("a", "S1")]["reference"]["changes"] == ["8"]
+    assert ran[("a", "S0")]["candidate_digest"] == _REF
+    assert ran[("b", "S0")]["verdict"] == "error" and ran[("b", "S0")]["driver_error"] is None
+    assert (informational / "fpsan-toy" / "cases" / "a__S1" / "fpsan_compare.json").is_file()
+    assert not (informational / "fpsan-toy" / "cases" / "b__S0" / "fpsan_compare.json").exists()
+
+
+def test_fpsan_needs_an_fpsan_block_in_every_inventory(tmp_path, monkeypatch, capsys):
+    _toy_asset(tmp_path)
+    assert _run_toy(tmp_path, monkeypatch, "--sanitizers", "waitcheck,fpsan") == 2
+    assert "have no fpsan block" in capsys.readouterr().err
+    assert not (tmp_path / "results").exists()
+
+
+def test_launches_leave_this_models_fpsan_wave_and_a_wave_that_cannot_fit_writes_no_row(
+    tmp_path, monkeypatch
+):
+    # One launch fits; a second would spend the 900 s FpSan hold, and with the
+    # hold gone the one compiled pair cannot be compared either.
+    _toy_asset(tmp_path, fpsan={**_TOY_FPSAN, "timeout_seconds": 900})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ms, "sweep", _fpsan_sweep)
+    assert ms.main(["run", "--inventory", "recipes/toy.yaml", "--out", "results/informational",
+                    "--work", "work", "--asset-dir", "asset/aorta-model-kernels", "--gpus", "0",
+                    "--sanitizers", "fpsan", "--budget-seconds", str(ms.WARM_TIMEOUT_SECONDS + 60)]) == 0
+    out = tmp_path / "results" / "informational" / "fpsan-toy"
+    selection = json.loads((out / "model_survey.json").read_text())
+    assert selection["ran"] == []
+    assert selection["not_scheduled_tonight"] == ["a/S0"]
+    assert sorted(selection["not_launched"]) == ["a/S1", "b/S0"]
+    assert not (out / "sanitizer_report.json").exists()

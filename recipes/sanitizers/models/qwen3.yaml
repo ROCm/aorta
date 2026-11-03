@@ -19,3 +19,15 @@ consan:
     # Runs cleanly without ConSan; under ConSan the C0 launch hangs the GPU
     # until the case timeout, and a wedged device costs every case after it.
     _topk_topp_kernel: hangs the GPU under ConSan (runs cleanly without it)
+# Every launched (kernel, scenario) under Triton FpSan against its reference;
+# see gpt-oss.yaml for the default reference config and why tile sizes stay.
+fpsan:
+  timeout_seconds: 900
+  exclude:
+    _compute_slot_mapping_kernel: integer-only slot mapping; FpSan has no floating-point op to rewrite
+  reference:
+    # Captured at num_warps 4 and num_stages 1 already, so the default
+    # reference would be the same launch. BLOCK_N is the causally masked KV
+    # tile, so the variant changes the warp count only.
+    _fwd_kernel:
+      num_warps: 8

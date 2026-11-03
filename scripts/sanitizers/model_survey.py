@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Run waitcheck and ConSan over open-source model kernels for the workload survey.
+"""Run waitcheck, ConSan and FpSan over open-source model kernels for the workload survey.
 
 The nightly ``sanitizers-model-survey`` job runs this once per model inventory in
-``recipes/sanitizers/models/``. For each model it:
+``recipes/sanitizers/models/`` with the default ``--sanitizers waitcheck,consan``;
+``sanitizers-fpsan-survey`` runs it with ``--sanitizers fpsan``. For each model it:
 
 1. launches every (kernel, scenario) pair the inventory keeps, once, with the
    asset's ``launch.py --mode run`` and a private ``TRITON_CACHE_DIR``. Triton
@@ -14,21 +15,28 @@ The nightly ``sanitizers-model-survey`` job runs this once per model inventory i
    hook instruments the bytes waitcheck scanned. Kernels are taken in a nightly
    rotation. The per-case reports are merged into ``<out>/consan-<model>/``; a
    case that wrote no report, or whose dispatched object is no longer the one
-   waitcheck scanned, is merged as an ``error`` for its kernel.
+   waitcheck scanned, is merged as an ``error`` for its kernel;
+4. runs every launched (kernel, scenario) under FpSan: one ``aorta sweep`` per
+   pair whose ``fpsan_command`` is ``fpsan_compare.py`` comparing the pair with
+   its reference (the inventory's ``fpsan`` block). The per-pair reports are
+   merged into ``<out>/fpsan-<model>/``, a case that wrote no report as an
+   ``error``.
 
-One time budget covers every launch, waitcheck sweep, and ConSan case. A
-launch or ConSan case starts only while it could still finish at its own
+Steps 2-4 run only for the sanitizers ``--sanitizers`` selects; step 1 always
+runs. One time budget covers every launch, waitcheck sweep, and sanitizer
+case. A launch or case starts only while it could still finish at its own
 timeout. After a model's first launch wave, a launch must also leave that
-model's ConSan wave, so slow launches cannot spend the time that writes its
-ConSan report. A waitcheck sweep is one process and stops at its own deadline,
-before it would spend this model's ConSan wave or the time held for a later
-model; on that deadline the sweep's process group is stopped and the timeout
-is recorded. Each later model keeps one launch wave, one waitcheck sweep, and
-one ConSan wave, so an earlier model running to its timeouts cannot leave the
-later one with no ConSan report.
+model's ConSan and FpSan waves, so slow launches cannot spend the time that
+writes their reports, and a ConSan case must leave its FpSan wave. A waitcheck
+sweep is one process and stops at its own deadline, before it would spend
+this model's later waves or the time held for a later model; on that deadline
+the sweep's process group is stopped and the timeout is recorded. Each later
+model keeps one launch wave and one wave per selected sanitizer, so an earlier
+model running to its timeouts cannot leave the later one with no report.
 
 Each output directory also gets ``model_survey.json``: what was launched, what
-failed to launch, which ConSan cases ran, were excluded, or did not fit tonight.
+failed to launch, which ConSan or FpSan cases ran, were excluded, or did not
+fit tonight.
 
 The kernel sources come from the ``aorta-model-kernels`` release asset pinned
 below by URL and SHA-256. Without ``--asset-dir`` the script downloads it,
@@ -41,6 +49,7 @@ that drifted, no object compiled at all) exit non-zero. A sanitizer verdict
 never does: the survey is observed-only.
 
     model_survey.py run --inventory recipes/sanitizers/models/gpt-oss.yaml --out results
+    model_survey.py run --sanitizers fpsan --inventory recipes/sanitizers/models/gpt-oss.yaml --out results
 """
 
 from __future__ import annotations
@@ -63,7 +72,7 @@ import tarfile
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,6 +80,9 @@ from pathlib import Path
 import yaml
 
 ASSET_SCHEMA = "aorta.model_kernel_asset/1"
+# v2 (adds triton-tutorials) is built but not published: these three pins and
+# every inventory's asset_version move together once model-kernels-v2 exists.
+# Until then an inventory naming asset_version "2" is refused by check_asset.
 ASSET_VERSION = "1"
 ASSET_ROOT = "aorta-model-kernels"
 ASSET_URL = (
@@ -98,8 +110,18 @@ _INVENTORY_KEYS = {
     "roles",
     "expected_pairs",
     "consan",
+    "fpsan",
 }
 _CONSAN_KEYS = {"timeout_seconds", "exclude"}
+_FPSAN_KEYS = {"timeout_seconds", "exclude", "reference"}
+_REFERENCE_KEYS = {"kernel", "num_warps", "num_stages", "constexprs", "grid"}
+SANITIZERS = ("waitcheck", "consan", "fpsan")
+# FpSan runs in its own nightly job, so a bare run keeps the waitcheck and ConSan survey.
+DEFAULT_SANITIZERS = ("waitcheck", "consan")
+FPSAN_COMPARE = Path(__file__).resolve().with_name("fpsan_compare.py")
+# Each FpSan case runs two sides in sequence; this much of its timeout is left
+# for the driver and the sweep around them.
+_FPSAN_SIDE_SLACK_SECONDS = 30
 _VERDICT_RANK = {"pass": 0, "not_checked": 1, "warn": 2, "error": 3, "fail": 4}
 _FAILED_STATES = {"error", "timed_out"}
 # ConSan names the reader process in a parse error; one cause across kernels
@@ -112,6 +134,26 @@ class SurveyError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class FpsanPlan:
+    """An inventory's ``fpsan:`` block.
+
+    ``reference`` maps a kernel, or one ``<kernel>/<scenario>``, to how its
+    reference differs from the default conservative config
+    (``fpsan_compare.py``): another spec entry (``kernel``), launch options,
+    constexpr overrides, or a grid. A scenario entry replaces its kernel's.
+    """
+
+    timeout: int
+    exclude: dict[str, str]
+    reference: dict[str, dict]
+
+    def reference_for(self, pair: Pair) -> dict:
+        return self.reference.get(
+            f"{pair.kernel}/{pair.scenario}", self.reference.get(pair.kernel, {})
+        )
+
+
+@dataclass(frozen=True)
 class Inventory:
     model: str
     asset_version: str
@@ -121,12 +163,63 @@ class Inventory:
     consan_timeout: int
     exclude: dict[str, str]
     path: Path
+    fpsan: FpsanPlan | None = None
 
 
 def _positive_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise SurveyError(f"{name} must be a positive integer, got {value!r}")
     return value
+
+
+def _reasons(value: object, name: str) -> dict[str, str]:
+    value = value or {}
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) and v for k, v in value.items()
+    ):
+        raise SurveyError(f"{name} must map kernel names to reasons")
+    return dict(value)
+
+
+def _reference(value: object, name: str) -> dict:
+    if not isinstance(value, dict) or not value or set(value) - _REFERENCE_KEYS:
+        raise SurveyError(f"{name} must be a non-empty mapping of {sorted(_REFERENCE_KEYS)}")
+    if "kernel" in value and (not isinstance(value["kernel"], str) or not value["kernel"]):
+        raise SurveyError(f"{name}.kernel must be a spec kernel name")
+    for key in ("num_warps", "num_stages"):
+        if key in value:
+            _positive_int(value[key], f"{name}.{key}")
+    constexprs = value.get("constexprs", {})
+    if not isinstance(constexprs, dict) or not all(
+        isinstance(k, str) and k and (v is None or isinstance(v, (bool, int, float, str)))
+        for k, v in constexprs.items()
+    ):
+        raise SurveyError(f"{name}.constexprs must map argument names to scalars")
+    if "grid" in value:
+        grid = value["grid"]
+        if not isinstance(grid, list) or len(grid) != 3:
+            raise SurveyError(f"{name}.grid must be three positive sizes")
+        for size in grid:
+            _positive_int(size, f"{name}.grid")
+    return dict(value)
+
+
+def _fpsan_plan(value: object, path: Path) -> FpsanPlan | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - _FPSAN_KEYS:
+        raise SurveyError(f"{path}: fpsan must be a mapping of {sorted(_FPSAN_KEYS)}")
+    reference = value.get("reference") or {}
+    if not isinstance(reference, dict) or not all(isinstance(k, str) and k for k in reference):
+        raise SurveyError(f"{path}: fpsan.reference must map kernel or kernel/scenario names to overrides")
+    return FpsanPlan(
+        timeout=_positive_int(value.get("timeout_seconds"), f"{path}: fpsan.timeout_seconds"),
+        exclude=_reasons(value.get("exclude"), f"{path}: fpsan.exclude"),
+        reference={
+            kernel: _reference(override, f"{path}: fpsan.reference.{kernel}")
+            for kernel, override in reference.items()
+        },
+    )
 
 
 def _str_list(value: object, name: str) -> tuple[str, ...]:
@@ -157,11 +250,6 @@ def load_inventory(path: Path) -> Inventory:
     consan = doc.get("consan")
     if not isinstance(consan, dict) or set(consan) - _CONSAN_KEYS:
         raise SurveyError(f"{path}: consan must be a mapping of {sorted(_CONSAN_KEYS)}")
-    exclude = consan.get("exclude") or {}
-    if not isinstance(exclude, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) and v for k, v in exclude.items()
-    ):
-        raise SurveyError(f"{path}: consan.exclude must map kernel names to reasons")
     return Inventory(
         model=model,
         asset_version=asset_version,
@@ -169,8 +257,9 @@ def load_inventory(path: Path) -> Inventory:
         roles=frozenset(_str_list(doc.get("roles"), f"{path}: roles")),
         expected_pairs=_positive_int(doc.get("expected_pairs"), f"{path}: expected_pairs"),
         consan_timeout=_positive_int(consan.get("timeout_seconds"), f"{path}: consan.timeout_seconds"),
-        exclude=dict(exclude),
+        exclude=_reasons(consan.get("exclude"), f"{path}: consan.exclude"),
         path=path,
+        fpsan=_fpsan_plan(doc.get("fpsan"), path),
     )
 
 
@@ -483,6 +572,95 @@ def consan_recipe(model: str, item: Warmed, *, timeout: int) -> str:
     return yaml.safe_dump(recipe, sort_keys=False)
 
 
+def fpsan_reference_args(reference: Mapping[str, object]) -> list[str]:
+    """``fpsan_compare.py`` flags for one inventory ``fpsan.reference`` entry."""
+    args: list[str] = []
+    if "kernel" in reference:
+        args += ["--reference-kernel", str(reference["kernel"])]
+    for key in ("num_warps", "num_stages"):
+        if key in reference:
+            args += [f"--reference-{key.replace('_', '-')}", str(reference[key])]
+    for name, value in sorted(dict(reference.get("constexprs") or {}).items()):
+        args += ["--reference-constexpr", f"{name}={json.dumps(value)}"]
+    if "grid" in reference:
+        args += ["--reference-grid", ",".join(str(g) for g in reference["grid"])]
+    return args
+
+
+def write_fpsan_shim(
+    path: Path,
+    *,
+    model_dir: Path,
+    pair: Pair,
+    work: Path,
+    record: Path,
+    python: str,
+    timeout: int,
+    reference: Mapping[str, object],
+) -> None:
+    """The ``fpsan_command`` for one pair: the driver over the asset's own harness."""
+    roofline = model_dir / "roofline"
+    side_timeout = max(1, (timeout - _FPSAN_SIDE_SLACK_SECONDS) // 2)
+    argv = [
+        python, str(FPSAN_COMPARE),
+        "--launch", str(roofline / "harness" / "launch.py"),
+        "--spec", str(roofline / "specs" / pair.spec),
+        "--kernel", pair.kernel, "--scenario", pair.scenario,
+        "--flat-dir", str(model_dir / "kernels"), "--pkg-src", str(model_dir / "pkg_src"),
+        "--arch", TARGET, "--warp-size", str(WARP_SIZE),
+        "--work", str(work), "--record", str(record), "--side-timeout", str(side_timeout),
+        *fpsan_reference_args(reference),
+    ]
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"cd {shlex.quote(str(roofline))}\n"
+        f"exec {shlex.join(argv)}\n",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def fpsan_recipe(model: str, item: Warmed, *, command: Path, timeout: int) -> str:
+    recipe = {
+        "schema_version": 1,
+        "mode": "sanitizer",
+        "ticket": f"MODEL-SURVEY-FPSAN-{model.upper()}",
+        "sanitizer_plan": {
+            "target": TARGET,
+            "source": {
+                "kind": "kernel",
+                "kernel": {
+                    "name": item.symbol,
+                    "code_object": str(item.code_object),
+                    "code_object_sha256": item.sha256,
+                    "code_object_index": 0,
+                },
+                "fpsan_command": str(command),
+            },
+            "scope": {"kind": "kernel"},
+            "selection": {"requirement": "top_dispatch_count", "top_n": 1},
+            "sanitizers": ["fpsan"],
+            "policy": {
+                "consan_policy": "strict",
+                "on_missing_backend": "fail",
+                "timeout_seconds": timeout,
+            },
+            "output": {"report": "sanitizer_report.json"},
+        },
+    }
+    return yaml.safe_dump(recipe, sort_keys=False)
+
+
+def pair_rotation(items: Sequence[Warmed], night: dt.date) -> list[Warmed]:
+    """The FpSan order for ``night``: every pair in a fixed order, started one pair later each night."""
+    ordered = sorted(items, key=lambda item: (item.pair.kernel, item.pair.scenario))
+    if not ordered:
+        return []
+    start = night.toordinal() % len(ordered)
+    return ordered[start:] + ordered[:start]
+
+
 def rotation(items: Sequence[Warmed], night: dt.date) -> list[Warmed]:
     """The ConSan order for ``night``: a fixed order, started one kernel later each night."""
     ordered = sorted(items, key=lambda item: item.pair.kernel)
@@ -630,8 +808,8 @@ def sweep(
             _CHILDREN.forget(proc)
 
 
-def error_case_report(item: Warmed, reason: str) -> dict:
-    """A per-case ConSan report recording ``reason`` as an error for ``item``'s kernel.
+def error_case_report(item: Warmed, reason: str, *, sanitizer: str = "consan") -> dict:
+    """A per-case ``sanitizer`` report recording ``reason`` as an error for ``item``'s kernel.
 
     Used when a case cannot be read as a valid observation, so its kernel stays in
     the merged row as an error instead of silently leaving it.
@@ -647,7 +825,7 @@ def error_case_report(item: Warmed, reason: str) -> dict:
         "entry_offset": None,
     }
     check = {
-        "sanitizer": "consan", "state": "error", "verdict": "error", "reason": reason,
+        "sanitizer": sanitizer, "state": "error", "verdict": "error", "reason": reason,
         "returncode": None, "findings": [], "coverage": [], "backend": {},
         "kernel_results": [{
             "identity": identity, "state": "error", "verdict": "error", "findings": [],
@@ -764,7 +942,7 @@ def waitcheck_failure_report(items: Sequence[Warmed], reason: str, *, timed_out:
 
 
 def _with_kernel_result(check: dict, identity: dict) -> dict:
-    """A ConSan check, with a per-kernel result even when the hook wrote none."""
+    """A case's primary check, with a per-kernel result even when its backend wrote none."""
     if check.get("kernel_results"):
         return check
     return {
@@ -783,8 +961,11 @@ def _with_kernel_result(check: dict, identity: dict) -> dict:
     }
 
 
-def _merge_checks(sanitizer: str, checks: Sequence[dict]) -> dict:
-    """One check from the same sanitizer's check in every case report."""
+def _merge_checks(sanitizer: str, checks: Sequence[dict], backend: Mapping[str, str] | None = None) -> dict:
+    """One check from the same sanitizer's check in every case report.
+
+    Without ``backend`` the merged check keeps the first case's backend.
+    """
     verdict = max((c["verdict"] for c in checks), key=_VERDICT_RANK.__getitem__)
     failed = [c for c in checks if c["state"] in _FAILED_STATES]
     unchecked = [c for c in checks if c["state"] == "not_checked"]
@@ -802,7 +983,8 @@ def _merge_checks(sanitizer: str, checks: Sequence[dict]) -> dict:
         reason = f"{len(unchecked)} of {len(checks)} kernels not checked ({tally(unchecked, 'not_checked')})"
     else:
         state = "ran"
-    backend = checks[0].get("backend") or {}
+    if backend is None:
+        backend = checks[0].get("backend") or {}
     return {
         "sanitizer": sanitizer,
         "state": state,
@@ -828,8 +1010,63 @@ def merge_consan(reports: Sequence[dict]) -> dict:
     nothing to instrument, that check is ``not_checked`` with the count in its
     reason, and the report is ``partial`` beside the preflight that did run.
     """
+    return merge_cases(reports, "consan")
+
+
+def merge_fpsan(cases: Sequence[tuple[Pair, dict]]) -> dict:
+    """One FpSan report per model from its per-(kernel, scenario) reports.
+
+    Every pair is its own comparison, so each keeps its own kernel result even
+    when two scenarios of one kernel compiled the same object, which the
+    worklist then lists once. A kernel result cannot say which scenario it
+    compared, so each finding's metadata names its ``kernel`` and
+    ``scenario``, and the merged check's backend carries, per pair,
+    ``<kernel>/<scenario>.verdict``, ``.reason`` when the case gave one, and,
+    once the driver's line parsed, ``.reference_digest`` and
+    ``.candidate_digest``.
+    """
+    from aorta.instrumentation.rocjitsu_sanitizers.fpsan_result import RESULT_MARKER
+
+    backend = {"result_marker": RESULT_MARKER, "triton_instrumentation_mode": "fpsan"}
+    reports = []
+    for pair, report in cases:
+        identity = report["worklist"]["kernels"][0]["identity"]
+        label = f"{pair.kernel}/{pair.scenario}"
+        checks = []
+        for check in report["checks"]:
+            if check["sanitizer"] == "fpsan":
+                findings = [
+                    {
+                        **finding,
+                        "kernel_name": finding.get("kernel_name") or identity["name"],
+                        "metadata": {**(finding.get("metadata") or {}),
+                                     "kernel": pair.kernel, "scenario": pair.scenario},
+                    }
+                    for finding in check.get("findings") or []
+                ]
+                check = _with_kernel_result({**check, "findings": findings}, identity)
+                reported = check.get("backend") or {}
+                backend[f"{label}.verdict"] = check["verdict"]
+                if check.get("reason"):
+                    backend[f"{label}.reason"] = str(check["reason"])
+                for key in ("reference_digest", "candidate_digest"):
+                    if isinstance(reported.get(key), str):
+                        backend[f"{label}.{key}"] = reported[key]
+            checks.append(check)
+        reports.append({**report, "checks": checks})
+    return merge_cases(reports, "fpsan", backend=backend)
+
+
+def merge_cases(reports: Sequence[dict], sanitizer: str, *, backend: Mapping[str, str] | None = None) -> dict:
+    """Merge per-case reports whose primary check is ``sanitizer`` into one report.
+
+    Other checks a case carries (ConSan's waitcheck preflight) are merged beside
+    it. A kernel identity two cases share is listed once in the worklist; each
+    case keeps its own kernel result.
+    """
     from aorta.instrumentation.rocjitsu_sanitizers.models import (
         CheckResult,
+        KernelIdentity,
         KernelWorklist,
         SanitizerReport,
     )
@@ -838,13 +1075,20 @@ def merge_consan(reports: Sequence[dict]) -> dict:
     for report in reports:
         identity = report["worklist"]["kernels"][0]["identity"]
         for check in report["checks"]:
-            if check["sanitizer"] == "consan":
+            if check["sanitizer"] == sanitizer:
                 check = _with_kernel_result(check, identity)
             by_sanitizer.setdefault(check["sanitizer"], []).append(check)
-    if "consan" not in by_sanitizer:
-        raise SurveyError("no case report carries a consan check")
-    names = ["consan"] + sorted(name for name in by_sanitizer if name != "consan")
-    kernels = [k for report in reports for k in report["worklist"]["kernels"]]
+    if sanitizer not in by_sanitizer:
+        raise SurveyError(f"no case report carries a {sanitizer} check")
+    names = [sanitizer] + sorted(name for name in by_sanitizer if name != sanitizer)
+    kernels = []
+    seen: set[str] = set()
+    for report in reports:
+        for kernel in report["worklist"]["kernels"]:
+            key = KernelIdentity.from_dict(kernel["identity"]).stable_key
+            if key not in seen:
+                seen.add(key)
+                kernels.append(kernel)
     worklist = KernelWorklist.from_dict(
         {
             "schema": reports[0]["worklist"]["schema"],
@@ -858,84 +1102,72 @@ def merge_consan(reports: Sequence[dict]) -> dict:
         target=reports[0]["target"],
         worklist=worklist,
         checks=tuple(
-            CheckResult.from_dict(_merge_checks(name, by_sanitizer[name])) for name in names
+            CheckResult.from_dict(
+                _merge_checks(name, by_sanitizer[name], backend if name == sanitizer else None)
+            )
+            for name in names
         ),
     )
     return merged.to_dict()
 
 
-def _later_reserve(later: Sequence[Inventory]) -> float:
-    """Seconds held so each later model can still launch, scan, and run ConSan.
+def _wave_holds(inv: Inventory, sanitizers: Sequence[str]) -> tuple[float, float]:
+    """This model's ConSan and FpSan wave holds, zero for a sanitizer not selected."""
+    consan = float(inv.consan_timeout) if "consan" in sanitizers else 0.0
+    fpsan = float(inv.fpsan.timeout) if "fpsan" in sanitizers and inv.fpsan else 0.0
+    return consan, fpsan
 
-    One launch wave, one waitcheck sweep, and one ConSan wave per later
-    inventory. On the nightly's eight GPUs the launch and ConSan waves cover
-    all of Qwen3; on fewer devices each is still one case, which is what
-    writes the report ``--require`` checks for.
+
+def _later_reserve(later: Sequence[Inventory], sanitizers: Sequence[str] = DEFAULT_SANITIZERS) -> float:
+    """Seconds held so each later model can still launch and run each selected sanitizer.
+
+    One launch wave, plus one waitcheck sweep, one ConSan wave and one FpSan
+    wave for whichever of them is selected, per later inventory. On the
+    nightly's eight GPUs the launch and ConSan waves cover all of Qwen3; on
+    fewer devices each is still one case, which is what writes the report
+    ``--require`` checks for.
     """
 
-    return float(
-        sum(WARM_TIMEOUT_SECONDS + SCAN_TIMEOUT_SECONDS + inv.consan_timeout for inv in later)
-    )
+    scan = SCAN_TIMEOUT_SECONDS if "waitcheck" in sanitizers else 0
+    return float(sum(WARM_TIMEOUT_SECONDS + scan + sum(_wave_holds(inv, sanitizers)) for inv in later))
 
 
-def run_model(
+def _copy_case_logs(src: Path, dest: Path) -> None:
+    for path in sorted([*src.rglob("*.log"), *src.glob("fpsan_compare.json")]):
+        target = dest / path.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+
+
+def waitcheck_wave(
     inv: Inventory,
+    warmed: Sequence[Warmed],
     *,
-    asset_dir: Path,
-    work: Path,
+    recipe_dir: Path,
     out: Path,
-    gpus: Sequence[str],
     budget: Budget,
-    night: dt.date,
-    python: str,
-    reserve: float = 0.0,
-) -> dict:
-    model_dir = check_asset(asset_dir, inv)
-    pairs = model_pairs(inv, model_dir)
-    root = work / inv.model
-    print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: launching {len(pairs)} pairs on {len(gpus)} GPU(s)", flush=True)
-    items = [Warmed(pair, root / "cases" / pair.stem) for pair in pairs]
-    # The first wave holds only the later-model time. Holding this model's
-    # ConSan wave there too would compile nothing on a budget too small for
-    # that wave, and "no pair compiled" stops the survey before later models.
-    first_wave = {id(item) for item in items[: len(gpus)]}
-    keep = float(inv.consan_timeout)
-    warmed = on_gpus(
-        gpus,
-        items,
-        lambda item, gpu: warm_one(
-            item,
-            model_dir=model_dir,
-            python=python,
-            gpu=gpu,
-            budget=budget,
-            reserve=reserve if id(item) in first_wave else reserve + keep,
-        ),
-    )
+    reserve: float,
+    keep: float,
+) -> int:
+    """Scan every compiled object in one sweep; returns the sweep's return code."""
     launched = [w for w in warmed if w.ok]
-    if not launched:
-        raise SurveyError(f"{inv.model}: no pair compiled; first failure: {warmed[0].reason}")
-    print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: {len(launched)}/{len(pairs)} compiled", flush=True)
     launch_record = [w.to_dict() for w in warmed]
-
-    recipe_dir = root / "recipes"
-    recipe_dir.mkdir(parents=True, exist_ok=True)
     wc_recipe = recipe_dir / f"waitcheck-{inv.model}.yaml"
     wc_recipe.write_text(waitcheck_recipe(inv.model, warmed), encoding="utf-8")
     wc_out = out / f"waitcheck-{inv.model}"
     print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: waitcheck over {len(launched)} objects", flush=True)
-    # Keep this model's ConSan wave as well as the later-model hold. A scan
-    # that cannot fit is recorded and skipped; it does not cancel ConSan.
-    deadline = _sweep_deadline(budget, reserve=reserve, keep=float(inv.consan_timeout))
+    # Keep this model's later waves as well as the later-model hold. A scan
+    # that cannot fit is recorded and skipped; it does not cancel them.
+    deadline = _sweep_deadline(budget, reserve=reserve, keep=keep)
+    not_started = (
+        "running it would spend the sanitizer time held for this model "
+        f"({int(keep)}s) or a later one"
+    )
     if deadline <= 0:
         wc_rc = SWEEP_TIMED_OUT
         shutil.rmtree(wc_out, ignore_errors=True)
         wc_out.mkdir(parents=True)
-        (wc_out / "sweep.log").write_text(
-            "waitcheck not started: running it would spend the ConSan time held "
-            f"for this model ({inv.consan_timeout}s) or a later one\n",
-            encoding="utf-8",
-        )
+        (wc_out / "sweep.log").write_text(f"waitcheck not started: {not_started}\n", encoding="utf-8")
     else:
         wc_rc = sweep(wc_recipe, wc_out, timeout=deadline)
     (wc_out / "model_survey.json").write_text(
@@ -950,10 +1182,7 @@ def run_model(
     # directory, log included. A report the sweep did write is left alone.
     if not _usable_sanitizer_report(wc_out / "sanitizer_report.json"):
         if wc_rc == SWEEP_TIMED_OUT and deadline <= 0:
-            reason = (
-                "waitcheck_not_started: running it would spend the ConSan time held "
-                f"for this model ({inv.consan_timeout}s) or a later one"
-            )
+            reason = f"waitcheck_not_started: {not_started}"
         elif wc_rc == SWEEP_TIMED_OUT:
             reason = (
                 f"waitcheck_timed_out: aorta sweep exceeded {deadline:.1f}s "
@@ -967,7 +1196,22 @@ def run_model(
         (wc_out / "sanitizer_report.json").write_text(
             json.dumps(report, indent=2) + "\n", encoding="utf-8"
         )
+    return wc_rc
 
+
+def consan_wave(
+    inv: Inventory,
+    warmed: Sequence[Warmed],
+    *,
+    root: Path,
+    recipe_dir: Path,
+    out: Path,
+    gpus: Sequence[str],
+    budget: Budget,
+    night: dt.date,
+    reserve: float,
+) -> dict:
+    """One scenario per kernel under ConSan, merged into ``<out>/consan-<model>/``."""
     first_by_kernel: dict[str, Warmed] = {}
     for item in warmed:
         first_by_kernel.setdefault(item.pair.kernel, item)
@@ -1034,10 +1278,7 @@ def run_model(
         (cs_out / "sanitizer_report.json").write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     for result in ran:
         src = consan_root / Pair("", result["kernel"], result["scenario"]).stem
-        for log in sorted(src.rglob("*.log")):
-            dest = cs_out / "cases" / src.name / log.relative_to(src)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(log, dest)
+        _copy_case_logs(src, cs_out / "cases" / src.name)
     selection = {
         "model": inv.model,
         "inventory": inv.path.name,
@@ -1054,19 +1295,208 @@ def run_model(
         "not_launched": not_launched,
     }
     (cs_out / "model_survey.json").write_text(json.dumps(selection, indent=2) + "\n", encoding="utf-8")
-    summary = {
-        "model": inv.model,
-        "pairs": len(pairs),
-        "compiled": len(launched),
-        "waitcheck_returncode": wc_rc,
-        "waitcheck_timed_out": wc_rc == SWEEP_TIMED_OUT,
+    return {
         "consan_ran": len(ran),
         "consan_candidates": len(order),
         "consan_not_scheduled": len(skipped),
         "consan_excluded": len(excluded),
     }
+
+
+def fpsan_wave(
+    inv: Inventory,
+    warmed: Sequence[Warmed],
+    *,
+    model_dir: Path,
+    root: Path,
+    recipe_dir: Path,
+    out: Path,
+    gpus: Sequence[str],
+    budget: Budget,
+    night: dt.date,
+    python: str,
+    reserve: float,
+) -> dict:
+    """Every launched (kernel, scenario) under FpSan, merged into ``<out>/fpsan-<model>/``.
+
+    Each pair is one ``aorta sweep`` whose ``fpsan_command`` runs
+    ``fpsan_compare.py`` against the pair's reference. Pairs are taken in a
+    nightly rotation, so a budget that runs out skips different pairs each
+    night. The driver's record (what the reference changed, both digests and
+    cache checks) is kept beside each case's logs as ``fpsan_compare.json``.
+    """
+    plan = inv.fpsan
+    if plan is None:
+        raise SurveyError(f"{inv.model}: the inventory has no fpsan block")
+    kernels = {w.pair.kernel for w in warmed}
+    excluded = {k: r for k, r in plan.exclude.items() if k in kernels}
+    not_launched = {
+        f"{w.pair.kernel}/{w.pair.scenario}": w.reason
+        for w in warmed
+        if not w.ok and w.pair.kernel not in excluded
+    }
+    order = pair_rotation([w for w in warmed if w.ok and w.pair.kernel not in excluded], night)
+    fpsan_root = root / "fpsan"
+    skipped: list[str] = []
+    lock = threading.Lock()
+
+    def fpsan_one(item: Warmed, gpu: str) -> dict | None:
+        if not budget.admit(plan.timeout, reserve=reserve):
+            with lock:
+                skipped.append(f"{item.pair.kernel}/{item.pair.scenario}")
+            return None
+        case_dir = item.case_dir / "fpsan"
+        shutil.rmtree(case_dir, ignore_errors=True)
+        case_dir.mkdir(parents=True)
+        shim, record = case_dir / "fpsan.sh", case_dir / "record.json"
+        write_fpsan_shim(
+            shim, model_dir=model_dir, pair=item.pair, work=case_dir / "work", record=record,
+            python=python, timeout=plan.timeout, reference=plan.reference_for(item.pair),
+        )
+        recipe = recipe_dir / f"fpsan-{item.pair.stem}.yaml"
+        recipe.write_text(fpsan_recipe(inv.model, item, command=shim, timeout=plan.timeout), encoding="utf-8")
+        case_out = fpsan_root / item.pair.stem
+        rc = sweep(recipe, case_out, env={"HIP_VISIBLE_DEVICES": gpu}, timeout=float(plan.timeout))
+        if rc == SWEEP_TIMED_OUT:
+            report = error_case_report(
+                item,
+                f"fpsan_case_timed_out: aorta sweep exceeded {plan.timeout}s "
+                "and its process group was stopped",
+                sanitizer="fpsan",
+            )
+        else:
+            try:
+                report = json.loads((case_out / "sanitizer_report.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                report = error_case_report(
+                    item, f"fpsan_case_produced_no_report: aorta sweep exited {rc}", sanitizer="fpsan"
+                )
+        try:
+            driver = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            driver = {}
+        else:
+            case_out.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(record, case_out / "fpsan_compare.json")
+        return {"pair": item.pair, "returncode": rc, "report": report,
+                "driver": driver if isinstance(driver, dict) else {}}
+
+    print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: FpSan over up to {len(order)} pairs "
+          f"({len(excluded)} kernels excluded, {int(budget.remaining())}s of budget left)", flush=True)
+    ran = [r for r in on_gpus(gpus, order, fpsan_one) if r is not None]
+    fp_out = out / f"fpsan-{inv.model}"
+    shutil.rmtree(fp_out, ignore_errors=True)
+    fp_out.mkdir(parents=True)
+    if ran:
+        merged = merge_fpsan([(r["pair"], r["report"]) for r in ran])
+        (fp_out / "sanitizer_report.json").write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    for result in ran:
+        stem = result["pair"].stem
+        _copy_case_logs(fpsan_root / stem, fp_out / "cases" / stem)
+    selection = {
+        "model": inv.model,
+        "inventory": inv.path.name,
+        "night": night.isoformat(),
+        "budget_seconds": int(budget.seconds),
+        "case_timeout_seconds": plan.timeout,
+        "ran": [
+            {
+                "kernel": r["pair"].kernel,
+                "scenario": r["pair"].scenario,
+                "returncode": r["returncode"],
+                "verdict": r["report"].get("overall_verdict"),
+                "reference": r["driver"].get("reference"),
+                "driver_error": r["driver"].get("error"),
+                "differing_tensors": r["driver"].get("differing_tensors"),
+                "seconds": r["driver"].get("seconds"),
+                **(r["driver"].get("result") or {}),
+            }
+            for r in ran
+        ],
+        "not_scheduled_tonight": sorted(skipped),
+        "excluded": excluded,
+        "not_launched": not_launched,
+    }
+    (fp_out / "model_survey.json").write_text(json.dumps(selection, indent=2) + "\n", encoding="utf-8")
+    return {
+        "fpsan_ran": len(ran),
+        "fpsan_candidates": len(order),
+        "fpsan_not_scheduled": len(skipped),
+        "fpsan_excluded": len(excluded),
+    }
+
+
+def run_model(
+    inv: Inventory,
+    *,
+    asset_dir: Path,
+    work: Path,
+    out: Path,
+    gpus: Sequence[str],
+    budget: Budget,
+    night: dt.date,
+    python: str,
+    reserve: float = 0.0,
+    sanitizers: Sequence[str] = DEFAULT_SANITIZERS,
+) -> dict:
+    model_dir = check_asset(asset_dir, inv)
+    pairs = model_pairs(inv, model_dir)
+    root = work / inv.model
+    print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: launching {len(pairs)} pairs on {len(gpus)} GPU(s)", flush=True)
+    items = [Warmed(pair, root / "cases" / pair.stem) for pair in pairs]
+    # The first wave holds only the later-model time. Holding this model's
+    # sanitizer waves there too would compile nothing on a budget too small
+    # for them, and "no pair compiled" stops the survey before later models.
+    first_wave = {id(item) for item in items[: len(gpus)]}
+    consan_hold, fpsan_hold = _wave_holds(inv, sanitizers)
+    keep = consan_hold + fpsan_hold
+    warmed = on_gpus(
+        gpus,
+        items,
+        lambda item, gpu: warm_one(
+            item,
+            model_dir=model_dir,
+            python=python,
+            gpu=gpu,
+            budget=budget,
+            reserve=reserve if id(item) in first_wave else reserve + keep,
+        ),
+    )
+    launched = [w for w in warmed if w.ok]
+    if not launched:
+        raise SurveyError(f"{inv.model}: no pair compiled; first failure: {warmed[0].reason}")
+    print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: {len(launched)}/{len(pairs)} compiled", flush=True)
+
+    recipe_dir = root / "recipes"
+    recipe_dir.mkdir(parents=True, exist_ok=True)
+    summary: dict[str, object] = {"model": inv.model, "pairs": len(pairs), "compiled": len(launched)}
+    if "waitcheck" in sanitizers:
+        wc_rc = waitcheck_wave(
+            inv, warmed, recipe_dir=recipe_dir, out=out, budget=budget, reserve=reserve, keep=keep
+        )
+        summary |= {"waitcheck_returncode": wc_rc, "waitcheck_timed_out": wc_rc == SWEEP_TIMED_OUT}
+    if "consan" in sanitizers:
+        summary |= consan_wave(
+            inv, warmed, root=root, recipe_dir=recipe_dir, out=out, gpus=gpus, budget=budget,
+            night=night, reserve=reserve + fpsan_hold,
+        )
+    if "fpsan" in sanitizers:
+        summary |= fpsan_wave(
+            inv, warmed, model_dir=model_dir, root=root, recipe_dir=recipe_dir, out=out, gpus=gpus,
+            budget=budget, night=night, python=python, reserve=reserve,
+        )
     print(f"[{time.strftime('%H:%M:%S')}] {inv.model}: {json.dumps(summary)}", flush=True)
     return summary
+
+
+def parse_sanitizers(text: str) -> tuple[str, ...]:
+    names = tuple(dict.fromkeys(name.strip() for name in text.split(",") if name.strip()))
+    unknown = sorted(set(names) - set(SANITIZERS))
+    if not names or unknown:
+        raise argparse.ArgumentTypeError(
+            f"expected a comma-separated subset of {','.join(SANITIZERS)}, got {text!r}"
+        )
+    return tuple(name for name in SANITIZERS if name in names)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1081,12 +1511,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--gpus", default="auto",
                      help="comma-separated device ids, or auto for every visible device")
     run.add_argument("--budget-seconds", type=float, default=3600.0,
-                     help="for every launch, waitcheck sweep, and ConSan case; a launch or "
-                     "ConSan case starts only if it can still finish at its own timeout, "
+                     help="for every launch, waitcheck sweep, ConSan case and FpSan case; a "
+                     "launch or case starts only if it can still finish at its own timeout, "
                      "a launch after a model's first wave also leaves that model's "
-                     "ConSan wave, a waitcheck sweep stops before spending that hold, and "
-                     "each later model keeps one launch wave, one waitcheck sweep, and "
-                     "one ConSan wave")
+                     "ConSan and FpSan waves, a waitcheck sweep stops before spending that "
+                     "hold, a ConSan case leaves this model's FpSan wave, and each later "
+                     "model keeps one launch wave and one wave per selected sanitizer")
+    run.add_argument("--sanitizers", type=parse_sanitizers, default=DEFAULT_SANITIZERS,
+                     help=f"comma-separated subset of {','.join(SANITIZERS)} (default: "
+                     f"{','.join(DEFAULT_SANITIZERS)}); fpsan needs an fpsan block in every inventory")
     run.add_argument("--night", type=dt.date.fromisoformat, default=dt.datetime.now(dt.timezone.utc).date())
     args = parser.parse_args(argv)
 
@@ -1102,6 +1535,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not gpus:
             raise SurveyError("no GPU is visible to this process")
         inventories = [load_inventory(path.resolve()) for path in args.inventory]
+        if "fpsan" in args.sanitizers:
+            missing = [inv.model for inv in inventories if inv.fpsan is None]
+            if missing:
+                raise SurveyError(f"fpsan was selected but {missing} have no fpsan block")
         asset_dir = args.asset_dir.resolve() if args.asset_dir else fetch_asset(work)
         for index, inv in enumerate(inventories):
             run_model(
@@ -1113,7 +1550,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 budget=budget,
                 night=args.night,
                 python=sys.executable,
-                reserve=_later_reserve(inventories[index + 1 :]),
+                reserve=_later_reserve(inventories[index + 1 :], args.sanitizers),
+                sanitizers=args.sanitizers,
             )
     except SurveyError as exc:
         print(f"error: {exc}", file=sys.stderr)
