@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from aorta.instrumentation.rocjitsu_sanitizers import KernelCodeObject, KernelInventory
-from aorta.rocjitsu import recording
+from aorta.rocjitsu import recording, shadow
 
 
 def _object(path: Path, processor: str = "gfx950", kernels=("kernel_a",)) -> KernelInventory:
@@ -103,3 +103,31 @@ def test_recording_is_versioned_and_written_atomically(tmp_path) -> None:
     assert document["rocjitsu_commit"] == recording.PINNED_ROCJITSU_COMMIT
     assert document["operations"][0]["output_check"]["state"] == "not_run"
     assert not list(tmp_path.glob(".recording.json.*"))
+
+
+def test_shadow_recording_is_written_beside_the_job(tmp_path, monkeypatch) -> None:
+    job = tmp_path / "job"
+    job.mkdir()
+    binary = tmp_path / "kernel.hsaco"
+    binary.write_bytes(b"binary")
+    facts = recording.CodeObjectFacts(
+        path=str(binary),
+        sha256="a" * 64,
+        requested_arch="gfx950",
+        observed_arch="gfx950",
+        kernels=("kernel_a",),
+        applicable=True,
+    )
+    monkeypatch.setattr(shadow, "inspect_code_object", lambda *args, **kwargs: facts)
+
+    path = shadow.capture_shadow_recording(
+        job_dir=job,
+        code_object=binary,
+        requested_arch="gfx950",
+        max_kernels=64,
+    )
+
+    assert path == job / "rj_expert" / "live_recording.json"
+    document = json.loads(path.read_text())
+    assert document["code_object"]["observed_arch"] == "gfx950"
+    assert document["operations"] == []
