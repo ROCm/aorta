@@ -312,6 +312,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [Profiling Collectors](docs/profiling-collectors.md) | `--collect rocprof` (wraps any subprocess command) / `--collect proton` (Python launches, or `mode: env`) — attach a GPU profiler without editing the payload |
 | [Choosing a Proton backend](docs/proton-backends.md) | Which of Proton's five backends answers which question — whole-kernel timing vs intra-kernel cycles vs PC sampling, what each costs you, and what is available on which Triton |
 | [TokenSpeed](docs/tokenspeed.md) | Third-party inference engine under `mode: probe` — kernel, operator-suite and serving triage, plus Waitcheck and ConSan over its JIT attention/gemm kernels (gfx950) |
+| [Tiny transformer](docs/tiny-transformer.md) | `tiny_transformer` workload — a small DDP transformer run in-process, through Spur, through Monarch, or through Monarch on Spur. Install guides: [Spur](docs/spur-install.md), [Monarch](docs/monarch-install.md) |
 | [TokenSpeed serving](docs/tokenspeed-serving.md) | `tokenspeed_serve` workload — TTFT / TPOT / ITL / throughput per cell, over model, concurrency and ISL/OSL sweeps (gfx950) |
 | [`aorta agent mitigate`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
 | [`aorta chat`](docs/chat/README.md) | Interactive assistant over the codebase and this machine's run artifacts (opt-in `chat-*` extras) |

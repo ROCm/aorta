@@ -44,7 +44,7 @@ from aorta.triage.recipe import (
 from aorta.triage.runner import (
     MatrixIncompleteError,
     MatrixStrictError,
-    _is_rank_zero,
+    _owns_persisted_output,
     run_recipe,
 )
 
@@ -375,7 +375,7 @@ def execute_triage_run(
         # (matrix.md / matrix.json present but classification couldn't
         # anchor, or --strict caught an errored/did_not_run cell). Only
         # rank 0 wrote artifacts, so only rank 0 reports.
-        if _is_rank_zero():
+        if _owns_persisted_output(r):
             click.echo(f"Wrote matrix to {exc.run_dir}")
         raise click.ClickException(str(exc)) from exc
     except (
@@ -389,7 +389,7 @@ def execute_triage_run(
     # Under torchrun only rank 0 writes the matrix; non-zero ranks ran the
     # trials into a scratch dir that no longer exists, so they must not claim
     # to have written anything.
-    if not dry_run and _is_rank_zero():
+    if not dry_run and _owns_persisted_output(r):
         click.echo(f"Wrote matrix to {run_dir}")
 
 

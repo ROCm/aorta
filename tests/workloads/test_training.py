@@ -11,13 +11,13 @@ from __future__ import annotations
 import pytest
 
 from aorta.workloads.training import (
-    ChecksSpec,
     ModelSpec,
     OptimizerSpec,
     TrainingConfig,
     TrainingWorkload,
+    _percentile,
+    cuda_device_index,
 )
-from aorta.workloads.training import _percentile
 
 # --------------------------------------------------------------------------- #
 # Config parsing / validation (torch-free)
@@ -30,6 +30,9 @@ def test_config_defaults() -> None:
     assert cfg.model.kind == "transformer"
     assert cfg.optimizer.kind == "adamw"
     assert cfg.checks.fail_on_nan_loss is True
+    # Opt-in checks stay off so existing training recipes are unchanged.
+    assert cfg.checks.fail_on_rank_loss_mismatch is False
+    assert cfg.expected_world_size is None
 
 
 def test_config_nested_sections_parsed() -> None:
@@ -108,6 +111,35 @@ def test_percentile_helper() -> None:
     assert _percentile([], 50) == 0.0
     assert _percentile([4.0], 99) == 4.0
     assert _percentile([1.0, 2.0, 3.0, 4.0], 50) == pytest.approx(2.5)
+
+
+def test_cuda_device_index_single_visible_gpu() -> None:
+    """One visible GPU is device 0; a wider mask keeps LOCAL_RANK."""
+    assert cuda_device_index(3, "4") == 0
+    assert cuda_device_index(3, "7") == 0
+    assert cuda_device_index(3, "0,1,2,3") == 3
+    assert cuda_device_index(2, None) == 2
+    assert cuda_device_index(1, "") == 1
+    assert cuda_device_index(1, "  ") == 1
+
+
+def test_expected_world_size_mismatch_fails_before_training() -> None:
+    wl = TrainingWorkload({})
+    wl._cfg = TrainingConfig.from_dict({"expected_world_size": 16, "steps": 2, "device": "cpu"})
+    wl._world_size = 1
+    wl._rank = 0
+    result = wl.run()
+    assert result.passed is False
+    assert result.main_work_started is False
+    assert result.metrics.get("world_size") == 1
+    assert result.metrics.get("final_loss") is None
+    problems = result.failure_details[0].get("problems")
+    assert problems == ["unexpected_world_size"]
+
+
+def test_mismatch_flag_rejects_non_bool() -> None:
+    with pytest.raises(TypeError, match="fail_on_rank_loss_mismatch"):
+        TrainingConfig.from_dict({"checks": {"fail_on_rank_loss_mismatch": "false"}})
 
 
 def test_workload_declares_contract() -> None:
@@ -336,3 +368,83 @@ def test_stubbed_multi_rank_run(monkeypatch) -> None:
     assert result.metrics["world_size"] == 2
     assert result.metrics["rank"] == 1
     assert result.total_iterations == 2
+
+
+_GLOO_RANK = """\
+import json
+import sys
+
+from aorta.workloads.distributed_launch import run_training_rank
+
+print("AORTA_RESULT " + json.dumps(run_training_rank(json.loads(sys.argv[1]))))
+"""
+
+
+@requires_torch
+def test_two_gloo_ranks_agree_when_the_loss_check_is_on() -> None:
+    """A healthy 2-rank run passes ``fail_on_rank_loss_mismatch``.
+
+    The check compares final losses, so both ranks must see the same batches.
+    A per-rank batch seed makes this run fail with ``rank_loss_mismatch``.
+    """
+    import json
+    import os
+    import socket
+    import subprocess
+    import sys
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    config = {
+        "parallelism": "ddp",
+        "device": "cpu",
+        "dtype": "float32",
+        "batch_size": 2,
+        "seq_len": 8,
+        "steps": 3,
+        "warmup_steps": 0,
+        "expected_world_size": 2,
+        "model": {"kind": "mlp", "hidden_size": 16, "num_layers": 1, "vocab_size": 32},
+        "checks": {"fail_on_rank_loss_mismatch": True},
+    }
+    procs = []
+    for rank in range(2):
+        env = {
+            **os.environ,
+            "RANK": str(rank),
+            "LOCAL_RANK": str(rank),
+            "WORLD_SIZE": "2",
+            "MASTER_ADDR": "127.0.0.1",
+            "MASTER_PORT": str(port),
+        }
+        env.pop("TORCHELASTIC_RUN_ID", None)
+        procs.append(
+            subprocess.Popen(
+                [sys.executable, "-c", _GLOO_RANK, json.dumps(config)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        )
+    results = []
+    try:
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            assert proc.returncode == 0, err[-2000:]
+            line = next(row for row in out.splitlines() if row.startswith("AORTA_RESULT "))
+            results.append(json.loads(line.removeprefix("AORTA_RESULT ")))
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+    for result in results:
+        problems = [
+            problem
+            for item in result.get("failure_details", [])
+            for problem in item.get("problems", [])
+        ]
+        assert result.get("passed") is True, problems
+        assert result.get("metrics", {}).get("world_size") == 2

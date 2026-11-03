@@ -61,6 +61,7 @@ race = "aorta.workloads.race:RaceWorkload"
 # Single-process GPU smoke test (no torchrun); ideal for emulated/CI runs.
 gpu_smoke = "aorta.workloads.gpu_smoke:GpuSmokeWorkload"
 training = "aorta.workloads.training:TrainingWorkload"
+tiny_transformer = "aorta.workloads.tiny_transformer:TinyTransformerWorkload"
 # TokenSpeed online-serving benchmark (gfx950/gfx1250). Drives TokenSpeed's own
 # `tokenspeed bench serve` in its published container and reports TTFT / TPOT /
 # ITL / throughput, which the `mode: probe` route cannot do (no metrics channel).
