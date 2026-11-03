@@ -70,7 +70,7 @@ jobs:
           fi
 
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # refresh_baselines.py rejects both of these too, but only after pip has
       # installed the wheel inside the container -- minutes of GPU runner time to
