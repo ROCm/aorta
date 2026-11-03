@@ -813,3 +813,20 @@ recorded as passing; unavailable and unrun checks render as `no output check`.
 
 This module does not yet execute the simulator or attach itself to Chat. Those
 consumers build on the versioned recording contract in follow-up PRs.
+
+### ConSan shadow comparison
+
+`aorta.rocjitsu.comparison` compares a stored expert answer with an independent
+ConSan report without changing either report or Autopsy. Only a finding
+attributed to the same kernel is called confirmed. A clean ConSan run leaves
+the expert claim unconfirmed; it does not silently disprove it. Waitcheck and
+simulator findings are not counted again because they are inputs to the expert.
+
+```bash
+python -m aorta.rocjitsu.evaluate \
+  --jobs-root <cia-jobs-root> \
+  --output <evaluation>/shadow-summary.json
+```
+
+Archive-demo reports are marked not applicable because they did not analyse the
+bound CIA job's live input.
