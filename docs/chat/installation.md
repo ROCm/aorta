@@ -112,6 +112,7 @@ available:
 
 - `list_cluster_jobs`
 - `read_autopsy_report`
+- `read_rocjitsu_expert_report`
 
 The three tools that write staged inputs and execute diagnostic work remain
 absent until an operator sets `allow_cluster_jobs = true`:
@@ -142,7 +143,8 @@ aorta chat tools --json
 ```
 
 At the safe default, the first command includes `list_cluster_jobs` and
-`read_autopsy_report`, but no `triage_*` tools. After enabling cluster jobs it
+`read_autopsy_report` plus the separate `read_rocjitsu_expert_report`, but no
+`triage_*` tools. After enabling cluster jobs it
 includes all five. Without `cia`, chat still starts and its ordinary code/run
 tools still work; startup prints that the five CIA diagnostic tools were
 not offered and names the remedy:
