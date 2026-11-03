@@ -44,7 +44,7 @@
 #   out = torch.as_tensor(v, device="cuda")*2; torch.cuda.synchronize()
 #   # -> device heap-buffer-overflow in vectorized_elementwise_kernel
 
-FROM rocm/dev-ubuntu-22.04:7.0.2 AS base
+FROM rocm/dev-ubuntu-22.04:7.2.4 AS base
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git python3-dev python3-pip python3-venv \
