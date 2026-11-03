@@ -17,19 +17,29 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     SelectionRequirement,
     Verdict,
     build_report,
+    evaluate_fpsan_output,
     write_report,
 )
+from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _load_comparator():
-    path = _REPO_ROOT / "scripts" / "sanitizers" / "compare_verdict_baselines.py"
-    spec = importlib.util.spec_from_file_location("compare_verdict_baselines", path)
+def _load_script(name: str):
+    path = _REPO_ROOT / "scripts" / "sanitizers" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_comparator():
+    return _load_script("compare_verdict_baselines")
+
+
+def _load_dashboard():
+    return _load_script("gen_sanitizer_dashboard")
 
 
 comparator = _load_comparator()
@@ -83,16 +93,77 @@ _RACY_CONFLICT_MESSAGE = (
 )
 
 
+_FPSAN_DIGEST_A = "4dfe96464b850fae836ced6ef7177049a67ed5f67ad63f31c6cca93dbb2779b3"
+_FPSAN_DIGEST_B = "e986a6ed5ab5c6794224330f7f8caa9abac54a995ce4e3ee3dc28c2ee964a5c4"
+
+
+def _fpsan_check(candidate_digest: str, *, candidate_instrumented: bool = True) -> CheckResult:
+    """The check ``run_fpsan`` derives from one ``AORTA_FPSAN_RESULT`` line."""
+    record = {
+        "reference_digest": _FPSAN_DIGEST_A,
+        "candidate_digest": candidate_digest,
+        "reference_instrumented": True,
+        "candidate_instrumented": candidate_instrumented,
+        "target": "gfx950",
+    }
+    process = ProcessResult(
+        argv=("fpsan_cmd",),
+        returncode=0,
+        stdout=f"AORTA_FPSAN_RESULT {json.dumps(record)}\n",
+        stderr="",
+    )
+    return evaluate_fpsan_output(process, sanitizer="fpsan", target="gfx950")
+
+
 def _write_all_matching(root: Path) -> None:
     _write_case(root, "waitcheck", _check("waitcheck", Verdict.WARN, message="missing s_waitcnt"))
     _write_case(root, "consan-clean", _check("consan", Verdict.PASS))
     _write_case(root, "consan-racy", _check("consan", Verdict.FAIL, message=_RACY_CONFLICT_MESSAGE))
+    _write_case(root, "fpsan-match", _fpsan_check(_FPSAN_DIGEST_A))
+    _write_case(root, "fpsan-mismatch", _fpsan_check(_FPSAN_DIGEST_B))
 
 
 def test_comparator_passes_when_all_cases_match(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     _write_all_matching(tmp_path)
     assert comparator.main(["prog", str(tmp_path)]) == 0
+
+
+def test_every_gated_case_has_a_committed_baseline_and_a_dashboard_row() -> None:
+    baselines = json.loads((_REPO_ROOT / comparator._BASELINES).read_text(encoding="utf-8"))
+    assert set(comparator._CASES) <= set(baselines)
+    dashboard = _load_dashboard()
+    assert {key: Path(case) / "sanitizer_report.json" for case, key, _r, _b in dashboard.CASES} == (
+        comparator._CASES
+    )
+    for _case, _key, recipe, _backend in dashboard.CASES:
+        assert (_REPO_ROOT / "recipes" / "sanitizers" / f"{recipe}.yaml").is_file(), recipe
+
+
+def test_fpsan_mismatch_baseline_names_the_evaluators_finding() -> None:
+    baselines = json.loads((_REPO_ROOT / comparator._BASELINES).read_text(encoding="utf-8"))
+    shape = baselines["fpsan_mismatch"]["finding_shape"]["fpsan"]
+    (finding,) = _fpsan_check(_FPSAN_DIGEST_B).findings
+    assert finding.code == "fpsan_digest_mismatch"
+    assert shape in finding.message
+
+
+def test_fpsan_mismatch_control_that_matches_fails_the_gate(tmp_path, monkeypatch, capsys) -> None:
+    # The negative control is the proof FpSan can see a wrong kernel at all.
+    monkeypatch.chdir(_REPO_ROOT)
+    _write_all_matching(tmp_path)
+    _write_case(tmp_path, "fpsan-mismatch", _fpsan_check(_FPSAN_DIGEST_A))
+    assert comparator.main(["prog", str(tmp_path)]) == 1
+    assert "fpsan_mismatch" in capsys.readouterr().out
+
+
+def test_fpsan_match_control_with_an_uninstrumented_side_fails_the_gate(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    _write_all_matching(tmp_path)
+    _write_case(
+        tmp_path, "fpsan-match", _fpsan_check(_FPSAN_DIGEST_A, candidate_instrumented=False)
+    )
+    assert comparator.main(["prog", str(tmp_path)]) == 1
 
 
 def test_comparator_rejects_schemaless_report(tmp_path, monkeypatch) -> None:

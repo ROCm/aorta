@@ -19,7 +19,7 @@ That sweep exists because of ROCm/aorta#450. ``daily-consan-tiny`` and
 which sets ``RJ_CONSAN_REQUIRE_RECORDS`` and so demands dynamic records a
 non-dispatching driver can never produce. Both failed closed with
 ``combined_hook_exit_86`` and zero findings on every run for weeks, and nothing
-noticed: the baseline comparison above only covers the three *gated* cases, and
+noticed: the baseline comparison above only covers the *gated* cases, and
 these two are informational, so an ``error`` verdict there was nobody's problem.
 The sweep is deliberately independent of whether a case is gated.
 
@@ -99,6 +99,8 @@ _CASES = {
     "waitcheck_gemm": Path("waitcheck") / "sanitizer_report.json",
     "consan_clean": Path("consan-clean") / "sanitizer_report.json",
     "consan_racy": Path("consan-racy") / "sanitizer_report.json",
+    "fpsan_match": Path("fpsan-match") / "sanitizer_report.json",
+    "fpsan_mismatch": Path("fpsan-mismatch") / "sanitizer_report.json",
 }
 _GATED_BY_PATH = {relative: name for name, relative in _CASES.items()}
 
