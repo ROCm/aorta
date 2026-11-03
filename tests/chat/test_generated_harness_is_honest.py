@@ -182,7 +182,9 @@ def triage(tmp_path, monkeypatch):
     monkeypatch.setenv("AORTA_CHAT_ALLOW_CLUSTER_JOBS", "true")
     reset_settings()
     monkeypatch.setattr(
-        cluster, "_run_triage", lambda args, label: "Autopsy verdict:\n  category: clean"
+        cluster,
+        "_run_triage",
+        lambda args, label, **_kwargs: "Autopsy verdict:\n  category: clean",
     )
 
     def run(source: str, **kwargs) -> str:

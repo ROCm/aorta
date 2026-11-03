@@ -278,7 +278,13 @@ def _triage_pool() -> ThreadPoolExecutor:
         return _POOL
 
 
-def _run_triage(extra_args: list[str], label: str) -> str:
+def _run_triage(
+    extra_args: list[str],
+    label: str,
+    *,
+    shadow_object: Path | None = None,
+    shadow_job_binary: bool = False,
+) -> str:
     """Run Launch -> Watch -> Autopsy in-process and render the result.
 
     The agents live in this environment now, so this is a call rather than a
@@ -372,6 +378,33 @@ def _run_triage(extra_args: list[str], label: str) -> str:
             f"Triage failed at stage {result.get('stage', '?')}: "
             f"{result.get('error', 'unknown error')}"
         )
+
+    if settings.rocjitsu_shadow_enabled:
+        object_path = (
+            Path(result["job_dir"]) / "kernel.bin"
+            if shadow_job_binary
+            else shadow_object
+        )
+        if object_path is not None and object_path.is_file():
+            try:
+                from aorta.rocjitsu.shadow import capture_shadow_recording
+
+                path = capture_shadow_recording(
+                    job_dir=Path(result["job_dir"]),
+                    code_object=object_path,
+                    requested_arch=_arch(),
+                    max_kernels=settings.rocjitsu_shadow_max_kernels,
+                )
+            except Exception as exc:
+                result["rocjitsu_shadow"] = {
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            else:
+                result["rocjitsu_shadow"] = {
+                    "status": "recorded",
+                    "path": str(path),
+                }
 
     # A sweep run is a sanitizer run by construction: write_asm_recipe asks for
     # waitcheck and sets on_missing_backend=fail, and the kernel recipe
@@ -605,6 +638,7 @@ def triage_kernel_source(
     body = _run_triage(
         ["--source", str(src_path), "--kernel-name", prepared.kernel],
         label or f"user kernel {prepared.kernel}",
+        shadow_job_binary=True,
     )
 
     if prepared.generated_inputs:
@@ -831,7 +865,11 @@ def triage_assembly_source(source: str = "", label: str = "", source_file: str =
         target=_arch(),
         ticket=f"CHAT-{prepared.kernel}",
     )
-    body = _run_triage(["--recipe", str(recipe)], label or f"{prepared.kernel} asm")
+    body = _run_triage(
+        ["--recipe", str(recipe)],
+        label or f"{prepared.kernel} asm",
+        shadow_object=obj_path,
+    )
 
     note = []
     if prepared.wrapped:

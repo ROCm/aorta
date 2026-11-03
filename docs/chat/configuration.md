@@ -194,6 +194,8 @@ while the profile pointed another is the failure the shared name prevents.
 | `rocjitsu_preload` | — | *(empty)* | Preloaded into the sanitized process. ConSan's hook is dlopened into one that has already loaded the host libstdc++, so without a newer one the tool library fails to load and the run reports a guardrail it never exercised. |
 | `triage_timeout` | — | `1800` | Seconds before one triage stops being waited for. The agents have their own internal timeouts; this keeps a wedged local process or cluster job from hanging a chat turn. The abandoned run is asked to stop rather than left going. |
 | `waitcheck_timeout` | — | `300` | Seconds for one static assembly analysis, which needs no GPU and no queue. |
+| `rocjitsu_shadow_enabled` | — | `false` | Record observed code-object architecture and kernel facts after kernel-source or assembly triage. This does not invoke the expert model, enter Autopsy, or change the user-visible result. |
+| `rocjitsu_shadow_max_kernels` | — | `64` | Refuse a code object beyond this prototype recording scope rather than silently analyzing only part of it. |
 
 CIA Launch, Watch, and Autopsy use `Qwen/Qwen3.8-27B`. They reuse the endpoint
 and API key selected by the chat provider, but not its model setting, so that

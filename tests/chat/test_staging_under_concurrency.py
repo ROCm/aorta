@@ -146,7 +146,7 @@ class TestConcurrentStagingWritesDistinctFiles:
 
         staged: list[str] = []
 
-        def fake(extra_args, label):
+        def fake(extra_args, label, **_kwargs):
             staged.append(extra_args[extra_args.index("--source") + 1])
             return "Autopsy verdict:\n  category: gpu_race"
 

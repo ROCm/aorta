@@ -66,7 +66,7 @@ def cluster(tmp_path, monkeypatch):
 
     calls: list[str] = []
 
-    def fake_triage(extra_args, label):
+    def fake_triage(extra_args, label, **_kwargs):
         calls.append(label)
         return _VERDICT
 
@@ -179,7 +179,7 @@ class TestReuseStillWorksWhereItShould:
         """
         attempts = []
 
-        def flaky(extra_args, label):
+        def flaky(extra_args, label, **_kwargs):
             attempts.append(1)
             if len(attempts) == 1:
                 return "Error: triage exceeded 1800s."
@@ -201,7 +201,7 @@ class TestReuseStillWorksWhereItShould:
         """The guard must not switch the caching off altogether."""
         attempts = []
 
-        def ok(extra_args, label):
+        def ok(extra_args, label, **_kwargs):
             attempts.append(1)
             return "Autopsy verdict:\n  category: gpu_race"
 
@@ -220,7 +220,9 @@ class TestReuseStillWorksWhereItShould:
     def test_a_failed_run_is_not_remembered(self, cluster, monkeypatch):
         """A transient launch failure should be retried, not cached."""
         monkeypatch.setattr(
-            cluster, "_run_triage", lambda extra_args, label: "Error: triage failed: boom"
+            cluster,
+            "_run_triage",
+            lambda extra_args, label, **_kwargs: "Error: triage failed: boom",
         )
 
         with use_tool_cache(ToolCache()):

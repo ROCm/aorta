@@ -225,6 +225,11 @@ class Settings(BaseSettings):
     triage_timeout: int = 1800
     #: Ceiling on a single static analysis, which needs no GPU and no queue.
     waitcheck_timeout: int = 300
+    #: Record observed live-kernel facts beside completed CIA jobs. The shadow
+    #: recorder never enters Autopsy and does not invoke the expert model yet.
+    rocjitsu_shadow_enabled: bool = False
+    #: Refuse code objects beyond the measured prototype scope.
+    rocjitsu_shadow_max_kernels: int = Field(64, ge=1)
 
     # --- Tool-calling protocol ---
     # "text"   act_node asks for `ACTION: tool(arg="v")` lines and parses them.
