@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("dspy", reason="rocjitsu shadow recording reaches the CIA tools")
+
 from aorta.chat.config import settings
 from aorta.chat.tools import cluster
 

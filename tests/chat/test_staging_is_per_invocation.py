@@ -179,7 +179,7 @@ class TestACompleteAssemblyCannotNameAPath:
         monkeypatch.setattr(
             cluster,
             "_run_triage",
-            lambda args, _label: (
+            lambda args, _label, **_kwargs: (
                 submitted.extend(args) or "Autopsy verdict:\n  category: clean"
             ),
         )
