@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+pytest.importorskip("dspy", reason="rocjitsu expert output reaches the CIA tools")
+
 from aorta.chat.config import settings
 from aorta.chat.tools import cluster
 
