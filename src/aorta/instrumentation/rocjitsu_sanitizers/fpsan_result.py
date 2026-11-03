@@ -56,12 +56,17 @@ class FpsanResult:
 
 
 def _marked(lines: list[str], marker: str) -> list[str]:
-    """The payloads of ``lines`` that start with ``marker`` as a whole word."""
+    """The payloads of ``lines`` that start with ``marker`` as a whole word.
 
+    Any whitespace ends the marker, not only a space: a second result written
+    with a tab must still be counted, or it would hide behind the first.
+    """
+
+    pattern = re.compile(rf"{re.escape(marker)}(?:\s|\Z)")
     payloads = []
     for line in lines:
         text = line.strip()
-        if text == marker or text.startswith(f"{marker} "):
+        if pattern.match(text):
             payloads.append(text[len(marker) :].strip())
     return payloads
 
@@ -139,7 +144,7 @@ def parse_fpsan_result(stdout: str) -> FpsanResult:
             raise ValueError(f"fpsan_result_unparsable: {key} must be a boolean")
         flags[key] = value
     target = record.get("target")
-    if target is not None and (not isinstance(target, str) or not target.strip()):
+    if "target" in record and (not isinstance(target, str) or not target.strip()):
         raise ValueError("fpsan_result_unparsable: target must be a non-empty string")
     return FpsanResult(
         reference_digest=digests["reference_digest"],

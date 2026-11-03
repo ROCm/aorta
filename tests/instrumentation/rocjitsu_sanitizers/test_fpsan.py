@@ -126,6 +126,7 @@ class TestParse:
             (_line(candidate_digest="abc"), "fpsan_result_unparsable"),
             (_line(candidate_instrumented="true"), "fpsan_result_unparsable"),
             (_line(target=""), "fpsan_result_unparsable"),
+            (_line(target=None), "fpsan_result_unparsable: target"),
         ],
     )
     def test_malformed_records_are_refused(self, stdout, reason):
@@ -142,6 +143,19 @@ class TestParse:
     def test_a_marker_inside_a_word_is_not_a_result_line(self):
         with pytest.raises(ValueError, match="fpsan_result_missing"):
             parse_fpsan_result("AORTA_FPSAN_RESULTS " + _line()[len("AORTA_FPSAN_RESULT ") :])
+
+    def test_a_tab_separated_second_line_is_counted(self):
+        mismatch = _line(candidate_digest=DIGEST_B).replace(
+            "AORTA_FPSAN_RESULT ", "AORTA_FPSAN_RESULT\t"
+        )
+        with pytest.raises(ValueError, match="fpsan_result_ambiguous: 2"):
+            parse_fpsan_result(_line() + mismatch)
+
+    def test_a_tab_separated_only_line_parses(self):
+        tabbed = _line(candidate_digest=DIGEST_B).replace(
+            "AORTA_FPSAN_RESULT ", "AORTA_FPSAN_RESULT\t"
+        )
+        assert parse_fpsan_result(tabbed).candidate_digest == DIGEST_B
 
     def test_a_duplicate_field_cannot_overwrite_a_mismatch(self):
         payload = (
@@ -181,8 +195,8 @@ class TestEvaluate:
         check = _evaluate(_line(candidate_digest=DIGEST_PREFIX))
         assert check.verdict is Verdict.FAIL
         metadata = dict(check.findings[0].metadata)
-        assert metadata["reference_digest"] == DIGEST_A
-        assert metadata["candidate_digest"] == DIGEST_PREFIX
+        assert metadata.get("reference_digest") == DIGEST_A
+        assert metadata.get("candidate_digest") == DIGEST_PREFIX
 
     def test_empty_outputs_are_an_error_rather_than_a_pass(self):
         check = _evaluate(_line(reference_digest=EMPTY_SHA256, candidate_digest=EMPTY_SHA256))
