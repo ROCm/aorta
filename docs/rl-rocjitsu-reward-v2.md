@@ -1,7 +1,7 @@
 # rocjitsu environment: reward v2 (pre-registered)
 
 **Status: pre-registered.** This file and the reward code it describes
-(`examples/rl/rocjitsu_env.py`: `POINTS_V2`, `KERNEL_PAID_ONLY_WITH`,
+(`src/aorta/rocjitsu/environment.py`: `POINTS_V2`, `KERNEL_PAID_ONLY_WITH`,
 `kernel_paid`, `reprice`, `reward_spec`) were committed together on 2026-10-05,
 in the development history this code comes from, before any val or test score
 under v2 was computed. The only scores computed before the commit are on the

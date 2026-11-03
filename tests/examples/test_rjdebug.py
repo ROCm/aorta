@@ -22,7 +22,11 @@ sys.path.insert(0, str(ROOT / "tests" / "examples"))
 
 import rjdebug  # noqa: E402
 import rocjitsu_env as rj  # noqa: E402
+from test_rocjitsu_env import build_corpus  # noqa: E402
 from test_rocjitsu_env_v2 import _toy_corpus  # noqa: E402
+
+from aorta.rocjitsu import demo  # noqa: E402
+from aorta.rocjitsu.runtime import ArchiveRunConfig, run_archive_episode  # noqa: E402
 
 TOOL = '{"tool": "waitcheck"}'
 ANSWER = '{"answer": {"class": "waitcnt", "kernel": "k000", "offset": "0x0"}}'
@@ -103,6 +107,138 @@ def test_an_episode_is_played_through_the_endpoint_and_scored_by_the_environment
     assert {k: first[k] for k in rjdebug.EVAL_SAMPLING} == rjdebug.EVAL_SAMPLING
     assert first["chat_template_kwargs"] == {"enable_thinking": False}
     assert [first["seed"], second["seed"]] == [rjdebug.episode_seed(rjdebug.EVAL_SEED, "ran@toy", 0, t) for t in (1, 2)]
+
+
+def test_archive_runtime_records_the_exact_multi_turn_tool_exchange(archive, monkeypatch):
+    monkeypatch.setattr(rjdebug, "_rj", object())
+    with Scripted([TOOL, ANSWER]) as server:
+        client = rjdebug.Client(server.url, "m", timeout=10)
+        result = run_archive_episode(
+            ArchiveRunConfig(Path(archive), "ran@toy"),
+            client,
+        )
+
+    assert result.status == "complete"
+    assert result.outcome == "exact"
+    assert (
+        result.system_prompt_sha256
+        == rjdebug.TRAINED_SYSTEM_SHA256[("procedure", "v2")]
+    )
+    assert len(server.bodies) == len(result.operations) == 2
+    first, second = result.operations
+    assert first.tool == "waitcheck"
+    assert first.machine_result is not None
+    assert first.rendered_result in server.bodies[1]["messages"][1]["content"]
+    assert second.kind == "answer"
+    assert second.machine_result is None
+
+
+def test_archive_runtime_refuses_a_v1_corpus(tmp_path):
+    with pytest.raises(ValueError, match="corpus-v2"):
+        run_archive_episode(
+            ArchiveRunConfig(build_corpus(tmp_path / "v1"), "k_a+0x0.barrier_early"),
+            object(),
+        )
+
+
+def test_archive_runtime_converts_environment_refusals_to_value_errors(archive):
+    with pytest.raises(ValueError, match="scenario"):
+        run_archive_episode(
+            ArchiveRunConfig(Path(archive), "missing@toy"),
+            object(),
+        )
+
+
+def test_archive_demo_attaches_a_storage_only_cia_sibling(archive, tmp_path):
+    jobs = tmp_path / "jobs"
+    job = jobs / "cia-demo"
+    job.mkdir(parents=True)
+    (job / "job.json").write_text('{"job_id":"cia-demo","status":"completed"}\n')
+    with Scripted([TOOL, ANSWER]) as server:
+        result = demo.main(
+            [
+                "--archive",
+                archive,
+                "--scenario",
+                "ran@toy",
+                "--endpoint",
+                server.url,
+                "--model",
+                "rjx",
+                "--jobs-root",
+                str(jobs),
+                "--job-id",
+                "cia-demo",
+            ]
+        )
+
+    assert result == 0
+    report = json.loads((job / "rj_expert" / "report.json").read_text())
+    assert report["mode"] == "archive_demo"
+    assert report["live_job_input_analyzed"] is False
+    assert report["affects_autopsy"] is False
+
+
+def test_archive_demo_keeps_partial_operations_without_persisting_the_key(
+    archive, tmp_path, monkeypatch
+):
+    jobs = tmp_path / "jobs"
+    job = jobs / "cia-demo"
+    job.mkdir(parents=True)
+    (job / "job.json").write_text('{"job_id":"cia-demo","status":"completed"}\n')
+    monkeypatch.setenv("AORTA_RJ_EXPERT_API_KEY", "SECRET-KEY")
+    with Scripted([TOOL], statuses=[200, 400]) as server:
+        result = demo.main(
+            [
+                "--archive",
+                archive,
+                "--scenario",
+                "ran@toy",
+                "--endpoint",
+                server.url,
+                "--model",
+                "rjx",
+                "--jobs-root",
+                str(jobs),
+                "--job-id",
+                "cia-demo",
+            ]
+        )
+
+    report_path = job / "rj_expert" / "report.json"
+    assert result == 1
+    assert json.loads(report_path.read_text())["status"] == "error"
+    assert len((job / "rj_expert" / "operations.jsonl").read_text().splitlines()) == 1
+    assert "SECRET-KEY" not in report_path.read_text()
+
+
+def test_archive_demo_redacts_a_key_echoed_by_the_model(archive, tmp_path, monkeypatch):
+    jobs = tmp_path / "jobs"
+    job = jobs / "cia-demo"
+    job.mkdir(parents=True)
+    (job / "job.json").write_text('{"job_id":"cia-demo","status":"completed"}\n')
+    monkeypatch.setenv("AORTA_RJ_EXPERT_API_KEY", "SECRET-KEY")
+    with Scripted(["SECRET-KEY", ANSWER]) as server:
+        result = demo.main(
+            [
+                "--archive",
+                archive,
+                "--scenario",
+                "ran@toy",
+                "--endpoint",
+                server.url,
+                "--model",
+                "rjx",
+                "--jobs-root",
+                str(jobs),
+                "--job-id",
+                "cia-demo",
+            ]
+        )
+
+    assert result == 0
+    for artifact in (job / "rj_expert").iterdir():
+        assert "SECRET-KEY" not in artifact.read_text()
 
 
 def test_llama_server_is_detected_and_its_prefill_echo_is_not_read_as_the_reply(archive):
@@ -371,7 +507,7 @@ class _Redirector:
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
-            do_GET = do_POST = _redirect
+            do_GET = do_POST = _redirect  # noqa: N815
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v1"
@@ -416,6 +552,18 @@ def test_env_code_wins_over_the_running_checkout_even_when_already_on_sys_path(t
     monkeypatch.setattr(rjdebug, "_rj", None)
     env = rjdebug.load_env(snapshot)
     assert getattr(env, "WHERE", None) == "snapshot", f"imported {env.__file__}"
+
+
+def test_env_code_loads_a_packaged_snapshot(tmp_path, monkeypatch):
+    snapshot = tmp_path / "snapshot"
+    packaged = snapshot / "src" / "aorta" / "rocjitsu"
+    packaged.mkdir(parents=True)
+    (packaged / "environment.py").write_text('WHERE = "packaged snapshot"\n')
+    monkeypatch.setattr(rjdebug, "_rj", None)
+
+    env = rjdebug.load_env(snapshot)
+
+    assert getattr(env, "WHERE", None) == "packaged snapshot"
 
 
 def test_env_code_refuses_a_rocjitsu_env_already_imported_from_elsewhere(tmp_path, monkeypatch):
