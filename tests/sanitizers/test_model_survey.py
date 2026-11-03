@@ -71,8 +71,10 @@ def test_dashboard_and_workflow_name_exactly_the_committed_models():
     models = _live_models()
     assert models <= set(gen._MODEL_SURVEY_GROUPS) <= {p.stem for p in _inventories()}
     workflow = (_REPO / ".github" / "workflows" / "sanitizers-nightly.yml").read_text(encoding="utf-8")
-    listed = re.search(r'^\s*MODELS="([^"]+)"', workflow, re.MULTILINE)
-    assert listed and set(listed.group(1).split()) == models
+    # One list per job that runs model_survey.py: the waitcheck/ConSan job and the FpSan job.
+    listed = re.findall(r'^\s*MODELS="([^"]+)"', workflow, re.MULTILINE)
+    assert len(listed) == 2
+    assert all(set(names.split()) == models for names in listed), listed
 
 
 def test_an_inventory_for_an_unpublished_asset_is_refused_by_the_pinned_one(tmp_path):

@@ -39,7 +39,7 @@ jobs:
       # The rocjitsu Actions run this job downloaded, so sanitizers-survey can pin the
       # same bundle rather than re-resolving `--run latest` against a moving branch.
       rocjitsu_run_id: ${{ steps.rocjitsu-run.outputs.run_id }}
-    # This job is fixtures + the three daily controls + the comparator; the ~69-min
+    # This job is fixtures + the five daily controls + the comparator; the ~69-min
     # survey now lives in sanitizers-survey. Recent nightlies ran 20.7/21.7/21.8 min
     # WITH the survey included, so 45 min is generous for what is left.
     #
@@ -279,7 +279,19 @@ jobs:
             aorta sweep run --recipe recipes/sanitizers/daily-consan-racy.yaml \
               --output-dir "${SANITIZER_OUT}/consan-racy" || true
 
-            # The gate is the three daily controls, and the comparator is the last thing
+            # The FpSan controls compile a tiny Triton row-dot pair under
+            # TRITON_INSTRUMENTATION_MODE=fpsan (fixtures/fpsan/fpsan_pair.py). They
+            # need no rocjitsu binary, only the Triton in this image; one older than
+            # 3.8 has no AMD FpSan pass, and both rows then read error.
+            mkdir -p "${SANITIZER_OUT}/fpsan-match" "${SANITIZER_OUT}/fpsan-mismatch"
+            echo "[$(date +%T)] daily-fpsan-match: FpSan on a re-tiled Triton row-dot against its reference (expect pass) …"
+            aorta sweep run --recipe recipes/sanitizers/daily-fpsan-match.yaml \
+              --output-dir "${SANITIZER_OUT}/fpsan-match" || true
+            echo "[$(date +%T)] daily-fpsan-mismatch: FpSan on a dropped-accumulate row-dot against its reference (expect fail) …"
+            aorta sweep run --recipe recipes/sanitizers/daily-fpsan-mismatch.yaml \
+              --output-dir "${SANITIZER_OUT}/fpsan-mismatch" || true
+
+            # The gate is the five daily controls, and the comparator is the last thing
             # this job does, so its exit status is the job status directly.
             #
             # The observed-only Tab 2 survey used to run here, between the controls and
@@ -583,7 +595,7 @@ jobs:
             # row must not fail the job merely for reporting something. That is
             # what let ROCm/aorta#450 sit unnoticed: rows ended `error` with zero
             # findings on every run, and the baseline comparison in the gate job
-            # only covers the three GATED cases, so nothing ever looked at these
+            # only covers the GATED cases, so nothing ever looked at these
             # reports at all.
             #
             # So look at them. --vacuous-only asserts the one thing that is always
@@ -841,6 +853,167 @@ jobs:
         working-directory: docker
         run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
 
+  sanitizers-fpsan-survey:
+    name: gfx950 open-source model kernel pairs under FpSan (non-gating)
+    # After the model survey, for the same reason that job follows the GEMM
+    # survey: one MI350 runner. Its own job, ceiling and artifact rather than a
+    # wave of sanitizers-model-survey, so an FpSan night that runs long cannot
+    # cost the waitcheck and ConSan rows.
+    needs: [sanitizers-gpu, sanitizers-model-survey]
+    if: always() && needs.sanitizers-gpu.result != 'skipped'
+    runs-on: [self-hosted, gpu]
+    # Every launched (kernel, scenario) pair is one FpSan case that runs the pair
+    # and its reference in turn. model_survey.py starts a launch (300 s) or an
+    # FpSan case (900 s) only while it can still finish inside one 3600 s budget
+    # shared by both models, so with setup and the probe the job ends inside 90
+    # minutes.
+    timeout-minutes: 90
+    steps:
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+
+      # FpSan is a Triton compile mode, not a rocjitsu binary, so unlike the other
+      # GPU jobs this one downloads no sanitizer bundle and is handed no token at
+      # all. The kernels come from the same digest-pinned aorta-model-kernels asset
+      # model_survey.py fetches itself.
+      - name: Run model-kernel FpSan survey
+        run: |
+          bash scripts/ci/docker_cmd.sh exec \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            SANITIZER_ROOT=".sanitizer-nightly"
+            SANITIZER_OUT="${SANITIZER_ROOT}/out"
+
+            echo "[$(date +%T)] setup: installing aorta (editable, [tests]) …"
+            python -m pip install --upgrade pip
+            pip install -e ".[tests]"
+            # Nothing above passed one in; this keeps it that way should the
+            # container ever inherit one, since the asset and the kernels it
+            # launches are downloaded code.
+            unset GH_TOKEN GITHUB_TOKEN
+
+            # Same resolver-derived PATH and LD_LIBRARY_PATH lines as the other
+            # payloads, for the same reasons (issue #381).
+            export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
+            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+
+            # Prove this image can run FpSan before spending the budget on it. An
+            # image whose Triton has no AMD FpSan pass (older than 3.8) compiles
+            # every pair uninstrumented, and every row would read error for a
+            # reason no kernel owner can act on. The probe JSON is uploaded with
+            # the results either way.
+            mkdir -p "${SANITIZER_OUT}"
+            echo "[$(date +%T)] probe: does this Triton instrument kernels under FpSan …"
+            probe_rc=0
+            python scripts/sanitizers/fpsan_probe.py \
+              --out "${SANITIZER_OUT}/fpsan-probe.json" \
+              --work "${SANITIZER_ROOT}/fpsan-probe-work" || probe_rc=$?
+            case "${probe_rc}" in
+              0) echo "[$(date +%T)] probe: FpSan instruments, changes the output, and ignores reduction tiling" ;;
+              1) echo "::error::FpSan is unavailable in this image: the Triton here did not instrument the probe kernel (needs Triton 3.8 or later; bump docker/Dockerfile.ci-gpu). See fpsan-probe.json in the artifact." >&2
+                 exit 1 ;;
+              2) echo "::error::FpSan probe checked nothing: torch, Triton or a GPU is missing in this container. See fpsan-probe.json in the artifact." >&2
+                 exit 1 ;;
+              3) echo "::error::FpSan instruments, but a reduction-tiling pair disagreed under it, so a config-variant reference would report mismatches that are not bugs. See fpsan-probe.json in the artifact." >&2
+                 exit 1 ;;
+              4) echo "::error::The FpSan probe itself failed (a child timed out or wrote no result), so it says nothing about FpSan. See fpsan-probe.json in the artifact." >&2
+                 exit 1 ;;
+              *) echo "::error::FpSan probe exited ${probe_rc}" >&2
+                 exit 1 ;;
+            esac
+
+            # triton-tutorials.yaml is not listed: it names asset v2, which is not
+            # published yet, and check_asset refuses it against the pinned v1. Add
+            # it here once model-kernels-v2 is pinned in model_survey.py.
+            MODELS="gpt-oss qwen3"
+            INVENTORIES=""
+            for m in ${MODELS}; do
+              INVENTORIES="${INVENTORIES} --inventory recipes/sanitizers/models/${m}.yaml"
+            done
+            # Exits non-zero only for an infrastructure fault, which should fail
+            # this job loudly. A digest mismatch never does: the rows are
+            # observed-only.
+            echo "[$(date +%T)] models: FpSan over ${MODELS} …"
+            # shellcheck disable=SC2086  # INVENTORIES is a deliberate argument list
+            python scripts/sanitizers/model_survey.py run --sanitizers fpsan ${INVENTORIES} \
+              --work "${SANITIZER_ROOT}/model-survey-work" \
+              --out "${SANITIZER_OUT}/informational" \
+              --budget-seconds 3600
+
+            # Same vacuity check as the model survey, over the fpsan rows: a
+            # report in which every pair errored, or a missing one, fails the job.
+            echo "[$(date +%T)] models: rejecting vacuous outcomes …"
+            REQUIRE=""
+            for m in ${MODELS}; do
+              REQUIRE="${REQUIRE} --require informational/fpsan-${m}"
+            done
+            # shellcheck disable=SC2086  # REQUIRE is a deliberate argument list
+            python scripts/sanitizers/compare_verdict_baselines.py \
+              --vacuous-only ${REQUIRE} "${SANITIZER_OUT}"
+          '
+
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Mark this attempt's FpSan results
+        # Same empty-upload hole as the gate job's marker step: v4 will not
+        # delete sanitizer-fpsan-<run_id> unless this attempt uploads a file.
+        if: always()
+        run: |
+          mkdir -p .sanitizer-nightly/out
+          echo "$GITHUB_RUN_ATTEMPT" > .sanitizer-nightly/out/attempt.txt
+
+      - name: Upload FpSan survey results
+        # Its own artifact, matched by the render download pattern, so the
+        # fpsan-<model> rows land in incoming/informational/ beside the others.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-fpsan-${{ github.run_id }}
+          path: .sanitizer-nightly/out
+          if-no-files-found: warn
+          overwrite: true   # same re-run collision as the gate artifact
+
+      - name: Clean up build/temp state
+        if: always()
+        run: rm -rf .sanitizer-nightly
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
+
   # Publishing is split in two so that rendering and writing never share a token.
   #
   #   render  runs on ANY ref, holds only `contents: read`, and does everything
@@ -861,11 +1034,12 @@ jobs:
   # recorded ref is not refs/heads/main.
   render:
     name: render sanitizer dashboard
-    # Every GPU job, so the dashboard renders Tab 1 and Tab 2 from the same run.
+    # Every GPU job, so the dashboard renders Tab 1, Tab 2 and the FpSan kernel
+    # pairs tab from the same run.
     # Gated on the GATE job only: the survey jobs are non-gating and may
     # legitimately be killed by the cap in #370, and rendering Tab 1 must not
     # depend on them.
-    needs: [sanitizers-gpu, sanitizers-survey, sanitizers-model-survey]
+    needs: [sanitizers-gpu, sanitizers-survey, sanitizers-model-survey, sanitizers-fpsan-survey]
     # Run even when the GPU job failed (to render the failure, not a stale green
     # page) but NOT when it was skipped. Deliberately NO main-only guard here --
     # that guard lives on `push`, the only job that can write.
@@ -1029,7 +1203,7 @@ jobs:
           # logs the verdict was derived from (waitcheck/*.log, consan/consan.log)
           # are what make the published run area reproducible (#384). The
           # generator gzips them and prunes them outside its --keep-logs window.
-          for case in waitcheck consan-clean consan-racy; do
+          for case in waitcheck consan-clean consan-racy fpsan-match fpsan-mismatch; do
             if [ -f "incoming/${case}/sanitizer_report.json" ]; then
               cp -a "incoming/${case}" "$dest/${case}"
             fi

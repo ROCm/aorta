@@ -5291,9 +5291,9 @@ def test_sanitizer_nightly_payloads_have_no_apostrophes():
     its own, and this branch now writes the resolver export into both.
     """
     lines, spans = _sanitizer_nightly_payloads()
-    assert len(spans) >= 2, (
-        "expected a payload per provisioning block (gate + survey); found "
-        f"{len(spans)} -- has the workflow been restructured?"
+    assert len(spans) >= 4, (
+        "expected a payload per GPU job (gate, GEMM survey, model survey, FpSan "
+        f"survey); found {len(spans)} -- has the workflow been restructured?"
     )
     offenders = [
         (i + 1, lines[i].strip())
@@ -5305,6 +5305,67 @@ def test_sanitizer_nightly_payloads_have_no_apostrophes():
         "apostrophe(s) inside a single-quoted bash -lc payload would break the "
         f"host shell: {offenders}"
     )
+
+
+def _nightly_jobs() -> dict:
+    yaml = __import__("pytest").importorskip("yaml")
+    doc = yaml.safe_load(
+        (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(encoding="utf-8")
+    )
+    return doc["jobs"]
+
+
+def _step_run(job: dict, name: str) -> str:
+    return next(step for step in job["steps"] if step.get("name") == name)["run"]
+
+
+def test_every_gated_case_is_swept_by_the_gate_job_and_published_by_render():
+    # The comparator fails the gate for a gated report that is absent, so a case
+    # added to CASES without a sweep in the gate job turns every nightly red, and
+    # one render does not copy is judged missing on the page.
+    jobs = _nightly_jobs()
+    gate = _step_run(jobs["sanitizers-gpu"], "Run sanitizer regression")
+    compare = gate.index("python scripts/sanitizers/compare_verdict_baselines.py")
+    for case_dir, _key, recipe, _label in gen.CASES:
+        sweep = re.search(
+            rf"aorta sweep run --recipe recipes/sanitizers/{re.escape(recipe)}\.yaml \\\s+"
+            rf'--output-dir "\$\{{SANITIZER_OUT\}}/{re.escape(case_dir)}" \|\| true',
+            gate,
+        )
+        assert sweep and sweep.start() < compare, f"{case_dir}: not swept before the comparator"
+    render = next(s for s in jobs["render"]["steps"] if s.get("id") == "render")["run"]
+    loop = re.search(r"for case in ([^;]+); do", render)
+    assert loop and loop.group(1).split() == [case_dir for case_dir, *_ in gen.CASES]
+
+
+def test_fpsan_survey_job_probes_first_and_holds_no_token():
+    jobs = _nightly_jobs()
+    job = jobs["sanitizers-fpsan-survey"]
+    # Serialised behind the model survey on the one MI350 runner, and still run
+    # when the gate failed, like the other observed-only jobs.
+    assert job["needs"] == ["sanitizers-gpu", "sanitizers-model-survey"]
+    assert job["if"] == "always() && needs.sanitizers-gpu.result != 'skipped'"
+    assert job["runs-on"] == jobs["sanitizers-model-survey"]["runs-on"]
+    assert isinstance(job["timeout-minutes"], int)
+    step = next(s for s in job["steps"] if s.get("name") == "Run model-kernel FpSan survey")
+    payload = step["run"]
+    # FpSan needs no rocjitsu bundle, so the job never holds the cross-repo PAT.
+    assert "env" not in step
+    assert "GH_TOKEN=" not in payload and "download_sanitizer_artifacts" not in payload
+    probe = payload.index("python scripts/sanitizers/fpsan_probe.py")
+    survey = payload.index("python scripts/sanitizers/model_survey.py run --sanitizers fpsan")
+    vacuity = payload.index("compare_verdict_baselines.py")
+    assert probe < survey < vacuity
+    # An unusable probe stops the job before the survey, with a visible error.
+    between = payload[probe:survey]
+    assert "::error::FpSan is unavailable" in between and "exit 1" in between
+    assert "--require informational/fpsan-${m}" in payload
+    assert "--vacuous-only" in payload
+    upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
+    # render downloads sanitizer-*-<run_id>; any other name is never published.
+    assert re.fullmatch(r"sanitizer-[\w-]+-\$\{\{ github\.run_id \}\}", upload["with"]["name"])
+    assert upload["with"]["name"].startswith("sanitizer-fpsan-")
+    assert "sanitizers-fpsan-survey" in jobs["render"]["needs"]
 
 
 def test_every_llvm_bindir_export_goes_through_the_resolver():
@@ -5396,8 +5457,8 @@ def test_rebuild_commands_export_the_rocm_library_path():
     loses its provisioning block fails here rather than on the runner.
     """
     minimum_per_workflow = {
-        # gate job + survey job
-        ".github/workflows/sanitizers-nightly.yml": 2,
+        # gate, GEMM survey, model survey and FpSan survey jobs
+        ".github/workflows/sanitizers-nightly.yml": 4,
         # the pytest step
         ".github/workflows/gpu-tests.yml": 1,
     }

@@ -492,8 +492,22 @@ and `none` elsewhere.
 
 What FpSan does **not** do: it does not detect NaN, Inf or divide-by-zero, and a
 sanitized output must never be compared to an ordinary IEEE golden result. A
-single production run with no reference kernel has nothing to disagree with, so
-a workload stays off `sanitizers: [fpsan]` until it has one. `aorta run
+single production run has nothing to disagree with, so every FpSan check needs a
+reference. Two commands supply one today:
+
+- `recipes/sanitizers/daily-fpsan-match.yaml` (expect `pass`) and
+  `daily-fpsan-mismatch.yaml` (expect `fail`, `fpsan_digest_mismatch`) are gated
+  nightly controls. `fixtures/fpsan/fpsan_pair.py` runs a tiny Triton row-dot
+  against a re-tiled copy and against one that drops its accumulate.
+- `scripts/sanitizers/fpsan_compare.py` compares each open-source model kernel
+  with a reference: the same kernel at a conservative launch config, or another
+  kernel for the Triton tutorial pairs. `model_survey.py run --sanitizers fpsan`
+  writes one recipe per (kernel, scenario) pair around it and merges them into
+  an observed-only `fpsan-<model>` report; see
+  [`recipes/sanitizers/models/README.md`](../../../../recipes/sanitizers/models/README.md).
+
+Both need a Triton with the AMD FpSan pass (3.8 or later);
+`scripts/sanitizers/fpsan_probe.py` checks that on the host. `aorta run
 --sanitizer` stays ASan-only.
 
 **Extension point: HIP-FpSan.** The result contract lives in `fpsan_result.py`,
