@@ -8,6 +8,12 @@ from aorta.rocjitsu.comparison import (
     compare_reports,
     summarize,
 )
+from aorta.rocjitsu.feedback import (
+    FeedbackOutcome,
+    FeedbackRecord,
+    export_verified,
+    record_feedback,
+)
 from aorta.rocjitsu.recording import (
     PINNED_ROCJITSU_COMMIT,
     RECORDING_SCHEMA,
@@ -39,6 +45,8 @@ __all__ = [
     "CodeObjectFacts",
     "ComparisonStatus",
     "EndpointError",
+    "FeedbackOutcome",
+    "FeedbackRecord",
     "LiveRecording",
     "OperationObservation",
     "OutputCheck",
@@ -48,8 +56,10 @@ __all__ = [
     "attach_archive_run",
     "compare_job",
     "compare_reports",
+    "export_verified",
     "inspect_code_object",
     "render_output_check",
+    "record_feedback",
     "run_archive_episode",
     "summarize",
     "write_recording",
