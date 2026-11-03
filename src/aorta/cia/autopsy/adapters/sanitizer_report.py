@@ -13,7 +13,12 @@ SCHEMA = "aorta.sanitizer_report/0.1"
 SIGNAL_MEMORY_ERROR = "SAN_ASAN_MEMORY_ERROR"
 SIGNAL_RACE = "SAN_CONSAN_RACE"
 SIGNAL_HAZARD = "SAN_WAITCHECK_HAZARD"
+SIGNAL_FPSAN_MISMATCH = "SAN_FPSAN_MISMATCH"
 SIGNAL_CLEAN = "SAN_CLEAN"
+
+# Sanitizers whose finding is a reference/candidate digest disagreement. A
+# future hip_fpsan joins this set and reports through the same signal.
+_FPSAN_SANITIZERS = frozenset({"fpsan"})
 SIGNAL_NOT_CHECKED = "SAN_NOT_CHECKED"
 
 # A backend that never ran says nothing about the workload, so these reasons are
@@ -25,6 +30,7 @@ MISSING_BACKEND_REASONS = frozenset(
         "consan_command_not_provisioned",
         "asan_command_not_provisioned",
         "asan_runtime_not_found",
+        "fpsan_command_not_provisioned",
         "dry_run",
     }
 )
@@ -38,6 +44,11 @@ _BACKEND_REMEDY = {
     "asan": (
         "device ASan needs a repro built with -fsanitize=address for an xnack+ "
         "target, HSA_XNACK=1, and the ASan-instrumented ROCm runtime (lib/asan)"
+    ),
+    "fpsan": (
+        "FpSan needs sanitizer_plan.source.fpsan_command: a command that runs a "
+        "reference and a candidate kernel under TRITON_INSTRUMENTATION_MODE=fpsan and "
+        "prints one AORTA_FPSAN_RESULT line, on gfx942, gfx950 or gfx1250"
     ),
 }
 _DEFAULT_REMEDY = "the RocJITsu backend must be built and ROCJITSU_BUILD exported"
@@ -82,12 +93,16 @@ def _signal_for(finding: dict[str, Any]) -> str:
         return SIGNAL_MEMORY_ERROR
     if severity == "race" or sanitizer == "consan":
         return SIGNAL_RACE
+    if sanitizer in _FPSAN_SANITIZERS:
+        return SIGNAL_FPSAN_MISMATCH
     return SIGNAL_HAZARD
 
 
 def _missing_signal(sanitizer: str) -> str:
     if sanitizer == "asan":
         return SIGNAL_MEMORY_ERROR
+    if sanitizer in _FPSAN_SANITIZERS:
+        return SIGNAL_FPSAN_MISMATCH
     return SIGNAL_RACE if sanitizer == "consan" else SIGNAL_HAZARD
 
 
@@ -98,11 +113,14 @@ def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
     allocation it ran past, which is the most specific evidence any backend
     gives. An observed ConSan race is also a definite finding, so it outranks a
     waitcheck hazard, which is a static warning that a kernel *may* be missing a
-    wait and needs a dynamic run to confirm.
+    wait and needs a dynamic run to confirm. An FpSan digest mismatch is observed
+    too, but names no site: a race or memory error could be its cause, so it
+    ranks below them and above the static hazard.
     """
     checks = report.get("checks") or []
     memory_errors: list[dict[str, Any]] = []
     races: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
     hazards: list[dict[str, Any]] = []
     not_checked: list[str] = []
     lost_reports: list[str] = []
@@ -124,6 +142,8 @@ def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
                 memory_errors.append(finding)
             elif signal == SIGNAL_RACE:
                 races.append(finding)
+            elif signal == SIGNAL_FPSAN_MISMATCH:
+                mismatches.append(finding)
             else:
                 hazards.append(finding)
 
@@ -176,6 +196,23 @@ def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
             signals=[SIGNAL_RACE],
         )
 
+    if mismatches:
+        metadata = mismatches[0].get("metadata") or {}
+        return SanitizerClassification(
+            category="numeric_silent",
+            confidence=0.85,
+            rationale=(
+                f"FpSan reported that the reference and candidate kernels disagree on "
+                f"{target}: reference digest {metadata.get('reference_digest', '?')}, "
+                f"candidate digest {metadata.get('candidate_digest', '?')}. Under FpSan's "
+                "deterministic payload algebra two kernels that compute the same thing "
+                "agree exactly, so the candidate computes something different -- a wrong "
+                "operand, a dropped sync, a bad fusion or a broken accumulator. FpSan "
+                "does not say which operation diverged."
+            ),
+            signals=[SIGNAL_FPSAN_MISMATCH],
+        )
+
     if hazards:
         first = hazards[0]
         where = first.get("kernel_name") or first.get("code_object") or "an unattributed kernel"
@@ -213,7 +250,7 @@ def classify_sanitizer(report: dict[str, Any]) -> SanitizerClassification:
 
 
 class SanitizerReportAdapter:
-    """Read an Aorta sanitizer_report.json and surface ASan/ConSan/waitcheck findings."""
+    """Read an Aorta sanitizer_report.json and surface ASan/ConSan/FpSan/waitcheck findings."""
 
     adapter_id = "sanitizer_report"
 

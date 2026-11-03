@@ -437,6 +437,76 @@ check silently off, or on GPUs the canary did not check; choose GPUs by setting 
 visibility before `aorta run`. A PASS under the mode has the same limits as a recipe
 PASS.
 
+## Triton FpSan (`fpsan`)
+
+`sanitizers: [fpsan]` checks that a candidate kernel computes the same thing as a
+reference kernel. Triton FpSan (`TRITON_INSTRUMENTATION_MODE=fpsan`) rewrites
+floating-point operations into a deterministic payload algebra, so two kernels
+that compute the same thing produce bit-identical sanitized outputs, and a wrong
+operand, a dropped sync, a bad fusion or a broken accumulator changes them. The
+recipe names a command that runs both kernels and reports their output digests;
+aorta fails the run when the digests differ.
+
+```yaml
+source:
+  kind: kernel
+  kernel: {name: matmul_fused}
+  fpsan_command: bin/fpsan_compare.sh   # recipe-relative, like asan_command
+sanitizers: [fpsan]
+```
+
+aorta does not compile Triton and does not set up the two kernels. It runs
+`fpsan_command` as a bare argv with the pipeline timeout
+(`sanitizer_plan.policy.timeout_seconds`) and `TRITON_INSTRUMENTATION_MODE=fpsan`
+in its environment, and keeps stdout and stderr in `<output>/fpsan/fpsan.log`.
+The command is responsible for running both kernels under FpSan, each in its own
+`TRITON_CACHE_DIR` so neither reuses the other's (or an uninstrumented) compile,
+and for printing **exactly one** stdout line:
+
+```text
+AORTA_FPSAN_RESULT {"reference_digest":"<64 lowercase hex>","candidate_digest":"<64 lowercase hex>","reference_instrumented":true,"candidate_instrumented":true,"target":"gfx950"}
+```
+
+The digests are SHA-256 of the two sanitized outputs, computed by the command.
+Both instrumentation flags are required; `target` is optional and, when present,
+must match the recipe's. No other field is accepted, and AgentKernelArena's
+`AKA_FPSAN_RESULT` marker is not read. The command must exit 0 whenever it
+printed a result, mismatch included: a non-zero exit is a harness failure.
+
+| verdict | when |
+|---|---|
+| `pass` | exit 0, one result line, both sides instrumented, digests equal |
+| `fail` | one result line, both sides instrumented, digests differ (`fpsan_digest_mismatch`) |
+| `error` | timeout, launch failure, non-zero exit, no result line, more than one, a malformed one (duplicate JSON keys included), the SHA-256 of empty input (`fpsan_result_empty_output`), a side not instrumented, or another target |
+| `not_checked` | no `source.fpsan_command` (`fpsan_command_not_provisioned`), a target outside the GPU list (`fpsan_target_unsupported`), an empty selection (`empty_worklist`), or more than one selected kernel (`fpsan_requires_one_candidate_kernel`) |
+
+The check's `backend` records the command and its SHA-256, the one selected
+kernel, and, once the line parses, both digests and flags, so a `pass` says
+what matched. A selection of more than one kernel is `not_checked` and the
+command does not run. A `fail` is the finding: one `fpsan_digest_mismatch` finding
+carrying both digests, which CIA autopsy reports as `SAN_FPSAN_MISMATCH` (`numeric_silent`). An
+`error` is not stored as a kernel bug, and a `not_checked` is a tooling gap
+(`SAN_NOT_CHECKED`); `aorta sweep run` exits non-zero on either, as it does for a
+`fail`. `support("fpsan", target)` is `full` on `gfx942`, `gfx950` and `gfx1250`
+and `none` elsewhere.
+
+What FpSan does **not** do: it does not detect NaN, Inf or divide-by-zero, and a
+sanitized output must never be compared to an ordinary IEEE golden result. A
+single production run with no reference kernel has nothing to disagree with, so
+a workload stays off `sanitizers: [fpsan]` until it has one. `aorta run
+--sanitizer` stays ASan-only.
+
+**Extension point: HIP-FpSan.** The result contract lives in `fpsan_result.py`,
+which knows the digests and instrumentation flags and nothing about Triton, so a
+HIP-FpSan backend reuses it unchanged. Adding it means: a new sanitizer id
+`hip_fpsan` in the pipeline and recipe allowlists (it is rejected as unknown
+today), a `source.hip_fpsan_command` recipe field with the same path rules, a
+runner that executes that command and calls
+`evaluate_fpsan_output(process, sanitizer="hip_fpsan", target=...)`, a
+`support("hip_fpsan", ...)` entry, and `hip_fpsan` in the autopsy adapter's
+`_FPSAN_SANITIZERS` so its `fail` reports the same `SAN_FPSAN_MISMATCH` signal.
+The command prints the same `AORTA_FPSAN_RESULT` line.
+
 ## Verdict and health rules
 
 - Waitcheck structured hazard → `warn`.
@@ -444,6 +514,10 @@ PASS.
 - ASan memory error → `fail`, whatever the exit code; a device detection the
   runtime could not report, or a clean exit without the selected kernel's
   dispatch → `error`.
+- FpSan reference/candidate digest mismatch → `fail`; a missing, repeated or
+  malformed result line, duplicate JSON keys, the SHA-256 of empty input, or
+  an uninstrumented side → `error`. More than one selected kernel →
+  `not_checked`.
 - Backend timeout, launch failure, unexpected exit, missing verdict, or
   incomplete coverage → `error`.
 - Missing backend or unsupported worklist scoping → `not_checked`.

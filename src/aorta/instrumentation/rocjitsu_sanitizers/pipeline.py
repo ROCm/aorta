@@ -7,11 +7,12 @@ from pathlib import Path
 
 from .asan import AsanRuntime, run_asan, scoped_asan_not_checked
 from .consan import run_consan, scoped_consan_not_checked
+from .fpsan import run_fpsan, scoped_fpsan_not_checked
 from .models import CheckResult, KernelIdentity, KernelWorklist, SanitizerReport
 from .report import build_report, write_report
 from .waitcheck import run_waitcheck
 
-_KNOWN_SANITIZERS = frozenset({"waitcheck", "consan", "asan"})
+_KNOWN_SANITIZERS = frozenset({"waitcheck", "consan", "asan", "fpsan"})
 
 # Default wall-clock ceiling for a single sanitizer subprocess (waitcheck or
 # consan). ConSan's transform of large production code objects can be heavy,
@@ -38,6 +39,7 @@ def run_sanitizers(
     asan_command: Path | None = None,
     asan_objects: Sequence[Path] = (),
     asan_runtime: AsanRuntime | None = None,
+    fpsan_command: Path | None = None,
 ) -> SanitizerReport:
     """Run supported checks and persist one versioned report."""
 
@@ -104,6 +106,19 @@ def run_sanitizers(
                 )
             else:
                 results.append(scoped_asan_not_checked(worklist))
+        elif sanitizer == "fpsan":
+            if fpsan_command is not None:
+                results.append(
+                    run_fpsan(
+                        worklist,
+                        command=fpsan_command,
+                        target=target,
+                        output_dir=output_dir / "fpsan",
+                        timeout_seconds=timeout_seconds,
+                    )
+                )
+            else:
+                results.append(scoped_fpsan_not_checked(worklist))
 
     report = build_report(
         target=target,

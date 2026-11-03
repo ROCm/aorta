@@ -6,7 +6,8 @@ rocprofiler trace, dispatch CSV, kernel list, ConSan repro), static Waitcheck
 targeted repro under the RocJITsu DBI hook, typed reports, and a strict
 ``mode: sanitizer`` recipe loader. ConSan on supported targets (e.g. gfx950)
 runs for real; it falls back to fail-closed ``not_checked`` only when no
-targeted repro command / hook is provisioned.
+targeted repro command / hook is provisioned. Triton FpSan compares a
+reference kernel to a candidate through a recipe-supplied command.
 """
 
 from .asan import (
@@ -30,6 +31,8 @@ from .consan import (
     run_consan,
     scoped_consan_not_checked,
 )
+from .fpsan import run_fpsan, scoped_fpsan_not_checked
+from .fpsan_result import FpsanResult, evaluate_fpsan_output, parse_fpsan_result
 from .models import (
     REPORT_SCHEMA,
     WORKLIST_SCHEMA,
@@ -80,6 +83,7 @@ __all__ = [
     "ExecutionSummary",
     "Finding",
     "FindingSeverity",
+    "FpsanResult",
     "InstrumentationEvidence",
     "KernelCheckResult",
     "KernelIdentity",
@@ -96,6 +100,7 @@ __all__ = [
     "build_report",
     "evaluate_asan_output",
     "evaluate_consan_output",
+    "evaluate_fpsan_output",
     "evaluate_record_replay",
     "execute_sanitizer_run",
     "inspect_device_instrumentation",
@@ -111,6 +116,7 @@ __all__ = [
     "observations_from_rocprof_trace",
     "parse_asan_output",
     "parse_consan_output",
+    "parse_fpsan_result",
     "parse_record_replay_output",
     "parse_waitcheck_jsonl",
     "parse_waitcheck_text",
@@ -118,9 +124,11 @@ __all__ = [
     "resolve_asan_runtime",
     "run_asan",
     "run_consan",
+    "run_fpsan",
     "run_sanitizers",
     "run_waitcheck",
     "scoped_consan_not_checked",
+    "scoped_fpsan_not_checked",
     "select_kernels",
     "support",
     "waitcheck_argv",

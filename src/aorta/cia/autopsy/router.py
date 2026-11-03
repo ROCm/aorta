@@ -180,6 +180,11 @@ class TriageDecision(dspy.Signature):
     - SAN_WAITCHECK_HAZARD alone is a *static* missing-s_waitcnt warning, not an
       observed failure: category is gpu_race but confidence ~0.55, and next_probe
       is 'aorta sweep run' to confirm it dynamically with ConSan.
+    - SAN_FPSAN_MISMATCH means Triton FpSan ran a reference and a candidate
+      kernel, both instrumented, and their sanitized output digests differ: the
+      candidate computes something different. Category is numeric_silent with
+      confidence ~0.85. FpSan names no operation, so do not invent a site; a
+      SAN_CONSAN_RACE or SAN_ASAN_MEMORY_ERROR beside it is the likelier cause.
     - SAN_NOT_CHECKED means the sanitizer backend never ran, so the run proves
       nothing: category is tooling_gap, confidence 0.0. Never read it as clean.
     - SAN_CLEAN with no other failure signal means the sanitizers passed; prefer
