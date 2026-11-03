@@ -1,6 +1,18 @@
 """Reusable rocjitsu debugging runtime."""
 
 from aorta.rocjitsu.cia_report import REPORT_SCHEMA, attach_archive_run
+from aorta.rocjitsu.recording import (
+    PINNED_ROCJITSU_COMMIT,
+    RECORDING_SCHEMA,
+    CodeObjectFacts,
+    LiveRecording,
+    OperationObservation,
+    OutputCheck,
+    OutputCheckState,
+    inspect_code_object,
+    render_output_check,
+    write_recording,
+)
 from aorta.rocjitsu.rjdebug import Client, EndpointError, Reply
 from aorta.rocjitsu.runtime import (
     ArchiveOperation,
@@ -11,12 +23,22 @@ from aorta.rocjitsu.runtime import (
 
 __all__ = [
     "REPORT_SCHEMA",
+    "RECORDING_SCHEMA",
+    "PINNED_ROCJITSU_COMMIT",
     "ArchiveOperation",
     "ArchiveRunConfig",
     "ArchiveRunResult",
     "Client",
+    "CodeObjectFacts",
     "EndpointError",
+    "LiveRecording",
+    "OperationObservation",
+    "OutputCheck",
+    "OutputCheckState",
     "Reply",
     "attach_archive_run",
+    "inspect_code_object",
+    "render_output_check",
     "run_archive_episode",
+    "write_recording",
 ]
