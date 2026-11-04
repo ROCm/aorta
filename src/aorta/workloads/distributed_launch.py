@@ -130,18 +130,53 @@ fi
 # processes it started, not only the first one. That group is not the one
 # the scheduler signals: without cgroups, Spur's step supervisor signals the
 # wrapper's group only. The trap passes TERM, INT, and HUP on to the task's
-# group; the reap below escalates to SIGKILL. The wrapper then exits 128 plus
-# the signal it received: what ``wait`` returns depends on whether the signal
-# landed during it, and the task itself only ever sees TERM. The trap is set
-# before the task starts, so an early signal cannot kill the wrapper and orphan
-# the task.
+# group and remembers 128 plus that signal; the task itself only ever sees
+# TERM. If that signal lands before ``wait``, a task that ignores TERM would
+# block there and never reach the reap, so the trap arms a two-second SIGKILL
+# and disarms it once ``wait`` returns. The wrapper exits with the remembered
+# signal when one was caught, expanded in the ``exit`` command. The trap is
+# set before the task starts, so an early signal cannot kill the wrapper and
+# orphan the task.
 _STEP_WATCH = """\
 _aorta_signal=
+# Bound ``wait`` when TERM was already forwarded. The timer is its own
+# process group so disarming it does not signal the wrapper or the task.
+_aorta_arm_kill() {
+  if [ -n "${_aorta_wait_done:-}" ] || [ -n "${_aorta_escalator:-}" ]; then
+    return
+  fi
+  set -m
+  (
+    trap '' HUP INT TERM
+    sleep 2
+    kill -KILL -- "-$_aorta_child" 2>/dev/null || true
+  ) >/dev/null 2>&1 &
+  _aorta_escalator=$!
+  set +m
+}
 _aorta_stop() {
   _aorta_signal=$1
-  if [ -n "${_aorta_child:-}" ]; then
-    kill -TERM -- "-$_aorta_child" 2>/dev/null || true
+  if [ -z "${_aorta_child:-}" ]; then
+    return
   fi
+  kill -TERM -- "-$_aorta_child" 2>/dev/null || true
+  _aorta_arm_kill
+}
+# Test-only. Production leaves both paths unset. Touch the ready file and
+# block until the release file exists, or 30s, so a test can signal while
+# this shell is parked outside ``wait``.
+_aorta_gate() {
+  if [ -z "$1" ] || [ -z "$2" ]; then
+    return
+  fi
+  : > "$1"
+  _aorta_gate_deadline=$((SECONDS + 30))
+  while [ ! -e "$2" ]; do
+    if [ "$SECONDS" -ge "$_aorta_gate_deadline" ]; then
+      break
+    fi
+    sleep 0.05
+  done
 }
 trap '_aorta_stop 129' HUP
 trap '_aorta_stop 130' INT
@@ -150,8 +185,10 @@ set -m
 "$@" &
 _aorta_child=$!
 set +m
+# The trap could not forward a signal that arrived before the pid existed.
 if [ -n "$_aorta_signal" ]; then
   kill -TERM -- "-$_aorta_child" 2>/dev/null || true
+  _aorta_arm_kill
 fi
 _aorta_status=0
 _aorta_cancel=${AORTA_STEP_CANCEL:-}
@@ -169,10 +206,23 @@ if [ -n "$_aorta_cancel" ]; then
   ) >/dev/null 2>&1 &
   _aorta_watcher=$!
 fi
-wait "$_aorta_child" || _aorta_status=$?
+# Last pause before wait, so a signal during watcher setup is included.
+_aorta_gate "${AORTA_STEP_BEFORE_WAIT_READY:-}" "${AORTA_STEP_BEFORE_WAIT_RELEASE:-}"
+if [ -n "$_aorta_signal" ]; then
+  # The timer's SIGKILL makes bash print "Killed" on this wait.
+  wait "$_aorta_child" 2>/dev/null || _aorta_status=$?
+else
+  wait "$_aorta_child" || _aorta_status=$?
+fi
+_aorta_wait_done=1
+if [ -n "${_aorta_escalator:-}" ]; then
+  kill -KILL -- "-$_aorta_escalator" 2>/dev/null || true
+  wait "$_aorta_escalator" 2>/dev/null || true
+fi
 # The first process can exit while its children run on. Stop the rest of
 # the group here; the watcher is killed below, before its own SIGKILL.
 if kill -0 -- "-$_aorta_child" 2>/dev/null; then
+  _aorta_gate "${AORTA_STEP_REAP_READY:-}" "${AORTA_STEP_REAP_RELEASE:-}"
   kill -TERM -- "-$_aorta_child" 2>/dev/null || true
   _aorta_tries=0
   while [ "$_aorta_tries" -lt 10 ] && kill -0 -- "-$_aorta_child" 2>/dev/null; do
@@ -185,10 +235,7 @@ if [ -n "${_aorta_watcher:-}" ]; then
   kill "$_aorta_watcher" 2>/dev/null || true
   wait "$_aorta_watcher" 2>/dev/null || true
 fi
-if [ -n "$_aorta_signal" ]; then
-  _aorta_status=$_aorta_signal
-fi
-exit "$_aorta_status"
+exit "${_aorta_signal:-$_aorta_status}"
 """
 
 SPUR_WORKER_SCRIPT += _STEP_WATCH

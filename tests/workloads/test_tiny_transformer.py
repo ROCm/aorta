@@ -1806,18 +1806,46 @@ def test_owned_step_passes_a_group_signal_to_the_task(tmp_path, sig, code) -> No
                 os.kill(descendant, signal.SIGKILL)
 
 
+def _wait_for_file(path: Path, timeout: float = 5, *, nonempty: bool = False) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        if path.is_file() and (not nonempty or path.read_text(encoding="utf-8").strip()):
+            return
+        assert time.monotonic() < deadline, f"{path.name} did not appear"
+        time.sleep(0.05)
+
+
+def _release_owned(proc, release: Path, descendant: int, pid_file: Path) -> None:
+    """Unblock a test gate, then kill the wrapper and any leftover descendant."""
+    release.write_text("1\n", encoding="utf-8")
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait(timeout=5)
+    if not descendant and pid_file.is_file():
+        text = pid_file.read_text(encoding="utf-8").strip()
+        if text.isdigit():
+            descendant = int(text)
+    if descendant:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(descendant, signal.SIGKILL)
+
+
 def test_owned_step_exits_with_a_signal_that_lands_outside_wait(tmp_path) -> None:
     """A signal during the reap of a leftover descendant still exits 128 + signal."""
     from aorta.workloads.distributed_launch import _marked_command
 
-    env = {**os.environ, "AORTA_STEP_CANCEL": str(tmp_path / "aorta-step-cancel")}
+    ready = tmp_path / "reap.ready"
+    release = tmp_path / "reap.release"
+    env = {
+        **os.environ,
+        "AORTA_STEP_CANCEL": str(tmp_path / "aorta-step-cancel"),
+        "AORTA_STEP_REAP_READY": str(ready),
+        "AORTA_STEP_REAP_RELEASE": str(release),
+    }
     env.pop("AORTA_RESULTS_DIR", None)
-    # The first process exits 0 once its child ignores SIGTERM, which holds the
-    # wrapper in its ~2 s reap loop, past ``wait``.
-    task = (
-        "(trap '' TERM; echo $BASHPID > descendant.pid; exec sleep 30) & "
-        "while [ ! -s descendant.pid ]; do sleep 0.05; done"
-    )
+    # The leader exits 0 and leaves a child, so the wrapper parks in the reap
+    # gate, which is past ``wait``. The gate holds that window open.
+    task = "sleep 30 & echo $! > descendant.pid; exit 0"
     proc = subprocess.Popen(
         _marked_command("aorta-1-abcd", ["bash", "-c", task]),
         env=env,
@@ -1827,22 +1855,51 @@ def test_owned_step_exits_with_a_signal_that_lands_outside_wait(tmp_path) -> Non
     pid_file = tmp_path / "descendant.pid"
     descendant = 0
     try:
-        deadline = time.monotonic() + 5
-        while not pid_file.is_file() or not pid_file.read_text(encoding="utf-8").strip():
-            assert time.monotonic() < deadline, "the task never started its descendant"
-            time.sleep(0.05)
+        _wait_for_file(ready)
+        _wait_for_file(pid_file, nonempty=True)
         descendant = int(pid_file.read_text(encoding="utf-8"))
-        time.sleep(0.5)
+        assert proc.poll() is None, "wrapper exited before the signal was sent"
         os.killpg(proc.pid, signal.SIGINT)
+        release.write_text("1\n", encoding="utf-8")
         assert proc.wait(timeout=10) == 130
         assert _pid_gone(descendant, timeout=3)
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
-        if descendant:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(descendant, signal.SIGKILL)
+        _release_owned(proc, release, descendant, pid_file)
+
+
+def test_owned_step_bounds_cleanup_when_a_signal_lands_before_wait(tmp_path) -> None:
+    """A signal before wait still ends a task that ignores SIGTERM."""
+    from aorta.workloads.distributed_launch import _marked_command
+
+    ready = tmp_path / "before-wait.ready"
+    release = tmp_path / "before-wait.release"
+    env = {
+        **os.environ,
+        "AORTA_STEP_CANCEL": str(tmp_path / "aorta-step-cancel"),
+        "AORTA_STEP_BEFORE_WAIT_READY": str(ready),
+        "AORTA_STEP_BEFORE_WAIT_RELEASE": str(release),
+    }
+    env.pop("AORTA_RESULTS_DIR", None)
+    task = "trap '' TERM; echo $$ > descendant.pid; exec sleep 60"
+    proc = subprocess.Popen(
+        _marked_command("aorta-1-abcd", ["bash", "-c", task]),
+        env=env,
+        cwd=tmp_path,
+        start_new_session=True,
+    )
+    pid_file = tmp_path / "descendant.pid"
+    descendant = 0
+    try:
+        _wait_for_file(ready)
+        _wait_for_file(pid_file, nonempty=True)
+        descendant = int(pid_file.read_text(encoding="utf-8"))
+        assert proc.poll() is None, "wrapper exited before the signal was sent"
+        os.killpg(proc.pid, signal.SIGINT)
+        release.write_text("1\n", encoding="utf-8")
+        assert proc.wait(timeout=8) == 130
+        assert _pid_gone(descendant, timeout=3)
+    finally:
+        _release_owned(proc, release, descendant, pid_file)
 
 
 def test_owned_step_keeps_the_task_exit_code(tmp_path) -> None:
