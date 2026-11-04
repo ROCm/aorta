@@ -52,7 +52,8 @@ Three input shapes are supported:
 * ``--history-root DIR`` -- the PUBLISHED data-branch layout
   ``DIR/<id>/<case>/sanitizer_report.json`` plus a per-run ``DIR/<id>/meta.json``
   (keys: commit, date, gpu, run_url, gate, and ``cases``: the gated controls the
-  run required, ``LEGACY_CASES`` when absent). ``<id>`` is
+  run required, ``LEGACY_CASES`` when absent, every case when it names
+  anything that is not a case dir). ``<id>`` is
   ``<YYYY-MM-DD>T<HHMMSS>-<run_id>`` (sortable to the second, unique; runs
   published before the time was added keep their date-only names and are never
   renamed), enumerated newest-first and capped by ``--keep N``
@@ -1730,9 +1731,20 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
         gate = data.get("gate")
         if gate is not None:
             meta["gate"] = gate
+        # Only case directories count. A list naming anything else -- a baseline
+        # key such as ``fpsan_match``, a typo -- would mark every real control
+        # "not run" and leave a HEALTHY 0/0 gate, so it is dropped and the run
+        # requires all of them. Every published run ran the legacy controls, so
+        # a list cannot release those.
         cases = data.get("cases", LEGACY_CASES)
-        if isinstance(cases, (list, tuple)) and all(isinstance(c, str) for c in cases):
-            meta["cases"] = list(cases)
+        known = [case for case, _k, _l, _b in CASES]
+        if (
+            isinstance(cases, (list, tuple))
+            and cases
+            and all(isinstance(c, str) and c in known for c in cases)
+        ):
+            listed = {*cases, *LEGACY_CASES}
+            meta["cases"] = [case for case in known if case in listed]
     return meta
 
 

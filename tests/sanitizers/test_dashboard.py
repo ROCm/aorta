@@ -2746,11 +2746,16 @@ def test_a_run_published_before_the_fpsan_controls_keeps_its_healthy_gate(tmp_pa
 
 
 def test_a_required_control_without_a_report_still_fails_the_gate(tmp_path):
-    # Listed in the manifest, or no readable list to go by: either way all five count.
+    # Listed in the manifest, or no usable list to go by: either way all five count.
+    # A list naming a baseline key or any other non-case would otherwise mark every
+    # control not run and leave a HEALTHY 0/0 gate.
     for name, meta in (
         ("listed", {"cases": [c for c, *_ in gen.CASES]}),
         ("no-manifest", None),
         ("malformed-cases", {"cases": "fpsan-match"}),
+        ("baseline-key", {"cases": ["fpsan_match"]}),
+        ("one-unknown-name", {"cases": [*gen.LEGACY_CASES, "fpsan-matched"]}),
+        ("empty-list", {"cases": []}),
     ):
         root = tmp_path / name
         run_dir = _write_history_run(root, "2026-08-05-33", meta=meta)
@@ -2763,6 +2768,23 @@ def test_a_required_control_without_a_report_still_fails_the_gate(tmp_path):
         assert run["gate"] is False, name
         assert gen._gate_summary(run["rows"])["label"] == "INCOMPLETE", name
         assert all(run["rows"][c].get("required") is not False for c, *_ in gen.CASES), name
+
+
+def test_a_cases_list_cannot_release_the_legacy_controls(tmp_path):
+    # Every published run ran the WaitCheck/ConSan controls, so a list naming only
+    # the FpSan controls still requires them, and a missing one fails the gate.
+    root = tmp_path / "runs"
+    run_dir = _write_history_run(
+        root, "2026-08-05-33", meta={"cases": ["fpsan-match", "fpsan-mismatch"]}
+    )
+    shutil.rmtree(run_dir / "consan-racy")
+
+    run = gen.runs_from_history_root(root, _fpsan_baselines())[0]
+
+    assert run.get("meta", {}).get("cases") == [c for c, *_ in gen.CASES]
+    assert run.get("gate") is False
+    assert gen._gate_summary(run["rows"]).get("label") == "INCOMPLETE"
+    assert run["rows"].get("consan-racy", {}).get("required") is not False
 
 
 def test_history_root_ignores_malformed_run_dirs(tmp_path):
@@ -5421,6 +5443,10 @@ def test_fpsan_survey_job_probes_first_and_holds_no_token():
     # FpSan needs no rocjitsu bundle, so the job never holds the cross-repo PAT.
     assert "env" not in step
     assert "GH_TOKEN=" not in payload and "download_sanitizer_artifacts" not in payload
+    # The container mounts the checkout, so the checkout token must not be in
+    # .git/config for the downloaded harness to read.
+    checkout = next(s for s in job["steps"] if "actions/checkout" in str(s.get("uses", "")))
+    assert (checkout.get("with") or {}).get("persist-credentials") is False
     probe = payload.index("python scripts/sanitizers/fpsan_probe.py")
     survey = payload.index("python scripts/sanitizers/model_survey.py run --sanitizers fpsan")
     vacuity = payload.index("compare_verdict_baselines.py")

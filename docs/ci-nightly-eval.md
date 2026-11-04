@@ -82,7 +82,8 @@ it (#486).
    their date-only names and manifests, and are never renamed -- and `cases` lists
    the gated controls the run required; a manifest from before `cases` required
    the three WaitCheck/ConSan controls, so its FpSan controls render as not run
-   rather than missing), and the rendered page
+   rather than missing; a `cases` list naming anything that is not a case
+   directory is ignored and the run requires all five), and the rendered page
    links to them: the latest run table has a per-recipe **Report** link, each
    kernel-detail card carries a **run area** link to the case's directory, and
    each **Run** row in the history table links to its `runs/<id>/` area. A
