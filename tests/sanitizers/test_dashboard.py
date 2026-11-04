@@ -5463,6 +5463,24 @@ def test_fpsan_survey_job_probes_first_and_holds_no_token():
     assert "sanitizers-fpsan-survey" in jobs["render"]["needs"]
 
 
+def test_no_container_job_leaves_the_checkout_token_in_git_config():
+    jobs = _nightly_jobs()
+    container_jobs = {
+        name: job
+        for name, job in jobs.items()
+        if any("rocm-ci-setup" in str(s.get("uses", "")) for s in job.get("steps", []))
+    }
+    assert {
+        "sanitizers-gpu",
+        "sanitizers-survey",
+        "sanitizers-model-survey",
+        "sanitizers-fpsan-survey",
+    } <= set(container_jobs)
+    for name, job in container_jobs.items():
+        checkout = next(s for s in job["steps"] if "actions/checkout" in str(s.get("uses", "")))
+        assert (checkout.get("with") or {}).get("persist-credentials") is False, name
+
+
 def test_every_llvm_bindir_export_goes_through_the_resolver():
     """Both provisioning blocks must derive the bindir, not guess it (#381).
 

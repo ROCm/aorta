@@ -78,6 +78,11 @@ jobs:
 
       - name: Check out code
         uses: actions/checkout@v5
+        with:
+          # The container mounts this checkout and runs downloaded code, so the
+          # job token must not be left in .git/config. Nothing after this step
+          # needs git credentials.
+          persist-credentials: false
 
       - name: Set up ROCm CI container
         uses: ./.github/actions/rocm-ci-setup
@@ -419,6 +424,11 @@ jobs:
 
       - name: Check out code
         uses: actions/checkout@v5
+        with:
+          # The container mounts this checkout and runs downloaded code, so the
+          # job token must not be left in .git/config. Nothing after this step
+          # needs git credentials.
+          persist-credentials: false
 
       - name: Set up ROCm CI container
         uses: ./.github/actions/rocm-ci-setup
@@ -730,6 +740,11 @@ jobs:
 
       - name: Check out code
         uses: actions/checkout@v5
+        with:
+          # The container mounts this checkout and runs downloaded code, so the
+          # job token must not be left in .git/config. Nothing after this step
+          # needs git credentials.
+          persist-credentials: false
 
       - name: Set up ROCm CI container
         uses: ./.github/actions/rocm-ci-setup
