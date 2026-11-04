@@ -776,9 +776,28 @@ python examples/rl/rjdebug.py --endpoint http://127.0.0.1:8080/v1 --model <name>
   the same loop instead of an endpoint, and fails unless every episode reproduces
   its recorded outcome and score.
 
-It is also a library: `rjdebug.run(scenarios, client, ...)` plays episodes
-through an `rjdebug.Client`, and `play_episode` and `render_prompt` expose one
-episode and the exact prompt text. The environment is imported from this
-checkout unless `--env-code` or `$RJDEBUG_ENV_CODE` names another one. The tests
-serve scripted replies from a standard-library HTTP server on a toy corpus, so
-they need no model.
+It is also an installed library under `aorta.rocjitsu`. `rjdebug.run(scenarios,
+client, ...)` plays episodes through an `aorta.rocjitsu.Client`, and
+`play_episode` and `render_prompt` expose one episode and the exact prompt text.
+The environment defaults to `aorta.rocjitsu.environment`; `--env-code` or
+`$RJDEBUG_ENV_CODE` can still select a pinned checkout snapshot. The tests serve
+scripted replies from a standard-library HTTP server on a toy corpus, so they
+need no model.
+
+### CIA sibling-report plumbing demo
+
+The experimental module below runs one recorded corpus-v2 scenario through the
+same multi-turn protocol and stores its transcript beside an existing CIA job:
+
+```bash
+python -m aorta.rocjitsu.demo \
+  --archive <corpus>/archive --split test --scenario <scenario-id> \
+  --endpoint http://127.0.0.1:8080/v1 --model <name> \
+  --jobs-root <cia-jobs-root> --job-id <existing-cia-job-id>
+```
+
+This is deliberately a storage-only plumbing demo. It does **not** analyze the
+bound CIA job's live input, confirm or alter Autopsy, inspect live architecture,
+or claim a live output check. Its report says so explicitly and lives under
+`<job>/rj_expert/`, outside the Autopsy bundle. The CIA job must already be
+terminal, and an existing attachment is never overwritten.
