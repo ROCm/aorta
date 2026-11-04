@@ -1,0 +1,69 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "candidate_digest": "b85f98818a3ebb611e8d408f086c5faea0df97a8009640f10b5e694286681f24",
+        "candidate_instrumented": "true",
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/fpsan/fpsan_mismatch.py",
+        "command_sha256": "a9dfd6750da7b9b7baa301ef8f133ebef8a8cf89ced7b045dcfeb0aeeffd949a",
+        "reference_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+        "reference_instrumented": "true",
+        "reported_target": "gfx950",
+        "result_marker": "AORTA_FPSAN_RESULT",
+        "selected_kernels": "row_dot_no_accumulate",
+        "triton_instrumentation_mode": "fpsan"
+      },
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [
+        {
+          "code": "fpsan_digest_mismatch",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "reference and candidate kernels disagree under FpSan: reference digest 53b41a29b1abfb54... != candidate digest b85f98818a3ebb61...",
+          "metadata": {
+            "candidate_digest": "b85f98818a3ebb611e8d408f086c5faea0df97a8009640f10b5e694286681f24",
+            "reference_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+            "target": "gfx950"
+          },
+          "sanitizer": "fpsan",
+          "severity": "error"
+        }
+      ],
+      "kernel_results": [],
+      "reason": "fpsan_digest_mismatch",
+      "returncode": 0,
+      "sanitizer": "fpsan",
+      "state": "ran",
+      "verdict": "fail"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "fail",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": null,
+          "code_object_index": null,
+          "code_object_sha256": null,
+          "entry_offset": null,
+          "name": "row_dot_no_accumulate",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}

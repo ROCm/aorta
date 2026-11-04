@@ -1,0 +1,28 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-FPSAN-MATCH
+description: >
+  Daily gfx950 Triton FpSan guardrail on a re-tiled row-dot kernel against its
+  reference (expect PASS). fixtures/fpsan/fpsan_pair.py holds both sides. A PASS
+  here is what proves FpSan instruments both kernels and that equivalent kernels
+  produce equal digests.
+
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: row_dot
+    fpsan_command: fixtures/fpsan/fpsan_match.py
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - fpsan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json
