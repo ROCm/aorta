@@ -28,7 +28,8 @@ Anything that makes the comparison untrustworthy prints no result line and
 exits 3, so aorta reports an error and never a pass: ``load_kernel`` never
 called, zero launches or more than one, a reference identical to the
 candidate, a device-pointer table among the arguments, tensor arguments whose
-dtypes or shapes differ between the sides, a side that failed or timed out.
+dtypes or shapes differ between the sides, a side that compiled for another
+target than ``--arch``, a side that failed or timed out.
 
     fpsan_compare.py --launch <model>/roofline/harness/launch.py \\
         --spec <model>/roofline/specs/moe.json --kernel _matmul_ogs --scenario P1 \\
@@ -232,6 +233,11 @@ def _import_launch(launch: Path):
     if spec is None or spec.loader is None:
         raise CompareError(f"fpsan_hook_missing: cannot import {launch}")
     module = importlib.util.module_from_spec(spec)
+    # ``python launch.py`` puts the harness dir first on sys.path; its sibling
+    # imports (moe_routing) need the same here.
+    harness = str(launch.parent)
+    if harness not in sys.path:
+        sys.path.insert(0, harness)
     spec.loader.exec_module(module)
     for name in ("load_kernel", "main"):
         if not callable(getattr(module, name, None)):
@@ -452,6 +458,19 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
             "fpsan_tensor_layout_mismatch: the reference and candidate launches pass "
             "tensors of different dtypes or shapes, so their digests are not comparable"
         )
+    # The result's target is --arch, so it must be what both sides compiled for:
+    # instrumentation() accepts any FpSan arch, and the evaluator only compares
+    # the reported target with the recipe's. A side that compiled nothing is
+    # already reported uninstrumented.
+    compiled = {
+        side: sorted({str(o["arch"]).split(":", 1)[0] for o in sides[side]["cache"]["objects"]})
+        for side in _SIDES
+    }
+    if any(arches and arches != [args.arch] for arches in compiled.values()):
+        raise CompareError(
+            f"fpsan_target_mismatch: --arch is {args.arch}, but the reference compiled "
+            f"for {compiled['reference']} and the candidate for {compiled['candidate']}"
+        )
     return {
         "reference": {"kernel": ref_kernel, "changes": changes},
         "sides": sides,
@@ -528,6 +547,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         metavar="NAME=JSON", help="override one constexpr argument of the reference")
     parser.add_argument("--reference-grid", type=_grid, metavar="X,Y,Z")
     args = parser.parse_args(argv)
+    # Each side runs from the asset's roofline dir, so a relative path given here
+    # would resolve against the wrong directory there.
+    for name in ("launch", "spec", "flat_dir", "pkg_src", "work", "record"):
+        if getattr(args, name):
+            setattr(args, name, str(Path(getattr(args, name)).resolve()))
 
     start = time.monotonic()
     record: dict[str, object] = {"kernel": args.kernel, "scenario": args.scenario}

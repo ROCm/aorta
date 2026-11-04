@@ -13,7 +13,8 @@ Every kernel compiles and runs in its own child process with its own empty
   instrumentation check ``fpsan_compare.py`` applies, the plain cache must
   fail it, and the two outputs must differ;
 * ``rowsum`` (a chunked row reduction) and ``dot`` (a ``tl.dot`` matmul), each
-  under FpSan at two reduction tile sizes. Their outputs must be bit-identical:
+  under FpSan at two reduction tile sizes. Each run that completes must pass the
+  same instrumentation check, and their outputs must be bit-identical:
   the conservative reference config shrinks reduction tiles, which compares
   nothing unless FpSan's payload algebra ignores reduction order.
 
@@ -194,8 +195,18 @@ def probe(work: Path) -> tuple[int, dict[str, object]]:
     summary["instrumented"] = instrumented
     summary["plain_instrumented"] = plain["cache"]["instrumented"]
     summary["output_differs"] = fpsan.get("sha256") not in (None, plain.get("sha256"))
-    if not instrumented or plain["cache"]["instrumented"] or not summary["output_differs"]:
-        summary["verdict"] = "fpsan_unavailable: the FpSan compile was not instrumented or did not change the output"
+    # A tiling pair that ran uninstrumented would match on ordinary floats and
+    # pass as FpSan invariance, so every FpSan run that ran must be instrumented.
+    summary["uninstrumented_runs"] = sorted(
+        key for key, run in runs.items()
+        if key.endswith("/fpsan") and run["returncode"] == 0 and not run["cache"]["instrumented"]
+    )
+    if (not instrumented or plain["cache"]["instrumented"] or not summary["output_differs"]
+            or summary["uninstrumented_runs"]):
+        summary["verdict"] = (
+            "fpsan_unavailable: an FpSan compile was not instrumented, or FpSan did not "
+            "change the output"
+        )
         return 1, summary
     invariant = {}
     for kernel in ("rowsum", "dot"):

@@ -364,6 +364,41 @@ def test_a_hook_that_did_not_fire_exactly_once_is_an_error_never_a_pass(tmp_path
     assert str(check.reason).startswith(f"fpsan_command_exit_{fc.EXIT_NO_RESULT}")
 
 
+def test_the_harness_imports_its_siblings_as_it_does_run_directly(tmp_path):
+    model = _stub_asset(tmp_path, launch_py="import routing_helper\n" + _STUB_LAUNCH)
+    (model / "roofline" / "harness" / "routing_helper.py").write_text("", encoding="utf-8")
+    proc, record = _compare(tmp_path, model)
+    assert proc.returncode == 0, proc.stderr
+    assert "error" not in record
+
+
+def test_relative_paths_resolve_against_the_callers_directory(tmp_path):
+    # Each side runs from <model>/roofline, where these relative paths would not exist.
+    _stub_asset(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT),
+         "--launch", "model/roofline/harness/launch.py", "--spec", "model/roofline/specs/toy.json",
+         "--kernel", "k", "--scenario", "S0", "--flat-dir", "model/kernels",
+         "--pkg-src", "model/pkg_src", "--work", "work", "--record", "record.json",
+         "--side-timeout", "60"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _verdict(proc).verdict is Verdict.PASS
+    assert "error" not in json.loads((tmp_path / "record.json").read_text(encoding="utf-8"))
+
+
+def test_objects_compiled_for_another_target_than_arch_are_an_error(tmp_path):
+    # The stub compiles for gfx950, as on a gfx950 host asked for --arch gfx942:
+    # reporting gfx942 would let the recipe's target check pass a wrong claim.
+    proc, record = _compare(tmp_path, _stub_asset(tmp_path), "--arch", "gfx942")
+    assert proc.returncode == fc.EXIT_NO_RESULT
+    assert "AORTA_FPSAN_RESULT" not in proc.stdout
+    assert record.get("error", "").startswith(
+        "fpsan_target_mismatch: --arch is gfx942, but the reference compiled for ['gfx950']"
+    )
+
+
 def test_a_reference_identical_to_the_candidate_never_runs(tmp_path):
     proc, record = _compare(tmp_path, _stub_asset(tmp_path, num_warps=4, num_stages=1))
     assert proc.returncode == fc.EXIT_NO_RESULT and not proc.stdout

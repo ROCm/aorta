@@ -30,7 +30,8 @@ def _load():
 probe_mod = _load()
 
 
-def _stub_children(monkeypatch, *, digests=None, failed=(), instrumented=True, timeout=False):
+def _stub_children(monkeypatch, *, digests=None, failed=(), instrumented=True, uninstrumented=(),
+                   timeout=False):
     """Fake child runs: each writes the digest ``digests`` names for its run key."""
     digests = {
         "mix/a/plain": "p", "mix/a/fpsan": "f",
@@ -51,8 +52,11 @@ def _stub_children(monkeypatch, *, digests=None, failed=(), instrumented=True, t
                                    "device": "gfx950"}), encoding="utf-8")
         return types.SimpleNamespace(returncode=0, stderr="")
 
+    skipped = {key.replace("/", "-") for key in uninstrumented}
+
     def check(cache: Path) -> dict:
-        return {"instrumented": instrumented and cache.name.endswith("-fpsan")}
+        return {"instrumented": instrumented and cache.name.endswith("-fpsan")
+                and cache.name not in skipped}
 
     monkeypatch.setattr(probe_mod.subprocess, "run", run)
     monkeypatch.setattr(probe_mod, "_instrumentation", lambda: check)
@@ -69,6 +73,9 @@ def _stub_children(monkeypatch, *, digests=None, failed=(), instrumented=True, t
         ({"instrumented": False}, 1, "fpsan_unavailable"),
         # Instrumented, but the sanitized output is the plain one: nothing was rewritten.
         ({"digests": {"mix/a/fpsan": "p"}}, 1, "fpsan_unavailable"),
+        # A tiling pair that ran uninstrumented matches on plain floats and proves nothing.
+        ({"uninstrumented": ("rowsum/b/fpsan",)}, 1, "fpsan_unavailable"),
+        ({"uninstrumented": ("dot/a/fpsan", "dot/b/fpsan")}, 1, "fpsan_unavailable"),
         ({"failed": ("mix/a/plain",)}, 2, "no_gpu"),
         ({"digests": {"dot/b/fpsan": "other"}}, 3, "fpsan_tiling_variant"),
         ({"failed": ("rowsum/b/fpsan",)}, 3, "fpsan_tiling_variant"),
@@ -81,6 +88,15 @@ def test_each_outcome_has_its_own_exit_code(tmp_path, monkeypatch, capsys, stub,
     summary = json.loads(out.read_text(encoding="utf-8"))
     assert summary.get("verdict", "").startswith(verdict)
     assert json.loads(capsys.readouterr().out) == summary
+
+
+def test_the_summary_names_each_fpsan_run_that_was_not_instrumented(tmp_path, monkeypatch, capsys):
+    _stub_children(monkeypatch, uninstrumented=("dot/b/fpsan",))
+    out = tmp_path / "probe.json"
+    assert probe_mod.main(["--out", str(out), "--work", str(tmp_path / "work")]) == 1
+    summary = json.loads(out.read_text(encoding="utf-8"))
+    assert summary.get("uninstrumented_runs") == ["dot/b/fpsan"]
+    assert "tiling_invariant" not in summary
 
 
 def test_a_probe_that_crashes_is_not_reported_as_fpsan_unavailable(tmp_path, monkeypatch):
