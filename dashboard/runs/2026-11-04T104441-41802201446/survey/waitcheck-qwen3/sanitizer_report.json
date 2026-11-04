@@ -1,0 +1,125 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "path": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck",
+        "sha256": "2c406bcc3be32c48ae0ac46d0ca197a7b9a6173e0d25f5b5226fa972d8e31e77"
+      },
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [
+        {
+          "diagnostics_truncated": false,
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_topk_topp_kernel__C0/dispatched.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "0673f020203c471d1b6a7ff515b50e68a9d318866950031fb626fe4117ad1f3f",
+            "entry_offset": null,
+            "name": "_topk_topp_kernel",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 0,
+          "state": "ran",
+          "verdict": "pass"
+        },
+        {
+          "diagnostics_truncated": false,
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_compute_slot_mapping_kernel__C0/dispatched.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "2b4432007a46d24edce3acd1ca7433b84f5c18ee415377ca5957e5527bdee427",
+            "entry_offset": null,
+            "name": "_compute_slot_mapping_kernel",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 0,
+          "state": "ran",
+          "verdict": "pass"
+        },
+        {
+          "diagnostics_truncated": false,
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_fwd_kernel__C0/dispatched.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "336ef011aa1ac84be3ecafe614eb3cbe9a3022995b0c31da6113dbec7d38473b",
+            "entry_offset": null,
+            "name": "_fwd_kernel",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 0,
+          "state": "ran",
+          "verdict": "pass"
+        }
+      ],
+      "reason": null,
+      "returncode": null,
+      "sanitizer": "waitcheck",
+      "state": "ran",
+      "verdict": "pass"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "pass",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 3,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_topk_topp_kernel__C0/dispatched.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "0673f020203c471d1b6a7ff515b50e68a9d318866950031fb626fe4117ad1f3f",
+          "entry_offset": null,
+          "name": "_topk_topp_kernel",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      },
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_compute_slot_mapping_kernel__C0/dispatched.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "2b4432007a46d24edce3acd1ca7433b84f5c18ee415377ca5957e5527bdee427",
+          "entry_offset": null,
+          "name": "_compute_slot_mapping_kernel",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      },
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_fwd_kernel__C0/dispatched.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "336ef011aa1ac84be3ecafe614eb3cbe9a3022995b0c31da6113dbec7d38473b",
+          "entry_offset": null,
+          "name": "_fwd_kernel",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 7
+  }
+}

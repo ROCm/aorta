@@ -1,6 +1,6 @@
 # Reproduce `consan-gemm`
 
-Sanitizer case `consan-gemm` from run `2026-10-28T140907-40686657660` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. See `index.html` for every file actually published here.
+Sanitizer case `consan-gemm` from run `2026-10-28T140907-40686657660` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. Its logs, recipe copy and inputs were pruned for falling outside the nightly's log-retention window. See `index.html` for every file actually published here.
 
 ## Run
 
@@ -36,7 +36,7 @@ Then rebuild the CI-built fixtures, which are not published here (see 'Artifacts
 
 The exact invocations the nightly used are in .github/workflows/sanitizers-nightly.yml.
 
-Set `ROCJITSU_PREBUILT` (unpacked rocjitsu bundle supplying rj_waitcheck and the ConSan hook) before running. `aorta` sets `HSA_TOOLS_LIB`, `HSA_TOOLS_DISABLE_REGISTER`, `RJ_CONSAN_MODE`, `RJ_CONSAN_PRESET`, `RJ_CONSAN_POLICY` for you from the recipe's policy block.
+Set `ROCJITSU_PREBUILT` (unpacked rocjitsu bundle supplying rj_waitcheck and the ConSan hook) before running. `aorta` sets `HSA_TOOLS_LIB`, `HSA_TOOLS_DISABLE_REGISTER`, `RJ_CONSAN_MODE`, `RJ_CONSAN_PRESET`, `RJ_CONSAN_POLICY` for you from the recipe.
 
 Finally, the sweep itself:
 
@@ -67,4 +67,4 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 
 ## Files here
 
-See `index.html` for the browsable list. Logs are gzipped; `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
+See `index.html` for the browsable list. `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.

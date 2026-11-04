@@ -1,16 +1,1534 @@
 [
   {
+    "fpsan": [
+      {
+        "backend": "\u2014",
+        "cls": "survey",
+        "command": "python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan --inventory recipes/sanitizers/models/gpt-oss.yaml --out results",
+        "group": "gpt-oss",
+        "label": "fpsan-gpt-oss",
+        "name": "fpsan-gpt-oss",
+        "report_rel": "runs/2026-11-04T104441-41802201446/survey/fpsan-gpt-oss/sanitizer_report.json",
+        "sanitizer": "fpsan",
+        "staged": true,
+        "summary": {
+          "backend": null,
+          "coverage": "",
+          "execution": "complete",
+          "expected": null,
+          "finding_groups": [],
+          "findings": 0,
+          "fpsan_pairs": [
+            {
+              "candidate_digest": "6e37a322cfc6cce12e4767ea521e72f0b51de3407653af551e948d489f8a2f06",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_kernel/D1",
+              "reason": "",
+              "reference_digest": "6e37a322cfc6cce12e4767ea521e72f0b51de3407653af551e948d489f8a2f06",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "484446e57c0def4d208cf58b943804732b5d8b21d1ce3d2ff8c3f9452229654f",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_kernel/D2",
+              "reason": "",
+              "reference_digest": "484446e57c0def4d208cf58b943804732b5d8b21d1ce3d2ff8c3f9452229654f",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "5abfefc32c7193b6211a7e5839722ffb565297949c294ce0395f741134bc4c27",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_kernel/D3",
+              "reason": "",
+              "reference_digest": "5abfefc32c7193b6211a7e5839722ffb565297949c294ce0395f741134bc4c27",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "256ee9cb29e84124f44e08a36f91f78e17ae3bf2e0c58f8c467257c3f40cb96c",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_kernel/D4",
+              "reason": "",
+              "reference_digest": "256ee9cb29e84124f44e08a36f91f78e17ae3bf2e0c58f8c467257c3f40cb96c",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "ea63473d20507f8141b86da64174f2fca6caacd489c308657a05c6e1c35e8144",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_kernel/P1",
+              "reason": "",
+              "reference_digest": "ea63473d20507f8141b86da64174f2fca6caacd489c308657a05c6e1c35e8144",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "f6b48b854a126c8cee380585d103e5efd43d42ef9e1c112c892b0f766b63015c",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_kernel/P2",
+              "reason": "",
+              "reference_digest": "f6b48b854a126c8cee380585d103e5efd43d42ef9e1c112c892b0f766b63015c",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "cace856f0299123aaa014cbaaeea40f0a41a89e8d4715e023ee92f7769c64d12",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_kernel/P3",
+              "reason": "",
+              "reference_digest": "cace856f0299123aaa014cbaaeea40f0a41a89e8d4715e023ee92f7769c64d12",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "b2f72cffe35cad4ce759738253f27ad8e828b6c0c7d9ffd2520184914f4f09f6",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_kernel/P4",
+              "reason": "",
+              "reference_digest": "b2f72cffe35cad4ce759738253f27ad8e828b6c0c7d9ffd2520184914f4f09f6",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "a787f850de78f8a34ea7178bf6f5cbb6b3e9786bb37fc33febbf0cf8d94a31df",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_pad/D1",
+              "reason": "",
+              "reference_digest": "a787f850de78f8a34ea7178bf6f5cbb6b3e9786bb37fc33febbf0cf8d94a31df",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "95df39f4d58cbd37a928128c3578d007e6048eb61aa0252f5fa118176d4f714d",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_pad/D2",
+              "reason": "",
+              "reference_digest": "95df39f4d58cbd37a928128c3578d007e6048eb61aa0252f5fa118176d4f714d",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "6014a3d0468da4bc5f7c4b1f4af5cdc555e4e0a8fdfd24a479d52c968f0d83ae",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_pad/D3",
+              "reason": "",
+              "reference_digest": "6014a3d0468da4bc5f7c4b1f4af5cdc555e4e0a8fdfd24a479d52c968f0d83ae",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_pad/D4",
+              "reason": "",
+              "reference_digest": "2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "d38cce118057b3ae0343a299133a0761a480b2808de65841fdcb0f216c5719a6",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_pad/P1",
+              "reason": "",
+              "reference_digest": "d38cce118057b3ae0343a299133a0761a480b2808de65841fdcb0f216c5719a6",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "c2fe692abe5a500b85cd70c9da48c50a62d6bd6b15f13529db71ff8046a63f40",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_pad/P2",
+              "reason": "",
+              "reference_digest": "c2fe692abe5a500b85cd70c9da48c50a62d6bd6b15f13529db71ff8046a63f40",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "96162bf879bcfee28285f3d0766fb56fe837d9735ed754a10e59e4586ec2b985",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_pad/P3",
+              "reason": "",
+              "reference_digest": "96162bf879bcfee28285f3d0766fb56fe837d9735ed754a10e59e4586ec2b985",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "db1f23622bc6078feed5b312d9536b6f0cf53aaf7bfdcb3048489842c07d307b",
+              "candidate_instrumented": "",
+              "name": "_fused_add_rmsnorm_pad/P4",
+              "reason": "",
+              "reference_digest": "db1f23622bc6078feed5b312d9536b6f0cf53aaf7bfdcb3048489842c07d307b",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "5152594de1f4e53dbb8d236a31937c03adb61d665cd73adeab16e987efe311b2",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs/D1",
+              "reason": "",
+              "reference_digest": "5152594de1f4e53dbb8d236a31937c03adb61d665cd73adeab16e987efe311b2",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "91b5096017a39a7985b223834ffd57fb891a4d2f191a2d59c7d4a327b91d793f",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs/D2",
+              "reason": "",
+              "reference_digest": "91b5096017a39a7985b223834ffd57fb891a4d2f191a2d59c7d4a327b91d793f",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "b1e341807d3430194b9b08f18bcb5edc8ae5819872775aa9aced0ee336f05802",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs/D3",
+              "reason": "",
+              "reference_digest": "b1e341807d3430194b9b08f18bcb5edc8ae5819872775aa9aced0ee336f05802",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "62c91d1188d407ac877ebacf5007ba409a2dd816b3f53233b1f5383629743d4c",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs/D4",
+              "reason": "",
+              "reference_digest": "62c91d1188d407ac877ebacf5007ba409a2dd816b3f53233b1f5383629743d4c",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "da31c40c6f42a74cfb2ad84a06af7a70920e53198068468db7effd3758fa40d3",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs/P1",
+              "reason": "",
+              "reference_digest": "da31c40c6f42a74cfb2ad84a06af7a70920e53198068468db7effd3758fa40d3",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "770ebaeb7f83970b6cd7f6bd145d361ab953ed04f25d9b421b7debbf7f333404",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs/P2",
+              "reason": "",
+              "reference_digest": "770ebaeb7f83970b6cd7f6bd145d361ab953ed04f25d9b421b7debbf7f333404",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "3f8de647521441c63d6bb19c5238145e65dd3733e92beb666b820a7f20633158",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs/P3",
+              "reason": "",
+              "reference_digest": "3f8de647521441c63d6bb19c5238145e65dd3733e92beb666b820a7f20633158",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "609c0a9d6f6f334da24ce34bd176ffd06725b14e48d61e9c3ecaf26fdcac27fb",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs/P4",
+              "reason": "",
+              "reference_digest": "609c0a9d6f6f334da24ce34bd176ffd06725b14e48d61e9c3ecaf26fdcac27fb",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "44c065a74eab8ca93ae1536506d0d94cf72df4c5a601c4f10cade643ba879d93",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs@w2/D1",
+              "reason": "",
+              "reference_digest": "44c065a74eab8ca93ae1536506d0d94cf72df4c5a601c4f10cade643ba879d93",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "e9c04082588ba8ee5bae4387c53907f6ead8bdd1ce81f7ea4ac571bafda36cfc",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs@w2/D2",
+              "reason": "",
+              "reference_digest": "e9c04082588ba8ee5bae4387c53907f6ead8bdd1ce81f7ea4ac571bafda36cfc",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "72b7585192ea410b0c2131e484253483d88e06e236750ced03ba2df3441a28b0",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs@w2/D3",
+              "reason": "",
+              "reference_digest": "72b7585192ea410b0c2131e484253483d88e06e236750ced03ba2df3441a28b0",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "67dd7d1570208734c386bc46d9d4c45de6c91773dec55d8ef655554e36bb76da",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs@w2/D4",
+              "reason": "",
+              "reference_digest": "67dd7d1570208734c386bc46d9d4c45de6c91773dec55d8ef655554e36bb76da",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "fb56e9d7c16007ab4cc15b1bc8c22ada7d894b0d26658abde741aabb48d292c3",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs@w2/P1",
+              "reason": "",
+              "reference_digest": "fb56e9d7c16007ab4cc15b1bc8c22ada7d894b0d26658abde741aabb48d292c3",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "54cdc9e01e5f3aa6f8b19f08b1c1da1908764812b3f58b0570a8e4bfa2ccc8b4",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs@w2/P2",
+              "reason": "",
+              "reference_digest": "54cdc9e01e5f3aa6f8b19f08b1c1da1908764812b3f58b0570a8e4bfa2ccc8b4",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "649be589cbe95faaf07e2270654a8caa4e702940338f1c10073e3e7773d3e0b1",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs@w2/P3",
+              "reason": "",
+              "reference_digest": "649be589cbe95faaf07e2270654a8caa4e702940338f1c10073e3e7773d3e0b1",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "8021aca8d27474319c7462d68ea35fba857c2f13a043128fc6f8b5d073c3fecc",
+              "candidate_instrumented": "",
+              "name": "_matmul_ogs@w2/P4",
+              "reason": "",
+              "reference_digest": "8021aca8d27474319c7462d68ea35fba857c2f13a043128fc6f8b5d073c3fecc",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "e87ddeeef77354b0a3ce48bb148719be1d8db632d94e08ac4c8e14a832c341fe",
+              "candidate_instrumented": "",
+              "name": "_rms_norm_kernel/D1",
+              "reason": "",
+              "reference_digest": "e87ddeeef77354b0a3ce48bb148719be1d8db632d94e08ac4c8e14a832c341fe",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "96d61b7bde70e1549171e76f72ba1b58edaf579d75b50d53c218f962b9f0851a",
+              "candidate_instrumented": "",
+              "name": "_rms_norm_kernel/D2",
+              "reason": "",
+              "reference_digest": "96d61b7bde70e1549171e76f72ba1b58edaf579d75b50d53c218f962b9f0851a",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "5f4638701b557afe983e43d19357fb551f47d71ab700902d12b014a99ee13807",
+              "candidate_instrumented": "",
+              "name": "_rms_norm_kernel/D3",
+              "reason": "",
+              "reference_digest": "5f4638701b557afe983e43d19357fb551f47d71ab700902d12b014a99ee13807",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "47a40d16778be8d5ed45ed193769f41e2590a01838397b560f59b6e53768874a",
+              "candidate_instrumented": "",
+              "name": "_rms_norm_kernel/D4",
+              "reason": "",
+              "reference_digest": "47a40d16778be8d5ed45ed193769f41e2590a01838397b560f59b6e53768874a",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "073f18d1d51f7e274df314a79e6fea84e6cb8c70955284e54f7ec40ce191b4c3",
+              "candidate_instrumented": "",
+              "name": "_rms_norm_kernel/P1",
+              "reason": "",
+              "reference_digest": "073f18d1d51f7e274df314a79e6fea84e6cb8c70955284e54f7ec40ce191b4c3",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "736b391d210c40bc18ab6d1646086fc899ca432d474667fb6ef2c26e5a8550f4",
+              "candidate_instrumented": "",
+              "name": "_rms_norm_kernel/P2",
+              "reason": "",
+              "reference_digest": "736b391d210c40bc18ab6d1646086fc899ca432d474667fb6ef2c26e5a8550f4",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "8906f4ac708203f9f38e6e1ecde3ef0bba86bc21b9b0b801235ce1dcb8abfe72",
+              "candidate_instrumented": "",
+              "name": "_rms_norm_kernel/P3",
+              "reason": "",
+              "reference_digest": "8906f4ac708203f9f38e6e1ecde3ef0bba86bc21b9b0b801235ce1dcb8abfe72",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "9f73ee1035bff333135e787fd9aff40d98a69a0527b13764f59e56509c0949f3",
+              "candidate_instrumented": "",
+              "name": "_rms_norm_kernel/P4",
+              "reason": "",
+              "reference_digest": "9f73ee1035bff333135e787fd9aff40d98a69a0527b13764f59e56509c0949f3",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "32b682cd94c40b7d6cabd0dafe80bb8c7b3bb8a54343669f662e683a01eab374",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd/D1",
+              "reason": "",
+              "reference_digest": "32b682cd94c40b7d6cabd0dafe80bb8c7b3bb8a54343669f662e683a01eab374",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "f30ac2598a7018aaa45b964218f2ff5934876fee034f636490ef00f8019dcc86",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd/D2",
+              "reason": "",
+              "reference_digest": "f30ac2598a7018aaa45b964218f2ff5934876fee034f636490ef00f8019dcc86",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "6a3cd679f0705d8f5052ba8a89e20350fdc561af3e1ef9d393858957d86f80fb",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd/D3",
+              "reason": "",
+              "reference_digest": "6a3cd679f0705d8f5052ba8a89e20350fdc561af3e1ef9d393858957d86f80fb",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "82756a77173cdfbe517ec3ef61945b465a953fc49f36e98851dac9027eae7d5b",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd/D4",
+              "reason": "",
+              "reference_digest": "82756a77173cdfbe517ec3ef61945b465a953fc49f36e98851dac9027eae7d5b",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "adf251cb45af58e69f7a2d5a9ead896f9cbe161e78fb4021996107a15e9a9c20",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd/P1",
+              "reason": "",
+              "reference_digest": "adf251cb45af58e69f7a2d5a9ead896f9cbe161e78fb4021996107a15e9a9c20",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "32d43670b0a0f10419c60db6ecf148c39db73f34b854034b523e64f536e2d575",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd/P2",
+              "reason": "",
+              "reference_digest": "32d43670b0a0f10419c60db6ecf148c39db73f34b854034b523e64f536e2d575",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "01ccf8d4dab5779f254c39904dbbd4ee88b8a7259662faae49b7c13dcf1f159c",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd/P3",
+              "reason": "",
+              "reference_digest": "01ccf8d4dab5779f254c39904dbbd4ee88b8a7259662faae49b7c13dcf1f159c",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "c640b749f4288f021a90b84066c0bde14af30c60b6cc3618b41e571c118afe0a",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd/P4",
+              "reason": "",
+              "reference_digest": "c640b749f4288f021a90b84066c0bde14af30c60b6cc3618b41e571c118afe0a",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "5b51de9b45ace5bdee828b2fb17d97c3a4baecf41c9bb5b24bb314c08f2a364c",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D1",
+              "reason": "",
+              "reference_digest": "5b51de9b45ace5bdee828b2fb17d97c3a4baecf41c9bb5b24bb314c08f2a364c",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "ea63f21b9c92cecaf5bd9504ba2c801c4a21ec21cb46b5889ce5c6da321301ad",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D2",
+              "reason": "",
+              "reference_digest": "ea63f21b9c92cecaf5bd9504ba2c801c4a21ec21cb46b5889ce5c6da321301ad",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "c259e259979796efb9fe7e4d38c94f7def4946ada82cb911d9ca23e1f9111249",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D3",
+              "reason": "",
+              "reference_digest": "c259e259979796efb9fe7e4d38c94f7def4946ada82cb911d9ca23e1f9111249",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D4",
+              "reason": "",
+              "reference_digest": "ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "c3d1849bc5857585de73cc0c5e8f8d0aa1e0cdfc5363f18495b97d5c80ba24b5",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P1",
+              "reason": "",
+              "reference_digest": "c3d1849bc5857585de73cc0c5e8f8d0aa1e0cdfc5363f18495b97d5c80ba24b5",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "76ea103292b9cf15a383f172910f55dbe9384a59bf4e0c0624e619065206800d",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P2",
+              "reason": "",
+              "reference_digest": "76ea103292b9cf15a383f172910f55dbe9384a59bf4e0c0624e619065206800d",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "64903d518690f25c91a96c73b821ae88976eb9ea4d51a48a5f22f84ad362b09f",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P3",
+              "reason": "",
+              "reference_digest": "64903d518690f25c91a96c73b821ae88976eb9ea4d51a48a5f22f84ad362b09f",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "ebb01513ea7009e472fff6a1369b0724b61311c0737d2cc09fc5f2d1667457c2",
+              "candidate_instrumented": "",
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P4",
+              "reason": "",
+              "reference_digest": "ebb01513ea7009e472fff6a1369b0724b61311c0737d2cc09fc5f2d1667457c2",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "8c5a2f68f254bd4af9519eb0ff7c3800bba486f4c673a79374fb4b8437790c9f",
+              "candidate_instrumented": "",
+              "name": "_swiglu/D1",
+              "reason": "",
+              "reference_digest": "8c5a2f68f254bd4af9519eb0ff7c3800bba486f4c673a79374fb4b8437790c9f",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "223c356e393a179b70bf105ecbd6246f97b4389d0c03e4774516a67d906c4714",
+              "candidate_instrumented": "",
+              "name": "_swiglu/D2",
+              "reason": "",
+              "reference_digest": "223c356e393a179b70bf105ecbd6246f97b4389d0c03e4774516a67d906c4714",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "af07d9ece3e30c765ca507f4d6cbb1013d6eb8bfb9dbcf175ec9bcce9902ce43",
+              "candidate_instrumented": "",
+              "name": "_swiglu/D3",
+              "reason": "",
+              "reference_digest": "af07d9ece3e30c765ca507f4d6cbb1013d6eb8bfb9dbcf175ec9bcce9902ce43",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "fa395db60e22d78a6cbc1b933c528aafe328146c8b4e42fa03ec52de7eb32629",
+              "candidate_instrumented": "",
+              "name": "_swiglu/D4",
+              "reason": "",
+              "reference_digest": "fa395db60e22d78a6cbc1b933c528aafe328146c8b4e42fa03ec52de7eb32629",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "225fdade79c927c9e70f7ef2fd662bf51c92515c8c38a56466b10df3f7f13e1a",
+              "candidate_instrumented": "",
+              "name": "_swiglu/P1",
+              "reason": "",
+              "reference_digest": "225fdade79c927c9e70f7ef2fd662bf51c92515c8c38a56466b10df3f7f13e1a",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "4390b81e125c66770431f31a9a7740d639180918921ff21d62e7e2b0112ddc37",
+              "candidate_instrumented": "",
+              "name": "_swiglu/P2",
+              "reason": "",
+              "reference_digest": "4390b81e125c66770431f31a9a7740d639180918921ff21d62e7e2b0112ddc37",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d",
+              "candidate_instrumented": "",
+              "name": "_swiglu/P3",
+              "reason": "",
+              "reference_digest": "ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "0642644a2c5b62a18f626ef3681e06b7a608a59239858e0aa9219ef5beaa4a4e",
+              "candidate_instrumented": "",
+              "name": "_swiglu/P4",
+              "reason": "",
+              "reference_digest": "0642644a2c5b62a18f626ef3681e06b7a608a59239858e0aa9219ef5beaa4a4e",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "f45486e386dc568394abc6304990af1f3f57fd2405d53ae3a04e0b5ab369562a",
+              "candidate_instrumented": "",
+              "name": "_topk_forward/D1",
+              "reason": "",
+              "reference_digest": "f45486e386dc568394abc6304990af1f3f57fd2405d53ae3a04e0b5ab369562a",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "eadf2627e74b74020457b3969a9df9f4a0e5a7c8c862e685567cc4140efa3ef7",
+              "candidate_instrumented": "",
+              "name": "_topk_forward/D2",
+              "reason": "",
+              "reference_digest": "eadf2627e74b74020457b3969a9df9f4a0e5a7c8c862e685567cc4140efa3ef7",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "e9977e13eba0680ee07a5867f411def959041369b103172c1e832885eafdfee4",
+              "candidate_instrumented": "",
+              "name": "_topk_forward/D3",
+              "reason": "",
+              "reference_digest": "e9977e13eba0680ee07a5867f411def959041369b103172c1e832885eafdfee4",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "23b5e433ea6f5fc8eb34829ac57ef6b01f8b73efaf0a114ac0b8cc0d7db1f45f",
+              "candidate_instrumented": "",
+              "name": "_topk_forward/D4",
+              "reason": "",
+              "reference_digest": "23b5e433ea6f5fc8eb34829ac57ef6b01f8b73efaf0a114ac0b8cc0d7db1f45f",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "f6b864c1b89cf8b793a64640b89da819ea8f8aa2b6d0a8a895434d4f91aba4f3",
+              "candidate_instrumented": "",
+              "name": "_topk_forward/P1",
+              "reason": "",
+              "reference_digest": "f6b864c1b89cf8b793a64640b89da819ea8f8aa2b6d0a8a895434d4f91aba4f3",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "e4a29b8159f2677e112fee4c749bd277f88b44b22763653d32204333100df990",
+              "candidate_instrumented": "",
+              "name": "_topk_forward/P2",
+              "reason": "",
+              "reference_digest": "e4a29b8159f2677e112fee4c749bd277f88b44b22763653d32204333100df990",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "252d48ee2bc97aa3c751f86bcfbf46aad5e3e43df57e01bec77482ca5823e68f",
+              "candidate_instrumented": "",
+              "name": "_topk_forward/P3",
+              "reason": "",
+              "reference_digest": "252d48ee2bc97aa3c751f86bcfbf46aad5e3e43df57e01bec77482ca5823e68f",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "7739451c83e080f34a8b630ee877e00c77c91f2355f578f03b8ea3fcfe1d7f8b",
+              "candidate_instrumented": "",
+              "name": "_topk_forward/P4",
+              "reason": "",
+              "reference_digest": "7739451c83e080f34a8b630ee877e00c77c91f2355f578f03b8ea3fcfe1d7f8b",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/D1",
+              "reason": "",
+              "reference_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/D2",
+              "reason": "",
+              "reference_digest": "7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "174ad6c9c8604aefac634df2281fd1eff54e07fcdc33e6f21d3bf4fe84aa90c3",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/D3",
+              "reason": "",
+              "reference_digest": "174ad6c9c8604aefac634df2281fd1eff54e07fcdc33e6f21d3bf4fe84aa90c3",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "1a7f72e91b5eb2ade3ee98adc401abce6c444a57baecfaa82850c7a0d6059993",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/D4",
+              "reason": "",
+              "reference_digest": "1a7f72e91b5eb2ade3ee98adc401abce6c444a57baecfaa82850c7a0d6059993",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/P1",
+              "reason": "",
+              "reference_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/P2",
+              "reason": "",
+              "reference_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/P3",
+              "reason": "",
+              "reference_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/P4",
+              "reason": "",
+              "reference_digest": "7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "1b183b97fcfd96576f2e03b01ff859c8ad577ae263b35369b710dd1ef28a2591",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/D1_full",
+              "reason": "",
+              "reference_digest": "1b183b97fcfd96576f2e03b01ff859c8ad577ae263b35369b710dd1ef28a2591",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "e7fe4a149aa149d6008bf6a3ff9c8c414180238c3a192fd32345488e79e7fa5b",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/D1_swa",
+              "reason": "",
+              "reference_digest": "e7fe4a149aa149d6008bf6a3ff9c8c414180238c3a192fd32345488e79e7fa5b",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "170e86d5d5b756e98dee391e04d45aa429ae18ecdde834e3bc4b0f799998d289",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/D2_full",
+              "reason": "",
+              "reference_digest": "170e86d5d5b756e98dee391e04d45aa429ae18ecdde834e3bc4b0f799998d289",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "8e9dc2e68cac67aed10b72baf114ee60eb8355cc6d755be16a2c54d96f7b5135",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/D2_swa",
+              "reason": "",
+              "reference_digest": "8e9dc2e68cac67aed10b72baf114ee60eb8355cc6d755be16a2c54d96f7b5135",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "8564266319eb7ac8bcccf57306a575f016203cb2f523a62a05d4ecae3d16e620",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/D3_full",
+              "reason": "",
+              "reference_digest": "8564266319eb7ac8bcccf57306a575f016203cb2f523a62a05d4ecae3d16e620",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "f20f742563d2f6d656938d5ad15fe56439977c28539c691438047acf492ebd6e",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/D3_swa",
+              "reason": "",
+              "reference_digest": "f20f742563d2f6d656938d5ad15fe56439977c28539c691438047acf492ebd6e",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "13ca5ce07e225bff4f83bec2587b16c036325816782b9860e0034005eadfbe75",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/D4_full",
+              "reason": "",
+              "reference_digest": "13ca5ce07e225bff4f83bec2587b16c036325816782b9860e0034005eadfbe75",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "d3cf7f32a55b722ce962b3961b353a86f11a1d2e7b211f5851137d298079fdc5",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/D4_swa",
+              "reason": "",
+              "reference_digest": "d3cf7f32a55b722ce962b3961b353a86f11a1d2e7b211f5851137d298079fdc5",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/P1_full",
+              "reason": "",
+              "reference_digest": "5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/P1_swa",
+              "reason": "",
+              "reference_digest": "5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "5ff7542e563ad82afc0d54aa27a2f26dd7885f155c2905da28aad827a6e69584",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/P2_full",
+              "reason": "",
+              "reference_digest": "5ff7542e563ad82afc0d54aa27a2f26dd7885f155c2905da28aad827a6e69584",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "bad332baf8619815e0fa28e01f2580cf991374cf8041d5aea902541f7fbb4cc5",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/P2_swa",
+              "reason": "",
+              "reference_digest": "bad332baf8619815e0fa28e01f2580cf991374cf8041d5aea902541f7fbb4cc5",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "320bad23dd01eb3c23317bc5458a6bac0034fd48bbedc9d5ac5925f64a6e1fb1",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/P3_full",
+              "reason": "",
+              "reference_digest": "320bad23dd01eb3c23317bc5458a6bac0034fd48bbedc9d5ac5925f64a6e1fb1",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/P3_swa",
+              "reason": "",
+              "reference_digest": "4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "14b8d771899c62eadc21a1944ebdc22dd0e0a377db06a872077b0a5bc0a7d0f7",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/P4_full",
+              "reason": "",
+              "reference_digest": "14b8d771899c62eadc21a1944ebdc22dd0e0a377db06a872077b0a5bc0a7d0f7",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "ca687daf4f52089f97c2028fdf1dde630d4e03b1ec955aed13fd7d8e7ad2aacd",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/P4_swa",
+              "reason": "",
+              "reference_digest": "ca687daf4f52089f97c2028fdf1dde630d4e03b1ec955aed13fd7d8e7ad2aacd",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "36a7faacb8498efcfccc137ade222068558d0f8ad4675970fdfc98fca6b5ae77",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/X1_swa",
+              "reason": "",
+              "reference_digest": "36a7faacb8498efcfccc137ade222068558d0f8ad4675970fdfc98fca6b5ae77",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "c48a1b82028a6e7c9dcc4183a03f803e14109460728192649a5859c64b656a86",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_2d/X2_swa",
+              "reason": "",
+              "reference_digest": "c48a1b82028a6e7c9dcc4183a03f803e14109460728192649a5859c64b656a86",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "3db05bc0633a42fee0e09a238a08a0cc2c18fd9c56dbeb5d39a85229f2916cc6",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_3d/X1_full",
+              "reason": "",
+              "reference_digest": "3db05bc0633a42fee0e09a238a08a0cc2c18fd9c56dbeb5d39a85229f2916cc6",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "0c0cc9e1d04d22ff6be6edc1021cc41777bd3d523f134d5bc0371442cbddd06c",
+              "candidate_instrumented": "",
+              "name": "kernel_unified_attention_3d/X2_full",
+              "reason": "",
+              "reference_digest": "0c0cc9e1d04d22ff6be6edc1021cc41777bd3d523f134d5bc0371442cbddd06c",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "f0ddc325ece16bdb2eef4bc83ec9d60f0904bf624bfbe9287c9649def447af55",
+              "candidate_instrumented": "",
+              "name": "reduce_segments/X1_full",
+              "reason": "",
+              "reference_digest": "f0ddc325ece16bdb2eef4bc83ec9d60f0904bf624bfbe9287c9649def447af55",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "f67f4fb3f8614b74340987eca8c98555feac71d76f182bcb0c7a48b7e1d7215d",
+              "candidate_instrumented": "",
+              "name": "reduce_segments/X2_full",
+              "reason": "",
+              "reference_digest": "f67f4fb3f8614b74340987eca8c98555feac71d76f182bcb0c7a48b7e1d7215d",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            }
+          ],
+          "kernel_reasons": [],
+          "kernels": [
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+              "offset": null,
+              "sha": "5111186046",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+              "offset": null,
+              "sha": "02170daa86",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1_swiglu",
+              "offset": null,
+              "sha": "99783dba6b",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+              "offset": null,
+              "sha": "b60dc71885",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+              "offset": null,
+              "sha": "8b64fa68f3",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1",
+              "offset": null,
+              "sha": "357789577b",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rms_norm_kernel",
+              "offset": null,
+              "sha": "1dcf3e3765",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rms_norm_kernel",
+              "offset": null,
+              "sha": "63fa64b777",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rms_norm_kernel",
+              "offset": null,
+              "sha": "e189a11509",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rms_norm_kernel",
+              "offset": null,
+              "sha": "e5d86d5d3e",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rms_norm_kernel",
+              "offset": null,
+              "sha": "b6dcdd21dd",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rms_norm_kernel",
+              "offset": null,
+              "sha": "ec7c47196f",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rms_norm_kernel",
+              "offset": null,
+              "sha": "cca3ceda2f",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+              "offset": null,
+              "sha": "8f39bbd1bd",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+              "offset": null,
+              "sha": "44472db069",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+              "offset": null,
+              "sha": "02f9a6e283",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+              "offset": null,
+              "sha": "6f97774106",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+              "offset": null,
+              "sha": "d5458dc446",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_swiglu_bf16xbf16_16x128",
+              "offset": null,
+              "sha": "6860ae4cbc",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_topk_forward",
+              "offset": null,
+              "sha": "5c4d4d519d",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_topk_forward",
+              "offset": null,
+              "sha": "d46a6cefb7",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_topk_topp_kernel",
+              "offset": null,
+              "sha": "b7b68ee37b",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_topk_topp_kernel",
+              "offset": null,
+              "sha": "50fe4fea9d",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "kernel_unified_attention_2d",
+              "offset": null,
+              "sha": "a5497ec8d0",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "kernel_unified_attention_2d",
+              "offset": null,
+              "sha": "1e85e67552",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "kernel_unified_attention_2d",
+              "offset": null,
+              "sha": "699e09c798",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "kernel_unified_attention_2d",
+              "offset": null,
+              "sha": "05e205ab8f",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "kernel_unified_attention_2d",
+              "offset": null,
+              "sha": "7433030bb8",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "kernel_unified_attention_2d",
+              "offset": null,
+              "sha": "6a27646a37",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "kernel_unified_attention_3d",
+              "offset": null,
+              "sha": "6d038c64ca",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "kernel_unified_attention_3d",
+              "offset": null,
+              "sha": "f437d8850a",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "reduce_segments",
+              "offset": null,
+              "sha": "7bcee0d9ae",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "reduce_segments",
+              "offset": null,
+              "sha": "53c2bad898",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_kernel",
+              "offset": null,
+              "sha": "136cc91e21",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_kernel",
+              "offset": null,
+              "sha": "61903965e1",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_kernel",
+              "offset": null,
+              "sha": "26b4c78f52",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_kernel",
+              "offset": null,
+              "sha": "28c7fc9948",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_kernel",
+              "offset": null,
+              "sha": "b7cbcd5bb8",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_kernel",
+              "offset": null,
+              "sha": "0429ecf4ed",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_kernel",
+              "offset": null,
+              "sha": "df48165cc5",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_pad",
+              "offset": null,
+              "sha": "494126cd1a",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fused_add_rmsnorm_pad",
+              "offset": null,
+              "sha": "dc6e5bea86",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            }
+          ],
+          "match": true,
+          "observation": "fpsan pass",
+          "present": true,
+          "primary": {
+            "preflight": null,
+            "reason": null,
+            "sanitizer": "fpsan",
+            "verdict": "pass"
+          },
+          "verdict": "pass",
+          "worklist": {
+            "kernel_count": 42,
+            "requirement": "top_dispatch_count",
+            "top_n": 42
+          }
+        },
+        "workload": null
+      },
+      {
+        "backend": "\u2014",
+        "cls": "survey",
+        "command": "python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan --inventory recipes/sanitizers/models/qwen3.yaml --out results",
+        "group": "qwen3",
+        "label": "fpsan-qwen3",
+        "name": "fpsan-qwen3",
+        "report_rel": "runs/2026-11-04T104441-41802201446/survey/fpsan-qwen3/sanitizer_report.json",
+        "sanitizer": "fpsan",
+        "staged": true,
+        "summary": {
+          "backend": null,
+          "coverage": "",
+          "execution": "complete",
+          "expected": null,
+          "finding_groups": [],
+          "findings": 0,
+          "fpsan_pairs": [
+            {
+              "candidate_digest": "dba12a952bdea343f9944e2680594bb8c18a78f5d7f4de2d691e73c45cb7c2a8",
+              "candidate_instrumented": "",
+              "name": "_fwd_kernel/C0",
+              "reason": "",
+              "reference_digest": "dba12a952bdea343f9944e2680594bb8c18a78f5d7f4de2d691e73c45cb7c2a8",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "3929fc52b083d4e078c140e3772c5ce1ccf865f6ad974f36c2ad1804f01cd0a5",
+              "candidate_instrumented": "",
+              "name": "_fwd_kernel/C1",
+              "reason": "",
+              "reference_digest": "3929fc52b083d4e078c140e3772c5ce1ccf865f6ad974f36c2ad1804f01cd0a5",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            },
+            {
+              "candidate_digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+              "candidate_instrumented": "",
+              "name": "_topk_topp_kernel/C0",
+              "reason": "",
+              "reference_digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+              "reference_instrumented": "",
+              "verdict": "pass"
+            }
+          ],
+          "kernel_reasons": [],
+          "kernels": [
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fwd_kernel",
+              "offset": null,
+              "sha": "336ef011aa",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_topk_topp_kernel",
+              "offset": null,
+              "sha": "0673f02020",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            }
+          ],
+          "match": true,
+          "observation": "fpsan pass",
+          "present": true,
+          "primary": {
+            "preflight": null,
+            "reason": null,
+            "sanitizer": "fpsan",
+            "verdict": "pass"
+          },
+          "verdict": "pass",
+          "worklist": {
+            "kernel_count": 2,
+            "requirement": "top_dispatch_count",
+            "top_n": 2
+          }
+        },
+        "workload": null
+      }
+    ],
     "gate": true,
     "meta": {
-      "commit": "12e75e694488",
-      "commit_full": "12e75e694488cd29937f2ee83dccf530c1f0a92a",
-      "date": "2026-11-03T14:06:44+00:00",
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy",
+        "fpsan-match",
+        "fpsan-mismatch"
+      ],
+      "commit": "6ad9b1aefedd",
+      "commit_full": "6ad9b1aefedddab05f565936ce30af95c57d8291",
+      "date": "2026-11-04T10:44:41+00:00",
       "gate": true,
       "gpu": "gfx950",
-      "run": "2026-11-03T140644-41634136516",
-      "run_url": "https://github.com/ROCm/aorta/actions/runs/41634136516"
+      "run": "2026-11-04T104441-41802201446",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/41802201446"
     },
-    "rel": "runs/2026-11-03T140644-41634136516",
+    "rel": "runs/2026-11-04T104441-41802201446",
     "rows": {
       "consan-clean": {
         "backend": null,
@@ -43,7 +1561,7 @@
           "sanitizer": "consan",
           "verdict": "pass"
         },
-        "report_rel": "runs/2026-11-03T140644-41634136516/consan-clean/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
           "kernel_count": 1,
@@ -61,7 +1579,7 @@
           {
             "code": "sampled_conflict",
             "count": 1,
-            "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=98888575580112 first_index=3 second_index=8 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 generat\u2026",
+            "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=106012503367104 first_index=3 second_index=8 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 genera\u2026",
             "sanitizer": "consan",
             "severity": "race"
           }
@@ -90,7 +1608,115 @@
           "sanitizer": "consan",
           "verdict": "fail"
         },
-        "report_rel": "runs/2026-11-03T140644-41634136516/consan-racy/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/consan-racy/sanitizer_report.json",
+        "verdict": "fail",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "complete",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "fpsan_pairs": [
+          {
+            "candidate_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+            "candidate_instrumented": "true",
+            "name": "row_dot",
+            "reason": "",
+            "reference_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+            "reference_instrumented": "true",
+            "verdict": "pass"
+          }
+        ],
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 0,
+            "name": "row_dot",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "pass"
+          }
+        ],
+        "match": true,
+        "observation": "fpsan pass",
+        "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "fpsan",
+          "verdict": "pass"
+        },
+        "report_rel": "runs/2026-11-04T104441-41802201446/fpsan-match/sanitizer_report.json",
+        "verdict": "pass",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "complete",
+        "expected": "fail",
+        "finding_groups": [
+          {
+            "code": "fpsan_digest_mismatch",
+            "count": 1,
+            "example": "reference and candidate kernels disagree under FpSan: reference digest 53b41a29b1abfb54... != candidate digest b85f98818a3ebb61...",
+            "sanitizer": "fpsan",
+            "severity": "error"
+          }
+        ],
+        "findings": 1,
+        "fpsan_pairs": [
+          {
+            "candidate_digest": "b85f98818a3ebb611e8d408f086c5faea0df97a8009640f10b5e694286681f24",
+            "candidate_instrumented": "true",
+            "name": "row_dot_no_accumulate",
+            "reason": "fpsan_digest_mismatch",
+            "reference_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+            "reference_instrumented": "true",
+            "verdict": "fail"
+          }
+        ],
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 1,
+            "name": "row_dot_no_accumulate",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "fail"
+          }
+        ],
+        "match": true,
+        "observation": "fpsan fail; reason fpsan_digest_mismatch; 1 finding(s) (fpsan_digest_mismatch)",
+        "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": "fpsan_digest_mismatch",
+          "sanitizer": "fpsan",
+          "verdict": "fail"
+        },
+        "report_rel": "runs/2026-11-04T104441-41802201446/fpsan-mismatch/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
           "kernel_count": 1,
@@ -162,7 +1788,7 @@
           "sanitizer": "waitcheck",
           "verdict": "warn"
         },
-        "report_rel": "runs/2026-11-03T140644-41634136516/waitcheck/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
           "kernel_count": 3,
@@ -179,7 +1805,7 @@
         "group": "gemm",
         "label": "consan-gemm",
         "name": "consan-gemm",
-        "report_rel": "runs/2026-11-03T140644-41634136516/survey/consan-gemm/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/survey/consan-gemm/sanitizer_report.json",
         "sanitizer": "consan",
         "staged": true,
         "summary": {
@@ -238,31 +1864,31 @@
         "group": "gpt-oss",
         "label": "consan-gpt-oss",
         "name": "consan-gpt-oss",
-        "report_rel": "runs/2026-11-03T140644-41634136516/survey/consan-gpt-oss/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/survey/consan-gpt-oss/sanitizer_report.json",
         "sanitizer": "consan",
         "staged": true,
         "summary": {
           "backend": null,
-          "coverage": "0/0, 20/20, 0/0, 0/0, 0/0, 6/6, 0/0, 6/6, 0/0, 16/16, 0/0, 282/282, 0/0, 27/27, 0/0, 27/27, 0/0, 18/18, 0/0, 13/13, 0/0, 0/0, 0/0, 0/0, 0/0, 4/4, 0/0, 2/2, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 40/40, 0/0, 34/34, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 4/4",
+          "coverage": "0/0, 0/0, 0/0, 6/6, 0/0, 6/6, 0/0, 16/16, 0/0, 282/282, 0/0, 27/27, 0/0, 27/27, 0/0, 18/18, 0/0, 13/13, 0/0, 0/0, 0/0, 0/0, 0/0, 4/4, 0/0, 2/2, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 40/40, 0/0, 34/34, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 4/4, 0/0, 20/20",
           "execution": "complete",
           "expected": null,
           "finding_groups": [
             {
               "code": "sampled_conflict",
-              "count": 46,
-              "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=472618528 first_index=1 second_index=3 first_kind=2 second_kind=2 first_owner=2 second_owner=0 epoch=0 generation=1\u2026",
+              "count": 47,
+              "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=278913984 first_index=0 second_index=6 first_kind=2 second_kind=2 first_owner=2 second_owner=0 epoch=0 generation=1\u2026",
               "sanitizer": "consan",
               "severity": "race"
             },
             {
               "code": "sampled_conflict_summary",
               "count": 2,
-              "example": "ConSan conflict count reported by the summary only: reader=545352160 counted 80 with 8 example record(s) logged",
+              "example": "ConSan conflict count reported by the summary only: reader=815512944 counted 80 with 8 example record(s) logged",
               "sanitizer": "consan",
               "severity": "race"
             }
           ],
-          "findings": 48,
+          "findings": 49,
           "kernel_reasons": [
             {
               "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__P1/dispatched.hsaco",
@@ -349,17 +1975,6 @@
           "kernels": [
             {
               "code_object": "dispatched.hsaco",
-              "detail": "",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
-              "offset": null,
-              "sha": "44472db069",
-              "time_ms": 0.0,
-              "verdict": "pass"
-            },
-            {
-              "code_object": "dispatched.hsaco",
               "detail": "consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object",
               "dispatch": 1,
               "findings": 0,
@@ -373,7 +1988,7 @@
               "code_object": "dispatched.hsaco",
               "detail": "",
               "dispatch": 1,
-              "findings": 5,
+              "findings": 7,
               "name": "_stage2_pow2",
               "offset": null,
               "sha": "e6acd0c33b",
@@ -395,12 +2010,12 @@
               "code_object": "dispatched.hsaco",
               "detail": "",
               "dispatch": 1,
-              "findings": 1,
+              "findings": 0,
               "name": "_topk_forward",
               "offset": null,
               "sha": "d46a6cefb7",
               "time_ms": 0.0,
-              "verdict": "fail"
+              "verdict": "pass"
             },
             {
               "code_object": "dispatched.hsaco",
@@ -599,10 +2214,21 @@
               "sha": "b6dcdd21dd",
               "time_ms": 0.0,
               "verdict": "fail"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+              "offset": null,
+              "sha": "44472db069",
+              "time_ms": 0.0,
+              "verdict": "pass"
             }
           ],
           "match": true,
-          "observation": "consan fail; _rope_kernel_cached_thd_2c_gqa_onehead_fwd: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _combine_sampled_and_draft_tokens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _compute_slot_mappings_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _gather_block_tables_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _get_num_sampled_and_rejected_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _masked_compaction: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _post_update_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_pos_seq_lens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_prefill_inputs_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object; 48 finding(s) (sampled_conflict); preflight pass",
+          "observation": "consan fail; _rope_kernel_cached_thd_2c_gqa_onehead_fwd: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _combine_sampled_and_draft_tokens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _compute_slot_mappings_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _gather_block_tables_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _get_num_sampled_and_rejected_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _masked_compaction: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _post_update_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_pos_seq_lens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_prefill_inputs_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object; 49 finding(s) (sampled_conflict); preflight pass",
           "present": true,
           "primary": {
             "preflight": "pass",
@@ -626,12 +2252,12 @@
         "group": "qwen3",
         "label": "consan-qwen3",
         "name": "consan-qwen3",
-        "report_rel": "runs/2026-11-03T140644-41634136516/survey/consan-qwen3/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/survey/consan-qwen3/sanitizer_report.json",
         "sanitizer": "consan",
         "staged": true,
         "summary": {
           "backend": null,
-          "coverage": "0/0, 172/172, 0/0, 0/0",
+          "coverage": "0/0, 0/0, 0/0, 172/172",
           "execution": "partial",
           "expected": null,
           "finding_groups": [],
@@ -650,17 +2276,6 @@
           "kernels": [
             {
               "code_object": "dispatched.hsaco",
-              "detail": "",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "_fwd_kernel",
-              "offset": null,
-              "sha": "336ef011aa",
-              "time_ms": 0.0,
-              "verdict": "pass"
-            },
-            {
-              "code_object": "dispatched.hsaco",
               "detail": "consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object",
               "dispatch": 1,
               "findings": 0,
@@ -669,6 +2284,17 @@
               "sha": "2b4432007a",
               "time_ms": 0.0,
               "verdict": "not_checked"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_fwd_kernel",
+              "offset": null,
+              "sha": "336ef011aa",
+              "time_ms": 0.0,
+              "verdict": "pass"
             }
           ],
           "match": true,
@@ -696,7 +2322,7 @@
         "group": "gemm",
         "label": "waitcheck-gemm",
         "name": "waitcheck-gemm",
-        "report_rel": "runs/2026-11-03T140644-41634136516/survey/waitcheck-gemm/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/survey/waitcheck-gemm/sanitizer_report.json",
         "sanitizer": "waitcheck",
         "staged": true,
         "summary": {
@@ -756,7 +2382,7 @@
         "group": "gpt-oss",
         "label": "waitcheck-gpt-oss",
         "name": "waitcheck-gpt-oss",
-        "report_rel": "runs/2026-11-03T140644-41634136516/survey/waitcheck-gpt-oss/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/survey/waitcheck-gpt-oss/sanitizer_report.json",
         "sanitizer": "waitcheck",
         "staged": true,
         "summary": {
@@ -1402,7 +3028,7 @@
         "group": "qwen3",
         "label": "waitcheck-qwen3",
         "name": "waitcheck-qwen3",
-        "report_rel": "runs/2026-11-03T140644-41634136516/survey/waitcheck-qwen3/sanitizer_report.json",
+        "report_rel": "runs/2026-11-04T104441-41802201446/survey/waitcheck-qwen3/sanitizer_report.json",
         "sanitizer": "waitcheck",
         "staged": true,
         "summary": {
@@ -1474,6 +3100,245 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
+      "commit": "12e75e694488",
+      "commit_full": "12e75e694488cd29937f2ee83dccf530c1f0a92a",
+      "date": "2026-11-03T14:06:44+00:00",
+      "gate": true,
+      "gpu": "gfx950",
+      "run": "2026-11-03T140644-41634136516",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/41634136516"
+    },
+    "rel": "runs/2026-11-03T140644-41634136516",
+    "rows": {
+      "consan-clean": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 0,
+            "name": "consan_lds_race",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "pass"
+          }
+        ],
+        "match": true,
+        "observation": "consan pass; preflight pass",
+        "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
+        "report_rel": "runs/2026-11-03T140644-41634136516/consan-clean/sanitizer_report.json",
+        "verdict": "pass",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "consan-racy": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
+        "expected": "fail",
+        "finding_groups": [
+          {
+            "code": "sampled_conflict",
+            "count": 1,
+            "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=98888575580112 first_index=3 second_index=8 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 generat\u2026",
+            "sanitizer": "consan",
+            "severity": "race"
+          }
+        ],
+        "findings": 1,
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 1,
+            "name": "consan_lds_race_2wave",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "fail"
+          }
+        ],
+        "match": true,
+        "observation": "consan fail; 1 finding(s) (sampled_conflict); preflight pass",
+        "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
+        "report_rel": "runs/2026-11-03T140644-41634136516/consan-racy/sanitizer_report.json",
+        "verdict": "fail",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "waitcheck": {
+        "backend": {
+          "name": "rj_waitcheck",
+          "sha": "2c406bcc3be3"
+        },
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "complete",
+        "expected": "warn",
+        "finding_groups": [
+          {
+            "code": "wait_hazard",
+            "count": 64,
+            "example": "sol_126578.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20",
+            "sanitizer": "waitcheck",
+            "severity": "warning"
+          }
+        ],
+        "findings": 64,
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "sol_126578.hsaco",
+            "detail": "",
+            "dispatch": 479,
+            "findings": 32,
+            "name": "gemm_NT_M256_N4096_K1024",
+            "offset": null,
+            "sha": "57c5d8efa4",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          },
+          {
+            "code_object": "sol_175415.hsaco",
+            "detail": "same code object as gemm_NT_M256_N4096_K1024; scanned once",
+            "dispatch": 471,
+            "findings": 0,
+            "name": "gemm_NT_M128_N4096_K1280",
+            "offset": null,
+            "sha": "57c5d8efa4",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          },
+          {
+            "code_object": "sol_137678.hsaco",
+            "detail": "",
+            "dispatch": 440,
+            "findings": 32,
+            "name": "gemm_TT_M64_N64_K1280",
+            "offset": null,
+            "sha": "aeb46fded1",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          }
+        ],
+        "match": true,
+        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
+        "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
+        "report_rel": "runs/2026-11-03T140644-41634136516/waitcheck/sanitizer_report.json",
+        "verdict": "warn",
+        "worklist": {
+          "kernel_count": 3,
+          "requirement": "top_dispatch_count",
+          "top_n": 3
+        }
+      }
+    }
+  },
+  {
+    "gate": true,
+    "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "d22f6116235c",
       "commit_full": "d22f6116235c05395a0241a83d6f7e952a988454",
       "date": "2026-11-02T14:09:36+00:00",
@@ -1570,6 +3435,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -1647,6 +3568,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "d22f6116235c",
       "commit_full": "d22f6116235c05395a0241a83d6f7e952a988454",
       "date": "2026-11-01T14:04:44+00:00",
@@ -1743,6 +3669,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -1820,6 +3802,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "d22f6116235c",
       "commit_full": "d22f6116235c05395a0241a83d6f7e952a988454",
       "date": "2026-10-31T14:04:37+00:00",
@@ -1916,6 +3903,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -1993,6 +4036,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "b78967101935",
       "commit_full": "b789671019359a96a8ccaed21ab8747c4fc74fc0",
       "date": "2026-10-30T14:11:45+00:00",
@@ -2089,6 +4137,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -2166,6 +4270,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "b78967101935",
       "commit_full": "b789671019359a96a8ccaed21ab8747c4fc74fc0",
       "date": "2026-10-29T14:11:05+00:00",
@@ -2262,6 +4371,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -2339,6 +4504,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "4fb536db06a8",
       "commit_full": "4fb536db06a8e0d6dc6e21cc2658505e8a1360f7",
       "date": "2026-10-28T14:09:07+00:00",
@@ -2435,6 +4605,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -2512,6 +4738,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "4fb536db06a8",
       "commit_full": "4fb536db06a8e0d6dc6e21cc2658505e8a1360f7",
       "date": "2026-10-27T15:51:49+00:00",
@@ -2608,6 +4839,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -2685,6 +4972,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "71099ef28e19",
       "commit_full": "71099ef28e192d55e3d3ae101909c32fbac1e7ea",
       "date": "2026-10-27T13:57:59+00:00",
@@ -2781,6 +5073,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -2858,6 +5206,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "53636046fa47",
       "commit_full": "53636046fa47b7af58e7d65461d8a49b46695cb4",
       "date": "2026-10-26T13:53:57+00:00",
@@ -2954,6 +5307,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -3031,6 +5440,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "a347a262ea51",
       "commit_full": "a347a262ea5115fac28d66b0f25b3efa3b6a4a4b",
       "date": "2026-10-25T12:25:57+00:00",
@@ -3127,6 +5541,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -3204,6 +5674,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "a347a262ea51",
       "commit_full": "a347a262ea5115fac28d66b0f25b3efa3b6a4a4b",
       "date": "2026-10-24T12:25:37+00:00",
@@ -3300,6 +5775,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -3377,6 +5908,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "7d567f0262b1",
       "commit_full": "7d567f0262b1ba68822de0393443e9b61aee1160",
       "date": "2026-10-23T12:28:11+00:00",
@@ -3473,6 +6009,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -3550,6 +6142,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "7d567f0262b1",
       "commit_full": "7d567f0262b1ba68822de0393443e9b61aee1160",
       "date": "2026-10-22T17:51:55+00:00",
@@ -3646,6 +6243,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -3723,6 +6376,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "3c6a345ae84f",
       "commit_full": "3c6a345ae84f61e3625e28f360fb215b9ffa1898",
       "date": "2026-10-22T14:14:31+00:00",
@@ -3819,6 +6477,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -3896,6 +6610,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "3c6a345ae84f",
       "commit_full": "3c6a345ae84f61e3625e28f360fb215b9ffa1898",
       "date": "2026-10-21T14:13:45+00:00",
@@ -3992,6 +6711,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -4069,6 +6844,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "3c6a345ae84f",
       "commit_full": "3c6a345ae84f61e3625e28f360fb215b9ffa1898",
       "date": "2026-10-20T14:14:40+00:00",
@@ -4165,6 +6945,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -4242,6 +7078,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "3c6a345ae84f",
       "commit_full": "3c6a345ae84f61e3625e28f360fb215b9ffa1898",
       "date": "2026-10-19T14:15:50+00:00",
@@ -4338,6 +7179,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -4415,6 +7312,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "3c6a345ae84f",
       "commit_full": "3c6a345ae84f61e3625e28f360fb215b9ffa1898",
       "date": "2026-10-18T14:10:43+00:00",
@@ -4511,6 +7413,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -4588,6 +7546,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "3c6a345ae84f",
       "commit_full": "3c6a345ae84f61e3625e28f360fb215b9ffa1898",
       "date": "2026-10-17T14:09:56+00:00",
@@ -4684,6 +7647,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -4761,6 +7780,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "3c6a345ae84f",
       "commit_full": "3c6a345ae84f61e3625e28f360fb215b9ffa1898",
       "date": "2026-10-16T16:06:50+00:00",
@@ -4857,6 +7881,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -4934,6 +8014,11 @@
   {
     "gate": false,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "bf117600ca07",
       "commit_full": "bf117600ca0754ec60d680a3de2ad5db6a89fcde",
       "date": "2026-10-16T12:34:32+00:00",
@@ -5042,6 +8127,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -5119,6 +8260,11 @@
   {
     "gate": false,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "bf117600ca07",
       "commit_full": "bf117600ca0754ec60d680a3de2ad5db6a89fcde",
       "date": "2026-10-15T12:34:27+00:00",
@@ -5227,6 +8373,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -5304,6 +8506,11 @@
   {
     "gate": false,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "bf117600ca07",
       "commit_full": "bf117600ca0754ec60d680a3de2ad5db6a89fcde",
       "date": "2026-10-14T19:51:18+00:00",
@@ -5412,6 +8619,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -5489,6 +8752,11 @@
   {
     "gate": false,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "bf117600ca07",
       "commit_full": "bf117600ca0754ec60d680a3de2ad5db6a89fcde",
       "date": "2026-10-14T19:41:55+00:00",
@@ -5553,6 +8821,62 @@
           "top_n": null
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": null,
         "cls": "guardrail",
@@ -5585,6 +8909,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "bf117600ca07",
       "commit_full": "bf117600ca0754ec60d680a3de2ad5db6a89fcde",
       "date": "2026-10-12T14:27:44+00:00",
@@ -5681,6 +9010,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -5758,6 +9143,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "224d19f4a371",
       "commit_full": "224d19f4a3718f4a8ddcfd477cd80e7a66469d68",
       "date": "2026-10-11T14:14:17+00:00",
@@ -5854,6 +9244,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -5931,6 +9377,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "224d19f4a371",
       "commit_full": "224d19f4a3718f4a8ddcfd477cd80e7a66469d68",
       "date": "2026-10-10T14:13:15+00:00",
@@ -6027,6 +9478,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -6104,6 +9611,11 @@
   {
     "gate": true,
     "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy"
+      ],
       "commit": "224d19f4a371",
       "commit_full": "224d19f4a3718f4a8ddcfd477cd80e7a66469d68",
       "date": "2026-10-09T14:14:46+00:00",
@@ -6200,6 +9712,62 @@
           "top_n": 1
         }
       },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "not run",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": true,
+        "observation": "not run: this control was added after this run",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "required": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
       "waitcheck": {
         "backend": {
           "name": "rj_waitcheck",
@@ -6265,179 +9833,6 @@
           "verdict": "warn"
         },
         "report_rel": "runs/2026-10-09T141446-37929907291/waitcheck/sanitizer_report.json",
-        "verdict": "warn",
-        "worklist": {
-          "kernel_count": 3,
-          "requirement": "top_dispatch_count",
-          "top_n": 3
-        }
-      }
-    }
-  },
-  {
-    "gate": true,
-    "meta": {
-      "commit": "224d19f4a371",
-      "commit_full": "224d19f4a3718f4a8ddcfd477cd80e7a66469d68",
-      "date": "2026-10-08T14:16:57+00:00",
-      "gate": true,
-      "gpu": "gfx950",
-      "run": "2026-10-08T141657-37776980403",
-      "run_url": "https://github.com/ROCm/aorta/actions/runs/37776980403"
-    },
-    "rel": "runs/2026-10-08T141657-37776980403",
-    "rows": {
-      "consan-clean": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "0/0, 2/2",
-        "execution": "complete",
-        "expected": "pass",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "",
-            "dispatch": 1,
-            "findings": 0,
-            "name": "consan_lds_race",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "pass"
-          }
-        ],
-        "match": true,
-        "observation": "consan pass; preflight pass",
-        "present": true,
-        "primary": {
-          "preflight": "pass",
-          "reason": null,
-          "sanitizer": "consan",
-          "verdict": "pass"
-        },
-        "report_rel": "runs/2026-10-08T141657-37776980403/consan-clean/sanitizer_report.json",
-        "verdict": "pass",
-        "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
-        }
-      },
-      "consan-racy": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "0/0, 2/2",
-        "execution": "complete",
-        "expected": "fail",
-        "finding_groups": [
-          {
-            "code": "sampled_conflict",
-            "count": 1,
-            "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=95483621234400 first_index=3 second_index=8 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 generat\u2026",
-            "sanitizer": "consan",
-            "severity": "race"
-          }
-        ],
-        "findings": 1,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "",
-            "dispatch": 1,
-            "findings": 1,
-            "name": "consan_lds_race_2wave",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "fail"
-          }
-        ],
-        "match": true,
-        "observation": "consan fail; 1 finding(s) (sampled_conflict); preflight pass",
-        "present": true,
-        "primary": {
-          "preflight": "pass",
-          "reason": null,
-          "sanitizer": "consan",
-          "verdict": "fail"
-        },
-        "report_rel": "runs/2026-10-08T141657-37776980403/consan-racy/sanitizer_report.json",
-        "verdict": "fail",
-        "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
-        }
-      },
-      "waitcheck": {
-        "backend": {
-          "name": "rj_waitcheck",
-          "sha": "cd631ed4907a"
-        },
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "complete",
-        "expected": "warn",
-        "finding_groups": [
-          {
-            "code": "wait_hazard",
-            "count": 64,
-            "example": "sol_126578.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20",
-            "sanitizer": "waitcheck",
-            "severity": "warning"
-          }
-        ],
-        "findings": 64,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "sol_126578.hsaco",
-            "detail": "",
-            "dispatch": 479,
-            "findings": 32,
-            "name": "gemm_NT_M256_N4096_K1024",
-            "offset": null,
-            "sha": "57c5d8efa4",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_175415.hsaco",
-            "detail": "same code object as gemm_NT_M256_N4096_K1024; scanned once",
-            "dispatch": 471,
-            "findings": 0,
-            "name": "gemm_NT_M128_N4096_K1280",
-            "offset": null,
-            "sha": "57c5d8efa4",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_137678.hsaco",
-            "detail": "",
-            "dispatch": 440,
-            "findings": 32,
-            "name": "gemm_TT_M64_N64_K1280",
-            "offset": null,
-            "sha": "aeb46fded1",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          }
-        ],
-        "match": true,
-        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
-        "present": true,
-        "primary": {
-          "preflight": null,
-          "reason": null,
-          "sanitizer": "waitcheck",
-          "verdict": "warn"
-        },
-        "report_rel": "runs/2026-10-08T141657-37776980403/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
           "kernel_count": 3,

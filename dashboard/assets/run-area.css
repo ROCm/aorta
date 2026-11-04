@@ -86,17 +86,20 @@
     transition:color .15s ease, background .15s ease; }
   .tabbar label:hover { color:var(--text-2); }
   #tab-guardrails:checked ~ .tabs .tabbar label[for="tab-guardrails"],
-  #tab-survey:checked ~ .tabs .tabbar label[for="tab-survey"] {
+  #tab-survey:checked ~ .tabs .tabbar label[for="tab-survey"],
+  #tab-fpsan:checked ~ .tabs .tabbar label[for="tab-fpsan"] {
     color:var(--text-1); background:var(--panel);
     border-color:var(--border); border-bottom:1px solid var(--panel); }
   /* The radios are visually hidden (opacity:0) so they show no native focus ring;
      mirror :focus-visible onto the label so keyboard users can see the focused tab. */
   #tab-guardrails:focus-visible ~ .tabs .tabbar label[for="tab-guardrails"],
-  #tab-survey:focus-visible ~ .tabs .tabbar label[for="tab-survey"] {
+  #tab-survey:focus-visible ~ .tabs .tabbar label[for="tab-survey"],
+  #tab-fpsan:focus-visible ~ .tabs .tabbar label[for="tab-fpsan"] {
     outline:2px solid var(--blue); outline-offset:-2px; }
   .tabpanel { display:none; }
   #tab-guardrails:checked ~ .tabs #panel-guardrails { display:block; }
   #tab-survey:checked ~ .tabs #panel-survey { display:block; }
+  #tab-fpsan:checked ~ .tabs #panel-fpsan { display:block; }
   /* The nightly run id, commit, date, and target do not describe a manual ASan run. */
   #tab-asan:checked ~ .navrow .rundetails { display:none; }
 
@@ -150,6 +153,7 @@
     border:1px solid transparent; }
   .match.pass { color:#BBF7D0; background:rgba(34,197,94,.18); border-color:rgba(34,197,94,.45); }
   .match.fail { color:#FECACA; background:rgba(239,68,68,.16); border-color:rgba(239,68,68,.45); }
+  .match.neutral { color:var(--text-3); border-color:var(--border-hover); }
 
   .kcard { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm);
     margin-bottom:10px; overflow:hidden; }
