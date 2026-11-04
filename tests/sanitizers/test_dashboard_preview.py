@@ -218,6 +218,7 @@ def test_an_empty_rerun_replaces_the_results_artifact():
             marked.append((job, name))
     assert [job for job, _name in marked] == [
         "sanitizers-gpu", "sanitizers-survey", "sanitizers-model-survey",
+        "sanitizers-fpsan-survey",
     ]
     render = next(
         step for step in doc["jobs"]["render"]["steps"] if step.get("id") == "render"

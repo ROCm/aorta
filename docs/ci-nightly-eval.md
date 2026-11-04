@@ -77,9 +77,13 @@ it (#486).
    Each nightly's per-case results are co-located on the `sanitizer-results` data
    branch under `dashboard/runs/<YYYY-MM-DD>T<HHMMSS>-<run_id>/` (one directory per
    guardrail recipe, one under `survey/` per observed-only case, plus a
-   `meta.json` with commit / date / gpu / run_url / gate, where `date` is an
+   `meta.json` with commit / date / gpu / run_url / gate / cases, where `date` is an
    ISO-8601 instant -- runs published before the directory carried a time keep
-   their date-only names and manifests, and are never renamed), and the rendered page
+   their date-only names and manifests, and are never renamed -- and `cases` lists
+   the gated controls the run required; a manifest from before `cases` required
+   the three WaitCheck/ConSan controls, so its FpSan controls render as not run
+   rather than missing; a `cases` list naming anything that is not a case
+   directory is ignored and the run requires all five), and the rendered page
    links to them: the latest run table has a per-recipe **Report** link, each
    kernel-detail card carries a **run area** link to the case's directory, and
    each **Run** row in the history table links to its `runs/<id>/` area. A
@@ -92,6 +96,29 @@ it (#486).
    pruned. Previously these raw reports lived only in an expiring Actions
    artifact and were never linked; the rolling window makes them durable and
    reachable from the page.
+
+   **Sanitizer jobs and tabs.** `sanitizers-nightly.yml` runs four GPU jobs in
+   sequence on the one gfx950 runner, each uploading its own
+   `sanitizer-<name>-<run_id>` artifact for `render` to merge:
+
+   | Job | Produces | Tab |
+   | --- | --- | --- |
+   | `sanitizers-gpu` (the gate) | the five gated daily controls: `waitcheck`, `consan-clean`, `consan-racy`, `fpsan-match`, `fpsan-mismatch`, compared against `verdict_baselines.json` | Nightly gate (Tab 1) |
+   | `sanitizers-survey` | `consan-gemm`, `waitcheck-gemm` | Workload survey (Tab 2) |
+   | `sanitizers-model-survey` | `waitcheck-<model>`, `consan-<model>` | Workload survey (Tab 2) |
+   | `sanitizers-fpsan-survey` | `fpsan-<model>`: every (kernel, scenario) pair compared with its reference under Triton FpSan | FpSan |
+
+   Only the gate job decides the run's health. The other three are
+   observed-only; each fails only on an infrastructure fault or a vacuous
+   report. The FpSan controls (`daily-fpsan-match`, expect `pass`;
+   `daily-fpsan-mismatch`, expect `fail`) and the FpSan survey both need a
+   Triton with the AMD FpSan pass (3.8 or later) in the CI image. The survey
+   job runs `scripts/sanitizers/fpsan_probe.py` first and fails with an
+   `::error::` when the image cannot run FpSan; it downloads no rocjitsu
+   bundle and holds no token. The FpSan tab lists one row per pair
+   with both digests (the label is `_FPSAN_TAB_LABEL` in
+   `gen_sanitizer_dashboard.py`); see `recipes/sanitizers/models/README.md`
+   for how the pairs are defined.
 
    **Run areas (#384).** A case directory is not just its report -- it carries
    the recipe as it ran, the logs the verdict came from, the source-level inputs,

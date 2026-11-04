@@ -253,6 +253,8 @@ def test_rendered_dashboard_output_is_public_safe(tmp_path, monkeypatch):
         ("waitcheck", "warn", "waitcheck"),
         ("consan-clean", "pass", "consan"),
         ("consan-racy", "fail", "consan"),
+        ("fpsan-match", "pass", "fpsan"),
+        ("fpsan-mismatch", "fail", "fpsan"),
     ):
         (incoming / case).mkdir(parents=True)
         report = {

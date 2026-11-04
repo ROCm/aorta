@@ -6,7 +6,8 @@ open it locally. This writes, into ``--out``:
 
 * ``dashboard.png`` -- ``index.html`` as it first loads (the default tab);
 * ``dashboard-<tab id>.png`` -- each further tab of ``index.html``, when the page
-  has more than one (the ASan tab, once ``add_asan_tab.py`` has been applied);
+  has more than one (``dashboard-tab-survey.png``, ``dashboard-tab-fpsan.png``,
+  and the ASan tab once ``add_asan_tab.py`` has been applied);
 * ``latest_run.png`` -- the newest ``runs/<id>/index.html`` landing page. Skipped,
   with a note, when the tree has no runs (the generator's empty state).
 

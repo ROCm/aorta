@@ -94,6 +94,81 @@ def _consan_racy_report() -> dict:
     }
 
 
+_FPSAN_DIGEST_A = "4dfe96464b850fae836ced6ef7177049a67ed5f67ad63f31c6cca93dbb2779b3"
+_FPSAN_DIGEST_B = "e986a6ed5ab5c6794224330f7f8caa9abac54a995ce4e3ee3dc28c2ee964a5c4"
+
+
+def _fpsan_line(candidate_digest: str = _FPSAN_DIGEST_A, **fields: object) -> str:
+    record = {
+        "reference_digest": _FPSAN_DIGEST_A,
+        "candidate_digest": candidate_digest,
+        "reference_instrumented": True,
+        "candidate_instrumented": True,
+        "target": "gfx950",
+        **fields,
+    }
+    return "AORTA_FPSAN_RESULT " + json.dumps(record) + "\n"
+
+
+def _fpsan_report(stdout: str | None = None, *, kernel: str = "row_dot", returncode: int = 0) -> dict:
+    """An FpSan report as ``run_fpsan`` writes it, built by the real evaluator and builder."""
+    import dataclasses
+
+    from aorta.instrumentation.rocjitsu_sanitizers import (
+        KernelIdentity,
+        KernelObservation,
+        KernelWorklist,
+        SelectionRequirement,
+        evaluate_fpsan_output,
+    )
+    from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
+    from aorta.instrumentation.rocjitsu_sanitizers.report import build_report
+
+    process = ProcessResult(
+        argv=("fpsan_cmd",),
+        returncode=returncode,
+        stdout=_fpsan_line() if stdout is None else stdout,
+        stderr="",
+    )
+    check = evaluate_fpsan_output(process, sanitizer="fpsan", target="gfx950")
+    backend = {
+        **dict(check.backend),
+        "result_marker": "AORTA_FPSAN_RESULT",
+        "selected_kernels": kernel,
+        "triton_instrumentation_mode": "fpsan",
+    }
+    check = dataclasses.replace(check, backend=tuple(sorted(backend.items())))
+    worklist = KernelWorklist(
+        requirement=SelectionRequirement.TOP_DISPATCH_COUNT,
+        top_n=1,
+        kernels=(
+            KernelObservation(
+                identity=KernelIdentity(name=kernel, target="gfx950"),
+                dispatch_count=1,
+                sources=("kernel_list",),
+            ),
+        ),
+    )
+    return build_report(target="gfx950", worklist=worklist, checks=(check,)).to_dict()
+
+
+def _fpsan_rows() -> dict:
+    """The two gated FpSan controls, each at its baseline."""
+    return {
+        "fpsan-match": gen.summarize_case(_fpsan_report(), "pass"),
+        "fpsan-mismatch": gen.summarize_case(
+            _fpsan_report(_fpsan_line(_FPSAN_DIGEST_B), kernel="row_dot_no_accumulate"), "fail"
+        ),
+    }
+
+
+def _fpsan_control_reports() -> list[tuple[str, dict]]:
+    return [
+        ("fpsan-match", _fpsan_report()),
+        ("fpsan-mismatch", _fpsan_report(_fpsan_line(_FPSAN_DIGEST_B), kernel="row_dot_no_accumulate")),
+    ]
+
+
 def _consan_sampled_racy_report() -> dict:
     """A default-detector racy run, kept alongside the legacy fixture above.
 
@@ -432,6 +507,7 @@ def test_kernel_tables_render_the_reason_on_both_twins():
         "waitcheck": case,
         "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     md = gen.build_summary_md(
         [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": False}]
@@ -2124,10 +2200,11 @@ def test_summary_md_expected_warn_and_fail_are_healthy():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": True}]
     md = gen.build_summary_md(runs)
-    assert "**Healthy** — 3/3 matched" in md
+    assert "**Healthy** — 5/5 matched" in md
     assert md.count(gen._status_md("matched", "pass")) >= 3
     assert "positive-control outcomes" in md
     assert "| Observed | Expected | Execution | Findings | Coverage | Baseline |" in md
@@ -2150,11 +2227,12 @@ def test_summary_md_mismatch_is_actionable_regression():
         # baseline says pass but report is fail -> mismatch
         "consan-clean": gen.summarize_case(_consan_racy_report(), "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     gate = all(r["match"] for r in rows.values())
     runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": gate}]
     md = gen.build_summary_md(runs)
-    assert "**Failed** — 1/3 unmatched" in md
+    assert "**Failed** — 1/5 unmatched" in md
     assert gen._status_md("unmatched", "fail") in md
     assert f"| {gen._verdict_md('fail')} | {gen._verdict_md('pass')} |" in md
     assert (
@@ -2169,6 +2247,7 @@ def test_build_html_expected_warn_and_fail_are_healthy_and_neutral():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     runs = [
         {
@@ -2181,7 +2260,7 @@ def test_build_html_expected_warn_and_fail_are_healthy_and_neutral():
     assert "<!doctype html>" in html
     # the gate is a pill beside the title and a gray count under it
     assert '<span class="health ok">Healthy</span>' in html
-    assert '<p class="countline">3/3 matched</p>' in html
+    assert '<p class="countline">5/5 matched</p>' in html
     assert html.count('class="match pass">matched</span>') >= 3
     # verdicts are a dot plus the word; the word itself is not recolored
     assert gen._status_html("warn", "warn") in html
@@ -2201,6 +2280,7 @@ def test_build_html_mismatch_is_primary_regression_signal():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(_consan_racy_report(), "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     runs = [
         {
@@ -2213,7 +2293,7 @@ def test_build_html_mismatch_is_primary_regression_signal():
     html = gen.build_html(runs)
 
     assert '<span class="health bad">Failed</span>' in html
-    assert '<p class="countline">1/3 unmatched</p>' in html
+    assert '<p class="countline">1/5 unmatched</p>' in html
     assert '<span class="match fail">unmatched</span>' in html
     assert gen._status_html("fail", "fail") in html
     assert f'<span class="dash">expected</span> {gen._status_html("pass", "pass")}' in html
@@ -2226,6 +2306,7 @@ def test_renderers_make_missing_report_explicit():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(None, "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     runs = [
         {
@@ -2260,7 +2341,7 @@ def test_gate_summary_distinguishes_missing_from_regression():
     assert gen._gate_summary(all_match) == {
         "ok": True,
         "label": "HEALTHY",
-        "detail": "3/3 sanitizer outcomes match their baselines",
+        "detail": "5/5 sanitizer outcomes match their baselines",
         "short": "Healthy",
     }
 
@@ -2268,27 +2349,30 @@ def test_gate_summary_distinguishes_missing_from_regression():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(None, "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     incomplete = gen._gate_summary(missing_only)
     assert incomplete["ok"] is False and incomplete["label"] == "INCOMPLETE"
-    assert incomplete["detail"] == "1/3 sanitizer report(s) are missing"
+    assert incomplete["detail"] == "1/5 sanitizer report(s) are missing"
 
     mismatch_only = {
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(_consan_racy_report(), "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     regression = gen._gate_summary(mismatch_only)
-    assert regression["label"] == "REGRESSION" and "1/3" in regression["detail"]
+    assert regression["label"] == "REGRESSION" and "1/5" in regression["detail"]
 
     combined = {
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(None, "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "pass"),
+        **_fpsan_rows(),
     }
     unhealthy = gen._gate_summary(combined)
     assert unhealthy["label"] == "UNHEALTHY"
-    assert "1/3 mismatched" in unhealthy["detail"] and "1/3 missing" in unhealthy["detail"]
+    assert "1/5 mismatched" in unhealthy["detail"] and "1/5 missing" in unhealthy["detail"]
 
 
 def test_missing_only_run_is_incomplete_not_regression():
@@ -2296,6 +2380,7 @@ def test_missing_only_run_is_incomplete_not_regression():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(None, "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     runs = [
         {
@@ -2309,8 +2394,8 @@ def test_missing_only_run_is_incomplete_not_regression():
     md = gen.build_summary_md(runs)
 
     assert '<span class="health bad">Failed</span>' in html
-    assert '<p class="countline">1/3 missing</p>' in html
-    assert "**Failed** — 1/3 missing" in md
+    assert '<p class="countline">1/5 missing</p>' in html
+    assert "**Failed** — 1/5 missing" in md
     assert f"{gen._status_md('failed', 'fail')} |" in md
     # a missing report must not be surfaced as a verdict regression anywhere
     assert "Regression" not in html and "REGRESSION" not in html
@@ -2325,6 +2410,7 @@ def test_combined_mismatch_and_missing_is_unhealthy():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(None, "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "pass"),
+        **_fpsan_rows(),
     }
     runs = [
         {
@@ -2337,7 +2423,7 @@ def test_combined_mismatch_and_missing_is_unhealthy():
     html = gen.build_html(runs)
     md = gen.build_summary_md(runs)
 
-    detail = "1/3 unmatched, 1/3 missing"
+    detail = "1/5 unmatched, 1/5 missing"
     assert f'<p class="countline">{detail}</p>' in html
     assert '<span class="health bad">Failed</span>' in html
     assert f"**Failed** — {detail}" in md
@@ -2349,6 +2435,7 @@ def test_summary_md_emphasizes_noncomplete_execution():
         "waitcheck": gen.summarize_case(_incomplete_execution_report(), "warn"),
         "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": True}]
 
@@ -2389,6 +2476,7 @@ def test_build_html_renders_stale_banner_when_unhealthy():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"}, "rows": rows, "gate": True}]
     status = {
@@ -2529,6 +2617,7 @@ def _write_history_run(root: Path, run_id: str, *, meta: dict | None = None) -> 
         ("waitcheck", _waitcheck_report()),
         ("consan-clean", _consan_clean_report()),
         ("consan-racy", _consan_racy_report()),
+        *_fpsan_control_reports(),
     ):
         (run_dir / case).mkdir(parents=True)
         (run_dir / case / "sanitizer_report.json").write_text(json.dumps(report))
@@ -2609,6 +2698,93 @@ def test_history_root_preserves_recorded_comparator_gate_failure(tmp_path):
     assert '<span class="health bad">Failed</span>' in page
     assert "Healthy" not in page
     assert gen._history_gate_html(run) == f"<td>{gen._status_html('failed', 'fail')}</td>"
+
+
+def _fpsan_baselines() -> dict:
+    return {
+        **_baselines(),
+        "fpsan_match": {"overall_verdict": "pass"},
+        "fpsan_mismatch": {"overall_verdict": "fail"},
+    }
+
+
+def _drop_fpsan_controls(run_dir: Path) -> None:
+    for case in ("fpsan-match", "fpsan-mismatch"):
+        shutil.rmtree(run_dir / case)
+
+
+def test_a_run_published_before_the_fpsan_controls_keeps_its_healthy_gate(tmp_path):
+    # Its manifest predates ``cases``, so it required the three original controls;
+    # the two it never ran are shown as not run, not as missing reports.
+    root = tmp_path / "runs"
+    legacy = _write_history_run(root, "2026-08-04-22")
+    _drop_fpsan_controls(legacy)
+    _write_history_run(root, "2026-08-05-33", meta={"cases": [c for c, *_ in gen.CASES]})
+
+    latest, old = gen.runs_from_history_root(root, _fpsan_baselines())
+
+    assert old["meta"].get("cases") == list(gen.LEGACY_CASES)
+    assert old["gate"] is True
+    summary = gen._gate_summary(old["rows"], recorded_gate=old["meta"].get("gate"))
+    assert (summary["ok"], summary["label"]) == (True, "HEALTHY")
+    assert gen._gate_count_line(old["rows"], summary) == "3/3 matched"
+    for case in ("fpsan-match", "fpsan-mismatch"):
+        row = old["rows"][case]
+        assert (row.get("required"), row.get("present"), row.get("report_rel")) == (False, False, None)
+        assert gen._baseline_cue(row) == ("not run", "neutral")
+        assert '<span class="match neutral">not run</span>' in gen._history_case_html(row)
+    page = gen.build_run_index_html(old)
+    assert '<span class="health ok">Healthy</span>' in page
+    assert "report missing" not in page and page.count("not run") >= 2
+    # The run that lists all five still gates on all five.
+    assert latest["gate"] is True
+    assert gen._gate_count_line(
+        latest["rows"], gen._gate_summary(latest["rows"])
+    ) == f"{len(gen.CASES)}/{len(gen.CASES)} matched"
+    html = gen.build_html([latest, old])
+    assert html.count('<span class="match neutral">not run</span>') == 2
+
+
+def test_a_required_control_without_a_report_still_fails_the_gate(tmp_path):
+    # Listed in the manifest, or no usable list to go by: either way all five count.
+    # A list naming a baseline key or any other non-case would otherwise mark every
+    # control not run and leave a HEALTHY 0/0 gate.
+    for name, meta in (
+        ("listed", {"cases": [c for c, *_ in gen.CASES]}),
+        ("no-manifest", None),
+        ("malformed-cases", {"cases": "fpsan-match"}),
+        ("baseline-key", {"cases": ["fpsan_match"]}),
+        ("one-unknown-name", {"cases": [*gen.LEGACY_CASES, "fpsan-matched"]}),
+        ("empty-list", {"cases": []}),
+    ):
+        root = tmp_path / name
+        run_dir = _write_history_run(root, "2026-08-05-33", meta=meta)
+        _drop_fpsan_controls(run_dir)
+        if meta is None:
+            (run_dir / "meta.json").unlink()
+
+        run = gen.runs_from_history_root(root, _fpsan_baselines())[0]
+
+        assert run["gate"] is False, name
+        assert gen._gate_summary(run["rows"])["label"] == "INCOMPLETE", name
+        assert all(run["rows"][c].get("required") is not False for c, *_ in gen.CASES), name
+
+
+def test_a_cases_list_cannot_release_the_legacy_controls(tmp_path):
+    # Every published run ran the WaitCheck/ConSan controls, so a list naming only
+    # the FpSan controls still requires them, and a missing one fails the gate.
+    root = tmp_path / "runs"
+    run_dir = _write_history_run(
+        root, "2026-08-05-33", meta={"cases": ["fpsan-match", "fpsan-mismatch"]}
+    )
+    shutil.rmtree(run_dir / "consan-racy")
+
+    run = gen.runs_from_history_root(root, _fpsan_baselines())[0]
+
+    assert run.get("meta", {}).get("cases") == [c for c, *_ in gen.CASES]
+    assert run.get("gate") is False
+    assert gen._gate_summary(run["rows"]).get("label") == "INCOMPLETE"
+    assert run["rows"].get("consan-racy", {}).get("required") is not False
 
 
 def test_history_root_ignores_malformed_run_dirs(tmp_path):
@@ -2857,6 +3033,7 @@ def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
         "GITHUB_SHA": "f" * 40,
         "GPU_RESULT": "success",
         "started_iso": started_iso,
+        "gated_cases": " ".join(case for case, *_ in gen.CASES),
     }
 
     for run_id, expected, rendered in (
@@ -2886,6 +3063,8 @@ def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
         assert meta.get("date") == expected, run_id
         assert meta.get("run") == run_id
         assert meta.get("gate") is True  # mirrors GPU_RESULT=success
+        # The controls this run required, read back when its history is re-rendered.
+        assert meta.get("cases") == [case for case, *_ in gen.CASES]
         # What the generator will put on the page for that manifest -- for the
         # timestamped name, the 094112 its own directory carries. Agreement is
         # asserted through the renderer rather than by pinning a shared pattern.
@@ -3197,6 +3376,7 @@ def test_build_html_no_report_column_links_without_history():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     runs = [gen._run_record({"run": "r1", "commit": "abc", "date": "d"}, rows)]
     html = gen.build_html(runs)
@@ -3232,7 +3412,7 @@ def test_build_run_index_html_missing_report_reads_incomplete(tmp_path):
 
     # A missing report fails the gate and says report missing, not a verdict mismatch.
     assert '<span class="health bad">Failed</span>' in page
-    assert "1/3 missing" in page
+    assert "1/5 missing" in page
     assert '<span class="match fail">report missing</span>' in page
     assert "verdict mismatch" not in page
 
@@ -3580,6 +3760,7 @@ def test_absent_report_never_claims_no_findings():
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": missing,
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
     }
     html = gen.build_html(
         [{"meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
@@ -3611,7 +3792,7 @@ def test_run_index_page_puts_the_gate_pill_beside_the_title():
     page = gen.build_run_index_html(run)
     header = page.index('<header class="page-header">')
     assert header < page.index('<span class="health ok">Healthy</span>')
-    assert '<p class="countline">3/3 matched</p>' in page
+    assert '<p class="countline">5/5 matched</p>' in page
     assert "runcard" not in page
     assert "2026-08-05-33" in page and "gfx950" in page
 
@@ -4256,7 +4437,7 @@ def test_survey_summary_table_renders_chips_emdash_and_gate_stays_healthy():
     html = gen.build_html([_healthy_guardrail_run()], survey=entries)
     assert 'class="statline"' in html
     assert '<span class="health ok">Healthy</span>' in html
-    assert '<p class="countline">3/3 matched</p>' in html
+    assert '<p class="countline">5/5 matched</p>' in html
     assert "REGRESSION" not in html and "Regression" not in html
     assert "Unexpected outcome" not in html and "Mismatch" not in html
 
@@ -4428,6 +4609,7 @@ def test_survey_cases_from_spec_isolates_list_valued_worklist(tmp_path, monkeypa
         ("waitcheck", _waitcheck_report()),
         ("consan-clean", _consan_clean_report()),
         ("consan-racy", _consan_racy_report()),
+        *_fpsan_control_reports(),
     ):
         (incoming / case).mkdir(parents=True)
         (incoming / case / "sanitizer_report.json").write_text(json.dumps(report))
@@ -4560,7 +4742,7 @@ def test_survey_execution_status_renders_neutral_not_health_colored():
     # is red. This is descriptive only -- the gate stays healthy.
     assert gen._status_html("error", "error") in html
     assert '<span class="health ok">Healthy</span>' in html
-    assert '<p class="countline">3/3 matched</p>' in html
+    assert '<p class="countline">5/5 matched</p>' in html
     assert "REGRESSION" not in html and "Regression" not in html
 
     # Unit: the survey facts grid neutralizes execution; the guardrail one flags it.
@@ -4610,7 +4792,7 @@ def test_build_html_survey_fail_is_color_coded_but_never_a_regression():
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
 
     assert '<span class="health ok">Healthy</span>' in html
-    assert '<p class="countline">3/3 matched</p>' in html
+    assert '<p class="countline">5/5 matched</p>' in html
     # the fail is a red dot, never a neutral one
     assert gen._status_html("fail", "fail") in html
     assert gen._status_html("fail", "neutral") not in html
@@ -4763,6 +4945,7 @@ def test_main_survey_flows_into_html_and_data_json(tmp_path, monkeypatch):
         ("waitcheck", _waitcheck_report()),
         ("consan-clean", _consan_clean_report()),
         ("consan-racy", _consan_racy_report()),
+        *_fpsan_control_reports(),
     ):
         (incoming / case).mkdir(parents=True)
         (incoming / case / "sanitizer_report.json").write_text(json.dumps(report))
@@ -4813,6 +4996,7 @@ def test_main_without_survey_omits_survey_rows_but_renders_tab(tmp_path, monkeyp
         ("waitcheck", _waitcheck_report()),
         ("consan-clean", _consan_clean_report()),
         ("consan-racy", _consan_racy_report()),
+        *_fpsan_control_reports(),
     ):
         (incoming / case).mkdir(parents=True)
         (incoming / case / "sanitizer_report.json").write_text(json.dumps(report))
@@ -5197,9 +5381,9 @@ def test_sanitizer_nightly_payloads_have_no_apostrophes():
     its own, and this branch now writes the resolver export into both.
     """
     lines, spans = _sanitizer_nightly_payloads()
-    assert len(spans) >= 2, (
-        "expected a payload per provisioning block (gate + survey); found "
-        f"{len(spans)} -- has the workflow been restructured?"
+    assert len(spans) >= 4, (
+        "expected a payload per GPU job (gate, GEMM survey, model survey, FpSan "
+        f"survey); found {len(spans)} -- has the workflow been restructured?"
     )
     offenders = [
         (i + 1, lines[i].strip())
@@ -5211,6 +5395,90 @@ def test_sanitizer_nightly_payloads_have_no_apostrophes():
         "apostrophe(s) inside a single-quoted bash -lc payload would break the "
         f"host shell: {offenders}"
     )
+
+
+def _nightly_jobs() -> dict:
+    yaml = __import__("pytest").importorskip("yaml")
+    doc = yaml.safe_load(
+        (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(encoding="utf-8")
+    )
+    return doc["jobs"]
+
+
+def _step_run(job: dict, name: str) -> str:
+    return next(step for step in job["steps"] if step.get("name") == name)["run"]
+
+
+def test_every_gated_case_is_swept_by_the_gate_job_and_published_by_render():
+    # The comparator fails the gate for a gated report that is absent, so a case
+    # added to CASES without a sweep in the gate job turns every nightly red, and
+    # one render does not copy is judged missing on the page.
+    jobs = _nightly_jobs()
+    gate = _step_run(jobs["sanitizers-gpu"], "Run sanitizer regression")
+    compare = gate.index("python scripts/sanitizers/compare_verdict_baselines.py")
+    for case_dir, _key, recipe, _label in gen.CASES:
+        sweep = re.search(
+            rf"aorta sweep run --recipe recipes/sanitizers/{re.escape(recipe)}\.yaml \\\s+"
+            rf'--output-dir "\$\{{SANITIZER_OUT\}}/{re.escape(case_dir)}" \|\| true',
+            gate,
+        )
+        assert sweep and sweep.start() < compare, f"{case_dir}: not swept before the comparator"
+    render = next(s for s in jobs["render"]["steps"] if s.get("id") == "render")["run"]
+    listed = re.search(r'gated_cases="([^"]+)"', render)
+    assert listed and listed.group(1).split() == [case_dir for case_dir, *_ in gen.CASES]
+    assert "for case in $gated_cases; do" in render
+
+
+def test_fpsan_survey_job_probes_first_and_holds_no_token():
+    jobs = _nightly_jobs()
+    job = jobs["sanitizers-fpsan-survey"]
+    # Serialised behind the model survey on the one MI350 runner, and still run
+    # when the gate failed, like the other observed-only jobs.
+    assert job["needs"] == ["sanitizers-gpu", "sanitizers-model-survey"]
+    assert job["if"] == "always() && needs.sanitizers-gpu.result != 'skipped'"
+    assert job["runs-on"] == jobs["sanitizers-model-survey"]["runs-on"]
+    assert isinstance(job["timeout-minutes"], int)
+    step = next(s for s in job["steps"] if s.get("name") == "Run model-kernel FpSan survey")
+    payload = step["run"]
+    # FpSan needs no rocjitsu bundle, so the job never holds the cross-repo PAT.
+    assert "env" not in step
+    assert "GH_TOKEN=" not in payload and "download_sanitizer_artifacts" not in payload
+    # The container mounts the checkout, so the checkout token must not be in
+    # .git/config for the downloaded harness to read.
+    checkout = next(s for s in job["steps"] if "actions/checkout" in str(s.get("uses", "")))
+    assert (checkout.get("with") or {}).get("persist-credentials") is False
+    probe = payload.index("python scripts/sanitizers/fpsan_probe.py")
+    survey = payload.index("python scripts/sanitizers/model_survey.py run --sanitizers fpsan")
+    vacuity = payload.index("compare_verdict_baselines.py")
+    assert probe < survey < vacuity
+    # An unusable probe stops the job before the survey, with a visible error.
+    between = payload[probe:survey]
+    assert "::error::FpSan is unavailable" in between and "exit 1" in between
+    assert "--require informational/fpsan-${m}" in payload
+    assert "--vacuous-only" in payload
+    upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
+    # render downloads sanitizer-*-<run_id>; any other name is never published.
+    assert re.fullmatch(r"sanitizer-[\w-]+-\$\{\{ github\.run_id \}\}", upload["with"]["name"])
+    assert upload["with"]["name"].startswith("sanitizer-fpsan-")
+    assert "sanitizers-fpsan-survey" in jobs["render"]["needs"]
+
+
+def test_no_container_job_leaves_the_checkout_token_in_git_config():
+    jobs = _nightly_jobs()
+    container_jobs = {
+        name: job
+        for name, job in jobs.items()
+        if any("rocm-ci-setup" in str(s.get("uses", "")) for s in job.get("steps", []))
+    }
+    assert {
+        "sanitizers-gpu",
+        "sanitizers-survey",
+        "sanitizers-model-survey",
+        "sanitizers-fpsan-survey",
+    } <= set(container_jobs)
+    for name, job in container_jobs.items():
+        checkout = next(s for s in job["steps"] if "actions/checkout" in str(s.get("uses", "")))
+        assert (checkout.get("with") or {}).get("persist-credentials") is False, name
 
 
 def test_every_llvm_bindir_export_goes_through_the_resolver():
@@ -5302,8 +5570,8 @@ def test_rebuild_commands_export_the_rocm_library_path():
     loses its provisioning block fails here rather than on the runner.
     """
     minimum_per_workflow = {
-        # gate job + survey job
-        ".github/workflows/sanitizers-nightly.yml": 2,
+        # gate, GEMM survey, model survey and FpSan survey jobs
+        ".github/workflows/sanitizers-nightly.yml": 4,
         # the pytest step
         ".github/workflows/gpu-tests.yml": 1,
     }
@@ -5976,22 +6244,34 @@ def test_required_env_is_per_case_and_the_note_names_exactly_it():
         "RJ_CONSAN_PRESET",
         "RJ_CONSAN_POLICY",
     ]
-    # The internal flag is not leaked into the published manifest.
-    assert all("consan_only" not in item for item in consan)
+    # The internal sanitizer list is not leaked into the published manifest.
+    assert all("sanitizers" not in item for item in consan)
+
+    # FpSan needs neither the rocjitsu bundle nor the ConSan hook, only Triton's mode.
+    fpsan = gen.required_env_for(case="fpsan-match", report=_fpsan_report())
+    assert fpsan == [{
+        "var": "TRITON_INSTRUMENTATION_MODE",
+        "value": "fpsan",
+        "set_by": "aorta",
+        "purpose": "compiles the reference and the candidate kernel under Triton FpSan",
+    }]
+    assert "TRITON_INSTRUMENTATION_MODE" not in {item["var"] for item in consan + waitcheck}
 
     # With no usable report the case name decides, following the naming convention
     # every guardrail and survey case uses.
     assert len(gen.required_env_for(case="consan-gemm", report=None)) == len(consan)
     assert len(gen.required_env_for(case="waitcheck-gemm", report=None)) == 1
+    assert gen.required_env_for(case="fpsan-gpt-oss", report=None) == fpsan
 
     # The note names exactly the variables it was given -- no more, no fewer.
-    for required in (waitcheck, consan):
+    for required in (waitcheck, consan, fpsan):
         note = gen.required_env_note(required)
-        named = set(re.findall(r"`([A-Z][A-Z0-9_]+)`", note))
+        named = set(re.findall(r"`([A-Z][A-Z0-9_]+)(?:=[^`]*)?`", note))
         assert named == {item["var"] for item in required}
         for item in required:
             assert item["set_by"] in {"operator", "aorta"}
             assert item["purpose"]
+    assert "`TRITON_INSTRUMENTATION_MODE=fpsan`" in gen.required_env_note(fpsan)
     assert gen.required_env_note([]) == ""
 
 
@@ -6043,9 +6323,9 @@ def test_env_json_records_required_env_and_rebuild_commands(tmp_path, monkeypatc
         )
     )
 
-    # A ConSan case, so it carries the full set.
+    # A ConSan case, so it carries every variable ConSan needs and none of FpSan's.
     assert [item["var"] for item in env["required_env"]] == [
-        item["var"] for item in gen._REQUIRED_ENV
+        item["var"] for item in gen._REQUIRED_ENV if "consan" in item["sanitizers"]
     ]
     rebuild = {entry["path"]: entry for entry in env["rebuild"]}
     # The recipe's built refs each carry their own commands, at this run's target.
@@ -7467,3 +7747,285 @@ def test_dev_image_appends_the_rocm_lib_dirs_rather_than_asserting_them():
     for forbidden in ("ENV ROCM_HOME", "ENV LD_LIBRARY_PATH"):
         offenders = [line for line in instructions if forbidden in line]
         assert not offenders, f"{forbidden} asserted in the image: {offenders}"
+
+
+# --------------------------------------------------------------------------
+# FpSan: gated digest controls on Tab 1 and the FpSan tab
+# --------------------------------------------------------------------------
+
+
+def _merged_fpsan_report() -> dict:
+    """A model's FpSan report as ``model_survey.merge_fpsan`` writes it.
+
+    Three pairs: two scenarios of one kernel (one matching, one not) and a second
+    kernel whose candidate side was not instrumented.
+    """
+    name = "model_survey"
+    spec = importlib.util.spec_from_file_location(
+        name, _REPO_ROOT / "scripts" / "sanitizers" / "model_survey.py"
+    )
+    assert spec and spec.loader
+    survey = importlib.util.module_from_spec(spec)
+    sys.modules[name] = survey
+    spec.loader.exec_module(survey)
+    cases = [
+        (survey.Pair("moe.json", "_matmul_ogs", "P1"), _fpsan_report(kernel="_matmul_ogs")),
+        (
+            survey.Pair("moe.json", "_matmul_ogs", "P2"),
+            _fpsan_report(_fpsan_line(_FPSAN_DIGEST_B), kernel="_matmul_ogs"),
+        ),
+        (
+            survey.Pair("moe.json", "_topk", "P1"),
+            _fpsan_report(_fpsan_line(candidate_instrumented=False), kernel="_topk"),
+        ),
+    ]
+    return survey.merge_fpsan(cases)
+
+
+def _write_informational(root: Path, cases: dict[str, dict]) -> Path:
+    for case, report in cases.items():
+        (root / case).mkdir(parents=True)
+        (root / case / "sanitizer_report.json").write_text(json.dumps(report), encoding="utf-8")
+    return root
+
+
+def _tab_panel(page: str, panel: str) -> str:
+    start = page.index(f"<section class=tabpanel id={panel}>")
+    end = page.find("<section class=tabpanel id=", start + 1)
+    return page[start:] if end == -1 else page[start:end]
+
+
+def test_fpsan_is_named_ranked_and_routed_like_the_other_sanitizers():
+    entry = {"sanitizer": "fpsan"}
+    assert gen._sanitizer_name(entry) == "FpSan"
+    assert gen._sanitizer_kind(entry) == "reference/candidate digest check"
+    assert gen._SANITIZER_RANK["fpsan"] > gen._SANITIZER_RANK["consan"]
+    assert gen._split_survey_case("fpsan-gpt-oss") == ("gpt-oss", "fpsan")
+    assert gen._survey_recipe_for("fpsan-gpt-oss") == "models/gpt-oss"
+    assert gen._survey_command_for("fpsan-gpt-oss") == (
+        "python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan "
+        "--inventory recipes/sanitizers/models/gpt-oss.yaml --out results"
+    )
+    # A group outside the ConSan/waitcheck model list is still an inventory.
+    assert gen._survey_command_for("fpsan-triton-tutorials").endswith(
+        "--inventory recipes/sanitizers/models/triton-tutorials.yaml --out results"
+    )
+    assert gen.is_fpsan_entry({"name": "fpsan-qwen3"})
+    assert not gen.is_fpsan_entry({"name": "consan-qwen3", "sanitizer": "consan"})
+
+
+def test_fpsan_pairs_reads_a_gated_control_report():
+    match = gen.summarize_case(_fpsan_report(), "pass")
+    assert match["fpsan_pairs"] == [{
+        "name": "row_dot", "verdict": "pass", "reason": "",
+        "reference_digest": _FPSAN_DIGEST_A, "candidate_digest": _FPSAN_DIGEST_A,
+        "reference_instrumented": "true", "candidate_instrumented": "true",
+    }]
+    mismatch = gen.fpsan_pairs(_fpsan_report(_fpsan_line(_FPSAN_DIGEST_B)))
+    assert [(p["verdict"], p["reason"]) for p in mismatch] == [("fail", "fpsan_digest_mismatch")]
+    assert mismatch[0]["candidate_digest"] == _FPSAN_DIGEST_B
+    # Only FpSan reports carry the key, so every other case summary is unchanged.
+    assert "fpsan_pairs" not in gen.summarize_case(_consan_racy_report(), "fail")
+    assert gen.fpsan_pairs(None) == []
+
+
+def test_fpsan_pairs_reads_each_pair_of_a_merged_model_report():
+    pairs = gen.fpsan_pairs(_merged_fpsan_report())
+    assert [(p["name"], p["verdict"]) for p in pairs] == [
+        ("_matmul_ogs/P1", "pass"),
+        ("_matmul_ogs/P2", "fail"),
+        ("_topk/P1", "error"),
+    ]
+    by_name = {p["name"]: p for p in pairs}
+    assert by_name["_matmul_ogs/P1"]["candidate_digest"] == _FPSAN_DIGEST_A
+    assert by_name["_matmul_ogs/P2"]["candidate_digest"] == _FPSAN_DIGEST_B
+    assert by_name["_matmul_ogs/P2"]["reason"] == "fpsan_digest_mismatch"
+    assert by_name["_topk/P1"]["reason"].startswith("fpsan_not_instrumented")
+    # Two scenarios of one kernel are two rows, never one row with the other's digests.
+    assert by_name["_matmul_ogs/P1"]["candidate_digest"] != by_name["_matmul_ogs/P2"]["candidate_digest"]
+
+
+def _merged_fpsan_errors(*, keep_reasons: bool) -> dict:
+    """Two scenarios of one kernel that both errored, each for its own reason."""
+    report = _merged_fpsan_report()
+    check = report["checks"][0]
+    for kr, reason in zip(
+        [kr for kr in check["kernel_results"] if kr["identity"]["name"] == "_matmul_ogs"],
+        ("fpsan_command_exit_1: P1 broke", "fpsan_result_missing: P2 printed nothing"),
+        strict=True,
+    ):
+        kr.update(verdict="error", reason=reason)
+    backend = check["backend"]
+    for scenario in ("P1", "P2"):
+        backend[f"_matmul_ogs/{scenario}.verdict"] = "error"
+        backend.pop(f"_matmul_ogs/{scenario}.reason", None)
+    if keep_reasons:
+        backend["_matmul_ogs/P1.reason"] = "fpsan_command_exit_1: P1 broke"
+        backend["_matmul_ogs/P2.reason"] = "fpsan_result_missing: P2 printed nothing"
+    return report
+
+
+def test_fpsan_pairs_prefer_the_reason_merge_fpsan_records_per_pair():
+    # model_survey.merge_fpsan writes <pair>.reason, so each row gets its own
+    # reason even where kernel results cannot say which scenario they compared.
+    reasons = {p["name"]: p["reason"] for p in gen.fpsan_pairs(_merged_fpsan_errors(keep_reasons=True))}
+    assert reasons["_matmul_ogs/P1"] == "fpsan_command_exit_1: P1 broke"
+    assert reasons["_matmul_ogs/P2"] == "fpsan_result_missing: P2 printed nothing"
+    # The real merge records it too, so the fixture is not ahead of the pipeline.
+    backend = _merged_fpsan_report()["checks"][0]["backend"]
+    assert backend["_matmul_ogs/P2.reason"] == "fpsan_digest_mismatch"
+    assert backend["_topk/P1.reason"].startswith("fpsan_not_instrumented")
+    assert "_matmul_ogs/P1.reason" not in backend
+
+
+def test_fpsan_pairs_without_a_recorded_reason_fall_back_only_when_unambiguous():
+    # A report from before merge_fpsan wrote <pair>.reason: two error results of
+    # one kernel disagree, so neither row borrows either reason.
+    pairs = {p["name"]: p for p in gen.fpsan_pairs(_merged_fpsan_errors(keep_reasons=False))}
+    assert pairs["_matmul_ogs/P1"]["reason"] == pairs["_matmul_ogs/P2"]["reason"] == ""
+    assert pairs["_topk/P1"]["reason"].startswith("fpsan_not_instrumented")
+
+
+def test_fpsan_cases_render_on_their_own_tab_and_never_on_the_survey_tab(tmp_path):
+    info = _write_informational(tmp_path / "info", {
+        "consan-gpt-oss": _consan_racy_report(),
+        "fpsan-gpt-oss": _merged_fpsan_report(),
+    })
+    survey = gen.survey_cases_from_informational_dir(info, rel="runs/r1")
+    rows = {c: gen.summarize_case(None, "pass") for c, *_ in gen.CASES}
+    page = gen.build_html([{"meta": {"run": "r1"}, "rows": rows, "gate": False}], survey=survey)
+
+    at = page.index
+    assert at("id=tab-guardrails") < at("id=tab-survey") < at("id=tab-fpsan") < at("<div class=navrow>")
+    tabbar = page[at("<div class=tabbar>") :]
+    tabbar = tabbar[: tabbar.index("</div>")]
+    assert tabbar.index('for="tab-survey"') < tabbar.index('<label for="tab-fpsan">FpSan</label>')
+    assert '#tab-fpsan:checked ~ .tabs #panel-fpsan { display:block; }' in page
+    assert '#tab-fpsan:checked ~ .tabs .tabbar label[for="tab-fpsan"]' in page
+    assert '#tab-fpsan:focus-visible ~ .tabs .tabbar label[for="tab-fpsan"]' in page
+    # Same nightly run, so its run details stay visible on this tab.
+    assert "#tab-fpsan:checked ~ .navrow" not in page
+
+    survey_panel = _tab_panel(page, "panel-survey")
+    assert '<span class="kname">consan-gpt-oss</span>' in survey_panel
+    assert "FpSan" not in survey_panel and "fpsan-gpt-oss" not in survey_panel
+
+    fpsan_panel = _tab_panel(page, "panel-fpsan")
+    assert "Compared <b>3 kernel pairs</b> across <b>1 workload</b>" in fpsan_panel
+    assert '<span class="name">FpSan</span>' in fpsan_panel
+    assert '<span class="kind">reference/candidate digest check</span>' in fpsan_panel
+    assert gen._survey_command_for("fpsan-gpt-oss") in fpsan_panel
+    for label in ("_matmul_ogs/P1", "_matmul_ogs/P2", "_topk/P1"):
+        assert f"<td class=mono>{label}</td>" in fpsan_panel
+    assert f'<span title="{_FPSAN_DIGEST_B}">{_FPSAN_DIGEST_B[:16]}\u2026</span>' in fpsan_panel
+    # The merged report keeps no per-pair flags, so the column is not drawn empty.
+    assert "<th>Instrumented</th>" not in fpsan_panel
+    assert 'href="runs/r1/survey/fpsan-gpt-oss/">run area</a>' in fpsan_panel
+
+
+def test_fpsan_tab_markdown_mirrors_the_html(tmp_path):
+    info = _write_informational(tmp_path / "info", {
+        "consan-gpt-oss": _consan_racy_report(),
+        "fpsan-gpt-oss": _merged_fpsan_report(),
+    })
+    survey = gen.survey_cases_from_informational_dir(info)
+    rows = {c: gen.summarize_case(None, "pass") for c, *_ in gen.CASES}
+    md = gen.build_summary_md([{"meta": {"run": "r1"}, "rows": rows, "gate": False}], survey=survey)
+
+    survey_md = md[md.index("## Workload survey") : md.index("## FpSan\n")]
+    fpsan_md = md[md.index("## FpSan\n") : md.index("## History / trend")]
+    assert "fpsan-gpt-oss" not in survey_md
+    assert "Compared 3 kernel pairs across 1 workload" in fpsan_md
+    assert "| gpt oss | 3 | \U0001f534 fail | 1 | fpsan_digest_mismatch |" in fpsan_md
+    assert f"Reproduce: `{gen._survey_command_for('fpsan-gpt-oss')}`" in fpsan_md
+    for label in ("_matmul_ogs/P1", "_matmul_ogs/P2", "_topk/P1"):
+        assert f"| `{label}` |" in fpsan_md
+    assert f"`{_FPSAN_DIGEST_B[:16]}\u2026`" in fpsan_md
+    assert "Three views below" in md and "**FpSan** (both observed only" in md
+
+
+def test_fpsan_tab_has_an_empty_state_on_both_twins():
+    rows = {c: gen.summarize_case(None, "pass") for c, *_ in gen.CASES}
+    runs = [{"meta": {"run": "r1"}, "rows": rows, "gate": False}]
+    assert "No FpSan kernel pairs in this run." in _tab_panel(gen.build_html(runs), "panel-fpsan")
+    assert "No FpSan kernel pairs in this run." in gen.build_summary_md(runs)
+
+
+def test_gated_fpsan_controls_show_both_digests_on_the_gate_tab():
+    rows = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(_consan_clean_report(), "pass"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+        **_fpsan_rows(),
+    }
+    runs = [{"meta": {"run": "r1"}, "rows": rows, "gate": True}]
+    gate = _tab_panel(gen.build_html(runs), "panel-guardrails")
+    assert "<td class=mono>daily-fpsan-mismatch</td><td>fpsan (digest)</td>" in gate
+    assert "<th>Reference digest</th>" in gate and "<th>Instrumented</th>" in gate
+    assert f'<span title="{_FPSAN_DIGEST_B}">{_FPSAN_DIGEST_B[:16]}\u2026</span>' in gate
+    assert "<td>both</td>" in gate
+    md = gen.build_summary_md(runs)
+    assert "**Healthy** \u2014 5/5 matched" in md
+    assert (
+        f"| `row_dot_no_accumulate` | \U0001f534 fail | `{_FPSAN_DIGEST_A[:16]}\u2026` "
+        f"| `{_FPSAN_DIGEST_B[:16]}\u2026` | both | fpsan_digest_mismatch |"
+    ) in md
+
+
+def test_run_index_lists_fpsan_cases_in_their_own_table(tmp_path):
+    info = _write_informational(tmp_path / "info", {
+        "consan-gpt-oss": _consan_racy_report(),
+        "fpsan-gpt-oss": _merged_fpsan_report(),
+    })
+    survey = gen.survey_cases_from_informational_dir(info, rel="runs/r1")
+    rows = {c: gen.summarize_case(None, "pass") for c, *_ in gen.CASES}
+    page = gen.build_run_index_html({"meta": {"run": "r1"}, "rows": rows, "gate": False}, survey=survey)
+    survey_table = page[page.index("<h2>Workload survey") : page.index("<h2>FpSan ")]
+    pairs_table = page[page.index("<h2>FpSan ") :]
+    assert "consan-gpt-oss" in survey_table and "fpsan-gpt-oss" not in survey_table
+    assert 'href="survey/fpsan-gpt-oss/">run area</a>' in pairs_table
+
+
+def test_fpsan_cases_flow_from_the_nightly_and_from_published_history(tmp_path, monkeypatch):
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    info = _write_informational(tmp_path / "informational", {
+        "consan-gpt-oss": _consan_racy_report(),
+        "fpsan-gpt-oss": _merged_fpsan_report(),
+    })
+    base = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+    ]
+    out = tmp_path / "dashboard"
+    monkeypatch.setattr(sys, "argv", [*base, "--out-dir", str(out), "--informational-results-dir", str(info)])
+    assert gen.main() == 0
+
+    area = out / "runs" / "2026-08-05-33" / "survey" / "fpsan-gpt-oss"
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert [item["var"] for item in env["required_env"]] == ["TRITON_INSTRUMENTATION_MODE"]
+    assert env["command"] == gen._survey_command_for("fpsan-gpt-oss")
+    reproduce = (area / "REPRODUCE.md").read_text(encoding="utf-8")
+    assert "`TRITON_INSTRUMENTATION_MODE=fpsan`" in reproduce
+    assert "ROCJITSU_PREBUILT" not in reproduce and "HSA_TOOLS_LIB" not in reproduce
+
+    data = json.loads((out / "data.json").read_text(encoding="utf-8"))
+    assert [e["name"] for e in data[0]["fpsan"]] == ["fpsan-gpt-oss"]
+    assert [e["name"] for e in data[0]["survey"]] == ["consan-gpt-oss"]
+    live = (out / "index.html").read_text(encoding="utf-8")
+    assert "_matmul_ogs/P2" in _tab_panel(live, "panel-fpsan")
+
+    # A re-render with no nightly input rebuilds the tab from what was published.
+    rerender = tmp_path / "rerender"
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard", "--history-root", str(out / "runs"),
+        "--baselines", base[-1], "--out-dir", str(rerender),
+    ])
+    assert gen.main() == 0
+    page = (rerender / "index.html").read_text(encoding="utf-8")
+    assert "_matmul_ogs/P2" in _tab_panel(page, "panel-fpsan")
+    assert "fpsan-gpt-oss" not in _tab_panel(page, "panel-survey")
+    landing = (rerender / "runs" / "2026-08-05-33" / "index.html").read_text(encoding="utf-8")
+    assert 'href="survey/fpsan-gpt-oss/">run area</a>' in landing[landing.index("<h2>FpSan ") :]

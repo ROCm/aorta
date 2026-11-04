@@ -105,11 +105,13 @@ def test_committed_manual_runs_validate_and_render():
 def test_tab_joins_the_nightly_tabs():
     page = gen.add_asan_tab(_nightly_page(), _runs(_row(), _control()))
     at = page.index
-    assert at("id=tab-survey") < at("id=tab-asan") < at("<div class=tabbar>")
+    assert at("id=tab-survey") < at("id=tab-fpsan") < at("id=tab-asan") < at("<div class=tabbar>")
     tabbar = page[at("<div class=tabbar>") :]
     tabbar = tabbar[: tabbar.index("</div>")]
     assert '<label for="tab-asan">Manual runs</label>' in tabbar
-    assert at("id=panel-survey") < at("<section class=tabpanel id=panel-asan>")
+    # Manual runs is not a nightly tab, so it stays last.
+    assert tabbar.index('for="tab-fpsan"') < tabbar.index('for="tab-asan"')
+    assert at("id=panel-survey") < at("id=panel-fpsan") < at("<section class=tabpanel id=panel-asan>")
     # Radios precede the header so Manual runs can hide the nightly run-details icon.
     # The panel stays inside .tabs, which follows those radios, for :checked to show it.
     assert at("id=tab-asan") < at('aria-label="Run details"')
@@ -133,7 +135,7 @@ def _guardrails_only_page() -> str:
     This is the page on sanitizer-results until the next nightly publish, and
     Pages adds the ASan tab to whatever that branch holds.
     """
-    page = _nightly_page()
+    page = _survey_only_page()
     survey = page.index("<section class=tabpanel id=panel-survey>")
     end = gen._TABS_END_RE.search(page)
     assert end is not None
@@ -142,6 +144,33 @@ def _guardrails_only_page() -> str:
     page = page.replace('\n    <label for="tab-survey">Workload survey</label>', "")
     assert "tab-survey" not in page.split("<style>", 1)[1].split("</style>", 1)[1]
     return page
+
+
+def _survey_only_page() -> str:
+    """The nightly page as rendered before the FpSan tab existed.
+
+    Pages serves that page until the first nightly publish after the tab lands.
+    """
+    page = _nightly_page()
+    fpsan = page.index("<section class=tabpanel id=panel-fpsan>")
+    end = gen._TABS_END_RE.search(page)
+    assert end is not None
+    page = page[:fpsan] + page[end.start(1) :]
+    page = page.replace("\n  <input type=radio name=santab id=tab-fpsan class=tabradio>", "")
+    page = page.replace(f'\n    <label for="tab-fpsan">{gen._FPSAN_TAB_LABEL}</label>', "")
+    assert "tab-fpsan" not in page.split("<style>", 1)[1].split("</style>", 1)[1]
+    return page
+
+
+def test_tab_joins_a_page_rendered_before_the_fpsan_tab():
+    joined = gen.add_asan_tab(_survey_only_page(), _runs(_row(), _control()))
+    at = joined.index
+    assert at("id=tab-survey") < at("id=tab-asan") < at("<div class=tabbar>")
+    tabbar = joined[at("<div class=tabbar>") :]
+    tabbar = tabbar[: tabbar.index("</div>")]
+    assert tabbar.index('for="tab-survey"') < tabbar.index('<label for="tab-asan">Manual runs</label>')
+    assert at("id=panel-survey") < at("<section class=tabpanel id=panel-asan>")
+    assert joined.endswith("</table></div></section>\n  </section>\n  </div>\n</div></body></html>\n")
 
 
 def test_tab_joins_a_guardrails_only_page():
@@ -187,6 +216,11 @@ def test_no_runs_page_gets_the_results_as_a_section():
         pytest.param(lambda p: p.replace("</head>", ""), id="no-head"),
         pytest.param(lambda p: p.replace("</div></body></html>", "</div><footer></footer></body></html>"), id="tail-moved"),
         pytest.param(lambda p: p.replace('<label for="tab-survey">', '<label for="tab-x">'), id="label-without-radio"),
+        pytest.param(
+            lambda p: p.replace("<input type=radio name=santab id=tab-fpsan class=tabradio>", ""),
+            id="fpsan-label-without-radio",
+        ),
+        pytest.param(lambda p: p.replace('<label for="tab-fpsan">', '<label for="tab-x">'), id="fpsan-radio-without-label"),
         pytest.param(lambda p: p + "<!-- -->", id="trailing-content"),
     ],
 )
