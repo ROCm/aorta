@@ -1203,7 +1203,10 @@ jobs:
           # logs the verdict was derived from (waitcheck/*.log, consan/consan.log)
           # are what make the published run area reproducible (#384). The
           # generator gzips them and prunes them outside its --keep-logs window.
-          for case in waitcheck consan-clean consan-racy fpsan-match fpsan-mismatch; do
+          # meta.json records this list as the controls this run required; the
+          # generator's CASES must name the same ones.
+          gated_cases="waitcheck consan-clean consan-racy fpsan-match fpsan-mismatch"
+          for case in $gated_cases; do
             if [ -f "incoming/${case}/sanitizer_report.json" ]; then
               cp -a "incoming/${case}" "$dest/${case}"
             fi
@@ -1221,9 +1224,10 @@ jobs:
           # gate mirrors the GPU job result (its comparator step is the gate); the
           # rendered history recomputes it from the reports + baselines regardless.
           if [ "${GPU_RESULT}" = "success" ]; then gate=true; else gate=false; fi
-          python - "$run_dir_id" "$started_iso" "$gate" > "$dest/meta.json" <<'PY'
+          python - "$run_dir_id" "$started_iso" "$gate" "$gated_cases" > "$dest/meta.json" <<'PY'
           import json, os, re, sys
           run_id, started_iso, gate = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+          cases = sys.argv[4].split()
           server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           gh_run = os.environ.get("GITHUB_RUN_ID", "")
@@ -1250,6 +1254,7 @@ jobs:
               "gpu": "gfx950",
               "run_url": f"{server}/{repo}/actions/runs/{gh_run}",
               "gate": gate,
+              "cases": cases,
           }, indent=2, sort_keys=True))
           PY
 

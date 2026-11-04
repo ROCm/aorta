@@ -2700,6 +2700,71 @@ def test_history_root_preserves_recorded_comparator_gate_failure(tmp_path):
     assert gen._history_gate_html(run) == f"<td>{gen._status_html('failed', 'fail')}</td>"
 
 
+def _fpsan_baselines() -> dict:
+    return {
+        **_baselines(),
+        "fpsan_match": {"overall_verdict": "pass"},
+        "fpsan_mismatch": {"overall_verdict": "fail"},
+    }
+
+
+def _drop_fpsan_controls(run_dir: Path) -> None:
+    for case in ("fpsan-match", "fpsan-mismatch"):
+        shutil.rmtree(run_dir / case)
+
+
+def test_a_run_published_before_the_fpsan_controls_keeps_its_healthy_gate(tmp_path):
+    # Its manifest predates ``cases``, so it required the three original controls;
+    # the two it never ran are shown as not run, not as missing reports.
+    root = tmp_path / "runs"
+    legacy = _write_history_run(root, "2026-08-04-22")
+    _drop_fpsan_controls(legacy)
+    _write_history_run(root, "2026-08-05-33", meta={"cases": [c for c, *_ in gen.CASES]})
+
+    latest, old = gen.runs_from_history_root(root, _fpsan_baselines())
+
+    assert old["meta"].get("cases") == list(gen.LEGACY_CASES)
+    assert old["gate"] is True
+    summary = gen._gate_summary(old["rows"], recorded_gate=old["meta"].get("gate"))
+    assert (summary["ok"], summary["label"]) == (True, "HEALTHY")
+    assert gen._gate_count_line(old["rows"], summary) == "3/3 matched"
+    for case in ("fpsan-match", "fpsan-mismatch"):
+        row = old["rows"][case]
+        assert (row.get("required"), row.get("present"), row.get("report_rel")) == (False, False, None)
+        assert gen._baseline_cue(row) == ("not run", "neutral")
+        assert '<span class="match neutral">not run</span>' in gen._history_case_html(row)
+    page = gen.build_run_index_html(old)
+    assert '<span class="health ok">Healthy</span>' in page
+    assert "report missing" not in page and page.count("not run") >= 2
+    # The run that lists all five still gates on all five.
+    assert latest["gate"] is True
+    assert gen._gate_count_line(
+        latest["rows"], gen._gate_summary(latest["rows"])
+    ) == f"{len(gen.CASES)}/{len(gen.CASES)} matched"
+    html = gen.build_html([latest, old])
+    assert html.count('<span class="match neutral">not run</span>') == 2
+
+
+def test_a_required_control_without_a_report_still_fails_the_gate(tmp_path):
+    # Listed in the manifest, or no readable list to go by: either way all five count.
+    for name, meta in (
+        ("listed", {"cases": [c for c, *_ in gen.CASES]}),
+        ("no-manifest", None),
+        ("malformed-cases", {"cases": "fpsan-match"}),
+    ):
+        root = tmp_path / name
+        run_dir = _write_history_run(root, "2026-08-05-33", meta=meta)
+        _drop_fpsan_controls(run_dir)
+        if meta is None:
+            (run_dir / "meta.json").unlink()
+
+        run = gen.runs_from_history_root(root, _fpsan_baselines())[0]
+
+        assert run["gate"] is False, name
+        assert gen._gate_summary(run["rows"])["label"] == "INCOMPLETE", name
+        assert all(run["rows"][c].get("required") is not False for c, *_ in gen.CASES), name
+
+
 def test_history_root_ignores_malformed_run_dirs(tmp_path):
     root = tmp_path / "runs"
     _write_history_run(root, "2026-08-05-33")
@@ -2946,6 +3011,7 @@ def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
         "GITHUB_SHA": "f" * 40,
         "GPU_RESULT": "success",
         "started_iso": started_iso,
+        "gated_cases": " ".join(case for case, *_ in gen.CASES),
     }
 
     for run_id, expected, rendered in (
@@ -2975,6 +3041,8 @@ def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
         assert meta.get("date") == expected, run_id
         assert meta.get("run") == run_id
         assert meta.get("gate") is True  # mirrors GPU_RESULT=success
+        # The controls this run required, read back when its history is re-rendered.
+        assert meta.get("cases") == [case for case, *_ in gen.CASES]
         # What the generator will put on the page for that manifest -- for the
         # timestamped name, the 094112 its own directory carries. Agreement is
         # asserted through the renderer rather than by pinning a shared pattern.
@@ -5334,8 +5402,9 @@ def test_every_gated_case_is_swept_by_the_gate_job_and_published_by_render():
         )
         assert sweep and sweep.start() < compare, f"{case_dir}: not swept before the comparator"
     render = next(s for s in jobs["render"]["steps"] if s.get("id") == "render")["run"]
-    loop = re.search(r"for case in ([^;]+); do", render)
-    assert loop and loop.group(1).split() == [case_dir for case_dir, *_ in gen.CASES]
+    listed = re.search(r'gated_cases="([^"]+)"', render)
+    assert listed and listed.group(1).split() == [case_dir for case_dir, *_ in gen.CASES]
+    assert "for case in $gated_cases; do" in render
 
 
 def test_fpsan_survey_job_probes_first_and_holds_no_token():

@@ -51,7 +51,8 @@ Three input shapes are supported:
   ``out/<case>/sanitizer_report.json``; used locally to render a history/trend.
 * ``--history-root DIR`` -- the PUBLISHED data-branch layout
   ``DIR/<id>/<case>/sanitizer_report.json`` plus a per-run ``DIR/<id>/meta.json``
-  (keys: commit, date, gpu, run_url, gate). ``<id>`` is
+  (keys: commit, date, gpu, run_url, gate, and ``cases``: the gated controls the
+  run required, ``LEGACY_CASES`` when absent). ``<id>`` is
   ``<YYYY-MM-DD>T<HHMMSS>-<run_id>`` (sortable to the second, unique; runs
   published before the time was added keep their date-only names and are never
   renamed), enumerated newest-first and capped by ``--keep N``
@@ -102,6 +103,9 @@ CASES: tuple[tuple[str, str, str, str], ...] = (
     ("fpsan-match", "fpsan_match", "daily-fpsan-match", "fpsan (digest)"),
     ("fpsan-mismatch", "fpsan_mismatch", "daily-fpsan-mismatch", "fpsan (digest)"),
 )
+# The controls a published run required when its meta.json names no ``cases``:
+# every run published before the manifest recorded them ran exactly these.
+LEGACY_CASES: tuple[str, ...] = ("waitcheck", "consan-clean", "consan-racy")
 
 _DASH = "\u2014"  # em dash; kept as a name so it can sit inside f-string braces (py3.11)
 
@@ -270,6 +274,7 @@ _CSS = """
     border:1px solid transparent; }
   .match.pass { color:#BBF7D0; background:rgba(34,197,94,.18); border-color:rgba(34,197,94,.45); }
   .match.fail { color:#FECACA; background:rgba(239,68,68,.16); border-color:rgba(239,68,68,.45); }
+  .match.neutral { color:var(--text-3); border-color:var(--border-hover); }
 
   .kcard { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm);
     margin-bottom:10px; overflow:hidden; }
@@ -538,6 +543,7 @@ def _gate_count_line(rows: dict[str, dict[str, Any]], summary: dict[str, Any]) -
     match has no unmatched row, so the line keeps that check's own detail.
     Classification stays in ``_gate_summary``; this only shortens the words.
     """
+    rows = _required_rows(rows)
     total = len(rows)
     matched = sum(1 for row in rows.values() if row["match"])
     mismatches = sum(1 for row in rows.values() if row["present"] and not row["match"])
@@ -1616,6 +1622,18 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     return summary
 
 
+def not_run_row(expected: str | None) -> dict[str, Any]:
+    """A gated control the run predates: shown as not run and kept out of its gate."""
+    return {
+        **summarize_case(None, expected), "required": False, "match": True,
+        "execution": "not run", "observation": "not run: this control was added after this run",
+    }
+
+
+def _required_rows(rows: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {case: row for case, row in rows.items() if row.get("required") is not False}
+
+
 def _run_record(
     meta: dict[str, Any],
     rows: dict[str, dict[str, Any]],
@@ -1687,7 +1705,7 @@ def runs_from_runs_root(runs_root: Path, baselines: dict) -> list[dict[str, Any]
 
 
 def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
-    """Read a published run's ``meta.json`` (commit, date, gpu, run_url, gate).
+    """Read a published run's ``meta.json`` (commit, date, gpu, run_url, gate, cases).
 
     The run id (see ``_RUN_ID_RE``) is authoritative from the directory
     name; ``meta.json`` supplies the rest. A missing/corrupt manifest degrades to
@@ -1712,6 +1730,9 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
         gate = data.get("gate")
         if gate is not None:
             meta["gate"] = gate
+        cases = data.get("cases", LEGACY_CASES)
+        if isinstance(cases, (list, tuple)) and all(isinstance(c, str) for c in cases):
+            meta["cases"] = list(cases)
     return meta
 
 
@@ -1781,17 +1802,22 @@ def runs_from_history_root(
     runs: list[dict[str, Any]] = []
     for run_dir in run_dirs[: max(keep, 0)]:
         rel = f"runs/{run_dir.name}"
+        meta = _run_meta_from_history(run_dir)
+        # No readable manifest, or a malformed ``cases``, requires every control.
+        required = set(meta.get("cases") or (c for c, _k, _l, _b in CASES))
         rows: dict[str, dict[str, Any]] = {}
         for case, key, _label, _backend in CASES:
-            row = summarize_case(
-                _load(run_dir / case / "sanitizer_report.json"),
-                baselines.get(key, {}).get("overall_verdict"),
-            )
+            report = _load(run_dir / case / "sanitizer_report.json")
+            expected = baselines.get(key, {}).get("overall_verdict")
+            if report is None and case not in required:
+                row = not_run_row(expected)
+            else:
+                row = summarize_case(report, expected)
             # Only link reports that are actually present, so the page never
             # points at a 404. Relative to the dashboard root (runs/<id>/...).
             row["report_rel"] = f"{rel}/{case}/sanitizer_report.json" if row["present"] else None
             rows[case] = row
-        runs.append(_run_record(_run_meta_from_history(run_dir), rows, rel=rel))
+        runs.append(_run_record(meta, rows, rel=rel))
     return runs
 
 
@@ -3690,6 +3716,8 @@ def _baseline_cue(row: dict[str, Any]) -> tuple[str, str]:
     (``daily-consan-racy``). A present disagreement is ``unmatched``. An absent
     report stays its own word so it is not called a verdict mismatch.
     """
+    if row.get("required") is False:
+        return "not run", "neutral"
     if not row["present"]:
         return "report missing", "fail"
     if row["match"]:
@@ -3723,7 +3751,7 @@ def _baseline_status_html(row: dict[str, Any]) -> str:
     fail, which is the observed verdict in an earlier column.
     """
     word, cue = _baseline_cue(row)
-    tone = "pass" if cue == "pass" else "fail"
+    tone = cue if cue in ("pass", "neutral") else "fail"
     return f'<span class="match {tone}">{_esc(word)}</span>'
 
 
@@ -3796,6 +3824,7 @@ def _gate_summary(
     reduced row matches its baseline -- otherwise a comparator-failed run would
     render ``HEALTHY``.
     """
+    rows = _required_rows(rows)
     total = len(rows)
     matched = sum(1 for r in rows.values() if r["match"])
     mismatches = sum(1 for r in rows.values() if r["present"] and not r["match"])
@@ -4170,7 +4199,7 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
         )
         tone = _tone_for(row["verdict"])
         if not row["present"]:
-            body = _observation_html(row, tone="fail")
+            body = _observation_html(row, tone="" if row.get("required") is False else "fail")
         else:
             body = (
                 _facts_html(
@@ -5431,7 +5460,8 @@ def build_run_index_html(
 
     def _cell(case: str, present: bool) -> str:
         if not present:
-            return '<span class="dash">report missing</span>'
+            word = "not run" if rows[case].get("required") is False else "report missing"
+            return f'<span class="dash">{word}</span>'
         href = _esc(f"{case}/sanitizer_report.json")
         return f'<a href="{href}">sanitizer_report.json</a>'
 
