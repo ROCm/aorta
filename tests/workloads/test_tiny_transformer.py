@@ -1722,6 +1722,54 @@ def test_spur_worker_stops_when_the_cancel_file_appears(tmp_path) -> None:
             proc.wait(timeout=5)
 
 
+def test_spur_worker_reaps_a_descendant_when_a_signal_hits_the_reap_sleep(tmp_path) -> None:
+    """``set -e`` must not skip the reap's SIGKILL when the signal hits sleep."""
+    env = {
+        **os.environ,
+        "SLURM_PROCID": "0",
+        "SLURM_LOCALID": "0",
+        "AORTA_GPUS_PER_NODE": "1",
+        "WORLD_SIZE": "1",
+        "MASTER_ADDR": "10.0.0.8",
+        "AORTA_INNER": "1",
+        "AORTA_RESULTS_DIR": str(tmp_path),
+    }
+    # The child records the reap's SIGTERM and stays alive, so ``termed`` exists
+    # only after ``wait`` has returned and the reap loop is in its grace sleep.
+    task = (
+        "(trap 'echo termed > termed' TERM; echo $BASHPID > descendant.pid; "
+        "while :; do sleep 0.05; done) & "
+        "while [ ! -s descendant.pid ]; do sleep 0.05; done"
+    )
+    proc = subprocess.Popen(
+        ["bash", "-c", SPUR_WORKER_SCRIPT, "aorta-inner", "bash", "-c", task],
+        env=env,
+        cwd=tmp_path,
+        start_new_session=True,
+    )
+    termed = tmp_path / "termed"
+    pid_file = tmp_path / "descendant.pid"
+    descendant = 0
+    try:
+        _wait_for_file(termed)
+        descendant = int(pid_file.read_text(encoding="utf-8"))
+        assert proc.poll() is None, "wrapper exited before the signal was sent"
+        os.killpg(proc.pid, signal.SIGINT)
+        assert proc.wait(timeout=8) == 130
+        assert _pid_gone(descendant, timeout=3)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        if not descendant and pid_file.is_file():
+            text = pid_file.read_text(encoding="utf-8").strip()
+            if text.isdigit():
+                descendant = int(text)
+        if descendant:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(descendant, signal.SIGKILL)
+
+
 def _pid_gone(pid: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1771,7 +1819,10 @@ def test_owned_step_cancel_reaches_a_descendant_that_ignores_sigterm(tmp_path) -
             os.kill(descendant, signal.SIGKILL)
 
 
-@pytest.mark.parametrize(("sig", "code"), [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
+@pytest.mark.parametrize(
+    ("sig", "code"),
+    [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)],
+)
 def test_owned_step_passes_a_group_signal_to_the_task(tmp_path, sig, code) -> None:
     """A signal to the wrapper's group (Spur without cgroups) reaches the task's own group."""
     from aorta.workloads.distributed_launch import _marked_command
@@ -1830,8 +1881,9 @@ def _release_owned(proc, release: Path, descendant: int, pid_file: Path) -> None
             os.kill(descendant, signal.SIGKILL)
 
 
-def test_owned_step_exits_with_a_signal_that_lands_outside_wait(tmp_path) -> None:
-    """A signal during the reap of a leftover descendant still exits 128 + signal."""
+@pytest.mark.parametrize("task_code", [0, 1])
+def test_owned_step_exits_with_a_signal_that_lands_outside_wait(tmp_path, task_code) -> None:
+    """A signal during the reap wins, including over the task's own status."""
     from aorta.workloads.distributed_launch import _marked_command
 
     ready = tmp_path / "reap.ready"
@@ -1843,9 +1895,9 @@ def test_owned_step_exits_with_a_signal_that_lands_outside_wait(tmp_path) -> Non
         "AORTA_STEP_REAP_RELEASE": str(release),
     }
     env.pop("AORTA_RESULTS_DIR", None)
-    # The leader exits 0 and leaves a child, so the wrapper parks in the reap
+    # The leader exits and leaves a child, so the wrapper parks in the reap
     # gate, which is past ``wait``. The gate holds that window open.
-    task = "sleep 30 & echo $! > descendant.pid; exit 0"
+    task = f"sleep 30 & echo $! > descendant.pid; exit {task_code}"
     proc = subprocess.Popen(
         _marked_command("aorta-1-abcd", ["bash", "-c", task]),
         env=env,
@@ -1900,6 +1952,45 @@ def test_owned_step_bounds_cleanup_when_a_signal_lands_before_wait(tmp_path) -> 
         assert _pid_gone(descendant, timeout=3)
     finally:
         _release_owned(proc, release, descendant, pid_file)
+
+
+def test_owned_step_does_not_signal_an_inherited_child_pid(tmp_path) -> None:
+    """A child pid inherited from the environment is cleared before the trap runs."""
+    from aorta.workloads.distributed_launch import _marked_command
+
+    unrelated = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    ready = tmp_path / "before-task.ready"
+    release = tmp_path / "before-task.release"
+    env = {
+        **os.environ,
+        "_aorta_child": str(unrelated.pid),
+        "AORTA_STEP_CANCEL": str(tmp_path / "aorta-step-cancel"),
+        "AORTA_STEP_BEFORE_TASK_READY": str(ready),
+        "AORTA_STEP_BEFORE_TASK_RELEASE": str(release),
+    }
+    env.pop("AORTA_RESULTS_DIR", None)
+    proc = subprocess.Popen(
+        _marked_command("aorta-1-abcd", ["bash", "-c", "exit 0"]),
+        env=env,
+        cwd=tmp_path,
+        start_new_session=True,
+    )
+    try:
+        _wait_for_file(ready)
+        assert proc.poll() is None, "wrapper exited before the signal was sent"
+        os.killpg(proc.pid, signal.SIGINT)
+        os.kill(unrelated.pid, 0)
+        release.write_text("1\n", encoding="utf-8")
+        assert proc.wait(timeout=8) == 130
+        os.kill(unrelated.pid, 0)
+    finally:
+        release.write_text("1\n", encoding="utf-8")
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        if unrelated.poll() is None:
+            unrelated.kill()
+            unrelated.wait(timeout=5)
 
 
 def test_owned_step_keeps_the_task_exit_code(tmp_path) -> None:
