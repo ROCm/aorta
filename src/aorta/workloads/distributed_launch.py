@@ -130,13 +130,29 @@ fi
 # processes it started, not only the first one. That group is not the one
 # the scheduler signals: without cgroups, Spur's step supervisor signals the
 # wrapper's group only. The trap passes TERM, INT, and HUP on to the task's
-# group; the reap below escalates to SIGKILL.
+# group; the reap below escalates to SIGKILL. The wrapper then exits 128 plus
+# the signal it received: what ``wait`` returns depends on whether the signal
+# landed during it, and the task itself only ever sees TERM. The trap is set
+# before the task starts, so an early signal cannot kill the wrapper and orphan
+# the task.
 _STEP_WATCH = """\
+_aorta_signal=
+_aorta_stop() {
+  _aorta_signal=$1
+  if [ -n "${_aorta_child:-}" ]; then
+    kill -TERM -- "-$_aorta_child" 2>/dev/null || true
+  fi
+}
+trap '_aorta_stop 129' HUP
+trap '_aorta_stop 130' INT
+trap '_aorta_stop 143' TERM
 set -m
 "$@" &
 _aorta_child=$!
 set +m
-trap 'kill -TERM -- "-$_aorta_child" 2>/dev/null || true' TERM INT HUP
+if [ -n "$_aorta_signal" ]; then
+  kill -TERM -- "-$_aorta_child" 2>/dev/null || true
+fi
 _aorta_status=0
 _aorta_cancel=${AORTA_STEP_CANCEL:-}
 if [ -z "$_aorta_cancel" ] && [ -n "${AORTA_RESULTS_DIR:-}" ]; then
@@ -168,6 +184,9 @@ fi
 if [ -n "${_aorta_watcher:-}" ]; then
   kill "$_aorta_watcher" 2>/dev/null || true
   wait "$_aorta_watcher" 2>/dev/null || true
+fi
+if [ -n "$_aorta_signal" ]; then
+  _aorta_status=$_aorta_signal
 fi
 exit "$_aorta_status"
 """

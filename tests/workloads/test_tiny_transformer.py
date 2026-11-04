@@ -1806,6 +1806,45 @@ def test_owned_step_passes_a_group_signal_to_the_task(tmp_path, sig, code) -> No
                 os.kill(descendant, signal.SIGKILL)
 
 
+def test_owned_step_exits_with_a_signal_that_lands_outside_wait(tmp_path) -> None:
+    """A signal during the reap of a leftover descendant still exits 128 + signal."""
+    from aorta.workloads.distributed_launch import _marked_command
+
+    env = {**os.environ, "AORTA_STEP_CANCEL": str(tmp_path / "aorta-step-cancel")}
+    env.pop("AORTA_RESULTS_DIR", None)
+    # The first process exits 0 once its child ignores SIGTERM, which holds the
+    # wrapper in its ~2 s reap loop, past ``wait``.
+    task = (
+        "(trap '' TERM; echo $BASHPID > descendant.pid; exec sleep 30) & "
+        "while [ ! -s descendant.pid ]; do sleep 0.05; done"
+    )
+    proc = subprocess.Popen(
+        _marked_command("aorta-1-abcd", ["bash", "-c", task]),
+        env=env,
+        cwd=tmp_path,
+        start_new_session=True,
+    )
+    pid_file = tmp_path / "descendant.pid"
+    descendant = 0
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.is_file() or not pid_file.read_text(encoding="utf-8").strip():
+            assert time.monotonic() < deadline, "the task never started its descendant"
+            time.sleep(0.05)
+        descendant = int(pid_file.read_text(encoding="utf-8"))
+        time.sleep(0.5)
+        os.killpg(proc.pid, signal.SIGINT)
+        assert proc.wait(timeout=10) == 130
+        assert _pid_gone(descendant, timeout=3)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        if descendant:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(descendant, signal.SIGKILL)
+
+
 def test_owned_step_keeps_the_task_exit_code(tmp_path) -> None:
     from aorta.workloads.distributed_launch import _marked_command
 
