@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -1734,11 +1735,29 @@ def test_spur_worker_reaps_a_descendant_when_a_signal_hits_the_reap_sleep(tmp_pa
         "AORTA_INNER": "1",
         "AORTA_RESULTS_DIR": str(tmp_path),
     }
-    # The child records the reap's SIGTERM and stays alive, so ``termed`` exists
-    # only after ``wait`` has returned and the reap loop is in its grace sleep.
+    # A stand-in ``sleep`` holds the reap's first grace sleep open. Only the
+    # wrapper's own ``sleep 0.2`` blocks: the wrapper leads the session, so its
+    # direct children have PPID equal to the session id. MASTER_ADDR is set, so
+    # the rank-0 address loop never runs, and the watcher sleeps in a subshell.
+    real_sleep = shutil.which("sleep")
+    assert real_sleep is not None
+    holding = tmp_path / "reap-sleep-held"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_sleep = bin_dir / "sleep"
+    fake_sleep.write_text(
+        "#!/bin/bash\n"
+        "read -r _ _ _ _ _ sid _ < /proc/$$/stat\n"
+        f'if [ "$1" = 0.2 ] && [ "$PPID" = "$sid" ] && (set -C; : > "{holding}") 2>/dev/null; then\n'
+        f"  exec {real_sleep} 30\n"
+        "fi\n"
+        f'exec {real_sleep} "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sleep.chmod(0o755)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     task = (
-        "(trap 'echo termed > termed' TERM; echo $BASHPID > descendant.pid; "
-        "while :; do sleep 0.05; done) & "
+        "(trap '' TERM; echo $BASHPID > descendant.pid; exec sleep 60) & "
         "while [ ! -s descendant.pid ]; do sleep 0.05; done"
     )
     proc = subprocess.Popen(
@@ -1747,11 +1766,10 @@ def test_spur_worker_reaps_a_descendant_when_a_signal_hits_the_reap_sleep(tmp_pa
         cwd=tmp_path,
         start_new_session=True,
     )
-    termed = tmp_path / "termed"
     pid_file = tmp_path / "descendant.pid"
     descendant = 0
     try:
-        _wait_for_file(termed)
+        _wait_for_file(holding)
         descendant = int(pid_file.read_text(encoding="utf-8"))
         assert proc.poll() is None, "wrapper exited before the signal was sent"
         os.killpg(proc.pid, signal.SIGINT)
@@ -1919,17 +1937,23 @@ def test_owned_step_exits_with_a_signal_that_lands_outside_wait(tmp_path, task_c
         _release_owned(proc, release, descendant, pid_file)
 
 
-def test_owned_step_bounds_cleanup_when_a_signal_lands_before_wait(tmp_path) -> None:
-    """A signal before wait still ends a task that ignores SIGTERM."""
+@pytest.mark.parametrize("gate", ["AFTER_TASK", "BEFORE_WAIT"])
+def test_owned_step_bounds_cleanup_when_a_signal_lands_before_wait(tmp_path, gate) -> None:
+    """A signal before wait still ends a task that ignores SIGTERM.
+
+    ``AFTER_TASK`` lands before the pids are saved, so the check after the
+    saves arms the timer. ``BEFORE_WAIT`` lands after that check, so only the
+    trap can arm it.
+    """
     from aorta.workloads.distributed_launch import _marked_command
 
-    ready = tmp_path / "before-wait.ready"
-    release = tmp_path / "before-wait.release"
+    ready = tmp_path / "gate.ready"
+    release = tmp_path / "gate.release"
     env = {
         **os.environ,
         "AORTA_STEP_CANCEL": str(tmp_path / "aorta-step-cancel"),
-        "AORTA_STEP_BEFORE_WAIT_READY": str(ready),
-        "AORTA_STEP_BEFORE_WAIT_RELEASE": str(release),
+        f"AORTA_STEP_{gate}_READY": str(ready),
+        f"AORTA_STEP_{gate}_RELEASE": str(release),
     }
     env.pop("AORTA_RESULTS_DIR", None)
     task = "trap '' TERM; echo $$ > descendant.pid; exec sleep 60"
@@ -1943,6 +1967,7 @@ def test_owned_step_bounds_cleanup_when_a_signal_lands_before_wait(tmp_path) -> 
     descendant = 0
     try:
         _wait_for_file(ready)
+        # The task must already ignore TERM, so only the timer can end it.
         _wait_for_file(pid_file, nonempty=True)
         descendant = int(pid_file.read_text(encoding="utf-8"))
         assert proc.poll() is None, "wrapper exited before the signal was sent"
@@ -1979,10 +2004,10 @@ def test_owned_step_does_not_signal_an_inherited_child_pid(tmp_path) -> None:
         _wait_for_file(ready)
         assert proc.poll() is None, "wrapper exited before the signal was sent"
         os.killpg(proc.pid, signal.SIGINT)
-        os.kill(unrelated.pid, 0)
         release.write_text("1\n", encoding="utf-8")
         assert proc.wait(timeout=8) == 130
-        os.kill(unrelated.pid, 0)
+        # ``poll`` reaps: ``os.kill(pid, 0)`` would also succeed on a zombie.
+        assert unrelated.poll() is None, "the wrapper signaled the inherited pid"
     finally:
         release.write_text("1\n", encoding="utf-8")
         if proc.poll() is None:

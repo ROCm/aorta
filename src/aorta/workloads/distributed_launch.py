@@ -132,10 +132,11 @@ fi
 # wrapper's group only. The trap passes TERM, INT, and HUP on to the task's
 # group and remembers 128 plus that signal; the task itself only ever sees
 # TERM. If that signal lands before ``wait``, a task that ignores TERM would
-# block there and never reach the reap, so the wrapper arms a two-second
-# SIGKILL once the child pid is saved, and disarms it once ``wait`` returns.
-# The timer is not started from the trap: a background job there would
-# overwrite ``$!`` and the cancel watcher would be tracked as the timer.
+# block there and never reach the reap, so a two-second SIGKILL is armed and
+# then disarmed once ``wait`` returns. The trap arms it only after the child
+# and watcher pids are saved: a background job started earlier would
+# overwrite ``$!`` and the watcher would be tracked as the timer. A signal
+# before that point is armed by the check that follows the pid saves.
 # The wrapper exits with the remembered signal when one was caught, expanded
 # in the ``exit`` command, ahead of whatever status the task itself returned.
 # The trap is set before the task starts, so an early signal cannot kill the
@@ -146,15 +147,21 @@ _STEP_WATCH = """\
 _aorta_signal=
 _aorta_child=
 _aorta_escalator=
+_aorta_arming=
+_aorta_pids_saved=
 _aorta_wait_done=
 _aorta_watcher=
 # Bound ``wait`` when TERM was already forwarded. The timer is its own
 # process group so disarming it does not signal the wrapper or the task.
 # Call this only after ``$!`` has been saved: it backgrounds a job.
+# ``_aorta_arming`` stops a trap that fires inside this function from
+# starting a second timer.
 _aorta_arm_kill() {
-  if [ -n "${_aorta_wait_done}" ] || [ -n "${_aorta_escalator}" ]; then
+  if [ -n "${_aorta_wait_done}" ] || [ -n "${_aorta_escalator}" ] \\
+    || [ -n "${_aorta_arming}" ]; then
     return
   fi
+  _aorta_arming=1
   set -m
   (
     trap '' HUP INT TERM
@@ -170,6 +177,9 @@ _aorta_stop() {
     return
   fi
   kill -TERM -- "-$_aorta_child" 2>/dev/null || true
+  if [ -n "${_aorta_pids_saved}" ]; then
+    _aorta_arm_kill
+  fi
 }
 # Test-only. Production leaves both paths unset. Touch the ready file and
 # block until the release file exists, or 30s, so a test can signal while
@@ -200,8 +210,10 @@ set +m
 # The trap could not forward a signal that arrived before the pid existed.
 if [ -n "$_aorta_signal" ]; then
   kill -TERM -- "-$_aorta_child" 2>/dev/null || true
-  _aorta_arm_kill
 fi
+# After the task starts and before the pids are saved, where the trap
+# forwards TERM but cannot arm the timer.
+_aorta_gate "${AORTA_STEP_AFTER_TASK_READY:-}" "${AORTA_STEP_AFTER_TASK_RELEASE:-}"
 _aorta_status=0
 _aorta_cancel=${AORTA_STEP_CANCEL:-}
 if [ -z "$_aorta_cancel" ] && [ -n "${AORTA_RESULTS_DIR:-}" ]; then
@@ -218,17 +230,18 @@ if [ -n "$_aorta_cancel" ]; then
   ) >/dev/null 2>&1 &
   _aorta_watcher=$!
 fi
-# Last pause before wait, so a signal during watcher setup is included.
-# Arm here, not from the trap, so a signal between the watcher's ``&`` and
-# the ``$!`` assignment above cannot replace the watcher pid with the timer.
-_aorta_gate "${AORTA_STEP_BEFORE_WAIT_READY:-}" "${AORTA_STEP_BEFORE_WAIT_RELEASE:-}"
+# From here a trap arms the timer itself. A signal that came earlier was
+# only recorded, so arm for it now.
+_aorta_pids_saved=1
 if [ -n "$_aorta_signal" ]; then
   _aorta_arm_kill
-  # The timer's SIGKILL makes bash print "Killed" on this wait.
-  wait "$_aorta_child" 2>/dev/null || _aorta_status=$?
-else
-  wait "$_aorta_child" || _aorta_status=$?
 fi
+# Last pause before wait, after the check above, so a test can land a signal
+# where only the trap can arm the timer.
+_aorta_gate "${AORTA_STEP_BEFORE_WAIT_READY:-}" "${AORTA_STEP_BEFORE_WAIT_RELEASE:-}"
+# Bash reports a SIGKILLed job ("Killed") on this wait's stderr. The task's
+# own stderr is not redirected.
+wait "$_aorta_child" 2>/dev/null || _aorta_status=$?
 _aorta_wait_done=1
 if [ -n "${_aorta_escalator:-}" ]; then
   kill -KILL -- "-$_aorta_escalator" 2>/dev/null || true
