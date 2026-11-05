@@ -1799,6 +1799,47 @@ def _pid_gone(pid: int, timeout: float) -> bool:
     return False
 
 
+def _session_members(sid: int) -> list[int]:
+    """Live (non-zombie) pids in session ``sid``, read from ``/proc``."""
+    members = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # The command name can hold spaces; the fields after it are fixed.
+        state, _ppid, _pgrp, session = stat.rsplit(")", 1)[1].split()[:4]
+        if state != "Z" and int(session) == sid:
+            members.append(int(entry.name))
+    return members
+
+
+def _session_empty(sid: int, timeout: float = 1.0) -> bool:
+    """True once nothing the wrapper started is left, the SIGKILL timer included."""
+    deadline = time.monotonic() + timeout
+    while _session_members(sid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def test_owned_step_wrapper_returns_an_explicit_status() -> None:
+    """No bare ``return`` in the wrapper's functions.
+
+    In bash 5.1 a bare ``return`` from a trap handler returns the status of the
+    command the trap interrupted, so under the Spur worker's ``set -e`` the
+    wrapper exits before its reap. CI's newer bash cannot show that, so the
+    source is pinned instead.
+    """
+    from aorta.workloads.distributed_launch import _STEP_WATCH
+
+    bare = [line for line in _STEP_WATCH.splitlines() if line.strip() == "return"]
+    assert bare == []
+
+
 def _run_owned(tmp_path: Path, task: str, *, cancel: bool) -> tuple[int, int]:
     """Run ``task`` under the owned-step wrapper; return its exit and a descendant pid."""
     from aorta.workloads.distributed_launch import _marked_command
@@ -1866,6 +1907,8 @@ def test_owned_step_passes_a_group_signal_to_the_task(tmp_path, sig, code) -> No
         os.killpg(proc.pid, sig)
         assert proc.wait(timeout=10) == code
         assert _pid_gone(descendant, timeout=3)
+        # The trap armed the SIGKILL timer; it must be disarmed, not left running.
+        assert _session_empty(proc.pid), "a process outlived the wrapper"
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -1933,6 +1976,8 @@ def test_owned_step_exits_with_a_signal_that_lands_outside_wait(tmp_path, task_c
         release.write_text("1\n", encoding="utf-8")
         assert proc.wait(timeout=10) == 130
         assert _pid_gone(descendant, timeout=3)
+        # ``wait`` already returned, so this signal must not start a timer.
+        assert _session_empty(proc.pid), "a process outlived the wrapper"
     finally:
         _release_owned(proc, release, descendant, pid_file)
 

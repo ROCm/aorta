@@ -155,13 +155,20 @@ _aorta_watcher=
 # process group so disarming it does not signal the wrapper or the task.
 # Call this only after ``$!`` has been saved: it backgrounds a job.
 # ``_aorta_arming`` stops a trap that fires inside this function from
-# starting a second timer.
+# starting a second timer. The escalator is checked again after the flag is
+# set, in case a trap armed one between the first check and the flag.
+# Every ``return`` here and in ``_aorta_stop`` and ``_aorta_gate`` says 0. In
+# bash 5.1 a bare ``return`` from a trap handler returns the status of the
+# command the trap interrupted, which under ``set -e`` ends the wrapper.
 _aorta_arm_kill() {
   if [ -n "${_aorta_wait_done}" ] || [ -n "${_aorta_escalator}" ] \\
     || [ -n "${_aorta_arming}" ]; then
-    return
+    return 0
   fi
   _aorta_arming=1
+  if [ -n "${_aorta_escalator}" ]; then
+    return 0
+  fi
   set -m
   (
     trap '' HUP INT TERM
@@ -174,7 +181,7 @@ _aorta_arm_kill() {
 _aorta_stop() {
   _aorta_signal=$1
   if [ -z "${_aorta_child}" ]; then
-    return
+    return 0
   fi
   kill -TERM -- "-$_aorta_child" 2>/dev/null || true
   if [ -n "${_aorta_pids_saved}" ]; then
@@ -186,7 +193,7 @@ _aorta_stop() {
 # this shell is parked outside ``wait``.
 _aorta_gate() {
   if [ -z "$1" ] || [ -z "$2" ]; then
-    return
+    return 0
   fi
   : > "$1"
   _aorta_gate_deadline=$((SECONDS + 30))
