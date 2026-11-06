@@ -860,8 +860,11 @@ def update_checks(
 #: directory belongs to another run.
 RUN_ARTIFACTS = ("wire.jsonl", "train-log.json", "train-log.json.partial",
                  "checkpoint-pre", "checkpoint-last", "checkpoint-best", "episodes",
+                 "checkpoint-pre.partial", "checkpoint-pre.previous",
                  "checkpoint-last.partial", "checkpoint-last.previous",
                  "checkpoint-best.partial", "checkpoint-best.previous")
+#: Per-iteration artifacts, by pattern: ``snapshot-itNNN`` and its ``.partial``/``.previous``.
+RUN_ARTIFACT_PATTERNS = ("snapshot-it*",)
 
 
 def publish_checkpoint(model: Any, tok: Any, dest: Path) -> None:
@@ -961,7 +964,8 @@ def check_output_dir(out: Path) -> str | None:
     existing directory to allow. An empty directory, or one holding other
     files, is fine.
     """
-    present = sorted(name for name in RUN_ARTIFACTS if (out / name).exists())
+    present = sorted({name for name in RUN_ARTIFACTS if (out / name).exists()}
+                     | {p.name for pattern in RUN_ARTIFACT_PATTERNS for p in out.glob(pattern)})
     if present:
         return (
             f"{out} already holds {present} from another run; give this run its own "
