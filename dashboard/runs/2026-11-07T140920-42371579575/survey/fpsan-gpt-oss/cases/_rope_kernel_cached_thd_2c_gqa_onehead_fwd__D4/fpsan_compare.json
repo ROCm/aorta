@@ -1,0 +1,199 @@
+{
+  "kernel": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+  "scenario": "D4",
+  "reference": {
+    "kernel": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+    "changes": [
+      "num_stages 2 -> 1"
+    ]
+  },
+  "sides": {
+    "reference": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd",
+      "tensors": [
+        {
+          "name": "arg0",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            64,
+            64
+          ],
+          "sha256": "83ea03bb0d3896359a70cfd785f7813b1bac9f1c601ecd052ea4c649e15f9ba9"
+        },
+        {
+          "name": "arg1",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            8,
+            64
+          ],
+          "sha256": "12f8cdccc9d7f8b47403cc4f4928c7a149cc6c60eea4e18fba6b2364f049d71f"
+        },
+        {
+          "name": "arg2",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            131072,
+            32
+          ],
+          "sha256": "d4601e21fbbdc2d5d35cf0a5e6cd2953368a7640dce3c140ff4cfd4ce638a1a5"
+        },
+        {
+          "name": "arg3",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            131072,
+            32
+          ],
+          "sha256": "ecf236cda32c31318769ef54b6f00f1627067118a2e8d70bae71e53cacc7f71a"
+        },
+        {
+          "name": "arg4",
+          "dtype": "torch.int64",
+          "shape": [
+            128
+          ],
+          "sha256": "adf6f5d4f969519f64ea80b50fae8b3568c09bb7b57c883a2143af14ebf5b693"
+        },
+        {
+          "name": "arg6",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            64,
+            64
+          ],
+          "sha256": "83ea03bb0d3896359a70cfd785f7813b1bac9f1c601ecd052ea4c649e15f9ba9"
+        },
+        {
+          "name": "arg7",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            8,
+            64
+          ],
+          "sha256": "12f8cdccc9d7f8b47403cc4f4928c7a149cc6c60eea4e18fba6b2364f049d71f"
+        }
+      ],
+      "kernel": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+      "seconds": 2.4,
+      "cache": {
+        "objects": [
+          {
+            "object": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd.hsaco",
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 14,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    },
+    "candidate": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd",
+      "tensors": [
+        {
+          "name": "arg0",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            64,
+            64
+          ],
+          "sha256": "83ea03bb0d3896359a70cfd785f7813b1bac9f1c601ecd052ea4c649e15f9ba9"
+        },
+        {
+          "name": "arg1",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            8,
+            64
+          ],
+          "sha256": "12f8cdccc9d7f8b47403cc4f4928c7a149cc6c60eea4e18fba6b2364f049d71f"
+        },
+        {
+          "name": "arg2",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            131072,
+            32
+          ],
+          "sha256": "d4601e21fbbdc2d5d35cf0a5e6cd2953368a7640dce3c140ff4cfd4ce638a1a5"
+        },
+        {
+          "name": "arg3",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            131072,
+            32
+          ],
+          "sha256": "ecf236cda32c31318769ef54b6f00f1627067118a2e8d70bae71e53cacc7f71a"
+        },
+        {
+          "name": "arg4",
+          "dtype": "torch.int64",
+          "shape": [
+            128
+          ],
+          "sha256": "adf6f5d4f969519f64ea80b50fae8b3568c09bb7b57c883a2143af14ebf5b693"
+        },
+        {
+          "name": "arg6",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            64,
+            64
+          ],
+          "sha256": "83ea03bb0d3896359a70cfd785f7813b1bac9f1c601ecd052ea4c649e15f9ba9"
+        },
+        {
+          "name": "arg7",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            8,
+            64
+          ],
+          "sha256": "12f8cdccc9d7f8b47403cc4f4928c7a149cc6c60eea4e18fba6b2364f049d71f"
+        }
+      ],
+      "kernel": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+      "seconds": 2.6,
+      "cache": {
+        "objects": [
+          {
+            "object": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd.hsaco",
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 14,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    }
+  },
+  "differing_tensors": [],
+  "result": {
+    "reference_digest": "ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd",
+    "candidate_digest": "ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd",
+    "reference_instrumented": true,
+    "candidate_instrumented": true,
+    "target": "gfx950"
+  },
+  "seconds": 5.1
+}

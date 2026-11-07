@@ -1,0 +1,167 @@
+{
+  "kernel": "_topk_topp_kernel",
+  "scenario": "C0",
+  "reference": {
+    "kernel": "_topk_topp_kernel",
+    "changes": [
+      "num_stages 2 -> 1"
+    ]
+  },
+  "sides": {
+    "reference": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+      "tensors": [
+        {
+          "name": "LOGITS",
+          "dtype": "torch.float32",
+          "shape": [
+            1024,
+            151936
+          ],
+          "sha256": "31ff53828d6022c87df4716b2f3f07e4803cb5f095cd6ba83f20eeddc9ae7657"
+        },
+        {
+          "name": "BUFFER",
+          "dtype": "torch.float32",
+          "shape": [
+            256,
+            151936
+          ],
+          "sha256": "ecd2d5337e92c69e6a0d8fe7b85ca88e7049c8e7fe9e745be29e2e26ec258deb"
+        },
+        {
+          "name": "PERCENTILE_TO_STD_TABLE",
+          "dtype": "torch.float32",
+          "shape": [
+            200
+          ],
+          "sha256": "840905c0587e72540f67ae3b01356560a3c07f0b89593938bad169b3180b738b"
+        },
+        {
+          "name": "NORMAL_CDF_TO_SIGMA_TABLE",
+          "dtype": "torch.float32",
+          "shape": [
+            200
+          ],
+          "sha256": "fd7e322ae2c0b839de4a0bf9d4293fbb9347f3905b46eff3b4f19d37f0560530"
+        },
+        {
+          "name": "K",
+          "dtype": "torch.int32",
+          "shape": [
+            1024
+          ],
+          "sha256": "081ab4d2cece4291abc31fbe12779d127a0f3af46931f0d278ff2abf99aa202a"
+        },
+        {
+          "name": "P",
+          "dtype": "torch.float32",
+          "shape": [
+            1024
+          ],
+          "sha256": "7b3f1e194411be99266f96cd1a2c0ddb747af4df9cbfd553638cf3db53642bc0"
+        }
+      ],
+      "kernel": "_topk_topp_kernel",
+      "seconds": 10.5,
+      "cache": {
+        "objects": [
+          {
+            "object": "_topk_topp_kernel.hsaco",
+            "name": "_topk_topp_kernel",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 443,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    },
+    "candidate": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+      "tensors": [
+        {
+          "name": "LOGITS",
+          "dtype": "torch.float32",
+          "shape": [
+            1024,
+            151936
+          ],
+          "sha256": "31ff53828d6022c87df4716b2f3f07e4803cb5f095cd6ba83f20eeddc9ae7657"
+        },
+        {
+          "name": "BUFFER",
+          "dtype": "torch.float32",
+          "shape": [
+            256,
+            151936
+          ],
+          "sha256": "ecd2d5337e92c69e6a0d8fe7b85ca88e7049c8e7fe9e745be29e2e26ec258deb"
+        },
+        {
+          "name": "PERCENTILE_TO_STD_TABLE",
+          "dtype": "torch.float32",
+          "shape": [
+            200
+          ],
+          "sha256": "840905c0587e72540f67ae3b01356560a3c07f0b89593938bad169b3180b738b"
+        },
+        {
+          "name": "NORMAL_CDF_TO_SIGMA_TABLE",
+          "dtype": "torch.float32",
+          "shape": [
+            200
+          ],
+          "sha256": "fd7e322ae2c0b839de4a0bf9d4293fbb9347f3905b46eff3b4f19d37f0560530"
+        },
+        {
+          "name": "K",
+          "dtype": "torch.int32",
+          "shape": [
+            1024
+          ],
+          "sha256": "081ab4d2cece4291abc31fbe12779d127a0f3af46931f0d278ff2abf99aa202a"
+        },
+        {
+          "name": "P",
+          "dtype": "torch.float32",
+          "shape": [
+            1024
+          ],
+          "sha256": "7b3f1e194411be99266f96cd1a2c0ddb747af4df9cbfd553638cf3db53642bc0"
+        }
+      ],
+      "kernel": "_topk_topp_kernel",
+      "seconds": 10.5,
+      "cache": {
+        "objects": [
+          {
+            "object": "_topk_topp_kernel.hsaco",
+            "name": "_topk_topp_kernel",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 443,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    }
+  },
+  "differing_tensors": [],
+  "result": {
+    "reference_digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+    "candidate_digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+    "reference_instrumented": true,
+    "candidate_instrumented": true,
+    "target": "gfx950"
+  },
+  "seconds": 21.0
+}

@@ -8,7 +8,7 @@
         "group": "gpt-oss",
         "label": "fpsan-gpt-oss",
         "name": "fpsan-gpt-oss",
-        "report_rel": "runs/2026-11-06T141021-42216230928/survey/fpsan-gpt-oss/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/survey/fpsan-gpt-oss/sanitizer_report.json",
         "sanitizer": "fpsan",
         "staged": true,
         "summary": {
@@ -1428,7 +1428,7 @@
         "group": "qwen3",
         "label": "fpsan-qwen3",
         "name": "fpsan-qwen3",
-        "report_rel": "runs/2026-11-06T141021-42216230928/survey/fpsan-qwen3/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/survey/fpsan-qwen3/sanitizer_report.json",
         "sanitizer": "fpsan",
         "staged": true,
         "summary": {
@@ -1522,13 +1522,13 @@
       ],
       "commit": "ac11f84616a8",
       "commit_full": "ac11f84616a8bf7cc475e455bfb4a7ae250d4928",
-      "date": "2026-11-06T14:10:21+00:00",
+      "date": "2026-11-07T14:09:20+00:00",
       "gate": true,
       "gpu": "gfx950",
-      "run": "2026-11-06T141021-42216230928",
-      "run_url": "https://github.com/ROCm/aorta/actions/runs/42216230928"
+      "run": "2026-11-07T140920-42371579575",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/42371579575"
     },
-    "rel": "runs/2026-11-06T141021-42216230928",
+    "rel": "runs/2026-11-07T140920-42371579575",
     "rows": {
       "consan-clean": {
         "backend": null,
@@ -1561,7 +1561,7 @@
           "sanitizer": "consan",
           "verdict": "pass"
         },
-        "report_rel": "runs/2026-11-06T141021-42216230928/consan-clean/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
           "kernel_count": 1,
@@ -1579,7 +1579,7 @@
           {
             "code": "sampled_conflict",
             "count": 1,
-            "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=101274488023888 first_index=4 second_index=15 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 gener\u2026",
+            "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=105804328241424 first_index=2 second_index=13 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 gener\u2026",
             "sanitizer": "consan",
             "severity": "race"
           }
@@ -1608,7 +1608,7 @@
           "sanitizer": "consan",
           "verdict": "fail"
         },
-        "report_rel": "runs/2026-11-06T141021-42216230928/consan-racy/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
           "kernel_count": 1,
@@ -1658,7 +1658,7 @@
           "sanitizer": "fpsan",
           "verdict": "pass"
         },
-        "report_rel": "runs/2026-11-06T141021-42216230928/fpsan-match/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/fpsan-match/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
           "kernel_count": 1,
@@ -1716,7 +1716,7 @@
           "sanitizer": "fpsan",
           "verdict": "fail"
         },
-        "report_rel": "runs/2026-11-06T141021-42216230928/fpsan-mismatch/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/fpsan-mismatch/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
           "kernel_count": 1,
@@ -1788,7 +1788,7 @@
           "sanitizer": "waitcheck",
           "verdict": "warn"
         },
-        "report_rel": "runs/2026-11-06T141021-42216230928/waitcheck/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
           "kernel_count": 3,
@@ -1805,7 +1805,7 @@
         "group": "gemm",
         "label": "consan-gemm",
         "name": "consan-gemm",
-        "report_rel": "runs/2026-11-06T141021-42216230928/survey/consan-gemm/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/survey/consan-gemm/sanitizer_report.json",
         "sanitizer": "consan",
         "staged": true,
         "summary": {
@@ -1864,31 +1864,31 @@
         "group": "gpt-oss",
         "label": "consan-gpt-oss",
         "name": "consan-gpt-oss",
-        "report_rel": "runs/2026-11-06T141021-42216230928/survey/consan-gpt-oss/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/survey/consan-gpt-oss/sanitizer_report.json",
         "sanitizer": "consan",
         "staged": true,
         "summary": {
           "backend": null,
-          "coverage": "0/0, 6/6, 0/0, 16/16, 0/0, 282/282, 0/0, 27/27, 0/0, 27/27, 0/0, 18/18, 0/0, 13/13, 0/0, 0/0, 0/0, 0/0, 0/0, 4/4, 0/0, 2/2, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 40/40, 0/0, 34/34, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 4/4, 0/0, 20/20, 0/0, 0/0, 0/0, 6/6",
+          "coverage": "0/0, 16/16, 0/0, 282/282, 0/0, 27/27, 0/0, 27/27, 0/0, 18/18, 0/0, 13/13, 0/0, 0/0, 0/0, 0/0, 0/0, 4/4, 0/0, 2/2, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 40/40, 0/0, 34/34, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 0/0, 4/4, 0/0, 20/20, 0/0, 0/0, 0/0, 6/6, 0/0, 6/6",
           "execution": "complete",
           "expected": null,
           "finding_groups": [
             {
               "code": "sampled_conflict",
-              "count": 45,
-              "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=807825888 first_index=113 second_index=115 first_kind=2 second_kind=2 first_owner=1 second_owner=3 epoch=8 generati\u2026",
+              "count": 46,
+              "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=639974640 first_index=112 second_index=118 first_kind=2 second_kind=2 first_owner=1 second_owner=3 epoch=8 generati\u2026",
               "sanitizer": "consan",
               "severity": "race"
             },
             {
               "code": "sampled_conflict_summary",
               "count": 2,
-              "example": "ConSan conflict count reported by the summary only: reader=1189232384 counted 80 with 8 example record(s) logged",
+              "example": "ConSan conflict count reported by the summary only: reader=792969760 counted 80 with 8 example record(s) logged",
               "sanitizer": "consan",
               "severity": "race"
             }
           ],
-          "findings": 47,
+          "findings": 48,
           "kernel_reasons": [
             {
               "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_combine_sampled_and_draft_tokens_kernel__P1/dispatched.hsaco",
@@ -1973,17 +1973,6 @@
             }
           ],
           "kernels": [
-            {
-              "code_object": "dispatched.hsaco",
-              "detail": "",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "_swiglu_bf16xbf16_16x128",
-              "offset": null,
-              "sha": "6860ae4cbc",
-              "time_ms": 0.0,
-              "verdict": "pass"
-            },
             {
               "code_object": "dispatched.hsaco",
               "detail": "",
@@ -2219,16 +2208,27 @@
               "code_object": "dispatched.hsaco",
               "detail": "",
               "dispatch": 1,
-              "findings": 2,
+              "findings": 3,
               "name": "_stage2_pow2",
               "offset": null,
               "sha": "e6acd0c33b",
               "time_ms": 0.0,
               "verdict": "fail"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_swiglu_bf16xbf16_16x128",
+              "offset": null,
+              "sha": "6860ae4cbc",
+              "time_ms": 0.0,
+              "verdict": "pass"
             }
           ],
           "match": true,
-          "observation": "consan fail; _combine_sampled_and_draft_tokens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _compute_slot_mappings_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _gather_block_tables_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _get_num_sampled_and_rejected_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _masked_compaction: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _post_update_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_pos_seq_lens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_prefill_inputs_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _rope_kernel_cached_thd_2c_gqa_onehead_fwd: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object; 47 finding(s) (sampled_conflict); preflight pass",
+          "observation": "consan fail; _combine_sampled_and_draft_tokens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _compute_slot_mappings_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _gather_block_tables_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _get_num_sampled_and_rejected_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _masked_compaction: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _post_update_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_pos_seq_lens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_prefill_inputs_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _rope_kernel_cached_thd_2c_gqa_onehead_fwd: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object; 48 finding(s) (sampled_conflict); preflight pass",
           "present": true,
           "primary": {
             "preflight": "pass",
@@ -2252,12 +2252,12 @@
         "group": "qwen3",
         "label": "consan-qwen3",
         "name": "consan-qwen3",
-        "report_rel": "runs/2026-11-06T141021-42216230928/survey/consan-qwen3/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/survey/consan-qwen3/sanitizer_report.json",
         "sanitizer": "consan",
         "staged": true,
         "summary": {
           "backend": null,
-          "coverage": "0/0, 0/0, 0/0, 172/172",
+          "coverage": "0/0, 172/172, 0/0, 0/0",
           "execution": "partial",
           "expected": null,
           "finding_groups": [],
@@ -2276,17 +2276,6 @@
           "kernels": [
             {
               "code_object": "dispatched.hsaco",
-              "detail": "consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "_compute_slot_mapping_kernel",
-              "offset": null,
-              "sha": "2b4432007a",
-              "time_ms": 0.0,
-              "verdict": "not_checked"
-            },
-            {
-              "code_object": "dispatched.hsaco",
               "detail": "",
               "dispatch": 1,
               "findings": 0,
@@ -2295,6 +2284,17 @@
               "sha": "336ef011aa",
               "time_ms": 0.0,
               "verdict": "pass"
+            },
+            {
+              "code_object": "dispatched.hsaco",
+              "detail": "consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "_compute_slot_mapping_kernel",
+              "offset": null,
+              "sha": "2b4432007a",
+              "time_ms": 0.0,
+              "verdict": "not_checked"
             }
           ],
           "match": true,
@@ -2322,7 +2322,7 @@
         "group": "gemm",
         "label": "waitcheck-gemm",
         "name": "waitcheck-gemm",
-        "report_rel": "runs/2026-11-06T141021-42216230928/survey/waitcheck-gemm/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/survey/waitcheck-gemm/sanitizer_report.json",
         "sanitizer": "waitcheck",
         "staged": true,
         "summary": {
@@ -2382,7 +2382,7 @@
         "group": "gpt-oss",
         "label": "waitcheck-gpt-oss",
         "name": "waitcheck-gpt-oss",
-        "report_rel": "runs/2026-11-06T141021-42216230928/survey/waitcheck-gpt-oss/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/survey/waitcheck-gpt-oss/sanitizer_report.json",
         "sanitizer": "waitcheck",
         "staged": true,
         "summary": {
@@ -3028,7 +3028,7 @@
         "group": "qwen3",
         "label": "waitcheck-qwen3",
         "name": "waitcheck-qwen3",
-        "report_rel": "runs/2026-11-06T141021-42216230928/survey/waitcheck-qwen3/sanitizer_report.json",
+        "report_rel": "runs/2026-11-07T140920-42371579575/survey/waitcheck-qwen3/sanitizer_report.json",
         "sanitizer": "waitcheck",
         "staged": true,
         "summary": {
@@ -3096,6 +3096,294 @@
         "workload": null
       }
     ]
+  },
+  {
+    "gate": true,
+    "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy",
+        "fpsan-match",
+        "fpsan-mismatch"
+      ],
+      "commit": "ac11f84616a8",
+      "commit_full": "ac11f84616a8bf7cc475e455bfb4a7ae250d4928",
+      "date": "2026-11-06T14:10:21+00:00",
+      "gate": true,
+      "gpu": "gfx950",
+      "run": "2026-11-06T141021-42216230928",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/42216230928"
+    },
+    "rel": "runs/2026-11-06T141021-42216230928",
+    "rows": {
+      "consan-clean": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 0,
+            "name": "consan_lds_race",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "pass"
+          }
+        ],
+        "match": true,
+        "observation": "consan pass; preflight pass",
+        "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
+        "report_rel": "runs/2026-11-06T141021-42216230928/consan-clean/sanitizer_report.json",
+        "verdict": "pass",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "consan-racy": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
+        "expected": "fail",
+        "finding_groups": [
+          {
+            "code": "sampled_conflict",
+            "count": 1,
+            "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=101274488023888 first_index=4 second_index=15 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 gener\u2026",
+            "sanitizer": "consan",
+            "severity": "race"
+          }
+        ],
+        "findings": 1,
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 1,
+            "name": "consan_lds_race_2wave",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "fail"
+          }
+        ],
+        "match": true,
+        "observation": "consan fail; 1 finding(s) (sampled_conflict); preflight pass",
+        "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
+        "report_rel": "runs/2026-11-06T141021-42216230928/consan-racy/sanitizer_report.json",
+        "verdict": "fail",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "complete",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "fpsan_pairs": [
+          {
+            "candidate_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+            "candidate_instrumented": "true",
+            "name": "row_dot",
+            "reason": "",
+            "reference_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+            "reference_instrumented": "true",
+            "verdict": "pass"
+          }
+        ],
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 0,
+            "name": "row_dot",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "pass"
+          }
+        ],
+        "match": true,
+        "observation": "fpsan pass",
+        "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "fpsan",
+          "verdict": "pass"
+        },
+        "report_rel": "runs/2026-11-06T141021-42216230928/fpsan-match/sanitizer_report.json",
+        "verdict": "pass",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "complete",
+        "expected": "fail",
+        "finding_groups": [
+          {
+            "code": "fpsan_digest_mismatch",
+            "count": 1,
+            "example": "reference and candidate kernels disagree under FpSan: reference digest 53b41a29b1abfb54... != candidate digest b85f98818a3ebb61...",
+            "sanitizer": "fpsan",
+            "severity": "error"
+          }
+        ],
+        "findings": 1,
+        "fpsan_pairs": [
+          {
+            "candidate_digest": "b85f98818a3ebb611e8d408f086c5faea0df97a8009640f10b5e694286681f24",
+            "candidate_instrumented": "true",
+            "name": "row_dot_no_accumulate",
+            "reason": "fpsan_digest_mismatch",
+            "reference_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+            "reference_instrumented": "true",
+            "verdict": "fail"
+          }
+        ],
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 1,
+            "name": "row_dot_no_accumulate",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "fail"
+          }
+        ],
+        "match": true,
+        "observation": "fpsan fail; reason fpsan_digest_mismatch; 1 finding(s) (fpsan_digest_mismatch)",
+        "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": "fpsan_digest_mismatch",
+          "sanitizer": "fpsan",
+          "verdict": "fail"
+        },
+        "report_rel": "runs/2026-11-06T141021-42216230928/fpsan-mismatch/sanitizer_report.json",
+        "verdict": "fail",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "waitcheck": {
+        "backend": {
+          "name": "rj_waitcheck",
+          "sha": "2c406bcc3be3"
+        },
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "complete",
+        "expected": "warn",
+        "finding_groups": [
+          {
+            "code": "wait_hazard",
+            "count": 64,
+            "example": "sol_126578.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20",
+            "sanitizer": "waitcheck",
+            "severity": "warning"
+          }
+        ],
+        "findings": 64,
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "sol_126578.hsaco",
+            "detail": "",
+            "dispatch": 479,
+            "findings": 32,
+            "name": "gemm_NT_M256_N4096_K1024",
+            "offset": null,
+            "sha": "57c5d8efa4",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          },
+          {
+            "code_object": "sol_175415.hsaco",
+            "detail": "same code object as gemm_NT_M256_N4096_K1024; scanned once",
+            "dispatch": 471,
+            "findings": 0,
+            "name": "gemm_NT_M128_N4096_K1280",
+            "offset": null,
+            "sha": "57c5d8efa4",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          },
+          {
+            "code_object": "sol_137678.hsaco",
+            "detail": "",
+            "dispatch": 440,
+            "findings": 32,
+            "name": "gemm_TT_M64_N64_K1280",
+            "offset": null,
+            "sha": "aeb46fded1",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          }
+        ],
+        "match": true,
+        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
+        "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
+        "report_rel": "runs/2026-11-06T141021-42216230928/waitcheck/sanitizer_report.json",
+        "verdict": "warn",
+        "worklist": {
+          "kernel_count": 3,
+          "requirement": "top_dispatch_count",
+          "top_n": 3
+        }
+      }
+    }
   },
   {
     "gate": true,
@@ -9766,240 +10054,6 @@
           "kernel_count": 0,
           "requirement": null,
           "top_n": null
-        }
-      }
-    }
-  },
-  {
-    "gate": true,
-    "meta": {
-      "cases": [
-        "waitcheck",
-        "consan-clean",
-        "consan-racy"
-      ],
-      "commit": "bf117600ca07",
-      "commit_full": "bf117600ca0754ec60d680a3de2ad5db6a89fcde",
-      "date": "2026-10-12T14:27:44+00:00",
-      "gate": true,
-      "gpu": "gfx950",
-      "run": "2026-10-12T142744-38250297996",
-      "run_url": "https://github.com/ROCm/aorta/actions/runs/38250297996"
-    },
-    "rel": "runs/2026-10-12T142744-38250297996",
-    "rows": {
-      "consan-clean": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "0/0, 2/2",
-        "execution": "complete",
-        "expected": "pass",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "",
-            "dispatch": 1,
-            "findings": 0,
-            "name": "consan_lds_race",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "pass"
-          }
-        ],
-        "match": true,
-        "observation": "consan pass; preflight pass",
-        "present": true,
-        "primary": {
-          "preflight": "pass",
-          "reason": null,
-          "sanitizer": "consan",
-          "verdict": "pass"
-        },
-        "report_rel": "runs/2026-10-12T142744-38250297996/consan-clean/sanitizer_report.json",
-        "verdict": "pass",
-        "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
-        }
-      },
-      "consan-racy": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "0/0, 2/2",
-        "execution": "complete",
-        "expected": "fail",
-        "finding_groups": [
-          {
-            "code": "sampled_conflict",
-            "count": 1,
-            "example": "[rocjitsu-dbi-hooks] ConSan conflict reader=107938137836912 first_index=4 second_index=15 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 gener\u2026",
-            "sanitizer": "consan",
-            "severity": "race"
-          }
-        ],
-        "findings": 1,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "",
-            "dispatch": 1,
-            "findings": 1,
-            "name": "consan_lds_race_2wave",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "fail"
-          }
-        ],
-        "match": true,
-        "observation": "consan fail; 1 finding(s) (sampled_conflict); preflight pass",
-        "present": true,
-        "primary": {
-          "preflight": "pass",
-          "reason": null,
-          "sanitizer": "consan",
-          "verdict": "fail"
-        },
-        "report_rel": "runs/2026-10-12T142744-38250297996/consan-racy/sanitizer_report.json",
-        "verdict": "fail",
-        "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
-        }
-      },
-      "fpsan-match": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "not run",
-        "expected": "pass",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [],
-        "kernels": [],
-        "match": true,
-        "observation": "not run: this control was added after this run",
-        "present": false,
-        "primary": {
-          "preflight": null,
-          "reason": null,
-          "sanitizer": null,
-          "verdict": null
-        },
-        "report_rel": null,
-        "required": false,
-        "verdict": "\u2014",
-        "worklist": {
-          "kernel_count": 0,
-          "requirement": null,
-          "top_n": null
-        }
-      },
-      "fpsan-mismatch": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "not run",
-        "expected": "fail",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [],
-        "kernels": [],
-        "match": true,
-        "observation": "not run: this control was added after this run",
-        "present": false,
-        "primary": {
-          "preflight": null,
-          "reason": null,
-          "sanitizer": null,
-          "verdict": null
-        },
-        "report_rel": null,
-        "required": false,
-        "verdict": "\u2014",
-        "worklist": {
-          "kernel_count": 0,
-          "requirement": null,
-          "top_n": null
-        }
-      },
-      "waitcheck": {
-        "backend": {
-          "name": "rj_waitcheck",
-          "sha": "2c406bcc3be3"
-        },
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "complete",
-        "expected": "warn",
-        "finding_groups": [
-          {
-            "code": "wait_hazard",
-            "count": 64,
-            "example": "sol_126578.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20",
-            "sanitizer": "waitcheck",
-            "severity": "warning"
-          }
-        ],
-        "findings": 64,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "sol_126578.hsaco",
-            "detail": "",
-            "dispatch": 479,
-            "findings": 32,
-            "name": "gemm_NT_M256_N4096_K1024",
-            "offset": null,
-            "sha": "57c5d8efa4",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_175415.hsaco",
-            "detail": "same code object as gemm_NT_M256_N4096_K1024; scanned once",
-            "dispatch": 471,
-            "findings": 0,
-            "name": "gemm_NT_M128_N4096_K1280",
-            "offset": null,
-            "sha": "57c5d8efa4",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_137678.hsaco",
-            "detail": "",
-            "dispatch": 440,
-            "findings": 32,
-            "name": "gemm_TT_M64_N64_K1280",
-            "offset": null,
-            "sha": "aeb46fded1",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          }
-        ],
-        "match": true,
-        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
-        "present": true,
-        "primary": {
-          "preflight": null,
-          "reason": null,
-          "sanitizer": "waitcheck",
-          "verdict": "warn"
-        },
-        "report_rel": "runs/2026-10-12T142744-38250297996/waitcheck/sanitizer_report.json",
-        "verdict": "warn",
-        "worklist": {
-          "kernel_count": 3,
-          "requirement": "top_dispatch_count",
-          "top_n": 3
         }
       }
     }
