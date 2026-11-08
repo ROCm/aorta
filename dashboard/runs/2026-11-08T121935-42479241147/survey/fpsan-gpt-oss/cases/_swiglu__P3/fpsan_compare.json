@@ -1,0 +1,119 @@
+{
+  "kernel": "_swiglu",
+  "scenario": "P3",
+  "reference": {
+    "kernel": "_swiglu",
+    "changes": [
+      "num_stages 2 -> 1"
+    ]
+  },
+  "sides": {
+    "reference": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d",
+      "tensors": [
+        {
+          "name": "arg0",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            2668,
+            3072
+          ],
+          "sha256": "d535a0fc94750f2c547ea6cfb90f64fef9f8183af057a11aad08f8f0f8931403"
+        },
+        {
+          "name": "arg4",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            2668,
+            6144
+          ],
+          "sha256": "e0b786698cb77b316c4a572b73b908149a74f0012866244ce4ef2760d041a4e0"
+        },
+        {
+          "name": "arg14",
+          "dtype": "torch.int32",
+          "shape": [
+            1
+          ],
+          "sha256": "237166537f71723978b512a7dce6cdc7565909f1c08cde214b7ed789dd38e2fa"
+        }
+      ],
+      "kernel": "_swiglu",
+      "seconds": 2.4,
+      "cache": {
+        "objects": [
+          {
+            "object": "_swiglu.hsaco",
+            "name": "_swiglu_bf16xbf16_16x128",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 18,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    },
+    "candidate": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d",
+      "tensors": [
+        {
+          "name": "arg0",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            2668,
+            3072
+          ],
+          "sha256": "d535a0fc94750f2c547ea6cfb90f64fef9f8183af057a11aad08f8f0f8931403"
+        },
+        {
+          "name": "arg4",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            2668,
+            6144
+          ],
+          "sha256": "e0b786698cb77b316c4a572b73b908149a74f0012866244ce4ef2760d041a4e0"
+        },
+        {
+          "name": "arg14",
+          "dtype": "torch.int32",
+          "shape": [
+            1
+          ],
+          "sha256": "237166537f71723978b512a7dce6cdc7565909f1c08cde214b7ed789dd38e2fa"
+        }
+      ],
+      "kernel": "_swiglu",
+      "seconds": 2.6,
+      "cache": {
+        "objects": [
+          {
+            "object": "_swiglu.hsaco",
+            "name": "_swiglu_bf16xbf16_16x128",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 18,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    }
+  },
+  "differing_tensors": [],
+  "result": {
+    "reference_digest": "ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d",
+    "candidate_digest": "ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d",
+    "reference_instrumented": true,
+    "candidate_instrumented": true,
+    "target": "gfx950"
+  },
+  "seconds": 5.0
+}

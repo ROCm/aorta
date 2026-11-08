@@ -1,0 +1,119 @@
+{
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "overall_verdict": "pass",
+  "execution_status": "complete",
+  "worklist": {
+    "schema": "aorta.kernel_worklist/0.1",
+    "requirement": "top_dispatch_count",
+    "top_n": 2,
+    "kernel_count": 2,
+    "kernels": [
+      {
+        "identity": {
+          "name": "_topk_topp_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_topk_topp_kernel__C0/dispatched.hsaco",
+          "code_object_sha256": "0673f020203c471d1b6a7ff515b50e68a9d318866950031fb626fe4117ad1f3f",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fwd_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_fwd_kernel__C0/dispatched.hsaco",
+          "code_object_sha256": "336ef011aa1ac84be3ecafe614eb3cbe9a3022995b0c31da6113dbec7d38473b",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      }
+    ]
+  },
+  "checks": [
+    {
+      "sanitizer": "fpsan",
+      "state": "ran",
+      "verdict": "pass",
+      "reason": null,
+      "returncode": null,
+      "findings": [],
+      "kernel_results": [
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_topk_topp_kernel__C0/dispatched.hsaco",
+            "code_object_sha256": "0673f020203c471d1b6a7ff515b50e68a9d318866950031fb626fe4117ad1f3f",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fwd_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_fwd_kernel__C0/dispatched.hsaco",
+            "code_object_sha256": "336ef011aa1ac84be3ecafe614eb3cbe9a3022995b0c31da6113dbec7d38473b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fwd_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/qwen3/cases/_fwd_kernel__C1/dispatched.hsaco",
+            "code_object_sha256": "336ef011aa1ac84be3ecafe614eb3cbe9a3022995b0c31da6113dbec7d38473b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        }
+      ],
+      "coverage": [],
+      "backend": {
+        "_fwd_kernel/C0.candidate_digest": "dba12a952bdea343f9944e2680594bb8c18a78f5d7f4de2d691e73c45cb7c2a8",
+        "_fwd_kernel/C0.reference_digest": "dba12a952bdea343f9944e2680594bb8c18a78f5d7f4de2d691e73c45cb7c2a8",
+        "_fwd_kernel/C0.verdict": "pass",
+        "_fwd_kernel/C1.candidate_digest": "3929fc52b083d4e078c140e3772c5ce1ccf865f6ad974f36c2ad1804f01cd0a5",
+        "_fwd_kernel/C1.reference_digest": "3929fc52b083d4e078c140e3772c5ce1ccf865f6ad974f36c2ad1804f01cd0a5",
+        "_fwd_kernel/C1.verdict": "pass",
+        "_topk_topp_kernel/C0.candidate_digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+        "_topk_topp_kernel/C0.reference_digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+        "_topk_topp_kernel/C0.verdict": "pass",
+        "result_marker": "AORTA_FPSAN_RESULT",
+        "triton_instrumentation_mode": "fpsan"
+      },
+      "diagnostics_truncated": false
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "model": "qwen3",
+  "inventory": "qwen3.yaml",
+  "night": "2026-11-08",
+  "budget_seconds": 3600,
+  "case_timeout_seconds": 900,
+  "ran": [
+    {
+      "kernel": "_topk_topp_kernel",
+      "scenario": "C0",
+      "returncode": 0,
+      "verdict": "pass",
+      "reference": {
+        "kernel": "_topk_topp_kernel",
+        "changes": [
+          "num_stages 2 -> 1"
+        ]
+      },
+      "driver_error": null,
+      "differing_tensors": [],
+      "seconds": 21.5,
+      "reference_digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+      "candidate_digest": "a7f866a7262c7c7eac4d92dc9d4c4ccd0adcd766bafad910a740344a8efe6d7c",
+      "reference_instrumented": true,
+      "candidate_instrumented": true,
+      "target": "gfx950"
+    },
+    {
+      "kernel": "_fwd_kernel",
+      "scenario": "C0",
+      "returncode": 0,
+      "verdict": "pass",
+      "reference": {
+        "kernel": "_fwd_kernel",
+        "changes": [
+          "num_warps 4 -> 8"
+        ]
+      },
+      "driver_error": null,
+      "differing_tensors": [],
+      "seconds": 27.8,
+      "reference_digest": "dba12a952bdea343f9944e2680594bb8c18a78f5d7f4de2d691e73c45cb7c2a8",
+      "candidate_digest": "dba12a952bdea343f9944e2680594bb8c18a78f5d7f4de2d691e73c45cb7c2a8",
+      "reference_instrumented": true,
+      "candidate_instrumented": true,
+      "target": "gfx950"
+    },
+    {
+      "kernel": "_fwd_kernel",
+      "scenario": "C1",
+      "returncode": 0,
+      "verdict": "pass",
+      "reference": {
+        "kernel": "_fwd_kernel",
+        "changes": [
+          "num_warps 4 -> 8"
+        ]
+      },
+      "driver_error": null,
+      "differing_tensors": [],
+      "seconds": 28.5,
+      "reference_digest": "3929fc52b083d4e078c140e3772c5ce1ccf865f6ad974f36c2ad1804f01cd0a5",
+      "candidate_digest": "3929fc52b083d4e078c140e3772c5ce1ccf865f6ad974f36c2ad1804f01cd0a5",
+      "reference_instrumented": true,
+      "candidate_instrumented": true,
+      "target": "gfx950"
+    }
+  ],
+  "not_scheduled_tonight": [],
+  "excluded": {
+    "_compute_slot_mapping_kernel": "integer-only slot mapping; FpSan has no floating-point op to rewrite"
+  },
+  "not_launched": {}
+}
