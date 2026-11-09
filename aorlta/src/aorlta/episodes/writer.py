@@ -1,0 +1,274 @@
+"""Write semantics of the run's records (design Section 6.8; Section 5 item 6).
+
+- **Per-iteration files** (`episodes.jsonl`, `summary.json`, `spans.jsonl`) are written into
+  `iterations/iter-<n>.partial/` and the directory is renamed to `iterations/iter-<n>/` when the iteration
+  completes. Readers list and open only renamed directories, so a partial iteration is invisible to them.
+- **Ledgers** (`ledgers/*.jsonl`: spans, ASan, score batches, controls, eval events) are append-only JSONL, one
+  canonical-JSON record per line, fsynced after each batch. Every record names its iteration, so a resume can cut
+  a ledger back to the iterations that were committed.
+- **The evidence store** (`evidence/`) holds raw stderr and sanitizer logs, content-addressed by sha256, with a
+  sha256 manifest. It is created owner-only (0700 / 0600): it may hold partner data, which never goes to logs.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import threading
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import Any
+
+from ..atomic import PARTIAL_SUFFIX, atomic_write_bytes, atomic_write_json, read_text
+from ..ids import canonical_json
+from ..spans import Span
+from .schema import EpisodeError, validate_episode, validate_summary
+
+ITERATIONS_DIR, LEDGERS_DIR, EVIDENCE_DIR = "iterations", "ledgers", "evidence"
+EPISODES_NAME, SUMMARY_NAME, SPANS_NAME = "episodes.jsonl", "summary.json", "spans.jsonl"
+ITER_RE = re.compile(r"iter-([0-9]{6})")
+
+
+def iteration_dir_name(n: int) -> str:
+    if not (isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= 999_999):
+        raise ValueError(f"iteration must be an int in [1, 999999], got {n!r}")
+    return f"iter-{n:06d}"
+
+
+def _fsync(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError:
+        if not path.is_dir():
+            raise
+    finally:
+        os.close(fd)
+
+
+def jsonl_bytes(records: Iterable[Any]) -> bytes:
+    return b"".join(canonical_json(r) + b"\n" for r in records)
+
+
+class IterationOutputs:
+    """The outputs of one iteration, invisible until `commit`. A leftover `.partial` (from a crash) is refused, not
+    reused: resume removes it first, so a re-run iteration can never add to what a dead process wrote."""
+
+    def __init__(self, run_dir: Path, n: int):
+        self.n = n
+        self.root = Path(run_dir) / ITERATIONS_DIR
+        name = iteration_dir_name(n)
+        self.final = self.root / name
+        self.partial = self.root / (name + PARTIAL_SUFFIX)
+        if self.final.exists():
+            raise FileExistsError(f"{self.final} exists: iteration {n} is already committed")
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.partial.mkdir()
+        self.committed = False
+
+    def write_episodes(self, records: Sequence[dict]) -> Path:
+        ids = [r.get("chain_id") for r in records]
+        if len(set(ids)) != len(ids):
+            raise EpisodeError(f"iteration {self.n}: a chain id appears twice")
+        for r in records:
+            validate_episode(r)
+            if r["iteration"] != self.n:
+                raise EpisodeError(f"{r['chain_id']}: iteration {r['iteration']} written into iteration {self.n}")
+        return atomic_write_bytes(self.partial / EPISODES_NAME, jsonl_bytes(sorted(records, key=lambda r: r["chain_id"])))
+
+    def write_summary(self, summary: dict) -> Path:
+        validate_summary(summary)
+        return atomic_write_json(self.partial / SUMMARY_NAME, summary)
+
+    def write_spans(self, spans: Sequence[Span]) -> Path:
+        return atomic_write_bytes(self.partial / SPANS_NAME, jsonl_bytes(s.to_json() for s in spans))
+
+    def write_json(self, name: str, obj: Any) -> Path:
+        return atomic_write_json(self.partial / name, obj)
+
+    def commit(self) -> Path:
+        for p in self.partial.iterdir():
+            _fsync(p)
+        _fsync(self.partial)
+        os.replace(self.partial, self.final)
+        _fsync(self.root)
+        self.committed = True
+        return self.final
+
+
+def complete_iterations(run_dir: Path) -> list[int]:
+    root = Path(run_dir) / ITERATIONS_DIR
+    if not root.is_dir():
+        return []
+    return sorted(int(m.group(1)) for p in root.iterdir() if p.is_dir() and (m := ITER_RE.fullmatch(p.name)))
+
+
+def _iteration_path(run_dir: Path, n: int) -> Path:
+    path = Path(run_dir) / ITERATIONS_DIR / iteration_dir_name(n)
+    if not path.is_dir():
+        raise FileNotFoundError(f"iteration {n} is not complete: no {path}")
+    return path
+
+
+def read_episodes(run_dir: Path, n: int) -> list[dict]:
+    out = []
+    for i, line in enumerate(read_text(_iteration_path(run_dir, n) / EPISODES_NAME).splitlines(), 1):
+        rec = json.loads(line)
+        validate_episode(rec)
+        out.append(rec)
+    return out
+
+
+def read_summary(run_dir: Path, n: int) -> dict:
+    summary = json.loads(read_text(_iteration_path(run_dir, n) / SUMMARY_NAME))
+    validate_summary(summary)
+    return summary
+
+
+# --- ledgers ---------------------------------------------------------------------------------------------------
+
+
+class LedgerError(ValueError):
+    pass
+
+
+class AppendLedger:
+    """Append-only JSONL. `append` writes one batch and fsyncs it. `read` skips a torn final line (a write the crash
+    cut short) and refuses a bad line anywhere else. `truncate_after(n)` keeps the records of iterations <= n."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._lock = threading.Lock()
+
+    def append(self, records: Sequence[dict]) -> None:
+        if not records:
+            return
+        for r in records:
+            it = r.get("iteration") if isinstance(r, dict) else None
+            if not (isinstance(it, int) and not isinstance(it, bool) and it >= 0):
+                raise LedgerError(f"{self.path.name}: every record names its iteration (an int >= 0), got {r!r:.120}")
+        data = jsonl_bytes(records)
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "ab") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+
+    def read(self) -> list[dict]:
+        if not self.path.exists():
+            return []
+        raw = self.path.read_bytes()
+        lines = raw.split(b"\n")
+        torn = lines.pop() if lines else b""  # the bytes after the last newline: empty unless a write was cut
+        out = []
+        for i, line in enumerate(lines, 1):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                raise LedgerError(f"{self.path}:{i}: not a JSON record") from None
+            out.append(rec)
+        if torn:
+            try:
+                out.append(json.loads(torn))  # a complete record that only lacks its newline
+            except ValueError:
+                pass
+        return out
+
+    def truncate_after(self, n: int) -> int:
+        """Keep the records of iterations <= n (and drop a torn line); return how many were dropped."""
+        if not self.path.exists():
+            return 0
+        lines = self.path.read_bytes().split(b"\n")
+        kept, dropped = [], 0
+        for line in lines:
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                keep = isinstance(rec, dict) and isinstance(rec.get("iteration"), int) and rec["iteration"] <= n
+            except ValueError:
+                keep = False
+            if keep:
+                kept.append(line + b"\n")
+            else:
+                dropped += 1
+        if dropped:
+            with self._lock:
+                atomic_write_bytes(self.path, b"".join(kept))
+        return dropped
+
+
+# --- the sealed evidence store -----------------------------------------------------------------------------------
+
+
+class EvidenceStore:
+    """Raw artifacts, content-addressed: `blobs/<sha[:2]>/<sha>`, with `MANIFEST.jsonl` (sha256, size, kind,
+    iteration per blob). Owner-only permissions."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.blobs = self.root / "blobs"
+        self.manifest = AppendLedger(self.root / "MANIFEST.jsonl")
+        self._lock = threading.Lock()
+        old = os.umask(0o077)
+        try:
+            self.blobs.mkdir(parents=True, exist_ok=True)
+        finally:
+            os.umask(old)
+        os.chmod(self.root, 0o700)
+        os.chmod(self.blobs, 0o700)
+
+    def path_of(self, sha: str) -> Path:
+        return self.blobs / sha[:2] / sha
+
+    def put(self, data: bytes, *, kind: str, iteration: int) -> str:
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("evidence is bytes")
+        sha = hashlib.sha256(data).hexdigest()
+        path = self.path_of(sha)
+        with self._lock:
+            if path.exists():
+                if hashlib.sha256(path.read_bytes()).hexdigest() != sha:
+                    raise LedgerError(f"evidence blob {sha} does not match its name")
+                return sha
+            old = os.umask(0o077)
+            try:
+                path.parent.mkdir(exist_ok=True)
+                atomic_write_bytes(path, bytes(data))
+            finally:
+                os.umask(old)
+            self.manifest.append([{"iteration": iteration, "sha256": sha, "size": len(data), "kind": kind}])
+        return sha
+
+    def get(self, sha: str) -> bytes:
+        data = self.path_of(sha).read_bytes()
+        if hashlib.sha256(data).hexdigest() != sha:
+            raise LedgerError(f"evidence blob {sha} does not match its name")
+        return data
+
+    def prune_unlisted(self) -> list[str]:
+        """Remove blobs no manifest entry lists: after a resume cut the manifest back, they belong to no committed
+        iteration (a blob also listed by an earlier iteration stays)."""
+        listed = {r["sha256"] for r in self.manifest.read()}
+        removed = []
+        for p in sorted(self.blobs.glob("*/*")):
+            if p.is_file() and p.name not in listed:
+                p.unlink()
+                removed.append(p.name)
+        return removed
+
+    def verify(self) -> list[str]:
+        problems = []
+        listed = {r["sha256"]: r for r in self.manifest.read()}
+        on_disk = {p.name for p in self.blobs.glob("*/*") if p.is_file() and not p.name.endswith(PARTIAL_SUFFIX)}
+        for sha in sorted(set(listed) - on_disk):
+            problems.append(f"listed but missing: {sha}")
+        for sha in sorted(on_disk - set(listed)):
+            problems.append(f"not in the manifest: {sha}")
+        for sha in sorted(on_disk & set(listed)):
+            if hashlib.sha256(self.path_of(sha).read_bytes()).hexdigest() != sha:
+                problems.append(f"content does not match its name: {sha}")
+        return problems
