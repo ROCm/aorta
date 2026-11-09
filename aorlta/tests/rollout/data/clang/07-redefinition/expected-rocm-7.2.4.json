@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "redefinition of <name>",
+   "line": 6,
+   "col": 9,
+   "token": "acc"
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. redefinition of <name> at line 6, column 9: `acc`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

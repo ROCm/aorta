@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "<name> file not found",
+   "line": 1,
+   "col": 10,
+   "token": "<"
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. <name> file not found at line 1, column 10: `<`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

@@ -1,0 +1,79 @@
+In file included from kernel.hip:3:
+In file included from /opt/rocm-7.0.2.1/lib/llvm/bin/../../../include/hip/hip_runtime.h:57:
+In file included from /opt/rocm-7.0.2.1/lib/llvm/bin/../../../include/hip/amd_detail/amd_hip_runtime.h:36:
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/cstddef:85:36: error: 'float' cannot be signed or unsigned
+   85 |   template<> struct __byte_operand<unsigned int> { using __type = byte; };
+      |                                    ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/cstddef:85:21: error: redefinition of '__byte_operand<float>'
+   85 |   template<> struct __byte_operand<unsigned int> { using __type = byte; };
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/cstddef:84:21: note: previous definition is here
+   84 |   template<> struct __byte_operand<int> { using __type = byte; };
+      |                     ^
+In file included from kernel.hip:3:
+In file included from /opt/rocm-7.0.2.1/lib/llvm/bin/../../../include/hip/hip_runtime.h:57:
+In file included from /opt/rocm-7.0.2.1/lib/llvm/bin/../../../include/hip/amd_detail/amd_hip_runtime.h:85:
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:72:19: error: a non-type template parameter cannot have type 'float' before C++20
+   72 |   template<size_t _Idx, typename _Head,
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:77:19: error: a non-type template parameter cannot have type 'float' before C++20
+   77 |   template<size_t _Idx, typename _Head>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:78:23: error: type of specialized non-type template argument depends on a template parameter of the partial specialization
+   78 |     struct _Head_base<_Idx, _Head, true>
+      |                       ^~~~
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:186:19: error: a non-type template parameter cannot have type 'float' before C++20
+  186 |   template<size_t _Idx, typename _Head>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:187:23: error: type of specialized non-type template argument depends on a template parameter of the partial specialization
+  187 |     struct _Head_base<_Idx, _Head, false>
+      |                       ^~~~
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:249:19: error: a non-type template parameter cannot have type 'float' before C++20
+  249 |   template<size_t _Idx, typename... _Elements>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:257:19: error: a non-type template parameter cannot have type 'float' before C++20
+  257 |   template<size_t _Idx, typename _Head, typename... _Tail>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:258:24: error: type of specialized non-type template argument depends on a template parameter of the partial specialization
+  258 |     struct _Tuple_impl<_Idx, _Head, _Tail...>
+      |                        ^~~~
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:415:19: error: a non-type template parameter cannot have type 'float' before C++20
+  415 |   template<size_t _Idx, typename _Head>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:416:24: error: type of specialized non-type template argument depends on a template parameter of the partial specialization
+  416 |     struct _Tuple_impl<_Idx, _Head>
+      |                        ^~~~
+In file included from <built-in>:1:
+In file included from /opt/rocm-7.0.2.1/lib/llvm/lib/clang/20/include/__clang_hip_runtime_wrapper.h:111:
+In file included from /opt/rocm-7.0.2.1/lib/llvm/lib/clang/20/include/cuda_wrappers/cmath:28:
+In file included from /opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/cmath:1935:
+In file included from /opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/bits/specfun.h:45:
+In file included from /opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/bits/stl_algobase.h:64:
+In file included from /opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/bits/stl_pair.h:60:
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/type_traits:61:30: error: a non-type template parameter cannot have type 'float' before C++20
+   61 |   template<typename _Tp, _Tp __v>
+      |                              ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:1341:14: note: while substituting prior template arguments into non-type template parameter '__v' [with _Tp = float]
+ 1341 |     : public integral_constant<size_t, sizeof...(_Elements)> { };
+      |              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:1354:19: error: a non-type template parameter cannot have type 'float' before C++20
+ 1354 |   template<size_t __i, typename... _Types>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:1355:26: error: type of specialized non-type template argument depends on a template parameter of the partial specialization
+ 1355 |     struct tuple_element<__i, tuple<_Types...>>
+      |                          ^~~
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:1362:19: error: a non-type template parameter cannot have type 'float' before C++20
+ 1362 |   template<size_t __i, typename _Head, typename... _Tail>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:1367:19: error: a non-type template parameter cannot have type 'float' before C++20
+ 1367 |   template<size_t __i, typename _Head, typename... _Tail>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:1373:19: error: a non-type template parameter cannot have type 'float' before C++20
+ 1373 |   template<size_t __i, typename... _Types>
+      |                   ^
+/opt/rh/gcc-toolset-12/root/usr/lib/gcc/x86_64-redhat-linux/12/../../../../include/c++/12/tuple:1378:19: error: a non-type template parameter cannot have type 'float' before C++20
+ 1378 |   template<size_t __i, typename... _Elements>
+      |                   ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated when compiling for gfx950.
+failed to execute:/opt/rocm-7.0.2.1/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

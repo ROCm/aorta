@@ -1,0 +1,38 @@
+{
+ "errors": [
+  {
+   "cls": "unknown type name <name>",
+   "line": 3,
+   "col": 22,
+   "token": "vec4f"
+  },
+  {
+   "cls": "expected ';' after expression",
+   "line": 5,
+   "col": 26,
+   "token": "{"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 5,
+   "col": 21,
+   "token": "vec4f"
+  },
+  {
+   "cls": "expected ';' after expression",
+   "line": 5,
+   "col": 37,
+   "token": "}"
+  }
+ ],
+ "shown": 4,
+ "total": 4,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. unknown type name <name> at line 3, column 22: `vec4f`",
+  "2. expected ';' after expression at line 5, column 26: `{`",
+  "3. use of undeclared identifier <name> at line 5, column 21: `vec4f`",
+  "4. expected ';' after expression at line 5, column 37: `}`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

@@ -1,0 +1,24 @@
+{
+ "errors": [
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 6,
+   "col": 323,
+   "token": "not_declared_after_a_long_expression"
+  },
+  {
+   "cls": "no viable conversion from <name> to <name>",
+   "line": 7,
+   "col": 54,
+   "token": "t"
+  }
+ ],
+ "shown": 2,
+ "total": 2,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. use of undeclared identifier <name> at line 6, column 323: `not_declared_after_a_long_expression`",
+  "2. no viable conversion from <name> to <name> at line 7, column 54: `t`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

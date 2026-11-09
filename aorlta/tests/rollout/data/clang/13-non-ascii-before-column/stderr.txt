@@ -1,0 +1,5 @@
+kernel.hip:4:40: error: use of undeclared identifier 'gain'
+    4 |   /* déjà vu → */ x[threadIdx.x] = gain;
+      |                                    ^
+1 error generated when compiling for gfx950.
+failed to execute:/opt/rocm-7.0.2.1/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

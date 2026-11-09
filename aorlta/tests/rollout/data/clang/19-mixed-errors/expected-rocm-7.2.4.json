@@ -1,0 +1,45 @@
+{
+ "errors": [
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 5,
+   "col": 20,
+   "token": "undefined_a"
+  },
+  {
+   "cls": "unknown type name <name>",
+   "line": 6,
+   "col": 3,
+   "token": "half_t"
+  },
+  {
+   "cls": "no matching function for call to <name>",
+   "line": 7,
+   "col": 3,
+   "token": "__syncthreads"
+  },
+  {
+   "cls": "expected ';' after expression",
+   "line": 8,
+   "col": 11,
+   "token": null
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 9,
+   "col": 10,
+   "token": "undefined_b"
+  }
+ ],
+ "shown": 5,
+ "total": 5,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. use of undeclared identifier <name> at line 5, column 20: `undefined_a`",
+  "2. unknown type name <name> at line 6, column 3: `half_t`",
+  "3. no matching function for call to <name> at line 7, column 3: `__syncthreads`",
+  "4. expected ';' after expression at line 8, column 11",
+  "5. use of undeclared identifier <name> at line 9, column 10: `undefined_b`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

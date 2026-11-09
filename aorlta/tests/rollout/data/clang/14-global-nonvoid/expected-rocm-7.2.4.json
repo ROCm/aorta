@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "kernel function type <name> must have void return type",
+   "line": 3,
+   "col": 12,
+   "token": "int"
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. kernel function type <name> must have void return type at line 3, column 12: `int`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}
