@@ -1,0 +1,64 @@
+# The stand-in run on one 8-GPU node: P = 16, K = 16, the public Qwen3.5-4B, the standin-gpu profile, the gap gate
+# enforced, lr 1e-5, nearest rounding, the start-up warm-up, and one trainer rank beside each engine on GPUs 0-3.
+# ConSan is served on GPUs 4 and 6 and ASan on GPUs 5 and 7 (the GPUs the engines leave free), two servers each, so
+# one hung kernel cannot hold the only worker (one held it for 110 s). Each ConSan run of one kernel is stopped at
+# 30 s (the slowest real one took 5.8 s) and is then unsettled; ASan keeps its own 45 s share of the request timeout
+# (real ASan jobs took up to about 48 s with their build). Mechanics only: never reported as a training result.
+# Site-specific paths, to edit: run.root, model.base_dir, data.prompt_pools[0].path and reward.remote.socket_dir
+# (which must be under /dev/shm for jobs/aorlta-run.sbatch).
+run:
+  run_id: standin
+  source: standin
+  root: /scratch/aorlta/runs
+model:
+  base_dir: /data/hf/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  source: standin
+data:
+  prompt_pools:
+    - path: /data/aorlta/standin-pool
+      source: standin
+rollout:
+  engines: [0, 1, 2, 3]
+  K: 16
+  P: 16
+  max_repair_turns: 2
+  thinking: "off"
+  temperature: 0.7
+  top_p: 0.95
+  top_k: -1
+  max_new_tokens: 4096
+  max_feedback_chars: 2000
+  request_timeout_s: 1800
+  gpu_memory_utilization: 0.45
+  compile_adapter: standin.hipcc
+  parse_adapter: standin.parse
+  leak_check_adapter: none
+  feedback_template: standin
+reward:
+  profile: standin-gpu
+  reward_fn: standin.v11
+  remote:
+    socket_dir: /dev/shm/aorlta-checkers/standin
+    adapters:
+      standin.aorta_consan: [4, 6]
+      standin.aorta_asan: [5, 7]
+  gpu_check_s:
+    san.consan: 30.0  # one kernel's ConSan run; the pool's sim_run (120 s) stays the bound on the leg
+orchestrator:
+  iterations: 3
+  run_seed: 20261103
+  prompts_per_iteration: 16
+  # standin.v11 leaves kernels ConSan cannot watch unscored: the last 3-iteration run scored 75-85% per iteration
+  min_scored_fraction: 0.75
+trainer:
+  ranks: 4  # colocated: rank r beside engine r (trainer.devices unset), each capped at 1 - 0.45 of its GPU
+  micro_batch_tokens: 20480  # measured to fit without gradient checkpointing under a 55% memory cap
+  lr: 1.0e-5
+  gap_gate: enforce
+  gap_statistic: mean_abs
+  max_generation_gap: 0.05
+  max_off_policy_fraction: 0.02
+  require_fast_path: true
+  startup_warmup: true
+sync:
+  stochastic_rounding: false

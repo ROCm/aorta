@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aorlta"
+version = "0.0.0"
+description = "AORLTA: a minimal GRPO training loop with TokenSpeed as the inference engine"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+# Exact pins; the full resolved set is requirements-dev.txt. PyYAML matches the TokenSpeed image (Python 3.12).
+dependencies = ["PyYAML==6.0.3"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "hypothesis==6.170.14", "pytest-xdist==3.8.0", "pytest-timeout==2.4.0"]
+# the stand-in checkers (aorlta.reward.adapters.standin_*) import aorta's sanitizer backends, which need click
+standin = ["click==8.5.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"aorlta.reward" = ["profiles/*.yaml"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = ["--import-mode=importlib", "-p", "no:cacheprovider"]

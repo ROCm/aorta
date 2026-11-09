@@ -1,0 +1,42 @@
+# AORLTA development run on stand-in data only: the public Qwen3.5-4B, stand-in prompts (a kernel dataset's original
+# listings) and the standin-static reward profile. Mechanics only; never reported as a training result.
+# Site-specific paths, to edit: run.root, model.base_dir and data.prompt_pools[0].path.
+run:
+  run_id: dev-standin
+  source: standin
+  root: /scratch/aorlta/runs
+model:
+  base_dir: /data/hf/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  source: standin
+data:
+  prompt_pools:
+    - path: /data/aorlta/standin-pool
+      source: standin
+rollout:
+  engines: [0, 1, 2, 3]
+  K: 8
+  P: 32
+  max_repair_turns: 2
+  thinking: "off"
+  temperature: 0.7
+  top_p: 0.95
+  top_k: -1
+  max_new_tokens: 4096
+  max_feedback_chars: 2000
+  request_timeout_s: 1800
+  gpu_memory_utilization: 0.45
+  compile_adapter: standin.hipcc
+  parse_adapter: standin.parse
+  leak_check_adapter: none
+  feedback_template: standin
+reward:
+  profile: standin-static
+  reward_fn: standin.v11
+orchestrator:
+  iterations: 3
+  run_seed: 20261102
+  # standin-static scores only gate, compile and waitcheck failures, 69-84% of samples per iteration in earlier runs
+  min_scored_fraction: 0.6
+trainer:
+  ranks: 1  # one trainer rank, on engine 0's GPU
+  micro_batch_tokens: 20480  # measured to fit without gradient checkpointing under a 55% memory cap
