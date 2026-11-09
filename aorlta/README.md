@@ -7,7 +7,8 @@ engines generate, a reward service runs the checks (a compile gate, waitcheck, C
 worker pools and a watchdog, 4 LoRA trainer ranks beside the engines train each group as soon as it is scored, and
 the new weights are loaded into every engine after each step. Every step is checked: trainer and engine must agree
 on the log-probs of the sampled tokens, each weight update must be seen to land on every engine, and an iteration
-trains only if enough of its samples were scored, where an unscored sample never counts as clean.
+trains only if enough of its samples were scored, where an unscored sample never counts as clean. A score run
+(`orchestrator.mode: score`) uses the same rollouts and checks to score a model without training it.
 
 This directory is a self-contained Python package, `aorlta`, inside the aorta repository; aorta's own package does not
 import it, and the stand-in checks use aorta's sanitizer backends from a separate checkout. It is the framework, not
@@ -41,7 +42,7 @@ Not there yet:
 
 | `src/aorlta/` | what it holds |
 |---|---|
-| `orchestrator/` | the loop (`loop.py`), prompt selection, checkpoints and resume, deadlines, the scored-fraction rule; `wiring.py` connects the real components, `fakes.py` stands in for them; entry point `run.py` |
+| `orchestrator/` | the loop (`loop.py`), the score run (`score.py`), prompt selection, checkpoints and resume, deadlines, the scored-fraction rule; `wiring.py` connects the real components, `fakes.py` stands in for them; entry point `run.py` |
 | `rollout/` | TokenSpeed engine processes, compile-repair chains, turn templates and the stand-in prompts, the parse and compile checks, compile feedback |
 | `reward/` | the reward service (stages, worker pools, watchdog, cache, trusted controls, checker servers in other processes); `adapters/` are the checks, `rewardfn/` the reward function, `profiles/` the stage files |
 | `trainer/` | the GRPO loss, packing, one LoRA rank per engine GPU, the per-step checks, the merged-weight forward |
@@ -148,6 +149,32 @@ skips that test; `COMPONENTS=fake` runs the loop with its fakes. To keep the job
 it stopped; the reason is in `run_result.json`. A run id is used once: the orchestrator refuses a run directory that
 already exists, so for a new run copy the config, give it a new `run.run_id`, and commit it.
 
+## Score a model without training
+
+`orchestrator.mode: score` runs the same rollouts and checks over the prompt pool with no trainer step, no optimizer
+and no weight sync; the same job script runs it (`CONFIG=configs/score-standin.yaml sbatch jobs/aorlta-run.sbatch`).
+The run:
+
+1. writes its run plan, with the sha256 of every file of `model.base_dir` (and of `model.adapter_dir`);
+2. serves `model.base_dir` as it is, a merged Hugging Face directory, or, with `model.adapter_dir` (a PEFT LoRA
+   adapter trained on that base), first merges the two with `tools/merge_base_adapter.py` into
+   `<sync.dir>/<run_id>/model`, and refuses a merge of other inputs than the files the plan hashed;
+3. checks that the engines serve exactly that directory before anything is scored: its files must hash as recorded,
+   its LoRA target tensors are written to a weight slot whose manifest must match the slot's files, and the start-up
+   round trip must be PROVEN;
+4. scores the first `orchestrator.score.prompts` prompts of the pool in `orchestrator.run_seed`'s order (null: all),
+   `rollout.P` at a time, `rollout.K` samples each, once per `orchestrator.score.passes`, each pass with its own
+   seeds. The unsettled checks are re-checked once. The scored fraction does not stop a score run, but an unscored
+   sample is never counted clean.
+
+It writes the episodes as a training run does (`trained` false, `excluded_reason` `score_only`), plus
+`score/report.jsonl` (the model's hashes, the landing check, the sampling settings, one row per prompt and one for
+the totals: samples, scored, unscored and clean counts, the reward over scored samples, each check's counts, compile
+success and repair turns), `score/summary.txt`, the same in a few lines, and `score/model.json`, the landing check
+in full. `configs/score-standin.yaml` scores the public Qwen3.5-4B on 16 stand-in prompts × 4 samples, on the
+stand-in layout without trainer ranks. A score run is never resumed: run it again under a new run id. On CPU, the
+same config runs with the fakes, as under "The loop on CPU, with fake components".
+
 ## Correctness checks
 
 | check | when | what it refuses |
@@ -163,6 +190,7 @@ already exists, so for a new run copy the config, give it a new `run.run_id`, an
 | step checks | each step | a non-finite or zero gradient, a non-finite loss, or a group trained twice; after the step, a LoRA tensor that is non-finite or did not move, a frozen weight that moved, or ranks that disagree. The run stops before the weights are published |
 | landing check | each weight sync | an engine whose probe log-probs did not change after a real update (NOT_LANDED), or differ from the trainer's by more than a limit calibrated at start (MISMATCH): the run stops. Five updates in a row that change nothing on the engines (NOOP) stop it too |
 | generation barrier | each weight sync | a reload while an engine still holds a request |
+| served model | start of a score run | a model directory whose files no longer hash as recorded, a merge of other inputs than the run plan's, a slot that does not match its manifest, or a round trip that is not PROVEN: nothing is scored |
 | resume | resume | a checkpoint whose files do not match its manifest, a trainer state that does not match the saved digest, or a changed prompt pool |
 
 ## Run outputs
@@ -179,6 +207,7 @@ The run directory is `<run.root>/<run.source>/<run.run_id>/`; `<n>` is the itera
 | `trainer/gaps-<n>.jsonl` | each sample's trainer-engine gap |
 | `reward/cache/`, `selector/plan_log.jsonl` | the check cache, and what the planner would have skipped |
 | `evidence/` | compiler stderr and the GPU checks' logs (owner-only) |
+| `score/` | a score run's `report.jsonl`, `summary.txt` and `model.json` |
 
 `episodes.jsonl` has one line per chain (`aorlta.episode/1`): each turn's token ids, engine log-probs, compile
 result and timings, then the end reason, reward, status, each check's state, the advantage and whether it trained.
@@ -208,3 +237,5 @@ run ends; a run has no export to a merged Hugging Face model or a PEFT adapter d
   unscored. In the last stand-in training run 152 of 768 samples stayed unscored, all with `sanitizer_not_settled`;
   that is why `standin.yaml` sets the scored fraction to 0.75, which iteration 3 met exactly (192 of 256).
 - A hung candidate kernel costs its ASan check the full 45 s limit (ConSan's limit is 30 s in `standin.yaml`).
+- Score runs: an adapter's merge has run only in the CPU tests, `rollout.K` must be at least 2, and a pass whose groups
+  give K identical answers too often stops, as a training iteration does.

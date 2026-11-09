@@ -22,6 +22,8 @@
 #   SMOKE=checkers    the canary, the checkers and their pre-flight only: no image builds, engines or trainer
 #   SMOKE=skip        no checker pre-flight
 #   While the orchestrator runs, every GPU's VRAM in use is sampled from sysfs every 10 s into vram.tsv.
+# A config with `orchestrator.mode: score` is a score run (aorlta.orchestrator.score): the same checkers, images and
+# engines, no trainer and no weight sync; the job ends by printing the run's score/summary.txt. It is never resumed.
 #
 # Site settings, from the environment (sbatch passes the submitting shell's environment on). A setting the run needs
 # and does not have ends the job with exit 95.
@@ -198,7 +200,7 @@ cleanup() {
   add_mounts mounts rw /dev/shm "$OUT" "$RUN_ROOT" 2>/dev/null
   # The GPU legs' logs, harnesses and the candidates' parsed sources (stand-in data) are kept, small, before the
   # node directory goes: they are how an unsettled ConSan or ASan leg is read afterwards.
-  [ -n "$img" ] && docker run --rm --network none "${mounts[@]}" --entrypoint bash "$img" -c \
+  [ -n "$img" ] && docker run --rm --network none --ulimit core=0 "${mounts[@]}" --entrypoint bash "$img" -c \
     "if cd '$SYNC_DIR/$RUN_ID/scratch/reward' 2>/dev/null; then
        find pkg \( -path '*/san.*' \( -name '*.log' -o -name aorlta_harness.hip -o -name '*.json' \) \
          -o -path '*/gate.parse-*' -name source.hip \) -size -2M -print0 | tar --null -czf '$OUT/gpu-leg-evidence.tgz' -T -;
@@ -316,7 +318,7 @@ if [ "$COMPONENTS" = real ]; then  # every module the run imports, in its image,
   IMPORT_MOUNTS=()
   add_mounts IMPORT_MOUNTS rw "$P"
   add_mounts IMPORT_MOUNTS ro "$AORLTA_AORTA_ROOT"
-  docker run --rm --name "$CNAME-imports" --network none "${IMPORT_MOUNTS[@]}" \
+  docker run --rm --name "$CNAME-imports" --network none --ulimit core=0 "${IMPORT_MOUNTS[@]}" \
     -e PYTHONPATH="$CODE/src" -e PYTHONDONTWRITEBYTECODE=1 -w "$CODE" --entrypoint python3 "$IMG" \
     jobs/aorlta-imports-check.py "$AORLTA_AORTA_ROOT/src" > "$OUT/imports.log" 2>&1 &
   wait $!
@@ -335,11 +337,11 @@ add_mounts ORCH_MOUNTS ro "${POOL_DIRS[@]}" "$AORLTA_AORTA_ROOT" "$AORLTA_ROCJIT
 vram_sampler >> "$OUT/vram.tsv" 2>/dev/null &
 VRAM_PID=$!
 ORCH_PID=
-orchestrator() {  # extra arguments for aorlta.orchestrator.run
+orchestrator() {  # extra arguments for aorlta.orchestrator.run; core=0, as every container here: the engines run in it
   stamp "RUN ${ARGS[*]} $*"
   docker run --rm --name "$CNAME" \
     --device=/dev/kfd --device=/dev/dri --group-add video --group-add render \
-    --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --ipc=host --ulimit memlock=-1 \
+    --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --ipc=host --ulimit memlock=-1 --ulimit core=0 \
     --ulimit nofile=65535:65535 --network=host "${ORCH_MOUNTS[@]}" \
     -e SLURM_JOB_ID="$SLURM_JOB_ID" -e PYTHONUNBUFFERED=1 -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH="$CODE/src" \
     -e HF_HOME="$AORLTA_HF_HOME" -e HF_HUB_OFFLINE=1 -e TMPDIR="$AORLTA_TMPDIR" \
@@ -369,12 +371,17 @@ rc=$?
 stamp "RUN rc=$rc (rc 0 is completed, rc 3 is stopped; see run_result.json)"
 tail -5 "$OUT/run.log"
 
-# Every committed iteration's summary names every span it must have.
+# Every committed iteration's summary names every span it must have; a score run prints its summary instead.
 PYTHONPATH="$CODE/src" "$PY" - "$CODE/$CONFIG" <<'EOF' | tee "$OUT/spans-check.txt"
 import sys
 from aorlta.config import load_config
 from aorlta.episodes.writer import complete_iterations, read_summary
 cfg = load_config(sys.argv[1])
+if cfg.orchestrator.mode == "score":
+    from aorlta.orchestrator.score import REPORT_DIR, SUMMARY_NAME
+    path = cfg.run_dir / REPORT_DIR / SUMMARY_NAME
+    print(path.read_text() if path.is_file() else f"no score summary at {path}", end="")
+    sys.exit(0)
 for n in complete_iterations(cfg.run_dir):
     s = read_summary(cfg.run_dir, n)
     print(f"iteration {n}: scored {s['samples']['scored']}/{s['samples']['total']} missing spans {s['spans']['missing']}"

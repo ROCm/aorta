@@ -329,6 +329,7 @@ class FakeRewardConfig:
     workers: int = 4
     constant: float | None = None  # every scored candidate of `constant_prompts` (all, if empty) gets this reward
     constant_prompts: frozenset = frozenset()
+    not_applicable_legs: frozenset = frozenset()  # legs the score report counts as not applicable
 
 
 RUNGS = (-1.0, -0.9, -0.8, -0.7, -0.5, -1.0 / 3.0, -1.0 / 6.0, 0.5, 1.0)
@@ -487,6 +488,48 @@ class FakeReward:
             open_ = [st for st in self.cands.values() if not st["future"].done()]
         for st in open_:
             st["future"].set_result(self._unscored(st["cand"], "service_closed", {}))
+
+    def claims_clean(self, result: RewardResult) -> bool:
+        """As standin.v11: clean exactly when the base is positive (+1.0 or +0.5)."""
+        return result.status == "scored" and isinstance(result.parts, dict) and result.parts.get("base", 0.0) > 0.0
+
+    def not_applicable(self, result: RewardResult, candidate: Candidate | None) -> tuple:
+        """The legs named in `not_applicable_legs` (none by default), wherever such a leg has a result."""
+        return tuple(sorted(leg for leg in self.c.not_applicable_legs if leg in result.legs))
+
+
+class FakeServedModel:
+    """A score run's model on the fake engines: `prepare` reads the run plan's hashes, `confirm` is FakeSync's round
+    trip (perturb, every draw changes; restore, every draw as before). `serves` names what the engines restore to:
+    anything but "v0", the weights they started on, fails the check, as engines serving another model would."""
+
+    def __init__(self, cfg: RunConfig, rollout: FakeRollout, *, serves: str = "v0"):
+        self.cfg, self.rollout, self.serves = cfg, rollout, serves
+        self.prepared: dict | None = None
+        self.confirms = 0
+
+    def prepare(self, recorded: dict) -> dict:
+        from .score import files_digest
+
+        files = {k.partition("/")[2]: v for k, v in recorded.items() if k.startswith("base/")}
+        kind = "merged_dir" if self.cfg.model.adapter_dir is None else "base_plus_adapter"
+        self.prepared = {"kind": kind, "dir": self.cfg.model.base_dir, "files": files,
+                         "files_sha256": files_digest(files)}
+        return self.prepared
+
+    def confirm(self) -> dict:
+        self.confirms += 1
+        probe = list(range(10_000, 10_064))
+        sp = {"temperature": 0.7, "top_p": 0.95, "top_k": -1, "max_new_tokens": 32, "seed": 99,
+              "stop_token_ids": [STOP_TOKEN_ID]}
+        base = [e.generate(input_ids=probe, sampling_params=sp)["output_ids"] for e in self.rollout.engines]
+        self.rollout.set_weights("roundtrip-perturbed")
+        moved = [e.generate(input_ids=probe, sampling_params=sp)["output_ids"] for e in self.rollout.engines]
+        self.rollout.set_weights(self.serves)
+        back = [e.generate(input_ids=probe, sampling_params=sp)["output_ids"] for e in self.rollout.engines]
+        proven = all(a != b for a, b in zip(base, moved)) and back == base
+        return {"verdict": "PROVEN" if proven else "NOT_PROVEN", "engines": len(self.rollout.engines),
+                "files_sha256": self.prepared["files_sha256"] if self.prepared else None}
 
 
 # --- the trainer -------------------------------------------------------------------------------------------------
@@ -746,6 +789,9 @@ class FakeRunSpec:
     eval_status: str = "done"
     eval_answer: bool = True
     canary: str | None = None
+    mode: str = "v1"  # "score": the score run (orchestrator/score.py) over the same fakes, without trainer or sync
+    score: dict | None = None  # orchestrator.score, in mode score
+    served: str = "v0"  # FakeServedModel's `serves`: what the engines restore to in the landing check
     leak_check: bool = False  # run the fake leak check on every repair turn's feedback (rollout.quarantine_rate)
 
     def to_json(self) -> dict:
@@ -768,9 +814,11 @@ def fake_config(spec: FakeRunSpec) -> RunConfig:
                     "leak_check_adapter": "fake.leak_check" if spec.leak_check else "none",
                     "feedback_template": "standin"},
         "reward": {"profile": "fake", "reward_fn": "standin.v11"},
-        "orchestrator": {"iterations": spec.iterations, "run_seed": spec.run_seed, "eval_every": spec.eval_every,
-                         "keep_ckpts": spec.keep_ckpts, "min_scored_fraction": spec.min_scored_fraction,
-                         "deadlines": {"generation_s": spec.generation_s, "scoring_s": spec.scoring_s}},
+        "orchestrator": {"run_seed": spec.run_seed, "keep_ckpts": spec.keep_ckpts,
+                         "min_scored_fraction": spec.min_scored_fraction,
+                         "deadlines": {"generation_s": spec.generation_s, "scoring_s": spec.scoring_s},
+                         **({"mode": "score", "score": spec.score} if spec.mode == "score" else
+                            {"iterations": spec.iterations, "eval_every": spec.eval_every})},
     })
 
 
@@ -809,12 +857,19 @@ def build_fake_run(spec: FakeRunSpec, *, point=None, clock: VirtualClock | None 
     engine = dataclasses.replace(FakeRolloutConfig().engine, **spec.engine)
     rollout = FakeRollout(cfg, clock, spans, FakeRolloutConfig(**{"engine": engine, **spec.rollout}))
     reward_kw = dict(spec.reward)
-    for k in ("unsettled", "unscored", "stall", "constant_prompts"):
+    for k in ("unsettled", "unscored", "stall", "constant_prompts", "not_applicable_legs"):
         if k in reward_kw:
             reward_kw[k] = frozenset(reward_kw[k])
     if "faulty_attempts" in reward_kw:
         reward_kw["faulty_attempts"] = tuple(reward_kw["faulty_attempts"])
     reward = FakeReward(clock, FakeRewardConfig(**reward_kw))
+    if spec.mode == "score":
+        from .score import Scorer
+
+        served = FakeServedModel(cfg, rollout, serves=spec.served)
+        scorer = Scorer(cfg, pool=pool, rollout=rollout, reward=reward, model=served, clock=clock, spans=spans,
+                        point=point)
+        return FakeRun(spec, cfg, clock, spans, pool, rollout, reward, None, None, None, None, scorer)
     trainer_kw = dict(spec.trainer)
     if "gap_exclude" in trainer_kw:
         trainer_kw["gap_exclude"] = frozenset(trainer_kw["gap_exclude"])

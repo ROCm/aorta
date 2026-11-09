@@ -339,9 +339,14 @@ class RunSection(_Section):
 class ModelSection(_Section):
     base_dir: str  # the merged base directory: v0 weights and tokenizer (Section 6.1, engine start)
     source: Source
+    # A PEFT LoRA adapter trained on base_dir, for a score run only: tools/merge_base_adapter.py merges the two into the
+    # run's node-local directory before the engines start, and the engines serve the merge.
+    adapter_dir: str | None = None
 
     def _validate(self) -> None:
         _absolute("base_dir", self.base_dir)
+        if self.adapter_dir is not None:
+            _absolute("adapter_dir", self.adapter_dir)
 
 
 @dataclass(frozen=True)
@@ -671,21 +676,45 @@ class OrchestratorDeadlines(_Section):
 
 
 @dataclass(frozen=True)
-class OrchestratorSection(_Section):
-    """Section 6.6."""
+class ScoreOptions(_Section):
+    """`orchestrator.mode: score`: which prompts are scored, and how often. Each pass gives every selected prompt
+    `rollout.K` samples, with seeds of its own; `rollout.P` prompts are scored at a time."""
 
-    iterations: int
+    prompts: int | None = None  # the first N prompts of the pool in the run seed's order; null: every prompt
+    passes: int = 1
+
+    def _validate(self) -> None:
+        _check(self.prompts is None or self.prompts >= 1,
+               f"prompts: must be >= 1 or null (every prompt), got {self.prompts}")
+        _check(self.passes >= 1, f"passes: must be >= 1, got {self.passes}")
+
+
+@dataclass(frozen=True)
+class OrchestratorSection(_Section):
+    """Section 6.6. `mode: score` generates and scores without training (orchestrator/score.py): no trainer step, no
+    optimizer and no weight sync; its batches follow from `score`, so `iterations` stays unset."""
+
     run_seed: int
+    iterations: int | None = None  # training iterations: required in mode v1, unset in mode score
     prompts_per_iteration: int | None = None  # null: rollout.P (the two keys name one number)
-    mode: Literal["v1"] = "v1"  # v2 (one-step-off-policy) is not built (D5)
+    mode: Literal["v1", "score"] = "v1"  # v2 (one-step-off-policy) is not built (D5)
     deadlines: OrchestratorDeadlines = field(default_factory=OrchestratorDeadlines)
     min_scored_fraction: float = 0.9  # D7
     min_scored_per_group: int = 2
     eval_every: int | None = None  # null: no eval requests
     keep_ckpts: int = 2
+    score: ScoreOptions | None = None  # mode score only; null there: every prompt, one pass
 
     def _validate(self) -> None:
-        _check(self.iterations >= 1, f"iterations: must be >= 1, got {self.iterations}")
+        if self.mode == "score":
+            _check(self.iterations is None, "iterations: a score run's batches follow from orchestrator.score; "
+                                            "leave iterations out")
+            if self.score is None:
+                object.__setattr__(self, "score", ScoreOptions())
+        else:
+            _check(self.iterations is not None, "iterations: a training run (mode v1) needs it")
+            _check(self.iterations >= 1, f"iterations: must be >= 1, got {self.iterations}")
+            _check(self.score is None, "score: is read only with mode: score")
         _check(0 <= self.run_seed < 2**63, f"run_seed: must be in [0, 2**63), got {self.run_seed}")
         _check(
             self.prompts_per_iteration is None or self.prompts_per_iteration >= 1,
@@ -741,6 +770,14 @@ class RunConfig(_Section):
             not mixed,
             f"mixed sources (Section 6.10 item 8): run.source is {self.run.source!r} but " + "; ".join(mixed),
         )
+        if self.orchestrator.mode == "score":
+            _check(self.sync.round_trip_at_start, "sync.round_trip_at_start: a score run confirms what the engines "
+                                                  "serve with the start-up round trip, so it cannot be off")
+            _check(self.orchestrator.eval_every is None, "orchestrator.eval_every: a score run trains nothing to "
+                                                         "evaluate")
+        else:
+            _check(self.model.adapter_dir is None, "model.adapter_dir: a training run starts from model.base_dir; "
+                                                   "an adapter is scored with orchestrator.mode: score")
 
     @property
     def run_dir(self) -> Path:
