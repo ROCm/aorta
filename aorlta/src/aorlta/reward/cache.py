@@ -1,19 +1,23 @@
 """The two content-addressed caches (design Section 6.2, Cache).
 
 A leg's key is `sha256(canonical JSON {source_sha256, task_sha256, leg, leg_settings, checker_name,
-checker_version})`; a candidate's reward key adds the reward function's name, version and code hash,
-and everything else its reward reads (the whole TaskRef, the token count and the token budget).
+checker_version, requires, bracketed})`: `requires` maps each leg it requires to that leg's key, so a
+change upstream (the compile's flags, say) changes the key of every leg that reads what it built, and
+`bracketed` is whether its pool needs a clean control bracket. A candidate's reward key adds the reward
+function's name, version, code hash and settings, the profile's clean repeats, and everything else its
+reward reads (the whole TaskRef, the token count and the token budget).
 
 Only settled legs (`clean`, `finding`, `fail`) are cached, and only with a clean control bracket
 where the leg is bracketed. `unsettled`, `skipped_by_plan`, `not_run` and anything with a dirty or
-missing bracket never are. Entries live at `<root>/legs/<key[:2]>/<key>.json` (and `rewards/`),
-written atomically, with an in-memory LRU in front. A read checks the schema, the key and the key's
-fields again; any mismatch, or a file that does not parse, is a miss, and is logged.
+missing bracket never are, and a lookup holds an entry to the same rule. Entries live at
+`<root>/legs/<key[:2]>/<key>.json` (and `rewards/`), written atomically, with an in-memory LRU in
+front. A read checks the schema, the key and the key's fields again; any mismatch, or a file that does
+not parse, is a miss, and is logged.
 
 The LRU is updated at once; the file is written by a background thread, because an atomic write
 fsyncs twice and on the NFS-mounted run area that is tens of milliseconds, too long to spend on the
 service's coordinator for every leg. A crash can lose the last few files, which only costs a
-recomputation. `flush()` waits for every pending write.
+recomputation. `flush()` waits for every pending write; `close()` also stops the thread.
 """
 
 from __future__ import annotations
@@ -38,19 +42,21 @@ REWARD_SCHEMA = "aorlta.reward.reward_cache/1"
 
 
 def leg_key_fields(*, source_sha256: str, task_sha256: str, leg: str, leg_settings: dict, checker_name: str,
-                   checker_version: str) -> dict:
+                   checker_version: str, requires: dict[str, str], bracketed: bool) -> dict:
     return {"source_sha256": source_sha256, "task_sha256": task_sha256, "leg": leg,
-            "leg_settings": leg_settings, "checker_name": checker_name, "checker_version": checker_version}
+            "leg_settings": leg_settings, "checker_name": checker_name, "checker_version": checker_version,
+            "requires": dict(sorted(requires.items())), "bracketed": bool(bracketed)}
 
 
 def leg_key(**fields: Any) -> str:
     return sha256_json(leg_key_fields(**fields))
 
 
-def reward_key_fields(cand: Candidate, leg_keys: dict[str, str], reward_fn: dict, profile: str) -> dict:
-    return {"profile": profile, "legs": dict(sorted(leg_keys.items())), "reward_fn": dict(reward_fn),
-            "task": to_dict(cand.task), "response_tokens": cand.response_tokens,
-            "max_new_tokens": cand.max_new_tokens}
+def reward_key_fields(cand: Candidate, leg_keys: dict[str, str], reward_fn: dict, profile: str, *,
+                      reward_settings: dict, clean_repeats: int) -> dict:
+    return {"profile": profile, "clean_repeats": clean_repeats, "legs": dict(sorted(leg_keys.items())),
+            "reward_fn": dict(reward_fn), "reward_settings": dict(reward_settings), "task": to_dict(cand.task),
+            "response_tokens": cand.response_tokens, "max_new_tokens": cand.max_new_tokens}
 
 
 def cacheable_leg(result: LegResult, *, bracketed: bool) -> bool:
@@ -63,10 +69,12 @@ def cacheable_leg(result: LegResult, *, bracketed: bool) -> bool:
 
 
 class _Writer:
-    """Writes cache files off the caller's thread, in order."""
+    """Writes cache files off the caller's thread, in order; once closed, on the caller's thread."""
 
     def __init__(self) -> None:
         self.q: queue.Queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.closed = False
         self.thread = threading.Thread(target=self._main, name="reward-cache-writer", daemon=True)
         self.thread.start()
 
@@ -76,20 +84,35 @@ class _Writer:
             try:
                 if item is None:
                     return
-                path, entry = item
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write_json(path, entry)
-                except OSError as exc:
-                    log.warning("cache: could not write %s (%s)", path.name, type(exc).__name__)
+                self._write(*item)
             finally:
                 self.q.task_done()
 
+    @staticmethod
+    def _write(path: Path, entry: dict) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(path, entry)
+        except OSError as exc:
+            log.warning("cache: could not write %s (%s)", path.name, type(exc).__name__)
+
     def put(self, path: Path, entry: dict) -> None:
-        self.q.put((path, entry))
+        with self.lock:  # nothing is queued behind the stop sentinel
+            if not self.closed:
+                self.q.put((path, entry))
+                return
+        self._write(path, entry)
 
     def flush(self) -> None:
         self.q.join()
+
+    def close(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            self.q.put(None)
+        self.thread.join()
 
 
 class _Store:
@@ -170,6 +193,11 @@ class RewardCache:
         if self._writer is not None:
             self._writer.flush()
 
+    def close(self) -> None:
+        """Write every entry put so far and stop the writer thread; an entry put later is written at once."""
+        if self._writer is not None:
+            self._writer.close()
+
     # legs
 
     def get_leg(self, key: str, fields: dict) -> LegResult | None:
@@ -185,7 +213,7 @@ class RewardCache:
             with self.legs.lock:
                 self.legs.stats["corrupt"] += 1
             return None
-        if result.state not in SETTLED_STATES or result.leg != fields["leg"]:
+        if not cacheable_leg(result, bracketed=fields.get("bracketed") is True) or result.leg != fields["leg"]:
             with self.legs.lock:
                 self.legs.stats["corrupt"] += 1
             return None

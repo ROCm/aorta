@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +33,7 @@ from aorlta.reward.profiles import load_profile, profile_from_dict
 from aorlta.reward.remote import RemoteFactory, Server, servers, socket_path
 from aorlta.reward.rewardfn.standin_v11 import StandinV11
 from aorlta.reward.service import RewardService
+from aorlta.schemas import LegJob
 
 from reward_helpers import reward_section
 
@@ -152,6 +155,14 @@ def test_aorta_stops_the_program_at_the_per_check_limit_never_past_the_adapters_
         assert seen[-1] == (a.leg, want)
 
 
+@pytest.mark.parametrize("cls,kw", [(AortaConsan, {"hook": "/nonexistent"}), (AortaAsan, {})], ids=["consan", "asan"])
+def test_the_checker_identity_names_the_target_the_program_is_built_for(cls, kw):
+    """The profile's leg settings do not name the GPU legs' target, so the checker's identity, which the leg's cache
+    key holds, must."""
+    a, b = (cls(aorta_src="/nonexistent", target=target, **kw) for target in ("gfx950", "gfx942"))
+    assert a.name == b.name and a.version != b.version
+
+
 def _sleeper(tmp_path: Path) -> Path:
     """A program whose argv[0] is its path, as the harness program aorta runs is: a copy of sleep(1). It keeps the
     name sleep, because a multi-call coreutils (uutils, as on Ubuntu 26.04) picks the tool by argv[0]'s name."""
@@ -206,6 +217,97 @@ def test_a_check_that_reaches_the_limit_is_never_clean_and_one_inside_it_is_unto
     assert state == "unsettled" and reason.startswith("check_timeout:")
     monkeypatch.setattr(a, "check", lambda *args: ("clean", None, []))
     assert a.bounded_check(_models(), tmp_path / "harness", "k", tmp_path / "out") == ("clean", None, [])
+
+
+def test_identical_checks_at_once_build_and_run_apart_and_a_timeout_kills_only_its_own(tmp_path, monkeypatch):
+    """Candidates with identical responses share the leg's output directory, and their checks can run at once. Each run
+    builds and runs its program in a directory of its own, so the check that times out kills only its own program."""
+    monkeypatch.setattr(standin_aorta, "CHECK_GRACE_S", 0.5)
+    monkeypatch.setattr(aorta_import, "load", lambda name, src: (_models(), None))
+    # "builds" the program as a link to this Python, so the program's argv[0] is its own path, as a harness's is
+    hipcc = tmp_path / "hipcc"
+    hipcc.write_text(f'#!/bin/bash\nwhile [ $# -gt 1 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
+                     f'ln -sf {sys.executable} "$out"\n')
+    hipcc.chmod(0o755)
+    src = tmp_path / "source.hip"
+    src.write_text("__global__ void k(float* p) { p[0] = 1.0f; }\nint main() { return 0; }\n")
+    job = LegJob("c#san.consan#a1", "san.consan", "c", None, "0" * 64, "0" * 64, 1, "w", {}, 0.0, None,
+                 {"source": str(src)}, str(tmp_path / "san.consan-0123"))
+    running, programs = threading.Event(), {}
+
+    def check_running_for(seconds: float):
+        def check(models, exe, kernel, out):
+            programs[seconds] = exe
+            proc = subprocess.Popen([str(exe), "-c", f"import time; time.sleep({seconds})"])
+            running.set()
+            rc = proc.wait()
+            return ("clean", None, []) if rc == 0 else ("unsettled", f"killed: {rc}", [])
+        return check
+
+    live = AortaConsan(hook="/nonexistent", aorta_src="/nonexistent", hipcc=str(hipcc), timeout_s=108.0)
+    hung = AortaConsan(hook="/nonexistent", aorta_src="/nonexistent", hipcc=str(hipcc), timeout_s=108.0,
+                       check_timeout_s=0.5)
+    monkeypatch.setattr(live, "check", check_running_for(5.0))
+    monkeypatch.setattr(hung, "check", check_running_for(600.0))
+    results = {}
+    t = threading.Thread(target=lambda: results.setdefault("live", live.run(job)))
+    t.start()
+    assert running.wait(timeout=30)
+    results["hung"] = hung.run(job)
+    t.join(timeout=60)
+    assert results["hung"].state == "unsettled" and results["hung"].reason.startswith("check_timeout:")
+    assert (results["live"].state, results["live"].reason) == ("clean", None)
+    assert programs[5.0] != programs[600.0] and not _running(programs[600.0])
+
+
+def test_close_kills_what_aorta_launched_for_the_check_and_what_it_launches_after(tmp_path, monkeypatch):
+    """aorta's backends run their programs with their own subprocess calls, which the adapter's runner never sees. Here
+    a stand-in does what aorta's ASan can: a build (of the node-health canary) that close() interrupts, after which it
+    goes on to launch the program. Neither outlives the close, and the leg is not a verdict."""
+    monkeypatch.setattr(aorta_import, "load", lambda name, src: (_models(), None))
+    hipcc = tmp_path / "hipcc"
+    hipcc.write_text(f'#!/bin/bash\nwhile [ $# -gt 1 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
+                     f'ln -sf {sys.executable} "$out"\n')
+    hipcc.chmod(0o755)
+    src = tmp_path / "source.hip"
+    src.write_text("__global__ void k(float* p) { p[0] = 1.0f; }\nint main() { return 0; }\n")
+    job = LegJob("c#san.asan#a1", "san.asan", "c", None, "0" * 64, "0" * 64, 1, "w", {}, 0.0, None,
+                 {"source": str(src)}, str(tmp_path / "san.asan-0123"))
+    building, started, lock, done = threading.Event(), [], threading.Lock(), []
+
+    def launch(argv):
+        with lock:
+            if done:  # the test is over
+                return None
+            started.append(subprocess.Popen(argv))
+            return started[-1]
+
+    def aorta_like(models, exe, kernel, out):
+        build = launch([sys.executable, "-c", "import time; time.sleep(60)", str(out / "canary")])
+        building.set()
+        build.wait()
+        program = launch([str(exe), "-c", "import time; time.sleep(60)"])
+        rc = None if program is None else program.wait()
+        return ("clean", None, []) if rc == 0 else ("unsettled", f"killed: {rc}", [])
+
+    a = AortaAsan(aorta_src="/nonexistent", hipcc=str(hipcc), timeout_s=45.0)
+    monkeypatch.setattr(a, "check", aorta_like)
+    results = []
+    t = threading.Thread(target=lambda: results.append(a.run(job)))
+    t.start()
+    try:
+        assert building.wait(timeout=30)
+        a.close()
+        t.join(timeout=20)
+        assert not t.is_alive()
+        assert (results[0].state, results[0].reason) == ("unsettled", "worker_died")
+        assert [p.returncode for p in started] == [-9, -9]  # the build, and the program launched after close()
+    finally:
+        with lock:
+            done.append(True)
+        for p in started:
+            p.kill()
+            p.wait()
 
 
 def test_kill_program_signals_only_the_program_at_that_path(tmp_path):

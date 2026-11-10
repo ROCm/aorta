@@ -9,14 +9,19 @@ import dataclasses
 import os
 import shutil
 import stat
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from aorlta.config import RewardSection
 from aorlta.ids import sha256_text
-from aorlta.reward.adapters import aorta_import
-from aorlta.reward.adapters.base import map_aorta_check
+from aorlta.reward.adapters import aorta_import, standin_harness, standin_hipcc
+from aorlta.reward.adapters.base import ProcessRunner, map_aorta_check
 from aorlta.reward.adapters.standin_hipcc import StandinHipcc, error_classes
 from aorlta.reward.adapters.standin_parse import StandinParse, last_cpp_block
 from aorlta.reward.adapters.standin_rj_waitcheck import StandinRjWaitcheck
@@ -78,6 +83,28 @@ def test_parse_without_its_input_is_unsettled_not_a_failure(tmp_path):
     assert (r.state, r.reason) == ("unsettled", "adapter_error")
 
 
+def test_identical_answers_parsed_at_once_both_publish_the_source(tmp_path, monkeypatch):
+    """Candidates with identical answers share the content-addressed parse directory, so two parse workers can write
+    source.hip at once; here both have written before either renames."""
+    (tmp_path / "response.txt").write_text("```cpp\n__global__ void k(float* p) { p[0] = 1.0f; }\n```")
+    replace, both = os.replace, threading.Barrier(2, timeout=10)
+
+    def replace_together(src, dst):
+        both.wait()
+        replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_together)
+    results = []
+    jobs = [job("gate.parse", tmp_path, inputs={"response": str(tmp_path / "response.txt")}) for _ in range(2)]
+    threads = [threading.Thread(target=lambda j=j: results.append(StandinParse().run(j))) for j in jobs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert [(r.state, r.reason) for r in results] == [("clean", None)] * 2
+    assert sorted(p.name for p in (tmp_path / "gate.parse").iterdir()) == ["source.hip"]
+
+
 # --- standin.hipcc ----------------------------------------------------------------------------------
 
 COMPILE = {"offload_arch": "gfx950", "flags": ["-c", "-O1"]}
@@ -105,6 +132,31 @@ def test_a_compile_error_is_the_candidates_with_classes_not_text(tmp_path):
 def test_error_classes_drop_quoted_names():
     stderr = "x.hip:3:7: error: use of undeclared identifier 'tid'\nx.hip:4:1: warning: w\n"
     assert error_classes(stderr) == ["use of undeclared identifier <name>"]
+    stderr = "x.hip:2:3: error: static_cast from 'size_t' (aka 'unsigned long') to 'float *' is not allowed\n"
+    assert error_classes(stderr) == ["static_cast from <name> to <name> is not allowed"]
+
+
+CANARY_STDERR = ("x.hip:2:2: error: private_source_canary\n"
+                 "x.hip:3:15: error: static assertion failed due to requirement 'sizeof(int) == 3': secret_assert_text\n"
+                 "x.hip:4:38: error: use of undeclared identifier 'secret_identifier_xyz'\n")
+
+
+def test_an_error_message_that_is_not_a_known_class_is_reported_by_its_hash_never_its_text():
+    classes = error_classes(CANARY_STDERR)
+    assert classes[2] == "use of undeclared identifier <name>"
+    assert all(c.startswith("sha256:") and len(c) == 19 for c in classes[:2])
+    assert not any(s in repr(classes) for s in ("private_source_canary", "secret_assert_text", "secret_identifier"))
+    assert error_classes("y.hip:9:1: error: private_source_canary\n") == classes[:1]  # the same message, the same code
+
+
+@needs_hipcc
+def test_an_error_directive_in_the_candidate_never_reaches_the_findings(tmp_path):
+    src = tmp_path / "canary.hip"
+    src.write_text('#include <hip/hip_runtime.h>\n#error private_source_canary\n'
+                   'static_assert(sizeof(int) == 3, "secret_assert_text");\n')
+    r = StandinHipcc(HIPCC).run(job("gate.compile", tmp_path, settings=COMPILE, inputs={"source": str(src)}))
+    assert (r.state, r.reason) == ("fail", "compile_error") and r.findings[0]["errors"] == 2
+    assert not any(s in repr(r.findings) for s in ("private_source_canary", "secret_assert_text"))
 
 
 def test_hipcc_never_runs_without_an_explicit_offload_arch(tmp_path):
@@ -138,8 +190,6 @@ def test_a_compiler_that_does_not_settle_is_unsettled(tmp_path, body, reason):
 
 
 def test_hipcc_close_kills_a_running_compile(tmp_path):
-    import threading
-    import time
     fake = script(tmp_path / "hipcc", "sleep 60\n")
     a = StandinHipcc(fake, timeout_s=50.0)
     out = {}
@@ -152,6 +202,81 @@ def test_hipcc_close_kills_a_running_compile(tmp_path):
     a.close()
     t.join(timeout=10)
     assert not t.is_alive() and out["r"].state == "unsettled" and out["r"].reason == "worker_died"
+
+
+def test_a_close_before_the_subprocess_is_published_still_kills_it(monkeypatch):
+    runner, popen = ProcessRunner(), subprocess.Popen
+
+    def popen_then_close(*args, **kw):  # close() lands after run() checked for it, before it published the process
+        proc = popen(*args, **kw)
+        runner.close()
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", popen_then_close)
+    r = runner.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout_s=8.0)
+    assert (r.killed, r.timed_out, r.returncode) == (True, False, -9)  # killed at once, not at its timeout
+
+
+def _run_together(runs):
+    results = [None] * len(runs)
+    threads = [threading.Thread(target=lambda i=i, f=f: results.__setitem__(i, f())) for i, f in enumerate(runs)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    return results
+
+
+def test_identical_compiles_at_once_each_rename_their_own_object(tmp_path):
+    """Candidates with identical responses and settings share the compile's output directory, and their first attempts
+    in one process have one PID and attempt number. Here both compilers finish writing before either object is
+    renamed."""
+    arrived = tmp_path / "arrived"
+    arrived.mkdir()
+    fake = script(tmp_path / "hipcc", f"""while [ $# -gt 1 ]; do [ "$1" = -o ] && out=$2; shift; done
+echo obj > "$out"
+touch {arrived}/$$
+for _ in $(seq 200); do n=({arrived}/*); [ ${{#n[@]}} -ge 2 ] && exit 0; sleep 0.05; done
+""")
+    src = tmp_path / "k.hip"
+    src.write_text("// k\n")
+    a = StandinHipcc(fake)
+    results = _run_together([lambda: a.run(job("gate.compile", tmp_path, settings=COMPILE, inputs={"source": str(src)}))
+                             for _ in range(2)])
+    assert [(r.state, r.reason) for r in results] == [("clean", None)] * 2
+    assert (tmp_path / "gate.compile" / "object.o").read_text() == "obj\n"
+
+
+def test_identical_build_facts_at_once_each_read_their_own_work_directory(tmp_path, monkeypatch):
+    """Two identical compiles one after the other, whose build facts are then read at once: one fact's cleanup must
+    not remove the other's work directory."""
+    fake = script(tmp_path / "hipcc", 'while [ $# -gt 1 ]; do [ "$1" = -o ] && out=$2; shift; done\necho obj > "$out"\n')
+    src = tmp_path / "k.hip"
+    src.write_text("__global__ void k(float* p) { p[0] = 1.0f; }\n")
+    first_in, both, seen = threading.Event(), threading.Barrier(2, timeout=10), []
+
+    def plan_side_by_side(source, *, workdir, **kw):
+        (Path(workdir) / str(threading.get_ident())).write_text("x")
+        first_in.set()
+        both.wait()
+        seen.append(sorted(p.name for p in Path(workdir).iterdir()))
+        both.wait()
+        return []
+
+    monkeypatch.setattr(standin_hipcc, "plan", plan_side_by_side)
+    a = StandinHipcc(fake)
+
+    def run():
+        return a.run(job("gate.compile", tmp_path, settings=COMPILE, inputs={"source": str(src)}))
+
+    def second():
+        first_in.wait(timeout=30)
+        return run()
+
+    results = _run_together([run, second])
+    assert [len(names) for names in seen] == [1, 1]  # each saw only its own file
+    assert [(r.state, r.reason) for r in results] == [("clean", None)] * 2
+    assert sorted(p.name for p in (tmp_path / "gate.compile").iterdir()) == ["launched_lds.json", "object.o"]
 
 
 # --- standin.rj_waitcheck ---------------------------------------------------------------------------
@@ -185,6 +310,68 @@ def test_waitcheck_verdicts_map_as_the_design_says(tmp_path, output, rc, state):
     assert r.state == state, r
     if state == "finding":
         assert r.findings and all("message" not in f for f in r.findings)
+
+
+def _fake_aorta_waitcheck(monkeypatch, seen: list) -> None:
+    """aorta's models and waitcheck backend, answering PASS for whatever object they are given (recorded in `seen`
+    with the output directory)."""
+    models = SimpleNamespace(KernelIdentity=lambda **k: k, KernelWorklist=lambda **k: k, KernelObservation=lambda **k: k,
+                             SelectionRequirement=SimpleNamespace(TOP_DISPATCH_COUNT=1))
+    passed = SimpleNamespace(state=SimpleNamespace(value="ran"), verdict=SimpleNamespace(value="pass"), findings=(),
+                             reason=None)
+
+    def run_waitcheck(worklist, *, output_dir, **kw):
+        seen.append((worklist["kernels"][0]["identity"]["code_object"], output_dir))
+        return passed
+
+    mods = {"models": models, "waitcheck": SimpleNamespace(run_waitcheck=run_waitcheck)}
+    monkeypatch.setattr(aorta_import, "load", lambda name, src: (mods.get(name), None))
+
+
+def test_two_waitcheck_runs_of_one_leg_directory_each_have_their_own(tmp_path, monkeypatch):
+    seen: list = []
+    _fake_aorta_waitcheck(monkeypatch, seen)
+    obj = tmp_path / "object.o"
+    obj.write_bytes(b"\x7fELF")
+    a = StandinRjWaitcheck("/nonexistent/rj_waitcheck")
+    results = [a.run(job("san.waitcheck", tmp_path, settings={"target": "gfx950"}, inputs={"object": str(obj)}))
+               for _ in range(2)]
+    assert [r.state for r in results] == ["clean", "clean"]
+    dirs = [Path(d) for _, d in seen]
+    assert len(set(dirs)) == 2 and all(d.parent == tmp_path / "san.waitcheck" for d in dirs)
+
+
+def _waitcheck_of(tmp_path, text: str, hipcc: str):
+    src = tmp_path / "source.hip"
+    src.write_text(text)
+    obj = tmp_path / "object.o"
+    obj.write_bytes(b"\x7fELF")
+    return obj, StandinRjWaitcheck("/nonexistent/rj_waitcheck", hipcc=hipcc).run(
+        job("san.waitcheck", tmp_path, settings={"target": "gfx950"}, inputs={"object": str(obj), "source": str(src)}))
+
+
+MIXED = "template <typename T> __global__ void scale(T* p) { p[0] *= 2; }\n__global__ void zero(float* p) { p[0] = 0; }\n"
+
+
+@pytest.mark.parametrize("hipcc_body", [None, "sleep 30\n"], ids=["cannot_start", "times_out"])
+def test_a_waitcheck_whose_kernels_cannot_be_read_is_unsettled_not_the_gate_objects_verdict(tmp_path, monkeypatch,
+                                                                                            hipcc_body):
+    """The gate's object has no code for an uninstantiated template, so when kernel discovery fails the scan of that
+    object alone says nothing about the source's templates."""
+    seen: list = []
+    _fake_aorta_waitcheck(monkeypatch, seen)
+    monkeypatch.setattr(standin_harness, "AST_TIMEOUT_S", 0.5)
+    hipcc = "/nonexistent/hipcc" if hipcc_body is None else script(tmp_path / "hipcc", hipcc_body)
+    _, r = _waitcheck_of(tmp_path, MIXED, hipcc)
+    assert (r.state, r.reason) == ("unsettled", "harness_unsupported: clang could not read the source (exit None)")
+    assert seen == []  # nothing was scanned
+
+
+def test_a_waitcheck_of_a_source_that_defines_no_kernel_scans_the_gates_object(tmp_path, monkeypatch):
+    seen: list = []
+    _fake_aorta_waitcheck(monkeypatch, seen)
+    obj, r = _waitcheck_of(tmp_path, "__device__ float twice(float x) { return 2 * x; }\n", "/nonexistent/hipcc")
+    assert r.state == "clean" and [o for o, _ in seen] == [str(obj)]
 
 
 @needs_rj

@@ -371,7 +371,8 @@ class RewardService:
             }
 
     def close(self) -> None:
-        """Stop the coordinator and the workers; any candidate still open is unscored (service_closed)."""
+        """Stop the coordinator, the workers and the cache's writer; any candidate still open is unscored
+        (service_closed)."""
         with self._lock:
             self._closed = True
         self._events.put(("close",))
@@ -383,7 +384,7 @@ class RewardService:
                     w.abandon()
             if self.selector is not None:
                 self.selector.close()
-        self.cache.flush()
+        self.cache.close()
 
     def _force_resolve(self, reason: str) -> None:
         for cid in self._order:
@@ -487,11 +488,13 @@ class RewardService:
     def _start_candidate(self, c: _Cand) -> None:
         cand = c.cand
         self._iteration = cand.iteration
-        for leg in self.profile.legs:
+        for leg in self.profile.legs:  # requirements come before their legs (profile_problems)
             pool = self._pools[self.profile.stage_of(leg).pool]
             fields = leg_key_fields(source_sha256=c.source_sha256, task_sha256=cand.task.task_sha256, leg=leg,
                                     leg_settings=dict(self.profile.leg_settings.get(leg, {})),
-                                    checker_name=pool.checker[0], checker_version=pool.checker[1])
+                                    checker_name=pool.checker[0], checker_version=pool.checker[1],
+                                    requires={need: c.leg_keys[need] for need in self.profile.requires.get(leg, ())},
+                                    bracketed=pool.bracketed)
             c.leg_keys[leg] = sha256_json(fields)
             c.leg_fields[leg] = fields
         rkey, rfields = self._reward_key(c)
@@ -512,7 +515,9 @@ class RewardService:
 
     def _reward_key(self, c: _Cand) -> tuple[str, dict]:
         rf = self._rewardfn_identity()
-        fields = reward_key_fields(c.cand, c.leg_keys, rf, self.profile.name)
+        fields = reward_key_fields(c.cand, c.leg_keys, rf, self.profile.name,
+                                   reward_settings=dict(getattr(self.rewardfn, "settings", {})),
+                                   clean_repeats=self.profile.clean_repeats)
         return sha256_json(fields), fields
 
     def _rewardfn_identity(self) -> dict:
