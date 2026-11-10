@@ -1,5 +1,6 @@
 """C8.T2: a partial iteration is invisible to readers; and the ledgers and the sealed evidence store."""
 
+import errno
 import os
 import stat
 
@@ -113,6 +114,55 @@ def test_a_ledger_with_a_bad_line_before_the_end_is_refused(tmp_path):
     p.write_bytes(b'{"iteration": 1}\nnot json\n{"iteration": 2}\n')
     with pytest.raises(LedgerError):
         AppendLedger(p).read()
+
+
+@pytest.mark.parametrize("tail", [b"\n", b""], ids=["a-line", "the-final-line"])
+@pytest.mark.parametrize("bad", [b"[]", b"{}", b"5", b'{"iteration": "1"}', b'{"iteration": true}',
+                                 b'{"iteration": -1}', b'{"iteration": 1.0}'])
+def test_read_refuses_a_record_that_names_no_iteration_as_truncating_does(tmp_path, bad, tail):
+    p = tmp_path / "x.jsonl"
+    p.write_bytes(b'{"iteration": 1}\n' + bad + tail)
+    with pytest.raises(LedgerError, match=":2: a record with no iteration"):
+        AppendLedger(p).read()
+    with pytest.raises(LedgerError, match=":2: a record with no iteration"):
+        AppendLedger(p).truncate_after(1)
+    assert p.read_bytes() == b'{"iteration": 1}\n' + bad + tail
+
+
+def test_read_keeps_a_complete_final_record_that_only_lacks_its_newline(tmp_path):
+    p = tmp_path / "x.jsonl"
+    p.write_bytes(b'{"iteration": 1}\n{"iteration": 2}')
+    assert AppendLedger(p).read() == [{"iteration": 1}, {"iteration": 2}]
+
+
+def _fail_dir_fsync(monkeypatch, code):
+    real = os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(code, os.strerror(code))
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+
+
+@pytest.mark.parametrize("code", [errno.EIO, errno.ENOSPC])
+def test_an_iteration_whose_directory_sync_fails_is_not_committed(tmp_path, monkeypatch, code):
+    out = IterationOutputs(tmp_path, 1)
+    out.write_episodes([_episode()])
+    _fail_dir_fsync(monkeypatch, code)
+    with pytest.raises(OSError) as exc:
+        out.commit()
+    assert exc.value.errno == code and complete_iterations(tmp_path) == [] and not out.committed
+
+
+@pytest.mark.parametrize("code", [errno.EINVAL, errno.ENOTSUP])
+def test_an_iteration_commits_on_a_filesystem_without_directory_fsync(tmp_path, monkeypatch, code):
+    out = IterationOutputs(tmp_path, 1)
+    out.write_episodes([_episode()])
+    _fail_dir_fsync(monkeypatch, code)
+    out.commit()
+    assert complete_iterations(tmp_path) == [1] and len(read_episodes(tmp_path, 1)) == 1
 
 
 def test_the_evidence_store_is_content_addressed_owner_only_and_verifiable(tmp_path):
