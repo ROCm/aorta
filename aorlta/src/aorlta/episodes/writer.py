@@ -178,21 +178,28 @@ class AppendLedger:
         return out
 
     def truncate_after(self, n: int) -> int:
-        """Keep the records of iterations <= n (and drop a torn line); return how many were dropped. A kept last
-        record that lacks its newline gets it back, or the next append would run on into the same line."""
+        """Keep the records of iterations <= n (and drop a torn final line); return how many were dropped. A bad line
+        anywhere else is refused, as `read` refuses it, and the file is left as it was: a resume never rewrites
+        committed history it cannot read. A kept last record that lacks its newline gets it back, or the next append
+        would run on into the same line."""
         if not self.path.exists():
             return 0
         raw = self.path.read_bytes()
+        lines = raw.split(b"\n")
+        torn = lines.pop() if lines else b""  # the bytes after the last newline: empty unless a write was cut
         kept, dropped = [], 0
-        for line in raw.split(b"\n"):
-            if not line:
-                continue
+        for i, line in enumerate(lines + ([torn] if torn else []), 1):
             try:
                 rec = json.loads(line)
-                keep = isinstance(rec, dict) and isinstance(rec.get("iteration"), int) and rec["iteration"] <= n
             except ValueError:
-                keep = False
-            if keep:
+                if i > len(lines):  # the torn final line
+                    dropped += 1
+                    continue
+                raise LedgerError(f"{self.path}:{i}: not a JSON record") from None
+            it = rec.get("iteration") if isinstance(rec, dict) else None
+            if not (isinstance(it, int) and not isinstance(it, bool)):
+                raise LedgerError(f"{self.path}:{i}: a record with no iteration")
+            if it <= n:
                 kept.append(line + b"\n")
             else:
                 dropped += 1

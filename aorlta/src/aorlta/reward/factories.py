@@ -3,6 +3,7 @@ profile's `adapters:` settings. `fake` adapters are built by the caller (they ta
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -51,6 +52,10 @@ def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, flo
             check_timeout_s=check_s.get("san.consan"), control_source=c.get("control_source"), clock=clock.wall)
     if "standin.aorta_asan" in names:
         c = cfg.get("standin.aorta_asan", {})
+        # aorta's ASan node-health canary builds with $HIPCC if it is set, else from aorta's own ROCm lookup, which
+        # AORLTA_ROCM_ROOT does not reach. Name the candidates' compiler there now, before any worker is built, so the
+        # canary and the candidates share one toolchain; a $HIPCC already set stands.
+        os.environ.setdefault("HIPCC", c.get("hipcc", hipcc))
         out["standin.aorta_asan"] = lambda wid, c=c: SequentialBatch(AortaAsan(
             aorta_src=c["aorta_src"], hipcc=c.get("hipcc", hipcc), target=c.get("target", "gfx950"),
             timeout_s=max(1.0, own("standin.aorta_asan") / 18), check_timeout_s=check_s.get("san.asan"),

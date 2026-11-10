@@ -28,8 +28,10 @@ derived from the committed summary and written after the commit (resume rewrites
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import queue
 import random
 import threading
@@ -58,6 +60,7 @@ from .state import (RUN_STATE_SCHEMA, RunState, cursor_for, prune_checkpoints, p
 log = logging.getLogger("aorlta.orchestrator")
 
 RUN_RESULT_SCHEMA = "aorlta.run_result/1"
+RUN_LOCK_NAME = "run.lock"  # held by the one process that owns the run directory (Orchestrator._lock_run)
 RESULT_WAIT_S = 60.0  # real seconds to wait, after a drain, for result callbacks still in flight
 NOOP_WARN, NOOP_STOP = 2, 5  # consecutive NOOP iterations: warn at 2, stop at 5 (Section 6.6, failure modes)
 
@@ -344,6 +347,7 @@ class Orchestrator:
         self.attempt = 1
         self.resumed_from: int | None = None
         self._owns_run = False  # set once this process has written (or, resuming, verified) the run plan
+        self._run_lock: int | None = None  # the descriptor holding RUN_LOCK_NAME
 
     def point(self, name: str, iteration: int) -> None:
         """A named place in the loop. Tests hook it (the kill -9 test dies at one); it does nothing by default."""
@@ -374,6 +378,7 @@ class Orchestrator:
                 plan_path = self.run_dir / config_mod.RUN_PLAN_NAME
                 if not plan_path.exists():
                     raise RunStopped("no_run_plan", {"run_dir": str(self.run_dir)})
+                self._lock_run()
                 config_mod.write_run_plan(self.cfg, exist_ok=True, commit=self.commit_id, package_dir=self.package_dir)
                 self._owns_run = True
                 rp = prepare_resume(self.run_dir, o.keep_ckpts)
@@ -382,6 +387,7 @@ class Orchestrator:
             else:
                 config_mod.write_run_plan(self.cfg, config_path=self.config_path, commit=self.commit_id,
                                           package_dir=self.package_dir, extra_files=self._base_files())
+                self._lock_run()  # after the plan, which is a run directory's first file
                 self._owns_run = True
                 state, rp = None, None
             self.base_sha256 = state.base_sha256 if state is not None else self._base_sha256_from_plan()
@@ -742,15 +748,32 @@ class Orchestrator:
             atomic_write_json(path, result)
         return result
 
+    def _lock_run(self) -> None:
+        """Hold the run directory's lock until the run closes: one process owns a run at a time, so a resume started
+        while the run (or another resume) is alive is refused before it touches the run directory."""
+        fd = os.open(self.run_dir / RUN_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise RunStopped("run_in_use", {"run_dir": str(self.run_dir)}) from None
+        self._run_lock = fd
+
     def _close(self) -> None:
-        if not self._owns_run:  # refused at the run plan, it started nothing; the run's node files belong to another
-            return
-        for name, fn in (("reward", getattr(self.reward, "close", None)), ("rollout", getattr(self.rollout, "shutdown", None))):
-            if fn is not None:
-                try:
-                    fn()
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("closing %s: %s", name, describe_error(exc, self.source))
+        try:
+            if not self._owns_run:  # refused at the run plan, it started nothing; the run's node files are another's
+                return
+            for name, fn in (("reward", getattr(self.reward, "close", None)),
+                             ("rollout", getattr(self.rollout, "shutdown", None))):
+                if fn is not None:
+                    try:
+                        fn()
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("closing %s: %s", name, describe_error(exc, self.source))
+        finally:
+            if self._run_lock is not None:  # closing the descriptor releases the lock
+                os.close(self._run_lock)
+                self._run_lock = None
 
     # --- data rules ---------------------------------------------------------------------------------------------
 

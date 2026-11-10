@@ -12,7 +12,8 @@ just before that (loop.py, step 10). `prepare_resume` is the file half of a resu
 - every `.partial` file or directory anywhere under the run directory is removed (Section 5 item 6: readers never
   open them, and a new process cannot finish what a dead one started);
 - a checkpoint newer than n_c is removed: it was renamed, but its iteration never committed;
-- records of iterations after n_c are cut from the append-only ledgers and the evidence manifest; TensorBoard
+- records of iterations after n_c are cut from the append-only ledgers and the evidence manifest (a ledger with a
+  bad line before its end stops the resume before anything is removed; only a torn final line is dropped); TensorBoard
   files after n_c are removed, and a committed iteration's file that the crash prevented is written from its
   committed summary;
 - checkpoints beyond `keep_ckpts` are pruned (a crash between a commit and its prune leaves one too many).
@@ -73,6 +74,10 @@ def prepare_resume(run_dir: Path, keep_ckpts: int) -> ResumePoint:
     if n_c:
         path = ckpt_root / iteration_dir_name(n_c)
         state = verify_checkpoint(path)  # raises CheckpointError: never fall back past a committed iteration
+    ledgers = [AppendLedger(p) for p in sorted((run_dir / LEDGERS_DIR).glob("*.jsonl"))]
+    store = EvidenceStore(run_dir / EVIDENCE_DIR) if (run_dir / EVIDENCE_DIR).is_dir() else None
+    for ledger in ledgers + ([store.manifest] if store else []):
+        ledger.read()  # raises LedgerError on a bad line before a ledger's end, before anything is removed
     removed = remove_partials(run_dir)
     for n in complete_checkpoints(ckpt_root):
         if n > n_c:
@@ -88,14 +93,11 @@ def prepare_resume(run_dir: Path, keep_ckpts: int) -> ResumePoint:
             summary = read_summary(run_dir, n)
             tb.write_iteration(run_dir / "tb", n, tb.scalars_from_summary(summary), summary["timing"]["t_landed"])
             removed.append(f"tb: rewrote iteration {n} from its summary")
-    ledgers = run_dir / LEDGERS_DIR
-    if ledgers.is_dir():
-        for p in sorted(ledgers.glob("*.jsonl")):
-            dropped = AppendLedger(p).truncate_after(n_c)
-            if dropped:
-                removed.append(f"{LEDGERS_DIR}/{p.name}: {dropped} records")
-    if (run_dir / EVIDENCE_DIR).is_dir():
-        store = EvidenceStore(run_dir / EVIDENCE_DIR)
+    for ledger in ledgers:
+        dropped = ledger.truncate_after(n_c)
+        if dropped:
+            removed.append(f"{LEDGERS_DIR}/{ledger.path.name}: {dropped} records")
+    if store is not None:
         dropped = store.manifest.truncate_after(n_c)
         if dropped:
             removed.append(f"{EVIDENCE_DIR}/MANIFEST.jsonl: {dropped} records")

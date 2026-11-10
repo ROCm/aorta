@@ -7,11 +7,15 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
+
 import pytest
 
 from aorlta.config import ConfigError
 from aorlta.episodes.writer import complete_iterations, read_episodes, read_summary
 from aorlta.orchestrator.fakes import build_fake_run
+from aorlta.orchestrator.loop import RUN_LOCK_NAME
 from aorlta.spans import read_jsonl
 
 NO_ERRORS = {"error_rate": 0.0}
@@ -99,3 +103,26 @@ def test_a_run_refused_at_its_run_plan_stops_nothing(make_spec):
     with pytest.raises(ConfigError, match="already set"):
         again.run()
     assert stopped == []
+
+
+def test_a_resume_while_another_process_owns_the_run_is_refused_and_touches_nothing(make_spec):
+    """A run holds its directory's lock for its life, so a resume started while the run (or another resume) is alive
+    stops before its cleanup, which would delete the live process's `.partial` files and share its weight slots."""
+    spec = make_spec(iterations=1)
+    first, result = run(spec)
+    assert result["status"] == "completed"
+    run_dir = first.cfg.run_dir
+    live = run_dir / "iterations" / "iter-000002.partial"
+    live.mkdir()
+    before = (run_dir / "run_result.json").read_bytes()
+    fd = os.open(run_dir / RUN_LOCK_NAME, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # the live owner's lock; the finished run released its own
+        again = build_fake_run(spec).orchestrator
+        stopped = []
+        again.rollout.shutdown = lambda: stopped.append("rollout")
+        assert again.run(resume=True)["stop"]["reason"] == "run_in_use" and stopped == []
+        assert live.is_dir() and (run_dir / "run_result.json").read_bytes() == before
+    finally:
+        os.close(fd)
+    assert build_fake_run(spec).orchestrator.run(resume=True)["status"] == "completed" and not live.exists()

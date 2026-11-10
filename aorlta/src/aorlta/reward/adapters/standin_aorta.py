@@ -26,9 +26,10 @@ Trusted controls are aorta's clean fixtures (the single-wave LDS repro for ConSa
 store for ASan): a control run is clean only if the fixture comes back PASS.
 
 Each aorta run has a per-check wall-clock limit (`reward.gpu_check_s`, inside the adapter's own share of the pool
-timeout): aorta stops the program at the limit, and if aorta has not returned `CHECK_GRACE_S` later the program is
-killed here, by its path. A check that reached the limit is unsettled (`check_timeout`) whatever came back: a
-timeout is never clean. A kernel that hangs then holds its worker for the limit, not for the whole pool timeout
+timeout): aorta stops the program at the limit, and if aorta has not returned `CHECK_GRACE_S` later everything it
+launched for the run is killed here (the program, or ASan's node-health canary and its build if the program has not
+started), and what it launches for the run after that is killed every `REAP_S` until aorta returns. A check that
+reached the limit is unsettled (`check_timeout`) whatever came back: a timeout is never clean. A kernel that hangs then holds its worker for the limit, not for the whole pool timeout
 (one such kernel held the only ConSan worker for 110 s).
 
 aorta launches the checked program (and ASan's node-health canary, and the canary's build) with its own subprocess
@@ -143,6 +144,7 @@ class _AortaGpu:
         self._closed = threading.Event()
         self._lock = threading.Lock()
         self._runs: set[Path] = set()  # the directories of the runs in progress
+        self._lingering: set[Path] = set()  # those of checks aorta has not returned from past their limit
 
     def _build(self, src: str, out: Path, flags: list[str]) -> tuple[Path | None, str | None]:
         exe = out / "harness"
@@ -221,7 +223,8 @@ class _AortaGpu:
 
     def bounded_check(self, models, exe: Path, kernel: str, out: Path):
         """`check` under the per-check wall-clock limit. aorta stops the program at `check_s` itself; a check still
-        running `CHECK_GRACE_S` later has its program killed here. Reaching the limit is unsettled, never clean."""
+        running `CHECK_GRACE_S` later has what it launched for `out` killed here, and goes on having it killed until it
+        returns (`_linger`). Reaching the limit is unsettled, never clean."""
         limit, box = self.check_s, {}
         if self._closed.is_set():
             return "unsettled", "worker_died", []
@@ -238,13 +241,32 @@ class _AortaGpu:
         thread.join(limit + CHECK_GRACE_S)
         if thread.is_alive():
             kill_program(exe)
+            kill_in([out])  # the ASan canary and its build, if the program has not started
             thread.join(CHECK_GRACE_S)
+        if thread.is_alive():
+            self._linger(thread, exe, out)
         elapsed = time.monotonic() - t0
         if self._closed.is_set():  # its program was killed by close(): whatever came back is no verdict
             return "unsettled", "worker_died", []
         if thread.is_alive() or elapsed >= limit:
             return "unsettled", f"check_timeout: {elapsed:.1f} s, limit {limit:g} s", []
         return box["result"]
+
+    def _linger(self, thread: threading.Thread, exe: Path, out: Path) -> None:
+        """A check aorta has not returned from: what it launches for `out` is killed every `REAP_S` until it returns,
+        and `close()` covers `out` until then."""
+        with self._lock:
+            self._lingering.add(out)
+
+        def reap() -> None:
+            while thread.is_alive():
+                kill_program(exe)
+                kill_in([out])
+                thread.join(REAP_S)
+            with self._lock:
+                self._lingering.discard(out)
+
+        threading.Thread(target=reap, name=f"{self.name}-linger", daemon=True).start()
 
     def controls(self) -> list[ControlSpec]:
         if not self.control_source:
@@ -263,7 +285,7 @@ class _AortaGpu:
         self._closed.set()
         self.runner.close()
         with self._lock:
-            live = list(self._runs)
+            live = list(self._runs | self._lingering)
         if live:
             kill_in(live)
             threading.Thread(target=self._reap, name=f"{self.name}-reap", daemon=True).start()
