@@ -37,15 +37,15 @@ class PhaseEngine:
         return {"output_ids": list(gen), "meta_info": {"cached_tokens": 0, "input_token_logprobs": rows}}
 
 
-def round_trip(tmp_path, pert, rest=BASE):
+def round_trip(tmp_path, pert, rest=BASE, probes=PROBES, engine=None):
     slots = []
     for name in ("pert", "rest"):
         (tmp_path / name).mkdir()
         (tmp_path / name / INDEX_NAME).write_text("{}")
         (tmp_path / name / MANIFEST_NAME).write_text("{}")
         slots.append(tmp_path / name)
-    e = PhaseEngine({"base": BASE, "pert": pert, "rest": rest})
-    return RT.round_trip([e], PROBES, perturbed_slot=slots[0], restore_slot=slots[1], expected=31,
+    e = engine or PhaseEngine({"base": BASE, "pert": pert, "rest": rest})
+    return RT.round_trip([e], probes, perturbed_slot=slots[0], restore_slot=slots[1], expected=31,
                          in_flight=lambda: 0, reps=2, greedy_tokens=2)
 
 
@@ -63,6 +63,13 @@ def test_a_changed_continuation_alone_does_not_prove_the_reload(tmp_path):
 def test_the_restore_must_bring_back_the_continuation_too(tmp_path):
     res = round_trip(tmp_path, MOVED, rest={"lps": BASE["lps"], "gen": [[5, 6], [7, 9]]})
     assert res.verdict == "NOT_PROVEN" and res.restore_draws_matching == 2
+
+
+def test_an_empty_probe_set_is_refused_before_the_baseline_and_the_reloads(tmp_path):
+    e = PhaseEngine({"base": BASE, "pert": MOVED, "rest": BASE})
+    with pytest.raises(LandingError, match="no probes"):
+        round_trip(tmp_path, MOVED, probes=ProbeSet(()), engine=e)
+    assert e.phase == "base"
 
 
 @pytest.mark.parametrize("bad", [-math.inf, math.inf, math.nan])

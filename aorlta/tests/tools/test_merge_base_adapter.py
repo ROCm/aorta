@@ -229,6 +229,18 @@ def test_the_cast_is_round_to_nearest_even_and_the_check_has_teeth():
     assert torch.equal(M.rne_bf16_bits(neg), u16(torch.tensor([-1.0, -(1 + 2.0**-6)]).to(torch.bfloat16)))
 
 
+@pytest.mark.parametrize(("b", "sum_finite"), [(1.7e38, True), (3e38, False)], ids=["cast_overflows", "sum_overflows"])
+def test_an_element_whose_sum_or_cast_is_not_finite_counts_once(b, sum_finite):
+    from aorlta.sync.merge import merge_all
+
+    w = torch.zeros(2, 4, dtype=torch.bfloat16)
+    base, factors = {"k": w}, {"k": (torch.ones(1, 4), torch.full((2, 1), b), 2.0)}
+    got = merge_all(base, factors, base, version=0).weights["k"]
+    assert bool(torch.isfinite(M.fp32_sum(w, *factors["k"])).all()) is sum_finite
+    rounding = M.check_rounding(base, factors, {"k": got})
+    assert (rounding["nonfinite"], rounding["pass"]) == (8, False)
+
+
 def test_compare_bf16_tells_a_rounding_flip_from_a_value_further_away():
     one, step = 1.0, 2.0**-7
     tiny = 2.0**-133  # the smallest bf16 subnormal
@@ -290,6 +302,9 @@ REFUSALS = {
         {_first(sd, "self_attn.q_proj.lora_A.weight"): torch.zeros(5, 64)})),
     "overflowing_merge": dict(tensors=lambda sd: sd.update(
         {k: torch.full_like(v, 1e30) for k, v in sd.items() if ".self_attn.q_proj.lora_" in k})),
+    "overflowing_cast": dict(tensors=lambda sd: sd.update(  # fp32 sums of 3.4e38: finite, but bf16 infinity
+        {k: torch.full_like(v, 1.0 if ".lora_A." in k else 4.25e37) for k, v in sd.items()
+         if ".self_attn.q_proj.lora_" in k})),
 }
 
 

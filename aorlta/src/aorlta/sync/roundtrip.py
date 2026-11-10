@@ -89,6 +89,8 @@ def judge(base: list[list[Draw]], pert: list[list[Draw]], rest: list[list[Draw]]
 
 def round_trip(engines: Sequence[Any], probes: ProbeSet, *, perturbed_slot: str | Path, restore_slot: str | Path,
                expected: int, in_flight: Callable[[], int], reps: int = 3, greedy_tokens: int = 16) -> RoundTripResult:
+    if not probes.ids:
+        raise LandingError("no probes: the round trip would be judged on zero draws")
     t0 = time.monotonic()
     base = probe_draws(engines, probes, reps, greedy_tokens)
     reloads = []
