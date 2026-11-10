@@ -7,8 +7,12 @@
 
 from __future__ import annotations
 
+import pytest
+
+from aorlta.config import ConfigError
 from aorlta.episodes.writer import complete_iterations, read_episodes, read_summary
 from aorlta.orchestrator.fakes import build_fake_run
+from aorlta.spans import read_jsonl
 
 NO_ERRORS = {"error_rate": 0.0}
 
@@ -52,9 +56,24 @@ def test_an_iteration_where_every_group_has_zero_advantage_is_a_noop_not_a_stop(
         s = read_summary(r.cfg.run_dir, n)
         assert "zero_advantage" in s["warnings"] and s["trainer"]["step_taken"] is False
         assert s["sync"]["published"] is False and s["groups"]["zero_advantage"] == s["groups"]["total"]
+        assert s["spans"]["missing"] == []
+        (mark,) = [x for x in read_jsonl(r.cfg.run_dir / "iterations" / f"iter-{n:06d}" / "spans.jsonl")
+                   if x.name in ("landing", "no_step")]
+        assert (mark.name, mark.t_start, mark.t_end) == ("no_step", s["timing"]["t_landed"], s["timing"]["t_landed"])
+        assert mark.attrs == {"reason": "zero_advantage"}
         why = {e["excluded_reason"] for e in read_episodes(r.cfg.run_dir, n) if e["status"] == "scored"}
         assert "no_step" in why and why <= {"no_step", "logprob_error"}  # a logprob_error chain has no sample
     assert read_summary(r.cfg.run_dir, 3)["noop_streak"] == 3 and "noop_steps" in read_summary(r.cfg.run_dir, 2)["warnings"]
+
+
+def test_an_iteration_with_no_trainable_sample_also_ends_at_its_no_step_marker(make_spec):
+    r, res = run(make_spec(iterations=1, eval_every=None, engine=NO_ERRORS, trainer={"min_scored": 9}))  # K is 8
+    assert res["status"] == "completed", res.get("stop")
+    s = read_summary(r.cfg.run_dir, 1)
+    assert "no_trainable_samples" in s["warnings"] and s["spans"]["missing"] == []
+    spans = read_jsonl(r.cfg.run_dir / "iterations" / "iter-000001" / "spans.jsonl")
+    (mark,) = [x for x in spans if x.name == "no_step"]
+    assert mark.attrs == {"reason": "no_trainable_samples"} and mark.t_end == s["timing"]["t_landed"]
 
 
 def test_an_iteration_where_only_some_groups_have_zero_advantage_still_steps(make_spec):
@@ -66,3 +85,17 @@ def test_an_iteration_where_only_some_groups_have_zero_advantage_still_steps(mak
     s = read_summary(r.cfg.run_dir, 1)
     assert r.trainer.steps == 1 and s["trainer"]["step_taken"] is True and "zero_advantage" not in s["warnings"]
     assert s["groups"]["zero_advantage"] == len(prompts) - 1
+
+
+def test_a_run_refused_at_its_run_plan_stops_nothing(make_spec):
+    """A second process under a run id that another holds started nothing, so it stops nothing: the rollout's
+    shutdown removes the run's node directory, which holds the other process's weight slots."""
+    spec = make_spec(iterations=1)
+    assert run(spec)[1]["status"] == "completed"
+    again = build_fake_run(spec).orchestrator
+    stopped = []
+    again.rollout.shutdown = lambda: stopped.append("rollout")
+    again.reward.close = lambda: stopped.append("reward")
+    with pytest.raises(ConfigError, match="already set"):
+        again.run()
+    assert stopped == []

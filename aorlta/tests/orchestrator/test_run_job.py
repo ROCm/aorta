@@ -2,6 +2,7 @@
 containers that load a profile or the config get the site's tool roots and site file."""
 
 import re
+import subprocess
 from pathlib import Path
 
 PKG = Path(__file__).resolve().parents[2]
@@ -22,3 +23,40 @@ def test_the_orchestrator_and_the_checkers_get_the_tool_roots_and_the_site_file(
             assert f"-e {name}=" in block, name
     copy = JOB.index('cp "$AORLTA_SITE" "$OUT/site.yaml"')
     assert copy < JOB.index("load_config(")  # every config the job reads has the site applied
+
+
+def test_the_job_stops_before_the_run_if_the_docker_daemon_sees_a_mount_elsewhere():
+    check = JOB[JOB.index("MARK=.aorlta-mount-"):JOB.index("vram_sampler >>")]
+    assert JOB.index("add_mounts ORCH_MOUNTS rw") < JOB.index("MARK=.aorlta-mount-") < JOB.index("\norchestrator\n")
+    assert '"${ORCH_MOUNTS[@]}"' in check and "*:ro) ;;" in check  # every read-write mount, as the run gets them
+    assert "exit 95" in check and 'rm -f "$d/$MARK"' in check
+
+
+DOCKER = r"""#!/bin/bash
+echo "$*" >> "$DOCKER_LOG"
+case "$1" in
+  ps) printf '%s\n' $CONTAINERS ;;
+  image) exit 1 ;;
+  rm) shift; [ "$1" = -f ] && shift; printf 'removed %s\n' "$@" >> "$DOCKER_LOG" ;;
+esac
+exit 0
+"""
+
+
+def test_cleanup_removes_this_jobs_containers_and_not_another_jobs_whose_name_extends_it(tmp_path):
+    funcs = "".join(re.search(rf"^{name}\(\) \{{.*?^\}}\n", JOB, re.M | re.S).group(0)
+                    for name in ("add_mounts", "clean_img", "cleanup"))
+    stub = tmp_path / "bin" / "docker"
+    stub.parent.mkdir()
+    stub.write_text(DOCKER)
+    stub.chmod(0o755)
+    log = tmp_path / "docker.log"
+    names = "aorlta-run-123 aorlta-run-123-canary aorlta-run-1234 aorlta-run-1234-canary aorlta-run-12"
+    env = {"PATH": f"{stub.parent}:/usr/bin:/bin", "DOCKER_LOG": str(log), "CONTAINERS": names}
+    state = (f"CNAME=aorlta-run-123 VRAM_PID= OUT={tmp_path}/out RUN_ROOT={tmp_path}/runs SYNC_DIR={tmp_path}/shm "
+             f"RUN_ID=r SOCK_DIR= RUN_DIR={tmp_path}/runs/r BUILT_TRAINER=0 BUILT_BASE=0 PULLED_CHK=0 BASE=b CHK_IMG=c")
+    out = subprocess.run(["bash", "-c", f"{funcs}{state}\ncleanup"], env=env, capture_output=True, text=True,
+                         check=True, timeout=60).stdout
+    removed = [line.split(" ", 1)[1] for line in log.read_text().splitlines() if line.startswith("removed ")]
+    assert sorted(" ".join(removed).split()) == ["aorlta-run-123", "aorlta-run-123-canary"]
+    assert "containers left: 2" in out  # the stub still lists them: the count is this job's two, not five

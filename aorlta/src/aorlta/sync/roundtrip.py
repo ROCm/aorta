@@ -1,8 +1,8 @@
 """C5 step 6: the perturb-then-restore round trip (design Section 6.5).
 
 On fresh engines at run start, and after any engine restart: take a baseline, reload a perturbed slot (every
-probe draw must change), reload the restore slot (every draw must be identical to the baseline), each phase
-judged on `reps` replicates as in an earlier prototype. A draw is one probe scored alone: its
+probe draw's prompt log-probs must change), reload the restore slot (every draw must be identical to the
+baseline), each phase judged on `reps` replicates as in an earlier prototype. A draw is one probe scored alone: its
 prompt log-probs (a fresh prefill, so the prefix cache cannot supply the baseline, Section 6.5 consequence 1)
 and a short greedy continuation.
 
@@ -12,6 +12,7 @@ PROVEN, NOT_PROVEN.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -35,6 +36,9 @@ def draw_request(ids: Sequence[int], greedy_tokens: int) -> dict[str, Any]:
 def draw(engine, ids: Sequence[int], greedy_tokens: int = 16) -> Draw:
     out = engine.generate(**draw_request(ids, greedy_tokens))
     lps = parse_input_logprobs(out, ids)
+    if not all(math.isfinite(v) for v in lps):
+        raise LandingError(f"draw has a prompt log-prob that is not finite: "
+                           f"{[v for v in lps if not math.isfinite(v)][:3]}")
     gen = out.get("output_ids")
     if not isinstance(gen, (list, tuple)) or not gen:
         raise LandingError(f"draw has no output ids: {str(out)[:200]}")
@@ -67,11 +71,11 @@ class RoundTripResult:
 
 
 def judge(base: list[list[Draw]], pert: list[list[Draw]], rest: list[list[Draw]]) -> tuple[str, bool, int, int]:
-    """Judged by phase: the baseline agrees with itself, every perturbed draw differs from it, every restore draw
-    equals it."""
+    """Judged by phase: the baseline agrees with itself, every perturbed draw's prompt log-probs differ from it (a
+    changed continuation alone is not a landed reload), every restore draw equals it."""
     ref = base[0]
     consistent = all(b == ref for b in base)
-    differing = sum(p[j] != ref[j] for p in pert for j in range(len(ref)))
+    differing = sum(p[j][0] != ref[j][0] for p in pert for j in range(len(ref)))
     matching = sum(r[j] == ref[j] for r in rest for j in range(len(ref)))
     per_phase = len(ref) * len(pert)
     if not consistent:

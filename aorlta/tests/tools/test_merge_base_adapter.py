@@ -243,15 +243,16 @@ def test_compare_bf16_tells_a_rounding_flip_from_a_value_further_away():
     assert total == c
 
 
-def _adapter_variant(tiny, dst: Path, *, config=None, tensors=None) -> Path:
+def _adapter_variant(tiny, dst: Path, *, src: Path | None = None, config=None, tensors=None) -> Path:
     from safetensors.torch import load_file, save_file
 
+    src = tiny.text if src is None else src
     dst.mkdir()
-    cfg = json.loads((tiny.text / M.ADAPTER_CONFIG).read_text())
+    cfg = json.loads((src / M.ADAPTER_CONFIG).read_text())
     if config:
         config(cfg)
     (dst / M.ADAPTER_CONFIG).write_text(json.dumps(cfg))
-    sd = load_file(str(tiny.text / M.ADAPTER_WEIGHTS))
+    sd = load_file(str(src / M.ADAPTER_WEIGHTS))
     if tensors:
         tensors(sd)
     save_file(sd, str(dst / M.ADAPTER_WEIGHTS))
@@ -298,6 +299,51 @@ def test_adapters_the_formula_does_not_cover_are_refused_before_writing(tiny, tm
              "--expect-modules", str(TINY.TINY_TARGETS))
     assert rc == 2, capsys.readouterr().err
     assert "REFUSED" in capsys.readouterr().err
+    assert not out.exists() and not out.with_name("out.partial").exists()
+
+
+def _modules(adapter: Path) -> list[str]:
+    from safetensors import safe_open
+
+    with safe_open(str(adapter / M.ADAPTER_WEIGHTS), framework="pt") as f:
+        return sorted(k[len(M.PEFT_PREFIX):-len(".lora_A.weight")] for k in f.keys() if k.endswith(".lora_A.weight"))
+
+
+def _suffixes(modules: list[str]) -> list[str]:
+    return sorted({".".join(m.split(".")[-2:]) for m in modules})
+
+
+@pytest.mark.parametrize("form", ["dotted_suffixes", "qualified_names"])
+def test_target_modules_may_be_qualified_names_or_dotted_suffixes(tiny, merged, tmp_path, form):
+    """PEFT targets a module whose full name is an entry or ends with "." + an entry: the tool takes the adapter
+    PEFT builds from such a list, and merges it to the same bytes."""
+    from peft import PeftModel
+    from transformers import Qwen3_5ForConditionalGeneration
+
+    modules = _modules(tiny.lm)
+    names = _suffixes(modules) if form == "dotted_suffixes" else modules
+    adapter = _adapter_variant(tiny, tmp_path / "adapter", src=tiny.lm,
+                               config=lambda c: c.update(target_modules=names))
+    model = Qwen3_5ForConditionalGeneration.from_pretrained(str(tiny.base), dtype=torch.float32)
+    pm = PeftModel.from_pretrained(model, str(adapter))
+    assert sum(n.endswith(".lora_A") for n, _ in pm.named_modules()) == TINY.TINY_TARGETS
+    out = tmp_path / "out"
+    assert run("merge", "--base", str(tiny.base), "--adapter", str(adapter), "--out", str(out)) == 0
+    for fn in SHARDS:
+        assert (out / fn).read_bytes() == (merged / fn).read_bytes()
+
+
+@pytest.mark.parametrize("form", ["suffix_without_a_dot", "other_naming"])
+def test_target_modules_peft_would_not_match_are_refused(tiny, tmp_path, form):
+    modules = _modules(tiny.lm)
+    if form == "suffix_without_a_dot":  # "proj" ends every mlp module's name, but not after a dot
+        names = [s for s in _suffixes(modules) if not s.startswith("mlp.")] + ["proj"]
+    else:  # the text-only model's names for modules the adapter names model.language_model.layers.N
+        names = [m.replace("model.language_model.", "model.") for m in modules]
+    adapter = _adapter_variant(tiny, tmp_path / "adapter", src=tiny.lm,
+                               config=lambda c: c.update(target_modules=names))
+    out = tmp_path / "out"
+    assert run("merge", "--base", str(tiny.base), "--adapter", str(adapter), "--out", str(out)) == 2
     assert not out.exists() and not out.with_name("out.partial").exists()
 
 
@@ -355,3 +401,26 @@ def test_verify_catches_any_changed_byte(tiny, merged, tmp_path, where):
         _flip_byte(copy / SHARDS[1], 8 + n + header[key]["data_offsets"][0])
     rc = run("verify", "--base", str(tiny.base), "--adapter", str(tiny.text), "--merged", str(copy))
     assert rc == (0 if where == "none" else 1)
+
+
+OUTPUT_DAMAGE = {
+    "index_missing": lambda d: (d / "model.safetensors.index.json").unlink(),
+    "index_not_json": lambda d: (d / "model.safetensors.index.json").write_text("{\"weight_map\": "),
+    "shard_missing": lambda d: (d / SHARDS[0]).unlink(),
+    "config_missing": lambda d: (d / "config.json").unlink(),
+    "manifest_missing": lambda d: (d / M.MANIFEST_NAME).unlink(),
+    "manifest_not_json": lambda d: (d / M.MANIFEST_NAME).write_text("{\"schema\": "),
+    "manifest_without_output": lambda d: (d / M.MANIFEST_NAME).write_text("{}"),
+    "directory_missing": lambda d: shutil.rmtree(d),
+}
+
+
+@pytest.mark.parametrize("damage", sorted(OUTPUT_DAMAGE))
+def test_verify_reports_missing_or_malformed_output_files_as_a_failed_check(tiny, merged, tmp_path, capsys, damage):
+    copy = tmp_path / "copy"
+    shutil.copytree(merged, copy)
+    OUTPUT_DAMAGE[damage](copy)
+    capsys.readouterr()
+    assert run("verify", "--base", str(tiny.base), "--adapter", str(tiny.text), "--merged", str(copy)) == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["pass"] is False and summary["problems"]

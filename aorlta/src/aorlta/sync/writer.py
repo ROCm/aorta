@@ -214,10 +214,11 @@ def write_slot(
     sizes = {name: t.numel() * t.element_size() for name, t in tensors.items()}
     total = sum(sizes.values())
     final = slot_path(sync_dir, run_id, version, slots)
-    need = 2 * total + margin
+    # the served slot already takes its space, and a slot being replaced keeps its own until the rename below
+    need = total + margin
     free = free_bytes(final.parent)
     if free < need:
-        raise ShmFullError(f"{final.parent}: {free} bytes free, need {need} (2 x {total} + margin {margin})")
+        raise ShmFullError(f"{final.parent}: {free} bytes free, need {need} ({total} for the slot + margin {margin})")
 
     tmp = final.with_name(final.name + PARTIAL_SUFFIX)
     shutil.rmtree(tmp, ignore_errors=True)
@@ -299,12 +300,25 @@ def load_slot_tensors(slot: str | Path, names: Iterable[str] | None = None) -> d
 
 
 def verify_slot(slot: str | Path) -> dict:
-    """Re-read every tensor and compare shape, dtype and xxh64 with the manifest, and the index with the files."""
+    """Re-read every tensor and compare shape, dtype and xxh64 with the manifest, and the index with the files: each
+    shard must hold exactly the tensors the index assigns to it, as an engine reads every tensor of every shard."""
+    from safetensors import safe_open
+
     slot = Path(slot)
     manifest = read_manifest(slot)
     entries = manifest["tensors"]
-    tensors = load_slot_tensors(slot)
+    wm = json.loads(read_text(slot / INDEX_NAME))["weight_map"]
     bad = []
+    for fn in sorted(set(wm.values())):
+        with safe_open(str(slot / fn), framework="pt", device="cpu") as f:
+            held = set(f.keys())
+        assigned = {k for k, v in wm.items() if v == fn}
+        if held != assigned:
+            bad.append(f"{fn}: holds {len(held - assigned)} tensors the index does not assign to it "
+                       f"{sorted(held - assigned)[:3]}, lacks {len(assigned - held)} {sorted(assigned - held)[:3]}")
+    if bad:
+        return {"ok": False, "tensors": len(wm), "problems": bad[:10]}
+    tensors = load_slot_tensors(slot)
     if set(tensors) != set(entries):
         bad.append(f"index names {len(tensors)} != manifest names {len(entries)}")
     for name, t in tensors.items():

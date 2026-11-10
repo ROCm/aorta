@@ -218,6 +218,8 @@ def test_a_plan_answered_after_its_deadline_is_plan_unavailable_timeout():
                                    None)), "rejected:missing_leg", ["san.asan"]),
     (Answers(lambda req: CheckPlan("v/1", "p", {k: dict(v, decision="perhaps") for k, v in
                                                 plan_with(req, {}).legs.items()}, None)), "rejected:bad_decision", []),
+    (Answers(lambda req: CheckPlan("v/1", "p", {k: dict(v, score=10**400) for k, v in
+                                                plan_with(req, {}).legs.items()}, None)), "rejected:bad_score", []),
     (Answers(lambda req: {"skip": ["san.asan"]}), "rejected:not_a_check_plan", []),
 ])
 def test_a_planner_that_fails_or_breaks_the_interface_is_plan_unavailable_and_every_leg_runs(

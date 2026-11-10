@@ -34,6 +34,7 @@ import torch
 
 from aorlta.config import TrainerSection
 from aorlta.trainer import checks as C
+from aorlta.trainer import kernels
 from aorlta.trainer.batching import DEFAULT_CHUNK_TOKENS, forward_microbatch, head_logprobs, pack
 from aorlta.trainer.loss import (
     GroupPlan,
@@ -217,39 +218,29 @@ def assignment_check(ledgers: Sequence[Sequence], trained: Sequence[Sequence], t
 
 
 def weights_checksum(merged) -> tuple | None:
-    """An exact checksum of every W_eff tensor the merged forward holds: per tensor, over its bit patterns as
-    integers, their sum, their sum of squares and their position-weighted sum (int64, so equal bits give equal
-    checksums on any rank). None when the forward holds no weights (a test stub)."""
+    """Every W_eff tensor the merged forward holds, by name, with its dtype, shape and xxh64 digest
+    (`checks.digest`): equal bits give equal checksums on any rank, and any other bits (a permutation too) a
+    different one. None when the forward holds no weights (a test stub)."""
     weights = getattr(merged, "weights", None)
     if not weights:
         return None
-    views = {1: torch.int8, 2: torch.int16, 4: torch.int32}
-    sums = []
-    with torch.no_grad():
-        for key in sorted(weights):
-            t = weights[key].detach().contiguous().reshape(-1)
-            x = t.view(views[t.element_size()]).to(torch.int64)
-            w = torch.arange(x.numel(), device=x.device, dtype=torch.int64).remainder_(65521).add_(1)
-            sums.append(torch.stack([x.sum(), (x * x).sum(), (x * w).sum()]))
-            del x, w
-    values = torch.stack(sums).cpu().tolist()
-    return tuple((key, *v) for key, v in zip(sorted(weights), values))
+    return tuple((key, *C.digest(weights[key])) for key in sorted(weights))
 
 
 def split_minibatches(groups: Sequence[GroupPlan], steps: int) -> list[list[GroupPlan]]:
-    """`steps` contiguous slices of the trained groups, as equal in samples as whole groups allow."""
+    """`steps` contiguous slices of the trained groups, as equal in samples as whole groups allow: a group goes to the
+    slice its first sample falls in, except that the slices fill in order and each keeps at least one group."""
     gs = [g for g in groups if g.samples]
     if steps > len(gs):
         raise TrainerInputError(f"steps_per_iteration {steps} exceeds the {len(gs)} trained groups")
     total = sum(len(g.samples) for g in gs)
     out: list[list[GroupPlan]] = [[] for _ in range(steps)]
-    seen = 0
-    for g in gs:
-        k = min(steps - 1, (seen * steps) // total)
+    k = seen = 0
+    for i, g in enumerate(gs):
+        if i:
+            k = min(k + 1, max(k, steps - len(gs) + i, (seen * steps) // total))
         out[k].append(g)
         seen += len(g.samples)
-    if any(not m for m in out):
-        raise TrainerInputError("a mini-batch came out empty; use fewer steps_per_iteration")
     return out
 
 
@@ -323,6 +314,7 @@ class RankTrainer:
         self.chunk_tokens, self.gap_gate = chunk_tokens, gap_gate
         self.lora = C.LoraTensors.of(model)
         self.params = self.lora.params()
+        self.packed = kernels.honours_packing(model)
         # Built once: Adam moments persist across iterations (zeroed moments every step make Adam signSGD).
         self.optimizer = torch.optim.AdamW(self.params, lr=optim.lr, betas=optim.betas, eps=optim.eps,
                                            weight_decay=optim.weight_decay)
@@ -330,7 +322,7 @@ class RankTrainer:
         if problems:
             raise TrainerInputError("; ".join(problems[:5]))
         self.control = control or C.BaseControl.capture(model, self.lora)
-        start = ([C.fingerprint(p) for p in self.params], [C.fingerprint(t) for t in self.control.tensors.values()])
+        start = ([C.digest(p) for p in self.params], [C.digest(t) for t in self.control.tensors.values()])
         if any(s != start for s in self.world.all_gather_object(start)):
             raise TrainerInputError("the ranks do not start from the same LoRA latent and base weights "
                                     "(call broadcast_lora before installing the merged forward)")
@@ -343,6 +335,11 @@ class RankTrainer:
         self._reset()
 
     # --- accumulation ---
+
+    def _rows(self, samples: Sequence[TrainSample]) -> list:
+        """The micro-batches of `samples`: packed, or one sequence each where the model's linear attention would run
+        a packed row as one sequence (`kernels.honours_packing`)."""
+        return pack(samples, self.micro_batch_tokens, max_sequences=None if self.packed else 1)
 
     def _reset(self) -> None:
         for p in self.params:
@@ -372,7 +369,7 @@ class RankTrainer:
             u.update({s.chain_id: sample_coefficient(self.loss, s, g.n_response_tokens) for s in g.samples})
         batches = [[s for g in live for s in g.samples]] if across_groups else [list(g.samples) for g in live]
         for samples in batches:
-            for mb in pack(samples, self.micro_batch_tokens):
+            for mb in self._rows(samples):
                 self._microbatch(mb, u, old)
 
     def _microbatch(self, mb, u: dict, old: dict | None) -> None:
@@ -416,9 +413,11 @@ class RankTrainer:
         if L.old_logprobs == "engine":
             old_t = engine_raw  # T_loss is 1 here (LossSettings refuses anything else)
         idx = mb.token_sample.to(dev)
+        # An excluded sample's tokens are left out of the objective, not weighted by zero: its ratio against the
+        # engine can overflow, and zero times inf is NaN.
+        kept = torch.tensor(keep, dtype=torch.bool, device=dev)[idx]
         adv = torch.tensor([s.advantage for s in mb.samples], dtype=torch.float32, device=dev)[idx]
-        coef = torch.tensor([u[s.chain_id] * float(k) for s, k in zip(mb.samples, keep)], dtype=torch.float32,
-                            device=dev)[idx]
+        coef = torch.tensor([u[s.chain_id] for s in mb.samples], dtype=torch.float32, device=dev)[idx]
         tis_w = tis_weights(L, old_raw, engine_raw) if L.tis is not None else None
         ref = None
         if L.kl_beta > 0:
@@ -426,8 +425,9 @@ class RankTrainer:
                 ref, _, _ = forward_microbatch(self.model, mb, device=self.device, temperature=L.loss_temperature,
                                                amp=self.amp, lm_head_fp32=L.lm_head_fp32,
                                                chunk_tokens=self.chunk_tokens)
-        loss_tok, aux = token_loss(L, lp, old_t, adv, tis_w=tis_w, ref_lp=ref)
-        local = (loss_tok * coef).sum()
+        loss_tok, aux = token_loss(L, lp[kept], old_t[kept], adv[kept], tis_w=None if tis_w is None else tis_w[kept],
+                                   ref_lp=None if ref is None else ref[kept])
+        local = (loss_tok * coef[kept]).sum()
         t1 = time.monotonic()
         local.backward()
         self.seconds["forward"] += t1 - t0
@@ -435,7 +435,7 @@ class RankTrainer:
         self.loss_sum += float(local.detach())
         self.counts["microbatches"] += 1
         self.counts["forward_tokens"] += mb.tokens
-        self.counts["loss_tokens"] += mb.loss_tokens
+        self.counts["loss_tokens"] += int(kept.sum())  # the tokens in the objective, which clipped_tokens counts
         self.counts["clipped_tokens"] += float(aux["clipped"].sum())
 
     def _old_logprobs(self, groups: Sequence[GroupPlan]) -> dict:
@@ -444,7 +444,7 @@ class RankTrainer:
         self.model.eval()
         with torch.no_grad():
             for g in groups:
-                for mb in pack(g.samples, self.micro_batch_tokens):
+                for mb in self._rows(g.samples):
                     lp, raw, _ = forward_microbatch(self.model, mb, device=self.device,
                                                     temperature=self.loss.loss_temperature, amp=self.amp,
                                                     lm_head_fp32=self.loss.lm_head_fp32,
@@ -470,10 +470,13 @@ class RankTrainer:
 
     def _assignment(self, stats: Sequence[dict], totals: StepTotals) -> dict:
         """`groups_trained_once` from the gathered stats. Without a ledger it holds only on one rank, which trains
-        every group it is given."""
+        every group it is given, and only if no group was accumulated twice."""
         ledgers = [s["ledger"] for s in stats]
         if all(lg is None for lg in ledgers):
-            return {"ledger": None, "ranks": len(stats), "passed": len(stats) == 1}
+            keys = Counter(tuple(k) for s in stats for k in s["trained_groups"])
+            twice = sorted(k for k, n in keys.items() if n > 1)
+            return {"ledger": None, "ranks": len(stats), "trained_twice": [list(k) for k in twice][:5],
+                    "passed": len(stats) == 1 and not twice}
         if any(lg is None for lg in ledgers):
             return {"ledger": "not on every rank", "passed": False}
         return assignment_check(ledgers, [s["trained_groups"] for s in stats], totals)
@@ -523,6 +526,7 @@ class RankTrainer:
             "excluded": sorted(i for s in stats for i in s["excluded_ids"]), "gap": C.gap_summary(gaps),
             "gaps": gaps, "seconds_by_rank": [s["seconds"] for s in stats], "reduce_sec": t_reduce,
             "gap_gate": self._gap_gate_report(counts["compared"], [i for s in stats for i in s["over_bound_ids"]]),
+            "packed": self.packed,
         }
         pre_checks = C.pre_step_checks(grad_norm=grad_norm, loss=loss_value, compared=counts["compared"],
                                        excluded=counts["excluded"],
@@ -552,7 +556,7 @@ class RankTrainer:
         merge = self.merged.refresh()
         report["step_sec"] = time.monotonic() - t0
         self.steps_done += 1
-        fp = [C.fingerprint(p) for p in self.params]
+        fp = [C.digest(p) for p in self.params]
         t_sum = time.monotonic()
         w_sum = weights_checksum(self.merged) if self.world.size > 1 else None
         replicas = self.world.all_gather_object((fp, w_sum))

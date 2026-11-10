@@ -15,7 +15,9 @@ first adds up to the wall:
 
 Wall time, v1: from prompt selection (the start of the iteration's `select` span) to the end of its
 last `landing` span, whose `verdict` must pass (LANDED or NOOP, Section 6.5). v2: from the previous
-iteration's passed landing to this iteration's (consecutive weight publications).
+iteration's passed landing to this iteration's (consecutive weight publications). An iteration that
+took no optimizer step publishes nothing: it ends at its zero-length `no_step` marker instead, in
+both modes.
 """
 
 from __future__ import annotations
@@ -44,12 +46,13 @@ UNCLASSIFIED = "unclassified"
 GAP_LIMIT = 0.05  # Section 6.6: a span gap of more than 5% of wall is flagged
 BEGIN_SPAN = "select"
 END_SPAN = "landing"
+NO_STEP_SPAN = "no_step"
 PASSING_VERDICTS = frozenset({"LANDED", "NOOP"})
 CAUSAL_KEYS = ("chain_id", "candidate_id")  # candidate_id == chain_id (Section 5 item 1)
 
 # Span name pattern -> category, first match wins. The names are Section 6.9's list, plus the ones
 # WP2, WP5 and WP7 already emit (`engine.start`, `control`, `score.retry`, `setup.*`) and the `select`
-# marker this module reads.
+# and `no_step` markers this module reads.
 DEFAULT_CATEGORIES: tuple[tuple[str, str], ...] = (
     ("gen.turn0", "generation"),
     ("gen.repair", "generation"),
@@ -68,6 +71,7 @@ DEFAULT_CATEGORIES: tuple[tuple[str, str], ...] = (
     ("write", "sync"),
     ("reload", "sync"),
     ("landing", "sync"),
+    ("no_step", "other"),
     ("select", "other"),
     ("record", "other"),
     ("ckpt", "other"),
@@ -162,8 +166,8 @@ class Bounds:
     iteration: int
     t_begin: float
     t_end: float
-    begin_from: str  # "select", "landing(n-1)" or "envelope"
-    end_from: str  # "landing:<verdicts>" or "envelope"
+    begin_from: str  # "select", "landing(n-1)", "no_step(n-1)" or "envelope"
+    end_from: str  # "landing:<verdicts>", "no_step" or "envelope"
 
     @property
     def wall_s(self) -> float:
@@ -190,10 +194,19 @@ Verdicts = Mapping[int, Sequence[str]]  # iteration -> the landing verdict per e
 def _passed_landing_end(spans: Sequence[Span], iteration: int, given: Verdicts | None = None) -> tuple[float, str]:
     """End of the iteration's last landing span, which must have passed. The verdict is the span's own
     `verdict` attr or, when the span has none, the one in `given` (the iteration summary's); if both
-    exist they must agree."""
+    exist they must agree. An iteration with no landing span ends at its one `no_step` marker."""
     landings = [s for s in spans if s.iteration == iteration and s.name == END_SPAN]
+    no_step = [s for s in spans if s.iteration == iteration and s.name == NO_STEP_SPAN]
+    if no_step:
+        if landings or len(no_step) != 1:
+            raise TimelineError(f"iteration {iteration}: {len(no_step)} '{NO_STEP_SPAN}' markers and {len(landings)} "
+                                f"'{END_SPAN}' spans; an iteration that took no step has one marker and no landing")
+        if given is not None and given.get(iteration):
+            raise TimelineError(f"iteration {iteration}: it took no step, but its summary gives landing verdicts")
+        return no_step[0].t_end, NO_STEP_SPAN
     if not landings:
-        raise TimelineError(f"iteration {iteration}: no '{END_SPAN}' span, so it never published weights")
+        raise TimelineError(f"iteration {iteration}: no '{END_SPAN}' span and no '{NO_STEP_SPAN}' marker, so nothing "
+                            "says where it ended")
     last = max(landings, key=lambda s: (s.t_end, s.t_start))
     own = landing_verdicts(last)
     other = None if given is None or iteration not in given else tuple(given[iteration])
@@ -226,11 +239,12 @@ def bounds_v1(spans: Sequence[Span], iteration: int, verdicts: Verdicts | None =
 def bounds_v2(spans: Sequence[Span], iteration: int, verdicts: Verdicts | None = None) -> Bounds:
     """Between consecutive weight publications (Section 6.9, v2). Iteration 1 needs a passed landing
     in iteration 0 (the start-of-run publication)."""
-    t_begin, _ = _passed_landing_end(spans, iteration - 1, verdicts)
+    t_begin, begin_from = _passed_landing_end(spans, iteration - 1, verdicts)
     t_end, end_from = _passed_landing_end(spans, iteration, verdicts)
     if not t_end > t_begin:
         raise TimelineError(f"iteration {iteration}: its publication ({t_end}) is not after the previous one ({t_begin})")
-    return Bounds(iteration, t_begin, t_end, f"landing({iteration - 1})", end_from)
+    previous = NO_STEP_SPAN if begin_from == NO_STEP_SPAN else END_SPAN
+    return Bounds(iteration, t_begin, t_end, f"{previous}({iteration - 1})", end_from)
 
 
 def bounds_envelope(spans: Sequence[Span], iteration: int, verdicts: Verdicts | None = None) -> Bounds:

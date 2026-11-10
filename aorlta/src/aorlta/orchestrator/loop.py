@@ -589,6 +589,9 @@ class Orchestrator:
             warnings.append("noop_steps")
         self.engine_version = n
         t_landed = self.spans.now()
+        if step is None:  # nothing was published, so no landing span ends the iteration: this marker does
+            self.spans.record("no_step", n, t_landed, t_landed,
+                              reason="no_trainable_samples" if trained == 0 else "zero_advantage")
         self.history = {"generation_s": dl.push_history(self.history["generation_s"], gen_dur),
                         "scoring_s": dl.push_history(self.history["scoring_s"], score_dur)}
         deadlines = {"generation_s": gen_s, "generation_hit": gen_hit,
@@ -740,6 +743,8 @@ class Orchestrator:
         return result
 
     def _close(self) -> None:
+        if not self._owns_run:  # refused at the run plan, it started nothing; the run's node files belong to another
+            return
         for name, fn in (("reward", getattr(self.reward, "close", None)), ("rollout", getattr(self.rollout, "shutdown", None))):
             if fn is not None:
                 try:

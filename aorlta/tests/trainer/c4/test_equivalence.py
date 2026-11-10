@@ -9,6 +9,7 @@ all-gather the trainer calls on torch.distributed (test_ranks.py runs the real g
 
 from __future__ import annotations
 
+import math
 import random
 
 import pytest
@@ -42,8 +43,8 @@ def _iteration(seed=SEED):
     return build_groups(samples, results)
 
 
-def _reference(groups, settings):
-    model = tiny_peft(torch.float32, seed=SEED, b_std=0.05)
+def _reference(groups, settings, packing=True):
+    model = tiny_peft(torch.float32, seed=SEED, b_std=0.05, packing=packing)
     model.train()
 
     def logprobs_of(s):
@@ -90,6 +91,20 @@ def test_c4_t1_batched_packed_four_ranks_equal_the_per_sample_reference(agg):
     assert counts["excluded"] == 0 and counts["compared"] == counts["samples"]
 
 
+def test_c4_t1_on_the_torch_fallback_rows_hold_one_sequence_and_the_step_equals_the_reference():
+    """Without the per-sequence kernels the linear attention runs transformers' torch path (what `require_fast_path`
+    off trains on), which reads neither `seq_idx` nor `cu_seq_lens_q`: a packed row would run as one sequence."""
+    groups = _iteration()
+    settings = LossSettings(loss_temperature=0.7)
+    ref_loss, ref_grad = _reference(groups, settings, packing=False)
+    t = RankTrainer(tiny_peft(torch.float32, seed=SEED, b_std=0.05, packing=False), NoMerge(), settings,
+                    OptimSettings(lr=1e-3, grad_clip=0.0), micro_batch_tokens=96, amp=False)
+    (rep,) = t.train_iteration(groups)
+    assert rel(rep["loss"], ref_loss) <= LOSS_REL, (rep["loss"], ref_loss)
+    assert cosine(t.last_flat_grad, ref_grad) >= GRAD_COS
+    assert not rep["packed"] and rep["counts"]["microbatches"] == rep["counts"]["samples"]
+
+
 def test_a_gap_excluded_sample_contributes_no_gradient_and_stays_in_the_normaliser():
     model = tiny_peft(torch.float32, seed=SEED, b_std=0.05)
     samples, results = synthetic_iteration(groups=8, k=4, seed=SEED + 3)
@@ -101,6 +116,8 @@ def test_a_gap_excluded_sample_contributes_no_gradient_and_stays_in_the_normalis
                     OptimSettings(lr=1e-3, grad_clip=0.0), micro_batch_tokens=96, amp=False)
     (rep,) = t.train_iteration(groups)
     assert rep["excluded"] == [victim] and rep["totals"]["samples"] == sum(len(g.samples) for g in groups)
+    # the clip fraction's denominator: the tokens in the objective, as for clipped_tokens
+    assert rep["counts"]["loss_tokens"] == sum(s.n_response for g in groups for s in g.samples if s.chain_id != victim)
     ref_model = tiny_peft(torch.float32, seed=SEED, b_std=0.05)
     ref_model.train()
 
@@ -116,6 +133,28 @@ def test_a_gap_excluded_sample_contributes_no_gradient_and_stays_in_the_normalis
         p.grad = None
     reference_loss(settings, groups, logprobs_of)
     assert cosine(t.last_flat_grad, flat_grads(_ordered(ref_model))) < 0.9999  # the victim's gradient is visible
+
+
+@pytest.mark.parametrize("agg", ["sample_mean", "token_mean"])
+def test_an_excluded_sample_whose_ratio_overflows_stays_out_of_the_objective(agg):
+    """old_logprobs 'engine': the ratio is exp(trainer - engine). A token the engine scored 194 nats below the
+    trainer overflows it, and with a negative advantage the token's loss is inf, which a zero weight turns into NaN.
+    The step is the one where the same sample is excluded for a 5-nat gap, with the sample still in the normaliser."""
+    model = tiny_peft(torch.float32, seed=SEED, b_std=0.05)
+    samples, results = synthetic_iteration(groups=8, k=4, seed=SEED + 3)
+    plans = build_groups(engine_logprobs_from(model, samples), results)
+    victim = next(s.chain_id for g in plans for s in g.samples if s.advantage < 0)
+    settings = LossSettings(aggregation=agg, old_logprobs="engine", loss_temperature=1.0, max_off_policy_fraction=0.1)
+    steps = {}
+    for nats in (5.0, 194.0):
+        groups = build_groups(engine_logprobs_from(model, samples, shift={victim: (0, nats)}), results)
+        t = RankTrainer(tiny_peft(torch.float32, seed=SEED, b_std=0.05), NoMerge(), settings,
+                        OptimSettings(lr=1e-3, grad_clip=0.0), micro_batch_tokens=96, amp=False)
+        (rep,) = t.train_iteration(groups)
+        assert rep["excluded"] == [victim] and rep["totals"]["samples"] == sum(len(g.samples) for g in groups)
+        steps[nats] = rep["loss"], t.last_flat_grad
+    assert math.isfinite(steps[194.0][0]) and steps[194.0][0] == steps[5.0][0]
+    assert torch.equal(steps[194.0][1], steps[5.0][1])
 
 
 def test_gradient_checkpointing_gives_the_same_step():
@@ -165,3 +204,20 @@ def test_c4_t7_streaming_in_random_group_order_equals_one_batched_step(agg):
         assert cosine(t.last_flat_grad, batched.last_flat_grad) >= GRAD_COS
         assert rep["totals"] == b_rep["totals"]
     assert b_rep["totals"]["groups"] == sum(1 for g in groups if g.samples)
+
+
+def test_the_gap_gates_view_packs_as_the_step_does_on_the_torch_fallback():
+    """measure.gap.score_packed packs each group as the streaming step does: on the torch fallback one sequence per
+    row, so every sample's log-probs are those of its forward alone."""
+    from aorlta.measure.gap import score_packed
+
+    groups = _iteration()
+    model = tiny_peft(torch.float32, seed=SEED, b_std=0.05, packing=False)
+    packed = score_packed(model, groups, micro_batch_tokens=96, device="cpu", temperature=0.7, amp=False)
+    samples = [s for g in groups for s in g.samples]
+    assert len(packed) == len(samples)
+    with torch.no_grad():
+        for s in samples:
+            mb = make_microbatch([s])
+            _, raw, _ = forward_microbatch(model, mb, device="cpu", temperature=0.7, amp=False)
+            assert torch.equal(packed[s.chain_id], raw[mb.sample_slices()[0]].float())

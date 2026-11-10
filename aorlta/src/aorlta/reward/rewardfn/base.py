@@ -6,6 +6,9 @@ outcome; a leg that can no longer run (not in the profile, or its inputs never c
 state `not_run`. `decide` may answer Decided or Unscored only when no outcome of the pending legs
 could change the answer: then `compute` on any completion of `partial` gives the same result, which
 the service checks again when it finalises.
+
+A reward function whose scoring reads its own configuration names it in `settings` (standin.v11's
+`clean_repeats`), which the reward cache's key holds beside the name, version and code hash.
 """
 
 from __future__ import annotations

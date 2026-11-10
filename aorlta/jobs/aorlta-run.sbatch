@@ -206,7 +206,7 @@ clean_img() {  # an image this node has, for removing root-owned files
 }
 cleanup() {
   [ -n "$VRAM_PID" ] && kill "$VRAM_PID" 2>/dev/null
-  docker ps -aq --filter "name=$CNAME" | xargs -r docker rm -f >/dev/null 2>&1
+  docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?" | xargs -r docker rm -f >/dev/null 2>&1
   find "$OUT" -maxdepth 3 -name 'gpucore.*' -type f -delete 2>/dev/null
   local img mounts=()
   img=$(clean_img)
@@ -223,14 +223,14 @@ cleanup() {
   [ "$BUILT_TRAINER" = 1 ] && docker rmi -f "$IMG" >/dev/null 2>&1 && echo "removed $IMG"
   [ "$BUILT_BASE" = 1 ] && docker rmi -f "$BASE" >/dev/null 2>&1 && echo "removed $BASE"
   [ "$PULLED_CHK" = 1 ] && docker rmi -f "$CHK_IMG" >/dev/null 2>&1 && echo "removed $CHK_IMG (pulled by this job)"
-  echo "containers left: $(docker ps -a --format '{{.Names}}' | grep -c "$CNAME")"
+  echo "containers left: $(docker ps -a --format '{{.Names}}' | grep -cxE "$CNAME(-[a-z]+)?")"
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT
 
 stamp "node $(hostname -s) job $SLURM_JOB_ID run $RUN_ID config $CONFIG components $COMPONENTS resume $RESUME commit $COMMIT"
 # The node is exclusive: a container of this run left by an earlier, cancelled job is removed before starting.
-stale=$(docker ps -aq --filter "name=aorlta-run-")
+stale=$(docker ps -a --format '{{.Names}}' | grep -xE 'aorlta-run-[0-9]+(-[a-z]+)?')
 [ -n "$stale" ] && { stamp "removing stale containers"; echo "$stale" | xargs -r docker rm -f >/dev/null 2>&1; }
 df -h /dev/shm | tail -1
 
@@ -348,6 +348,18 @@ ORCH_MOUNTS=()
 add_mounts ORCH_MOUNTS rw "$P" "$RUN_ROOT" "$MODEL_DIR" "$AORLTA_HF_HOME" "$AORLTA_TMPDIR" /dev/shm
 add_mounts ORCH_MOUNTS ro "${POOL_DIRS[@]}" "$ADAPTER_DIR" "$AORLTA_AORTA_ROOT" "$AORLTA_ROCJITSU_ROOT" \
   "$AORLTA_LIBSTDCXX_SHIM" "${EXTRA_MOUNTS[@]}"
+# A directory the docker daemon sees at another place than this job does (a Slurm job's private /tmp, for one)
+# would hide what the run writes there: each read-write mount must show the container this job's marker.
+MARK=.aorlta-mount-$SLURM_JOB_ID
+MARKED=()
+for ((i = 1; i < ${#ORCH_MOUNTS[@]}; i += 2)); do
+  case "${ORCH_MOUNTS[i]}" in *:ro) ;; *) d=${ORCH_MOUNTS[i]%%:*}; touch "$d/$MARK" 2>/dev/null && MARKED+=("$d") ;; esac
+done
+unseen=$(docker run --rm --name "$CNAME-mounts" --network none --ulimit core=0 "${ORCH_MOUNTS[@]}" --entrypoint bash \
+  "$IMG" -c 'for d in "${@:2}"; do [ -e "$d/$1" ] || echo "$d"; done' _ "$MARK" "${MARKED[@]}")
+for d in "${MARKED[@]}"; do rm -f "$d/$MARK"; done
+[ -z "$unseen" ] || { echo "[guard] the docker daemon does not see these directories where this job does (a per-job" \
+  "/tmp?): $(echo $unseen)" >&2; exit 95; }
 vram_sampler >> "$OUT/vram.tsv" 2>/dev/null &
 VRAM_PID=$!
 ORCH_PID=

@@ -4,7 +4,9 @@
   `micro_batch_tokens`; a sample longer than that gets a micro-batch of its own.
 - Padding-free packing. WP1 showed it is correct on the fast path only when every packed row carries
   restarting `position_ids` *and* `cu_seq_lens_q`/`_k` *and* `seq_idx`; dropping either signal leaks across
-  sequences. So every row carries all three, a single-sequence row too.
+  sequences. So every row carries all three, a single-sequence row too. transformers' torch path for the linear
+  attention (training with `require_fast_path` off) reads neither boundary, so there a row holds one sequence
+  (`kernels.honours_packing`).
 - Full attention on a packed row. Under `sdpa`, transformers turns restarting position ids into an explicit
   block-diagonal mask, and SDPA with a mask cannot use its flash kernel (WP1). `PACKED_ATTENTION` instead runs one
   causal SDPA call per sequence, so each sequence's attention is the same call a solo forward makes. Its name is
@@ -107,15 +109,19 @@ def make_microbatch(samples: Sequence[TrainSample]) -> MicroBatch:
     )
 
 
-def pack(samples: Sequence[TrainSample], micro_batch_tokens: int) -> list[MicroBatch]:
-    """First-fit-decreasing by length (ties by chain id, so the result is deterministic)."""
+def pack(samples: Sequence[TrainSample], micro_batch_tokens: int, *, max_sequences: int | None = None
+         ) -> list[MicroBatch]:
+    """First-fit-decreasing by length (ties by chain id, so the result is deterministic), with at most
+    `max_sequences` sequences in a row when it is given."""
     if micro_batch_tokens < 1:
         raise TrainerInputError(f"micro_batch_tokens must be >= 1, got {micro_batch_tokens}")
+    if max_sequences is not None and max_sequences < 1:
+        raise TrainerInputError(f"max_sequences must be >= 1, got {max_sequences}")
     bins: list[list[TrainSample]] = []
     room: list[int] = []
     for s in sorted(samples, key=lambda s: (-s.length, s.chain_id)):
         for b, free in enumerate(room):
-            if s.length <= free:
+            if s.length <= free and (max_sequences is None or len(bins[b]) < max_sequences):
                 bins[b].append(s)
                 room[b] -= s.length
                 break

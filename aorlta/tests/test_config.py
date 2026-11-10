@@ -1,9 +1,12 @@
 """The config loader (Section 5 item 4; Section 6.10 item 8): frozen dataclasses, unknown keys and
 mixed sources refused, run_plan.json written first."""
 
+import copy
 import dataclasses
 import json
+import pickle
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -120,6 +123,33 @@ def test_config_is_frozen():
         cfg.rollout.K = 16
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.rollout = None
+
+
+def test_mappings_in_the_config_are_frozen_too():
+    data = edit(edit(standin(), "reward.profile", "standin-gpu"), "reward.gpu_check_s", {"san.consan": 30.0})
+    cfg = config_from_dict(edit(data, "reward.remote", REMOTE))
+    resolved = C.plain(cfg)
+    with pytest.raises(TypeError):
+        cfg.reward.gpu_check_s["san.consan"] = -1.0
+    with pytest.raises(TypeError):
+        cfg.reward.gpu_check_s["not.a.leg"] = 1.0
+    with pytest.raises(AttributeError):
+        cfg.reward.remote.adapters.clear()
+    with pytest.raises(TypeError):
+        del cfg.reward.remote.adapters["standin.aorta_asan"]
+    assert C.plain(cfg) == resolved
+    assert cfg.reward.gpu_check_s == {"san.consan": 30.0} and cfg.reward.remote.gpus("standin.aorta_asan") == (5,)
+    assert C.RewardSection(profile="fake", reward_fn="standin.v11", gpu_check_s={}).gpu_check_s == {}
+
+
+def test_a_config_with_mappings_round_trips():
+    data = edit(edit(standin(), "reward.profile", "standin-gpu"), "reward.gpu_check_s", {"san.consan": 30.0})
+    cfg = config_from_dict(edit(data, "reward.remote", REMOTE))
+    assert config_from_dict(C.plain(cfg)) == cfg and json.loads(json.dumps(C.plain(cfg))) == C.plain(cfg)
+    assert pickle.loads(pickle.dumps(cfg)) == cfg and copy.deepcopy(cfg) == cfg
+    assert dataclasses.replace(cfg.reward, gpu_check_s={"san.asan": 45.0}).gpu_check_s == {"san.asan": 45.0}
+    with pytest.raises(ConfigError, match=r"gpu_check_s\.san\.asan: must be > 0"):
+        dataclasses.replace(cfg.reward, gpu_check_s={"san.asan": 0.0})
 
 
 def test_sections_built_in_code_are_checked_and_normalised_too():
@@ -329,6 +359,89 @@ def test_run_plan_comes_before_anything_else(tmp_path: Path):
     (cfg.run_dir / "episodes.jsonl").write_text("")
     with pytest.raises(ConfigError, match="plan must be written first"):
         write_run_plan(cfg, commit=COMMIT)
+
+
+COMMIT_B = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+@pytest.mark.parametrize("changed, exist_ok, refusal", [
+    (True, False, "already set"),
+    (False, False, "already set"),
+    (True, True, "different config"),
+    (False, True, None),
+])
+def test_launchers_racing_to_start_one_run_publish_one_plan(tmp_path: Path, monkeypatch, changed, exist_ok, refusal):
+    """Both launchers pass the checks before either publishes; the first then publishes, and the second is judged
+    against that plan as if it had started later. The published plan is never replaced."""
+    first = config_from_dict(standin(str(tmp_path)))
+    second = config_from_dict(edit(standin(str(tmp_path)), "rollout.K", 16)) if changed else first
+    checked = {COMMIT: threading.Event(), COMMIT_B: threading.Event()}
+    go = {COMMIT: threading.Event(), COMMIT_B: threading.Event()}
+    real = C.code_identity
+
+    def code_identity(package_dir=None, *, commit=None):  # runs after the checks, before the publication
+        checked[commit].set()
+        assert go[commit].wait(30)
+        return real(package_dir, commit=commit)
+
+    monkeypatch.setattr(C, "code_identity", code_identity)
+    out = {}
+
+    def launch(cfg, commit):
+        try:
+            out[commit] = write_run_plan(cfg, commit=commit, exist_ok=exist_ok)
+        except ConfigError as exc:
+            out[commit] = exc
+
+    a = threading.Thread(target=launch, args=(first, COMMIT))
+    b = threading.Thread(target=launch, args=(second, COMMIT_B))
+    a.start()
+    assert checked[COMMIT].wait(30)
+    b.start()
+    assert checked[COMMIT_B].wait(30)
+    go[COMMIT].set()
+    a.join(30)
+    go[COMMIT_B].set()
+    b.join(30)
+    plan_path = first.run_dir / "run_plan.json"
+    plan = json.loads(plan_path.read_text())
+    assert out[COMMIT] == plan_path
+    assert plan["code"]["commit"] == COMMIT and plan["config_sha256"] == sha256_json(C.plain(first))
+    if refusal is None:
+        assert out[COMMIT_B] == plan_path
+    else:
+        assert isinstance(out[COMMIT_B], ConfigError) and refusal in str(out[COMMIT_B])
+    assert sorted(p.name for p in first.run_dir.iterdir()) == ["run_plan.json"]
+
+
+@pytest.mark.parametrize("exist_ok", [False, True])
+def test_a_plan_published_between_the_checks_is_judged_like_an_existing_one(tmp_path: Path, monkeypatch, exist_ok):
+    cfg = config_from_dict(standin(str(tmp_path)))
+    plan_path = write_run_plan(cfg, commit=COMMIT)  # the racing launcher's, published after this one looked
+    before = plan_path.read_bytes()
+    real = Path.exists
+    looked = []
+
+    def exists(self, **kwargs):
+        if self == plan_path and not looked:
+            looked.append(self)
+            return False
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    if exist_ok:
+        assert write_run_plan(cfg, commit=COMMIT_B, exist_ok=True) == plan_path
+    else:
+        with pytest.raises(ConfigError, match="already set"):
+            write_run_plan(cfg, commit=COMMIT_B)
+    assert looked and plan_path.read_bytes() == before
+
+
+def test_a_racing_launchers_temporary_file_is_not_a_file_of_the_run(tmp_path: Path):
+    cfg = config_from_dict(standin(str(tmp_path)))
+    cfg.run_dir.mkdir(parents=True)
+    (cfg.run_dir / "run_plan.json.4242-17-0a1b2c3d.partial").write_text("{")
+    assert write_run_plan(cfg, commit=COMMIT) == cfg.run_dir / "run_plan.json"
 
 
 def _git(cwd: Path, *args: str) -> str:

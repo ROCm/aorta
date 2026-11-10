@@ -155,7 +155,8 @@ def resources(summary: Per256Summary, *, gpus_held: int, cpu_nodes_held: int) ->
 def walls_from_spans(spans: Sequence[Span], mode: str = "v1",
                      verdicts: Mapping[int, Sequence[str]] | None = None) -> dict[int, float]:
     """wall(n) for every training iteration, from the `select` and `landing` markers (v1) or
-    consecutive publications (v2). The span envelope is refused: it starts after prompt selection,
+    consecutive publications (v2); an iteration that took no step ends at its `no_step` marker
+    instead (timeline). The span envelope is refused: it starts after prompt selection,
     so it would understate AORLTA's time. `verdicts` (from the iteration summaries) stand in for a
     landing span that carries no verdict of its own."""
     if mode not in ("v1", "v2"):
@@ -178,8 +179,12 @@ class EpisodeCounts:
         return self.reward_sum / self.scored if self.scored else None
 
 
-def _final_finish(rec: Mapping[str, Any], where: str) -> str:
+def _final_finish(rec: Mapping[str, Any], where: str) -> str | None:
+    """The final turn's finish_reason type; None for a chain the engine failed before its first reply."""
     turns, final = rec.get("turns"), rec.get("final_turn")
+    if (turns == [] and type(final) is int and final == -1
+            and (rec.get("end_reason"), rec.get("status")) == ("engine_error", "unscored")):
+        return None
     if not isinstance(turns, list) or type(final) is not int or not 0 <= final < len(turns):
         raise Per256Error(f"{where}: turns/final_turn do not name a final turn")
     finish = turns[final].get("finish_reason") if isinstance(turns[final], Mapping) else None
@@ -212,13 +217,13 @@ def counts_from_episodes(records: Iterable[Mapping[str, Any]]) -> dict[int, Epis
                 raise Per256Error(f"{where}: scored, but its reward is {reward!r}")
             a["scored"] += 1
             a["reward_sum"] += float(reward)
-        elif status == "unscored":
+        elif status in ("unscored", "quarantined"):
             reason = rec.get("unscored_reason")
             if reward is not None or not (isinstance(reason, str) and reason):
-                raise Per256Error(f"{where}: unscored needs reward null and an unscored_reason")
+                raise Per256Error(f"{where}: {status} needs reward null and an unscored_reason")
             a["unscored"][reason] += 1
         else:
-            raise Per256Error(f"{where}: status must be 'scored' or 'unscored', got {status!r}")
+            raise Per256Error(f"{where}: status must be 'scored', 'unscored' or 'quarantined', got {status!r}")
         if _final_finish(rec, where) == "length":
             a["truncated"] += 1
     return {n: EpisodeCounts(n, a["samples"], a["scored"], dict(a["unscored"]), a["truncated"], a["reward_sum"])

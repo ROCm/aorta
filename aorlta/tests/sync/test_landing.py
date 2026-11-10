@@ -57,6 +57,45 @@ def test_engine_change_under_a_zero_update_stops_the_run():
     assert r.verdict == "MISMATCH" and not r.ok
 
 
+def test_a_zero_update_with_the_gap_above_tau_is_a_mismatch():
+    r = L.landing_verdict(0, [list(p) for p in PREV], PREV, shifted(PREV, 0.5), tau=0.01)
+    assert r.verdict == "MISMATCH" and not r.ok and not r.engine_changed and r.mean_gap == pytest.approx(0.5)
+
+
+def _served(tiny_base, tmp_path, tiny_probes, engine):
+    """The base's targets, written as the slot the engine serves, and a SyncState judging against them."""
+    from safetensors import safe_open
+
+    from aorlta.sync import writer as W
+
+    with safe_open(str(tiny_base / "model.safetensors"), framework="pt") as f:
+        weights = {k: f.get_tensor(k) for k in W.target_keys(f.keys())}
+    slot = W.write_slot(weights, base_dir=tiny_base, sync_dir=tmp_path, run_id="r", version=0).path
+    prev = L.engine_logprobs(engine, tiny_probes)
+    state = L.SyncState(run_id="r", sync_dir=str(tmp_path), base_dir=str(tiny_base), probes=tiny_probes,
+                        tau={0: 0.01}, previous={0: prev}, in_flight=lambda: 0,
+                        expected=W.expected_count(W.read_base_index(tiny_base), partial=True))
+    return weights, slot, prev, state
+
+
+def test_publish_stops_on_a_zero_update_the_trainer_does_not_match(tiny_base, tmp_path, tiny_probes,
+                                                                   engine_factory):
+    e = engine_factory(0)
+    weights, served, prev, state = _served(tiny_base, tmp_path, tiny_probes, e)
+    with pytest.raises(L.LandingFailed) as exc:
+        L.publish(weights, 1, 0, engines=[e], state=state, trainer_side=lambda probes: shifted(prev, 0.5))
+    pub = exc.value.publication
+    assert pub.verdicts() == {0: "MISMATCH"} and not pub.results[0].engine_changed
+    assert pub.pruned == [] and served.is_dir() and state.previous == {0: prev}
+
+
+def test_publish_accepts_a_zero_update_within_tau(tiny_base, tmp_path, tiny_probes, engine_factory):
+    e = engine_factory(0)
+    weights, served, prev, state = _served(tiny_base, tmp_path, tiny_probes, e)
+    pub = L.publish(weights, 1, 0, engines=[e], state=state, trainer_side=lambda probes: shifted(prev, 0.003))
+    assert pub.verdicts() == {0: "NOOP"} and pub.pruned == [str(served)]
+
+
 @pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
 def test_non_finite_log_probs_are_a_mismatch(bad):
     now = shifted(PREV, 0.01)
@@ -136,6 +175,30 @@ def test_repeatability():
     assert L.repeatability([PREV, PREV, [list(p) for p in PREV]])["bitwise"]
     r = L.repeatability([PREV, shifted(PREV, 1e-7)])
     assert not r["bitwise"] and r["max_abs_delta"] == pytest.approx(1e-7)
+
+
+class CharTokenizer:
+    """One token per character, and a chat template that frames each message."""
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": [ord(c) for c in text]}
+
+    def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False):
+        return "".join(f"<{m['role']}>{m['content']}</{m['role']}>" for m in msgs) + "<assistant>"
+
+
+@pytest.mark.parametrize("text", ["x" * 200, "x" * 80, "x" * 100 + "\n" + "Q" * 20],
+                         ids=["no_reply_left", "6_reply_tokens_left", "first_line_too_long"])
+def test_build_probes_refuses_a_prompt_that_leaves_fewer_than_reply_min_reply_tokens(text):
+    # the template adds 42 characters: a 200-character line leaves no reply token, an 80-character one 6
+    with pytest.raises(L.LandingError, match="reply_min"):
+        L.build_probes(CharTokenizer(), [text], system="s", tokens=128, reply="Z" * 40, reply_min=16)
+
+
+def test_build_probes_cuts_a_long_prompt_at_a_line_boundary():
+    (probe,) = L.build_probes(CharTokenizer(), ["x" * 60 + "\n" + "Q" * 60], system="s", tokens=128,
+                              reply="Z" * 40, reply_min=16).ids
+    assert len(probe) == 128 and probe.count(ord("Z")) == 26 and ord("Q") not in probe
 
 
 HF_HOME = Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))

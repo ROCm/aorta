@@ -24,6 +24,7 @@ HIST_WIDTH = 0.15  # 17 bins over [-1.55, 1.0]
 SPAN_GAP_FLAG = 0.05  # a gap above 5% of the iteration's wall time is flagged (Section 6.6, failure modes)
 ALWAYS_SPANS = ("select", "gen.turn0", "score.wait", "record", "ckpt")
 STEP_SPANS = ("train.final", "merge", "write", "reload", "landing")
+NO_STEP_SPANS = ("no_step",)
 
 
 def plain_stats(stats: Any) -> dict:
@@ -68,9 +69,7 @@ def union_length(intervals: Sequence[tuple[float, float]]) -> float:
 def span_check(spans: Sequence[Span], t0: float, t1: float, *, step_taken: bool, any_repair: bool,
                any_compile: bool, any_trained_group: bool) -> dict:
     names = Counter(s.name for s in spans)
-    required = set(ALWAYS_SPANS)
-    if step_taken:
-        required |= set(STEP_SPANS)
+    required = set(ALWAYS_SPANS) | set(STEP_SPANS if step_taken else NO_STEP_SPANS)
     if any_repair:
         required.add("gen.repair")
     if any_compile:

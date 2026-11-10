@@ -193,6 +193,8 @@ def _episode(**over):
     ([_episode(status="scored", reward=float("nan"))], "scored, but"),
     ([_episode(status="unscored", reward=-1.0, unscored_reason="x")], "unscored needs"),
     ([_episode(status="unscored", reward=None, unscored_reason=None)], "unscored needs"),
+    ([_episode(status="quarantined", reward=-1.0, unscored_reason="quarantined")], "quarantined needs"),
+    ([_episode(status="quarantined", reward=None, unscored_reason=None)], "quarantined needs"),
     ([_episode(status="pending")], "status must be"),
     ([_episode(), _episode()], "appears twice"),
     ([_episode(final_turn=1)], "final turn"),
@@ -202,6 +204,37 @@ def _episode(**over):
 def test_episode_counts_fail_closed(records, message):
     with pytest.raises(Per256Error, match=message):
         p.counts_from_episodes(records)
+
+
+def _no_reply(**over):
+    """An engine_error chain whose engine failed before its first reply."""
+    return _episode(**{"chain_id": "r/1/p/1", "status": "unscored", "reward": None, "unscored_reason": "engine_error",
+                       "end_reason": "engine_error", "turns": [], "final_turn": -1, **over})
+
+
+def test_a_chain_the_engine_lost_before_its_first_reply_is_unscored_and_not_truncated():
+    c = p.counts_from_episodes([_episode(), _no_reply()])[1]
+    assert (c.samples, c.scored, c.unscored_by_reason, c.truncated) == (2, 1, {"engine_error": 1}, 0)
+
+
+@pytest.mark.parametrize("over", [
+    dict(final_turn=0),
+    dict(final_turn=-2),
+    dict(turns=[{"finish_reason": {"type": "stop"}}]),
+    dict(end_reason="compiled"),
+    dict(end_reason=None),
+    dict(status="scored", reward=0.5, unscored_reason=None),
+])
+def test_no_final_turn_is_refused_unless_an_unscored_engine_error_has_no_turns(over):
+    with pytest.raises(Per256Error, match="final turn"):
+        p.counts_from_episodes([_no_reply(**over)])
+
+
+def test_a_quarantined_chain_is_unscored_under_its_reason_and_out_of_the_scored_count():
+    q = _episode(chain_id="r/1/p/1", status="quarantined", reward=None, unscored_reason="quarantined",
+                 end_reason="quarantined")
+    c = p.counts_from_episodes([_episode(), q])[1]
+    assert (c.samples, c.scored, c.unscored_by_reason, c.mean_train_reward) == (2, 1, {"quarantined": 1}, 0.5)
 
 
 def test_truncation_is_read_from_the_final_turn():
