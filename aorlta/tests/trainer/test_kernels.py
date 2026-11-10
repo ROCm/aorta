@@ -324,6 +324,52 @@ def test_watcher_detaches_on_exit():
     assert w not in logging.getLogger("transformers").handlers
 
 
+# --- packing ----------------------------------------------------------------------------------------------
+
+def test_a_model_on_the_fast_kernels_honours_packing():
+    mod = fake_modeling()
+    assert kernels.honours_packing(fast_model(mod), mod)
+    assert kernels.honours_packing(FakeModel([], layer_types=["full_attention"] * 4), mod)
+
+
+def test_a_model_built_without_kernels_does_not_honour_packing():
+    mod = fake_modeling(conv=False, fla=False)
+    assert not kernels.honours_packing(fast_model(mod), mod)
+
+
+@pytest.mark.parametrize("attr", ["causal_conv1d_fn", "chunk_gated_delta_rule"])
+def test_one_layer_on_the_torch_path_of_a_packing_kernel_does_not_honour_packing(attr):
+    mod = fake_modeling()
+    model = fast_model(mod)
+    torch_fn = getattr(mod, kernels.TORCH_FALLBACKS[attr]) if attr in kernels.TORCH_FALLBACKS else None
+    setattr(model.layers[1], attr, torch_fn)
+    assert not kernels.honours_packing(model, mod)
+
+
+def test_the_decode_kernels_and_the_norm_do_not_decide_packing():
+    """A training forward runs neither single-token kernel, and the norm is per token."""
+    mod = fake_modeling()
+    model = fast_model(mod)
+    model.layers[0].causal_conv1d_update = mod.torch_causal_conv1d_update
+    model.layers[0].recurrent_gated_delta_rule = mod.torch_recurrent_gated_delta_rule
+    model.layers[0].norm = mod.Qwen3_5RMSNormGated()
+    assert not kernels.check_model(model, mod).available
+    assert kernels.honours_packing(model, mod)
+
+
+@pytest.mark.parametrize("name", ["Qwen3_5GatedDeltaNet", "torch_chunk_gated_delta_rule"])
+def test_an_unknown_layout_does_not_honour_packing(name):
+    mod = fake_modeling()
+    model = fast_model(mod)
+    delattr(mod, name)
+    assert not kernels.honours_packing(model, mod)
+
+
+def test_an_import_failure_does_not_honour_packing(monkeypatch):
+    monkeypatch.setattr(kernels, "MODELING", "aorlta_no_such_package.modeling_qwen3_5")
+    assert not kernels.honours_packing(FakeModel([]))
+
+
 # --- the real module ---------------------------------------------------------------------------------------
 
 @pytest.mark.skipif(importlib.util.find_spec("transformers") is None, reason="transformers is not installed here")

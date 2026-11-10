@@ -54,6 +54,22 @@ def test_a_sample_longer_than_the_capacity_gets_its_own_microbatch():
         pack([small], 0)
 
 
+def test_pack_with_one_sequence_a_row_gives_every_sample_its_own_microbatch():
+    samples = [_ts(f"c{i}", n, 5, seed=i) for i, n in enumerate([20, 3, 50, 7])]
+    assert [[s.chain_id for s in mb.samples] for mb in pack(samples, 64)] == [["c2", "c1"], ["c0", "c3"]]
+    assert [[s.chain_id for s in mb.samples] for mb in pack(samples, 64, max_sequences=1)] == [
+        ["c2"], ["c0"], ["c3"], ["c1"]]
+    with pytest.raises(TrainerInputError):
+        pack(samples, 64, max_sequences=0)
+
+
+def test_only_the_per_sequence_kernels_make_the_tiny_model_honour_packing():
+    """The C4 tests' tiny model on CPU runs transformers' torch path for the linear attention unless
+    `honour_packing` swaps in the per-sequence kernels."""
+    assert kernels.honours_packing(tiny_model())
+    assert not kernels.honours_packing(tiny_model(packing=False))
+
+
 def test_microbatch_tensors_restart_positions_and_mark_boundaries():
     a, b = _ts("a", 6, 3, seed=1), _ts("b", 4, 2, seed=2)
     mb = make_microbatch([a, b])
