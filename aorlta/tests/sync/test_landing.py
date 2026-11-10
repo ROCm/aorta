@@ -120,13 +120,23 @@ def test_tolerance_fallback_when_prefill_is_not_bitwise_repeatable():
     assert L.landing_verdict(4, moved, PREV, moved, tau=0.01, bitwise=False, repeat_eps=1e-6).verdict == "LANDED"
 
 
-def test_tau_is_three_times_the_median_probe_mean_with_a_floor():
+def test_tau_is_three_times_the_larger_of_the_median_probe_mean_and_the_pooled_mean_with_a_floor():
     engine = [[0.0] * 4, [0.0] * 4, [0.0] * 4, [0.0] * 4]
     trainer = [[0.1, 0.1, 0.1, 0.1], [0.02] * 4, [0.04] * 4, [0.0, 0.0, 0.0, 4.0]]  # probe means .1 .02 .04 1.0
     c = L.calibrate_tau(engine, trainer, tau_floor=0.01)
     assert c.per_probe_gap == pytest.approx((0.1, 0.02, 0.04, 1.0))
-    assert c.median_gap == pytest.approx(0.07) and c.tau == pytest.approx(0.21)
+    assert c.median_gap == pytest.approx(0.07) and c.mean_gap == pytest.approx(0.29) and c.tau == pytest.approx(0.87)
+    quiet = [[0.1] * 4, [0.1] * 4, [0.1] * 4, [0.0] * 4]  # one quiet probe pulls the mean below the median
+    assert L.calibrate_tau(engine, quiet, tau_floor=0.01).tau == pytest.approx(0.3)
     assert L.calibrate_tau(engine, [[0.001] * 4] * 4, tau_floor=0.01).tau == 0.01
+
+
+def test_v0_passes_its_own_calibration_when_one_probe_dwarfs_the_others():
+    engine = [[-1.0] * 4, [-1.0] * 4, [-1.0] * 4, [-1.0] * 4]
+    trainer = [[-1.1] * 4, [-1.02] * 4, [-1.04] * 4, [-1.0, -1.0, -1.0, -5.0]]  # probe means .1 .02 .04 1.0
+    c = L.calibrate_tau(engine, trainer, tau_floor=0.01)
+    r = L.landing_verdict(1, engine, shifted(engine, 0.5), trainer, tau=c.tau)
+    assert (r.verdict, r.mean_gap) == ("LANDED", pytest.approx(0.29))
 
 
 def test_v0_passes_its_own_calibration_when_probes_are_alike():

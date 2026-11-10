@@ -693,6 +693,8 @@ def cmd_merge(args) -> int:
     t = time.monotonic()
     rounding = check_rounding(merged.base_targets, merged.factors, merged.weights)
     seconds["check_rounding"] = time.monotonic() - t
+    if rounding["nonfinite"]:
+        raise Refused(f"the merge holds {rounding['nonfinite']} non-finite values; nothing was written")
     sens = None
     if args.sensitivity:
         t = time.monotonic()
