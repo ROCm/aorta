@@ -825,7 +825,8 @@ def config_from_dict(data: Any, source: str = "<config>") -> RunConfig:
 
 SITE_ENV = "AORLTA_SITE"
 # What a site file may set: where a run's data and scratch are, never what the run does.
-SITE_KEYS = ("run.root", "model.base_dir", "data.prompt_pools", "reward.remote.socket_dir", "sync.dir")
+SITE_KEYS = ("run.root", "model.base_dir", "model.adapter_dir", "data.prompt_pools", "reward.remote.socket_dir",
+             "sync.dir")
 
 
 def _leaves(node: Mapping, prefix: str = ""):

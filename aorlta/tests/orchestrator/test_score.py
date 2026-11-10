@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from aorlta.config import ConfigError, ScoreOptions, config_from_dict
+from aorlta.config import ConfigError, ScoreOptions, config_from_dict, load_config
 from aorlta.episodes.schema import EpisodeError, validate_episode
 from aorlta.episodes.writer import complete_iterations, read_episodes
 from aorlta.orchestrator import score as S
@@ -61,6 +61,14 @@ def test_a_score_config_needs_no_iterations_and_scores_every_prompt_once_by_defa
     adapter = dict(score_dict(tmp_path), model={"base_dir": "/m/base", "source": "standin",
                                                 "adapter_dir": "/m/adapter"})
     assert config_from_dict(adapter).model.adapter_dir == "/m/adapter"
+
+
+def test_a_site_file_may_name_the_adapter_a_score_run_merges(tmp_path):
+    path, site = tmp_path / "score.yaml", tmp_path / "site.yaml"
+    path.write_text(json.dumps(score_dict(tmp_path)))
+    site.write_text("model: {base_dir: /site/base, adapter_dir: /site/adapter}\n")
+    model = load_config(path, site=site).model
+    assert (model.base_dir, model.adapter_dir) == ("/site/base", "/site/adapter")
 
 
 @pytest.mark.parametrize("edit, message", [

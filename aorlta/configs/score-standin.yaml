@@ -4,8 +4,8 @@
 # sections (standin.v11, the 30 s ConSan limit). Mechanics only: the stand-in prompts show a kernel's original
 # disassembly and ask for a HIP source, so the scores say little about the model. For a base and a PEFT adapter, add
 # `adapter_dir: /path/to/the/adapter` under `model:`.
-# Site-specific paths, to edit: run.root, model.base_dir, data.prompt_pools[0].path and reward.remote.socket_dir
-# (which must be under /dev/shm for jobs/aorlta-run.sbatch).
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir,
+# data.prompt_pools[0].path and reward.remote.socket_dir (which must be under /dev/shm for jobs/aorlta-run.sbatch).
 run:
   run_id: score-standin
   source: standin
