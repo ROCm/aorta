@@ -116,6 +116,8 @@ def test_a_gap_excluded_sample_contributes_no_gradient_and_stays_in_the_normalis
                     OptimSettings(lr=1e-3, grad_clip=0.0), micro_batch_tokens=96, amp=False)
     (rep,) = t.train_iteration(groups)
     assert rep["excluded"] == [victim] and rep["totals"]["samples"] == sum(len(g.samples) for g in groups)
+    # the clip fraction's denominator: the tokens in the objective, as for clipped_tokens
+    assert rep["counts"]["loss_tokens"] == sum(s.n_response for g in groups for s in g.samples if s.chain_id != victim)
     ref_model = tiny_peft(torch.float32, seed=SEED, b_std=0.05)
     ref_model.train()
 
