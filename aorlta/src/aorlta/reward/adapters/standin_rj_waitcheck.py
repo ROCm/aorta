@@ -9,7 +9,13 @@ unsettled. A capped scan (`diagnostics=>=N`) still has findings, so it is a find
 The object is the compile gate's, unless the source defines a template kernel and has no `main`: a template has no
 code until something instantiates it, so then the scan is of the instantiation the GPU legs launch, the stand-in
 harness (`standin_harness.plan`) with every kernel's instance, compiled `-c -O1` for the leg's target
-(`instantiation.o` beside the leg). A kernel with no instance leaves the leg unsettled, since nothing scanned it.
+(`instantiation.o`). A kernel with no instance leaves the leg unsettled, since nothing scanned it, and so does a
+source whose kernels cannot be read (clang's dump fails, times out or does not start, or a kernel is a shape the
+harness does not know): a template among them would have no code in the gate's object. Only a source clang reads as
+defining no kernel is scanned as the gate's object alone.
+
+The harness, its instantiation and aorta's logs are in a directory of the run's own under the leg's output directory
+(`base.run_dir`), which every job with identical content shares.
 """
 
 from __future__ import annotations
@@ -21,8 +27,9 @@ from pathlib import Path
 
 from ...schemas import ControlSpec, LegJob, LegResult
 from . import aorta_import
-from .base import ProcessRunner, aorta_findings, make_result, map_aorta_check, unsettled
-from .standin_harness import HARNESS_VERSION, HarnessUnsupported, find_kernels, has_main, plan, write_harness
+from .base import ProcessRunner, aorta_findings, make_result, map_aorta_check, run_dir, unsettled
+from .standin_harness import (HARNESS_VERSION, HarnessUnsupported, NoKernel, find_kernels, has_main, plan,
+                              write_harness)
 
 
 def _sha256(path: str) -> str:
@@ -73,7 +80,8 @@ class StandinRjWaitcheck:
             target = job.leg_settings.get("target", "gfx950")
             if waitcheck is None or models is None or job.leg != "san.waitcheck" or not obj or not job.output_dir:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self._clock())
-            obj, why = self._object(job, obj, target)
+            out = run_dir(job)
+            obj, why = self._object(job, obj, target, out)
             if obj is None:
                 return unsettled(job, why, t_start=t0, t_end=self._clock())
             digest = _sha256(obj)
@@ -82,7 +90,7 @@ class StandinRjWaitcheck:
             worklist = models.KernelWorklist(
                 requirement=models.SelectionRequirement.TOP_DISPATCH_COUNT, top_n=1,
                 kernels=(models.KernelObservation(identity=ident, dispatch_count=1, sources=("aorlta",)),))
-            check = waitcheck.run_waitcheck(worklist, output_dir=Path(job.output_dir), binary=Path(self.binary),
+            check = waitcheck.run_waitcheck(worklist, output_dir=out, binary=Path(self.binary),
                                             timeout_seconds=self.timeout_s, execute=self._execute,
                                             max_diagnostics=job.leg_settings.get("max_diagnostics"))
             state, reason = map_aorta_check(check)
@@ -97,9 +105,10 @@ class StandinRjWaitcheck:
         proc = self.runner.run(argv, timeout_s=timeout_s)
         return (None if proc.killed or proc.timed_out else proc.returncode), proc.stdout
 
-    def _object(self, job: LegJob, obj: str, target: str) -> tuple[str | None, str | None]:
+    def _object(self, job: LegJob, obj: str, target: str, out: Path) -> tuple[str | None, str | None]:
         """The object to scan: the compile gate's, or, for a kernel-only source with a template kernel, the harness's
-        instantiation of every kernel (None and why, when a kernel has no instance or the build fails)."""
+        instantiation of every kernel, built in `out` (None and why, when a kernel has no instance or the build
+        fails)."""
         src = job.inputs.get("source")
         if not src:
             return obj, None
@@ -110,10 +119,11 @@ class StandinRjWaitcheck:
             if not any(k.template is not None for k in find_kernels(src, hipcc=self.hipcc, target=target,
                                                                    run=self._run_tool)):
                 return obj, None
-            out = Path(job.output_dir)
             planned = plan(src, hipcc=self.hipcc, target=target, workdir=out, run=self._run_tool)
-        except HarnessUnsupported:
-            return obj, None  # nothing the harness can add: the gate's object, as it is
+        except NoKernel:
+            return obj, None  # nothing for the harness to instantiate: the gate's object, as it is
+        except HarnessUnsupported as exc:
+            return None, f"harness_unsupported: {exc}"[:300]
         missing = [p for p in planned if p.instance is None]
         if missing:
             return None, f"harness_unsupported: {missing[0].kernel.qualified}: {missing[0].why}"[:300]

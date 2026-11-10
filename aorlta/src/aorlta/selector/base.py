@@ -73,7 +73,11 @@ class CheckPlanner(Protocol):
 
 
 def _number(x: Any) -> bool:
-    return type(x) in (int, float) and math.isfinite(x)
+    """A finite int or float that the logged float fields can hold."""
+    try:
+        return type(x) in (int, float) and math.isfinite(x)
+    except OverflowError:  # an int too large for a float
+        return False
 
 
 def plan_problem(plan: Any, available: Sequence[str]) -> str | None:

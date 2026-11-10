@@ -6,11 +6,16 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from aorlta.ids import sha256_text
+from aorlta.rollout import compile_check
 from aorlta.rollout.compile_check import CompileUnavailable, EvidenceStore, FakeCompiler, HipccCompiler, parse_code
 from aorlta.rollout.fake_engine import COMPILE_ERROR_MARKER
 
@@ -82,13 +87,105 @@ def test_a_clean_compile_is_ok(tmp_path):
     assert res.ok and res.errors == []
 
 
-def test_a_compile_timeout_is_a_failed_compile_with_a_diagnostic(tmp_path):
+def test_concurrent_compiles_with_the_same_stderr_all_seal_it(tmp_path, monkeypatch):
+    """Every clean compile has the same (empty) stderr, so the compile pool's checks put one digest together."""
     script = tmp_path / "hipcc"
-    script.write_text("#!/bin/bash\nsleep 5\n")
+    script.write_text("#!/bin/bash\nexit 0\n")
     script.chmod(0o755)
-    res = HipccCompiler(tmp_path / "w", hipcc=str(script), timeout_s=0.3).check("int x;\n", "t")
+    evidence = EvidenceStore(tmp_path / "evidence")
+    cc = HipccCompiler(tmp_path / "w", hipcc=str(script), evidence=evidence)
+    n = 4
+    written = threading.Barrier(n, timeout=10)
+    replace = os.replace
+
+    def replace_once_all_have_written(src, dst):
+        if Path(dst).is_relative_to(evidence.root):
+            try:
+                written.wait()
+            except threading.BrokenBarrierError:  # a store that lets one writer through at a time never fills it
+                pass
+        replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_once_all_have_written)
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        results = list(pool.map(lambda i: cc.check("int x;\n", f"c0-{i}-t0"), range(n)))
+    digest = sha256_text("")
+    assert all(r.ok and r.raw_stderr_sha256 == digest for r in results)
+    stored = [p.relative_to(evidence.root) for p in evidence.root.rglob("*") if p.is_file()]
+    assert stored == [Path(digest[:2]) / f"{digest}.txt"]  # one sealed copy, no temporary left behind
+
+
+def _running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # a zombie has stopped; reaping it is up to its new parent
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+@pytest.mark.parametrize("on_term, graces", [('echo TERM > "${0%/*}/hipcc.term"; exit 143', 0), ("", 1)],
+                         ids=["stops-on-sigterm", "ignores-sigterm"])
+def test_a_compile_timeout_is_a_failed_compile_with_a_diagnostic(tmp_path, on_term, graces):
+    """hipcc's own children (clang) are stopped with it: SIGTERM first, SIGKILL for what ignores it."""
+    child_pid = tmp_path / "child.pid"
+    script = tmp_path / "hipcc"
+    script.write_text(f"#!/bin/bash\ntrap '{on_term}' TERM\nsleep 30 &\necho $! > {child_pid}\nwait\n")
+    script.chmod(0o755)
+    grace = 2.0
+    for timeout_s in (0.5, 5.0):  # the longer one only for a loaded runner that had not started the child in time
+        cc = HipccCompiler(tmp_path / "w", hipcc=str(script), timeout_s=timeout_s, kill_grace_s=grace)
+        res = cc.check("int x;\n", "t")
+        if child_pid.exists() and child_pid.read_text().strip():
+            break
+    else:
+        pytest.fail("the stand-in hipcc never started its child")
     assert not res.ok and res.rc == -9
-    assert res.errors == [{"cls": "compile timed out after 0.3 s", "line": None, "col": None, "token": None}]
+    assert res.errors == [{"cls": f"compile timed out after {timeout_s:g} s", "line": None, "col": None,
+                           "token": None}]
+    assert not _running(int(child_pid.read_text()))
+    assert not (tmp_path / "w" / "t").exists()
+    assert (tmp_path / "hipcc.term").exists() == bool(on_term)  # SIGTERM came first, and hipcc could handle it
+    assert res.seconds < timeout_s + (graces + 1) * grace  # a grace period is waited out only for what ignores SIGTERM
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a child subreaper is Linux-only")
+def test_a_compile_timeout_reaps_what_hipcc_leaves_to_this_process(tmp_path):
+    """As PID 1 of a container run without an init, the compiling process inherits the compilers of a hipcc that
+    exits on SIGTERM; the stop reaps them too, rather than leaving zombies that hold it for a second grace period."""
+    child_pid = tmp_path / "child.pid"
+    script = tmp_path / "hipcc"
+    script.write_text("#!/bin/bash\ntrap 'exit 143' TERM\n"
+                      f"(trap '' TERM; echo $BASHPID > {child_pid}; exec sleep 30) &\nwait\n")
+    script.chmod(0o755)
+    grace = 2.0
+    driver = """
+import ctypes, os, sys
+from aorlta.rollout.compile_check import HipccCompiler
+if ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+    sys.exit(print("no subreaper"))
+work, hipcc, child_pid, grace = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+for timeout_s in (0.5, 5.0):
+    res = HipccCompiler(work, hipcc=hipcc, timeout_s=timeout_s, kill_grace_s=grace).check("int x;\\n", "t")
+    if os.path.exists(child_pid):
+        break
+try:
+    left = os.waitpid(-1, os.WNOHANG)  # (0, 0): a child still running; (pid, status): one left unreaped
+except ChildProcessError:
+    left = None
+print(res.rc, res.seconds, timeout_s, left is None)
+"""
+    src = str(Path(compile_check.__file__).resolve().parents[2])
+    out = subprocess.run([sys.executable, "-c", driver, str(tmp_path / "w"), str(script), str(child_pid), str(grace)],
+                         capture_output=True, text=True, timeout=120, env={**os.environ, "PYTHONPATH": src})
+    if out.stdout.strip() == "no subreaper":
+        pytest.skip("PR_SET_CHILD_SUBREAPER refused")
+    assert out.returncode == 0, out.stderr
+    rc, seconds, timeout_s, nothing_left = out.stdout.split()
+    assert child_pid.exists() and rc == "-9" and nothing_left == "True"
+    assert float(seconds) < float(timeout_s) + 2 * grace  # one grace period for the child that ignores SIGTERM
 
 
 def test_a_missing_compiler_is_infrastructure_not_a_compile_error(tmp_path):

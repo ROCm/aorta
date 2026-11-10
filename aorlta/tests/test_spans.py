@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from aorlta import spans
 from aorlta.atomic import PartialFileError
 from aorlta.spans import MAX_ATTR_STR, Span, SpanError, SpanRecorder, read_jsonl
 
@@ -74,6 +75,59 @@ def test_a_span_ends_once():
         handle.end()
     with pytest.raises(SpanError, match="already closed"):
         handle.set(x=1)
+
+
+def test_set_racing_an_end_on_another_thread_is_kept_or_refused(monkeypatch):
+    """The other thread ends the span while set() is under way: the attribute is in the span or set() raises; it is
+    never accepted and then dropped."""
+    rec = recorder(Clock())
+    handle = rec.start("gen.turn0", 1)
+    in_set, ended = threading.Event(), threading.Event()
+    real = spans.validate_attrs
+
+    def validate_attrs(attrs):
+        if "late" in attrs:
+            in_set.set()
+            ended.wait(5)
+        return real(attrs)
+
+    monkeypatch.setattr(spans, "validate_attrs", validate_attrs)
+    refused = []
+
+    def set_late():
+        try:
+            handle.set(late=1)
+        except SpanError as exc:
+            refused.append(exc)
+
+    setter = threading.Thread(target=set_late)
+    setter.start()
+    assert in_set.wait(5)
+    span = handle.end()
+    ended.set()
+    setter.join(10)
+    assert ("late" in span.attrs) != bool(refused)
+
+
+def test_an_end_arriving_while_set_updates_waits_for_it():
+    rec = recorder(Clock())
+    handle = rec.start("gen.turn0", 1)
+    in_update, ended = threading.Event(), threading.Event()
+
+    class SlowAttrs(dict):
+        def update(self, *args, **kwargs):
+            in_update.set()
+            ended.wait(1)  # without the recorder's lock, the end below completes meanwhile
+            super().update(*args, **kwargs)
+
+    handle._attrs = SlowAttrs(handle._attrs)
+    setter = threading.Thread(target=handle.set, kwargs={"late": 1})
+    setter.start()
+    assert in_update.wait(5)
+    span = handle.end()
+    ended.set()
+    setter.join(10)
+    assert span.attrs == {"late": 1}
 
 
 def test_external_spans():

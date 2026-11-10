@@ -105,9 +105,7 @@ class SpanHandle:
         return self._span is not None
 
     def set(self, **attrs: Any) -> None:
-        if self._span is not None:
-            raise SpanError(f"span {self.name!r} is already closed")
-        self._attrs.update(validate_attrs(attrs))
+        self._recorder._set(self, validate_attrs(attrs))
 
     def end(self, **attrs: Any) -> Span:
         return self._recorder._end(self, validate_attrs(attrs))
@@ -135,6 +133,12 @@ class SpanRecorder:
         with self._lock:
             self._open[id(handle)] = handle
         return handle
+
+    def _set(self, handle: SpanHandle, attrs: dict[str, Any]) -> None:
+        with self._lock:
+            if handle._span is not None:
+                raise SpanError(f"span {handle.name!r} is already closed")
+            handle._attrs.update(attrs)
 
     def _end(self, handle: SpanHandle, attrs: dict[str, Any]) -> Span:
         mono_end = self._monotonic()

@@ -87,7 +87,7 @@ add_mounts() {  # add_mounts ARRAY rw|ro DIR...: `-v DIR:DIR[:ro]` for each DIR 
   done
 }
 cleanup() {
-  docker ps -aq --filter "name=$CNAME" | xargs -r docker rm -f >/dev/null 2>&1
+  docker rm -f "$CNAME" >/dev/null 2>&1
   if [ "$PULLED" = 1 ]; then docker rmi "$IMG" >/dev/null 2>&1 && echo "removed $IMG (pulled by this job)"; fi
 }
 trap cleanup EXIT

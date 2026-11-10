@@ -15,12 +15,15 @@ import time
 
 import pytest
 
+from aorlta.ids import sha256_json, sha256_text
 from aorlta.reward.adapters.fake import FakeAdapterConfig, FakeLegProfile, FakeOutcome
+from aorlta.reward.cache import RewardCache
 from aorlta.reward.profiles import load_profile
 from aorlta.reward.rewardfn.base import Decided
 from aorlta.reward.rewardfn.standin_v11 import StandinV11
 from aorlta.reward.service import RewardService, ServiceOptions
-from reward_helpers import SIM_LEGS, cand, fake_rig, reward_section, wait_all
+from aorlta.schemas import to_dict
+from reward_helpers import SIM_LEGS, cand, fake_rig, leg, reward_section, wait_all
 
 ALL_LEGS = load_profile("fake").legs
 TIMEOUTS = {"gate": 60.0, "compile": 120.0, "sim_run": 120.0, "asan_request": 900.0}
@@ -240,14 +243,14 @@ def test_c2_t5_a_changed_setting_or_checker_version_misses(tmp_path):
         rig.service.submit(cand(0, text="```cpp\nk\n```")).result(timeout=60)
     finally:
         rig.close()
-    # same cache directory, a changed compile setting: only the compile leg misses
+    # same cache directory, a changed compile setting: the compile misses, and so does every leg that requires it
     profile = load_profile("fake")
     changed = dataclasses.replace(profile, leg_settings={"gate.compile": {"command": "hipcc --offload-arch=gfx950 -c -O2"}})
     rig2 = fake_rig(tmp_path, profile=changed)
     try:
         r = rig2.service.submit(cand(1, text="```cpp\nk\n```", tokens=3)).result(timeout=60)
         missed = {n for n, x in r.legs.items() if not x.cache_hit}
-        assert missed == {"gate.compile"}
+        assert missed == {"gate.compile", "ref.native", "ref.edge", "san.consan", "san.waitcheck", "san.asan"}
     finally:
         rig2.close()
     # a new checker version: every leg misses
@@ -257,6 +260,132 @@ def test_c2_t5_a_changed_setting_or_checker_version_misses(tmp_path):
         assert not any(x.cache_hit for x in r.legs.values())
     finally:
         rig3.close()
+
+
+def test_c2_t5_a_verdict_on_the_old_object_is_not_reused_for_one_built_with_other_flags(tmp_path):
+    rig = fake_rig(tmp_path)
+    try:
+        c0 = cand(0, text="```cpp\nf\n```")
+        assert rig.service.submit(c0).result(timeout=60).reward == 1.0 + length(c0)
+    finally:
+        rig.close()
+    changed = dataclasses.replace(load_profile("fake"),
+                                  leg_settings={"gate.compile": {"command": "hipcc --offload-arch=gfx950 -c -O2"}})
+    c = cand(1, text="```cpp\nf\n```", tokens=3)
+    # the object built with -O2 has a hazard the -O1 one did not
+    rig2 = fake_rig(tmp_path, profile=changed,
+                    adapter=FakeAdapterConfig(overrides={(c.candidate_id, "san.waitcheck"): FakeOutcome("finding")}))
+    try:
+        r = rig2.service.submit(c).result(timeout=60)
+        assert not r.legs["san.waitcheck"].cache_hit and r.legs["san.waitcheck"].state == "finding"
+        assert r.parts["base"] == -0.5 / 3
+    finally:
+        rig2.close()
+
+
+@pytest.mark.parametrize("stricter", ["profile_and_reward_fn", "reward_fn", "profile"])
+def test_c2_t5_a_clean_reward_cached_with_one_repeat_is_not_reused_when_two_are_required(tmp_path, stricter):
+    c0 = cand(0, text="```cpp\nr\n```")
+    rig = fake_rig(tmp_path)
+    try:
+        assert rig.service.submit(c0).result(timeout=60).reward == 1.0 + length(c0)
+    finally:
+        rig.close()
+    profile = load_profile("fake")
+    if stricter != "reward_fn":
+        profile = dataclasses.replace(profile, clean_repeats=2)
+    rig2 = fake_rig(tmp_path, profile=profile, rewardfn=StandinV11(clean_repeats=1 if stricter == "profile" else 2))
+    try:
+        r = rig2.service.submit(cand(1, text="```cpp\nr\n```")).result(timeout=60)  # the same reward inputs as c0
+        assert not r.timings.get("reward_cache_hit") and r.reward is None
+        # the legs come from the cache with their one repeat; the reward is decided again and is not clean
+        assert all(r.legs[n].cache_hit and r.legs[n].repeats == 1 for n in SIM_LEGS)
+        assert r.reason == ("reward_invariant_violated" if stricter == "profile" else "clean_not_proven")
+    finally:
+        rig2.close()
+
+
+def test_c2_t5_results_cached_without_controls_are_not_reused_once_the_pool_is_bracketed(tmp_path):
+    fake = load_profile("fake")
+    unbracketed = dataclasses.replace(fake, pools={**fake.pools,
+                                                   "sim": dataclasses.replace(fake.pools["sim"], controls=False)})
+    rig = fake_rig(tmp_path, profile=unbracketed)
+    try:
+        r0 = rig.service.submit(cand(0, text="```cpp\nb\n```")).result(timeout=60)
+        assert r0.status == "scored" and all(r0.legs[n].bracket is None for n in SIM_LEGS)
+    finally:
+        rig.close()
+    rig2 = fake_rig(tmp_path)  # the shipped profile brackets the sim pool
+    try:
+        same, other = cand(1, text="```cpp\nb\n```"), cand(2, text="```cpp\nb\n```", tokens=7)
+        r1, r2 = (rig2.service.submit(x).result(timeout=60) for x in (same, other))
+        assert not r1.timings.get("reward_cache_hit")
+        assert all(r.legs[n].bracket is not None and r.legs[n].bracket["clean"] is True
+                   for r in (r1, r2) for n in SIM_LEGS)
+    finally:
+        rig2.close()
+
+
+def test_c2_t5_a_cached_leg_without_the_clean_bracket_its_key_requires_is_a_miss(tmp_path):
+    rig = fake_rig(tmp_path)
+    try:
+        c = cand(0, text="```cpp\nq\n```")
+        r = rig.service.submit(c).result(timeout=60)
+        key, fields = rig.service._cands[c.candidate_id].leg_keys["san.consan"], \
+            rig.service._cands[c.candidate_id].leg_fields["san.consan"]
+        assert rig.service.cache.get_leg(key, fields) is not None
+        unbracketed = dataclasses.replace(r.legs["san.consan"], bracket=None, cache_hit=False)
+        rig.service.cache.legs.put(key, fields, {"result": to_dict(unbracketed), "artifacts": {}})  # past put_leg
+        assert rig.service.cache.get_leg(key, fields) is None
+    finally:
+        rig.close()
+
+
+def test_c2_t5_an_entry_under_the_earlier_key_layout_is_never_found(tmp_path):
+    """Leg keys once had only the source, task, leg, settings and checker: an entry stored that way, here a finding,
+    is not what a lookup now finds."""
+    c = cand(0, text="```cpp\no\n```")
+    old = {"source_sha256": sha256_text(c.response_text), "task_sha256": c.task.task_sha256, "leg": "san.consan",
+           "leg_settings": {}, "checker_name": "fake.checker", "checker_version": "1"}
+    finding = leg("san.consan", "finding", bracket={"before": "x", "after": "y", "clean": True})
+    rig = fake_rig(tmp_path)
+    try:
+        rig.service.cache.put_leg(sha256_json(old), old, finding, bracketed=True)
+        r = rig.service.submit(c).result(timeout=60)
+        assert not r.legs["san.consan"].cache_hit and r.legs["san.consan"].state == "clean"
+    finally:
+        rig.close()
+
+
+def _cache_writers() -> int:
+    return sum(t.name == "reward-cache-writer" and t.is_alive() for t in threading.enumerate())
+
+
+def test_closing_services_leaves_no_cache_writer_running(tmp_path):
+    before = _cache_writers()
+    for i in range(3):
+        rig = fake_rig(tmp_path / str(i))
+        rig.service.submit(cand(0)).result(timeout=60)
+        rig.close()
+    assert _cache_writers() == before
+
+
+def test_a_closed_cache_still_writes_and_flush_stays_usable(tmp_path):
+    cache = RewardCache(tmp_path / "cache")
+    keyed = [(sha256_json(f), f) for f in ({"leg": "gate.parse", "n": n} for n in range(3))]
+    for key, fields in keyed[:2]:
+        cache.put_leg(key, fields, leg("gate.parse"), bracketed=False)
+        cache.flush()
+    writer = cache._writer.thread
+    cache.close()
+    assert not writer.is_alive()
+    cache.put_leg(*keyed[2], leg("gate.parse"), bracketed=False)  # written on the caller's thread
+    cache.flush()
+    fresh = RewardCache(tmp_path / "cache")
+    try:
+        assert all(fresh.get_leg(key, fields) is not None for key, fields in keyed)
+    finally:
+        fresh.close()
 
 
 def test_c2_t5_unsettled_results_are_never_cached(tmp_path):
