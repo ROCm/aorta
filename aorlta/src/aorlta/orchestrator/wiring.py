@@ -978,15 +978,17 @@ class ServedModel:
     `prepare` takes `model.base_dir` as it is, or merges `model.adapter_dir` into it with tools/merge_base_adapter.py,
     the trainer's and the sync's merge formula, into the run's node-local directory. The tool checks what it wrote and
     records the sha256 of every file in its merge manifest; a merge whose base or adapter is not the one the run plan
-    hashed is refused.
+    hashed is refused. So is a base whose index names a shard below its top level: TokenSpeed loads the top-level
+    shards the index names, as a Hugging Face checkpoint lays them out, and only top-level files are confirmed.
 
     `confirm` runs once the engines have started on that directory:
       1. its files are hashed again and must be the ones prepared (the run plan's, or the merge manifest's);
-      2. its LoRA target tensors (every tensor with `sync.partial: false`) are written to weight slot w0, and the
-         slot's xxh64 manifest is checked against the slot's own files (`sync.writer.verify_slot`);
+      2. every one of its tensors is written to weight slot w0, whatever `sync.partial` says: a partial slot would
+         leave the engines' own copies of the other tensors, from whatever they loaded at start, unchecked. The slot's
+         xxh64 manifest is checked against the slot's own files (`sync.writer.verify_slot`);
       3. the start-up round trip (`sync.roundtrip`): each engine's draws on what it loaded at start, then on a
          synthetic perturbation (every draw must change, so a reload lands), then on slot w0 (every draw must be the
-         first one again). PROVEN means the engines serve exactly those tensors.
+         first one again). PROVEN means the engines serve exactly those tensors, and served the same at start.
     The engines then hold slot w0 for the whole run; nothing is reloaded after it. The tensors are read, perturbed and
     written on the CPU: a score run has no trainer on a GPU."""
 
@@ -1015,10 +1017,16 @@ class ServedModel:
 
     def prepare(self, recorded: dict[str, str]) -> dict:
         """`recorded`: the run plan's sha256 of the model's files, by `base/<name>` and `adapter/<name>`."""
+        from ..sync.writer import INDEX_NAME, read_base_index
         from .score import files_digest
 
+        m = self.cfg.model
+        if (Path(m.base_dir) / INDEX_NAME).is_file():
+            nested = sorted({f for f in read_base_index(m.base_dir).values() if Path(f).name != f})
+            if nested:
+                raise RunStopped("model_shards_not_top_level", {"base_dir": m.base_dir, "shards": nested[:10]})
         base = _top_level(recorded, "base")
-        if self.cfg.model.adapter_dir is None:
+        if m.adapter_dir is None:
             self.identity = {"kind": "merged_dir", "dir": str(self.dir), "files": base}
         else:
             self.identity = self._merge(base, _top_level(recorded, "adapter"))
@@ -1094,18 +1102,18 @@ class ServedModel:
         keys = list(read_base_index(self.dir))
         targets = sorted(target_keys(keys))
         weights = load_base_tensors(self.dir, targets)
-        others = None if s.partial else load_base_tensors(self.dir, [k for k in keys if k not in set(targets)])
-        expected = expected_count(keys, partial=s.partial)
+        others = load_base_tensors(self.dir, [k for k in keys if k not in set(targets)])
+        expected = expected_count(keys, partial=False)
         secs["read"] = time.monotonic() - t
         t = time.monotonic()
-        common = dict(base_dir=self.dir, sync_dir=s.dir, run_id=cfg.run.run_id, slots=s.slots, partial=s.partial,
+        common = dict(base_dir=self.dir, sync_dir=s.dir, run_id=cfg.run.run_id, slots=s.slots, partial=False,
                       others=others)
         restore = write_slot(weights, version=0, **common)
         held = verify_slot(restore.path)
         if not held["ok"]:
             raise RunStopped("served_slot_mismatch", {"slot": str(restore.path), "problems": held["problems"]})
         perturbed = write_slot(synthetic_perturbation(weights), version=1, **common)
-        del weights
+        del weights, others, common
         secs["slots"] = time.monotonic() - t
         engines = [SyncEngine(self.rollout.pool, i) for i in range(len(self.rollout.handles))]
         try:
@@ -1117,7 +1125,7 @@ class ServedModel:
         secs["round_trip"] = res.seconds
         return {"verdict": res.verdict, "engines": len(engines), "files_checked": len(now),
                 "files_sha256": files_digest(now), "slot": str(restore.path), "slot_tensors": restore.tensors,
-                "slot_manifest_sha256": restore.manifest_sha256, "partial": s.partial, "tensors_read": expected,
+                "slot_manifest_sha256": restore.manifest_sha256, "partial": False, "tensors_read": expected,
                 "round_trip": res.as_dict(), "seconds": secs}
 
 

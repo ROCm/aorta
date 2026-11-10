@@ -55,8 +55,8 @@
 #                            sbatch --exclude="$AORLTA_EXCLUDE_NODES" jobs/aorlta-run.sbatch
 # A container sees each directory at its host path. Mounted besides the directories above: the package root, /dev/shm
 # (reward.remote.socket_dir must be under it, and sync.dir is by default), and from the config run.root,
-# model.base_dir (for a Hugging Face snapshot, the model's whole cache directory, so the snapshot's links resolve) and
-# each prompt pool's dataset directory.
+# model.base_dir and model.adapter_dir (the adapter read-only; for a Hugging Face snapshot, the model's whole cache
+# directory, so the snapshot's links resolve) and each prompt pool's dataset directory.
 #SBATCH -N 1
 #SBATCH --exclusive
 #SBATCH --no-requeue
@@ -149,20 +149,25 @@ read -r RUN_ID SYNC_DIR RUN_DIR RUN_ROOT < <(PYTHONPATH="$CODE/src" "$PY" -c "
 from aorlta.config import load_config; c = load_config('$CODE/$CONFIG')
 print(c.run.run_id, c.sync.dir, c.run_dir, c.run.root)") || { echo "[guard] $CONFIG does not load" >&2; exit 94; }
 mkdir -p "$RUN_ROOT" || { echo "[guard] cannot create run.root ($RUN_ROOT)" >&2; exit 95; }
-# The data the config names, for the orchestrator's container: model.base_dir (for a Hugging Face snapshot, the model's
-# whole cache directory, so the snapshot's links into blobs/ resolve), then each prompt pool's dataset directory (the
-# pool's path, or its parent if that holds kernels.json and listings/, as the wiring reads it)
+# The data the config names, for the orchestrator's container: model.base_dir, then model.adapter_dir or an empty line
+# (for a Hugging Face snapshot, the model's whole cache directory, so the snapshot's links into blobs/ resolve), then
+# each prompt pool's dataset directory (the pool's path, or its parent if that holds kernels.json and listings/, as the
+# wiring reads it)
 mapfile -t DATA_DIRS < <(PYTHONPATH="$CODE/src" "$PY" -c "
 from pathlib import Path
 from aorlta.config import load_config
 c = load_config('$CODE/$CONFIG')
-b = Path(c.model.base_dir)
-print(b.parent.parent if b.parent.name == 'snapshots' else b)
+def model(d):
+    d = Path(d)
+    return d.parent.parent if d.parent.name == 'snapshots' else d
+print(model(c.model.base_dir))
+print(model(c.model.adapter_dir) if c.model.adapter_dir else '')
 for pool in c.data.prompt_pools:
     p = Path(pool.path)
     print(next((d for d in (p, p.parent) if (d / 'kernels.json').is_file() and (d / 'listings').is_dir()), p))")
 MODEL_DIR=${DATA_DIRS[0]:-}
-POOL_DIRS=("${DATA_DIRS[@]:1}")
+ADAPTER_DIR=${DATA_DIRS[1]:-}
+POOL_DIRS=("${DATA_DIRS[@]:2}")
 # reward.remote: the socket directory, then one 'adapter gpu socket' line per checker server
 mapfile -t REMOTE < <(PYTHONPATH="$CODE/src" "$PY" -c "
 from aorlta.config import load_config; from aorlta.reward.remote import servers
@@ -341,8 +346,8 @@ ARGS=(--config "$CODE/$CONFIG" --components "$COMPONENTS" --commit "$COMMIT")
 [ "$RESUME" = 1 ] && ARGS+=(--resume)
 ORCH_MOUNTS=()
 add_mounts ORCH_MOUNTS rw "$P" "$RUN_ROOT" "$MODEL_DIR" "$AORLTA_HF_HOME" "$AORLTA_TMPDIR" /dev/shm
-add_mounts ORCH_MOUNTS ro "${POOL_DIRS[@]}" "$AORLTA_AORTA_ROOT" "$AORLTA_ROCJITSU_ROOT" "$AORLTA_LIBSTDCXX_SHIM" \
-  "${EXTRA_MOUNTS[@]}"
+add_mounts ORCH_MOUNTS ro "${POOL_DIRS[@]}" "$ADAPTER_DIR" "$AORLTA_AORTA_ROOT" "$AORLTA_ROCJITSU_ROOT" \
+  "$AORLTA_LIBSTDCXX_SHIM" "${EXTRA_MOUNTS[@]}"
 vram_sampler >> "$OUT/vram.tsv" 2>/dev/null &
 VRAM_PID=$!
 ORCH_PID=

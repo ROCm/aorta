@@ -180,6 +180,17 @@ def test_each_check_is_counted_pass_fail_unsettled_or_not_run_and_not_applicable
         "pass", "fail", "fail", "unsettled", "not_run", "not_run"]
 
 
+def test_a_sample_the_reward_service_never_saw_did_not_run_any_check():
+    clean = sample("a", 0, legs={"san.asan": "clean"})
+    died = sample("a", 1, status="unscored", end="engine_error", turn=-1, handed=False, reason="engine_error")
+    assert S.summarize([clean, died])["checks"]["san.asan"] == {"pass": 1, "fail": 0, "unsettled": 0, "not_run": 1,
+                                                                "not_applicable": 0}
+    lost = sample("b", 0, status="quarantined", end="quarantined", turn=1, handed=False, reason="quarantined")
+    rows = S.build_report([clean, died, lost], [_prompt("a"), _prompt("b")], {})
+    assert rows[2]["checks"] == {"san.asan": {"pass": 0, "fail": 0, "unsettled": 0, "not_run": 1, "not_applicable": 0}}
+    assert rows[-1]["checks"]["san.asan"]["not_run"] == 2
+
+
 def test_the_reward_distribution_is_over_scored_samples_only():
     samples = [sample(k=0, reward=-0.95, base=-0.9), sample(k=1, reward=-0.92, base=-0.9),
                sample(k=2, reward=0.98, base=1.0), sample(k=3, status="unscored"), sample(k=4, reward=-1.0, base=-1.0)]
@@ -297,12 +308,21 @@ def test_a_check_that_never_settles_leaves_its_sample_unscored_and_the_run_compl
     assert sorted(r.reward.resubmits) == sorted(ids[:6])
 
 
+def test_every_check_counts_every_sample_when_engines_lose_chains(tmp_path):
+    r, res = scored(spec(tmp_path, score={"prompts": 8, "passes": 1}, engine={"error_rate": 0.2}))
+    rows = report(r.cfg)
+    assert res["status"] == "completed" and rows[-1]["end_reasons"]["engine_error"] > 0
+    for row in rows[1:]:
+        assert row["checks"].keys() == rows[-1]["checks"].keys() != set()
+        assert all(sum(c[o] for o in S.CHECK_OUTCOMES) == row["samples"] for c in row["checks"].values()), row
+
+
 def test_not_applicable_legs_are_counted_beside_their_states(tmp_path):
     r, res = scored(spec(tmp_path, score={"prompts": 4, "passes": 1}, engine=NO_ERRORS,
                          reward={"not_applicable_legs": ["san.waitcheck"]}))
-    checks = report(r.cfg)[-1]["checks"]
-    assert checks["san.waitcheck"]["not_applicable"] == sum(v for k, v in checks["san.waitcheck"].items()
-                                                            if k != "not_applicable") > 0
+    checks, eps = report(r.cfg)[-1]["checks"], episodes(r.cfg)
+    assert checks["san.waitcheck"]["not_applicable"] == sum("san.waitcheck" in e["legs"] for e in eps) > 0
+    assert sum(checks["san.waitcheck"][o] for o in S.CHECK_OUTCOMES) == len(eps)
     assert checks["san.asan"]["not_applicable"] == 0
 
 
@@ -388,6 +408,82 @@ def test_every_container_of_the_run_job_dumps_no_core():
     assert len(runs) == 6 and "--ulimit core=0" in text[text.index("CHK_DOCKER=("):text.index(")", text.index(
         "CHK_DOCKER=("))]
     assert all("--ulimit core=0" in r or "${CHK_DOCKER[@]}" in r for r in runs), runs
+
+
+def snapshot(cache: Path, names) -> Path:
+    """A Hugging Face cache's snapshot directory: each file a link into the cache's blobs/."""
+    snap, blobs = cache / "snapshots" / "0123abc", cache / "blobs"
+    snap.mkdir(parents=True)
+    blobs.mkdir()
+    for name in names:
+        (blobs / f"blob-{name}").write_text(name)
+        (snap / name).symlink_to(Path("..") / ".." / "blobs" / f"blob-{name}")
+    return snap
+
+
+def orchestrator_mounts(tmp_path, data: dict) -> list[str]:
+    """The `-v` arguments of the orchestrator's container when jobs/aorlta-run.sbatch runs `data` (a score config),
+    from a package root that is a git repository, with `docker` a stub on PATH that records its arguments and runs
+    nothing."""
+    pkg, bin_dir, venv = tmp_path / "pkg", tmp_path / "bin", tmp_path / "venv"
+    for d in (pkg / "configs", bin_dir, venv / "bin", tmp_path / "tmpdir"):
+        d.mkdir(parents=True)
+    (pkg / "src").symlink_to(REPO / "src")
+    (pkg / "configs" / "score.yaml").write_text(json.dumps(data))
+    git = ["git", "-C", str(pkg), "-c", "user.name=aorlta", "-c", "user.email=aorlta@localhost", "-c",
+           "commit.gpgsign=false"]
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "config"]):
+        subprocess.run(git + args, check=True, capture_output=True)
+    (venv / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    log = tmp_path / "docker.log"
+    (bin_dir / "docker").write_text(f"#!/bin/bash\nprintf '%s\\037' \"$@\" >> '{log}'\nprintf '\\036' >> '{log}'\n"
+                                    "if [ \"$1 $2 $3\" = 'image inspect --format' ]; then echo stub; fi\n")
+    for f in (venv / "bin" / "python", bin_dir / "docker"):
+        f.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("AORLTA_", "SLURM"))}
+    env.update(PATH=f"{bin_dir}:{env['PATH']}", SLURM_JOB_ID="4242", SLURM_SUBMIT_DIR=str(pkg),
+               CONFIG="configs/score.yaml", COMPONENTS="fake", AORLTA_VENV=str(venv),
+               AORLTA_TMPDIR=str(tmp_path / "tmpdir"), AORLTA_HF_HOME=str(tmp_path / "hf"))
+    proc = subprocess.run(["bash", str(REPO / "jobs" / "aorlta-run.sbatch")], cwd=pkg, env=env, capture_output=True,
+                          text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    calls = [c.split("\x1f")[:-1] for c in log.read_text().split("\x1e")[:-1]]
+    run = next(c for c in calls if c[:4] == ["run", "--rm", "--name", "aorlta-run-4242"])
+    return [run[i + 1] for i, a in enumerate(run) if a == "-v"]
+
+
+def visible(path: Path, mounts: list[str]) -> str | None:
+    """The mode ("rw" or "ro") of the innermost mount that holds `path` in the container, each mount at its host path;
+    None if no mount holds it."""
+    held = [(len(dest), mode or "rw") for dest, _, mode in (m.partition(":")[2].partition(":") for m in mounts)
+            if path == Path(dest) or Path(dest) in path.parents]
+    return max(held)[1] if held else None
+
+
+@pytest.mark.parametrize("adapter_layout", [None, "directory", "hf_snapshot"])
+def test_the_run_job_mounts_the_model_the_adapter_read_only_and_the_pools(tmp_path, adapter_layout):
+    base = snapshot(tmp_path / "hub" / "models--org--base", ["config.json", "model.safetensors"])
+    names = ["adapter_config.json", "adapter_model.safetensors"]
+    data = score_dict(tmp_path)
+    data["model"] = {"base_dir": str(base), "source": "standin"}
+    if adapter_layout == "hf_snapshot":
+        adapter = snapshot(tmp_path / "lora-hub" / "models--org--lora", names)
+    elif adapter_layout == "directory":
+        adapter = tmp_path / "adapters" / "lora"
+        adapter.mkdir(parents=True)
+        for name in names:
+            (adapter / name).write_text(name)
+    if adapter_layout is not None:
+        data["model"]["adapter_dir"] = str(adapter)
+    (tmp_path / "pool" / "listings").mkdir(parents=True)
+    (tmp_path / "pool" / "kernels.json").write_text("{}")
+    data["data"] = {"prompt_pools": [{"path": str(tmp_path / "pool" / "listings"), "source": "standin"}]}
+    mounts = orchestrator_mounts(tmp_path, data)
+    assert visible(base, mounts) == "rw" and visible((base / "config.json").resolve(), mounts) == "rw", mounts
+    assert visible(tmp_path / "pool", mounts) == "ro", mounts
+    if adapter_layout is not None:
+        assert visible(adapter, mounts) == "ro", mounts
+        assert all(visible((adapter / n).resolve(), mounts) == "ro" for n in names), mounts  # a snapshot's links
 
 
 def test_the_summary_leads_with_the_scored_fraction_and_lists_the_checks_that_ran():

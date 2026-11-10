@@ -168,10 +168,11 @@ The run:
 1. writes its run plan, with the sha256 of every file of `model.base_dir` (and of `model.adapter_dir`);
 2. serves `model.base_dir` as it is, a merged Hugging Face directory, or, with `model.adapter_dir` (a PEFT LoRA
    adapter trained on that base), first merges the two with `tools/merge_base_adapter.py` into
-   `<sync.dir>/<run_id>/model`, and refuses a merge of other inputs than the files the plan hashed;
+   `<sync.dir>/<run_id>/model`, and refuses a merge of other inputs than the files the plan hashed, or a base whose
+   index names a shard below its top level;
 3. checks that the engines serve exactly that directory before anything is scored: its files must hash as recorded,
-   its LoRA target tensors are written to a weight slot whose manifest must match the slot's files, and the start-up
-   round trip must be PROVEN;
+   all its tensors are written to a weight slot whose manifest must match the slot's files, and the start-up round
+   trip must be PROVEN;
 4. scores the first `orchestrator.score.prompts` prompts of the pool in `orchestrator.run_seed`'s order (null: all),
    `rollout.P` at a time, `rollout.K` samples each, once per `orchestrator.score.passes`, each pass with its own
    seeds. The unsettled checks are re-checked once. The scored fraction does not stop a score run, but an unscored
@@ -200,7 +201,7 @@ same config runs with the fakes, as under "The loop on CPU, with fake components
 | step checks | each step | a non-finite or zero gradient, a non-finite loss, or a group trained twice; after the step, a LoRA tensor that is non-finite or did not move, a frozen weight that moved, or ranks that disagree. The run stops before the weights are published |
 | landing check | each weight sync | an engine whose probe log-probs did not change after a real update (NOT_LANDED), or differ from the trainer's by more than a limit calibrated at start (MISMATCH): the run stops. Five updates in a row that change nothing on the engines (NOOP) stop it too |
 | generation barrier | each weight sync | a reload while an engine still holds a request |
-| served model | start of a score run | a model directory whose files no longer hash as recorded, a merge of other inputs than the run plan's, a slot that does not match its manifest, or a round trip that is not PROVEN: nothing is scored |
+| served model | start of a score run | a model directory whose files no longer hash as recorded or whose index names a shard below its top level, a merge of other inputs than the run plan's, a slot that does not match its manifest, or a round trip that is not PROVEN: nothing is scored |
 | resume | resume | a checkpoint whose files do not match its manifest, a trainer state that does not match the saved digest, or a changed prompt pool |
 
 ## Run outputs

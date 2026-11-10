@@ -164,16 +164,18 @@ def reward_distribution(rewards: Sequence[float], bases: Sequence[float | None])
             "max": xs[-1], "by_base": dict(sorted(rungs.items(), key=lambda kv: float(kv[0])))}
 
 
-def summarize(samples: Sequence[Sample]) -> dict:
-    """The counts of one prompt's samples, or of all of them."""
+def summarize(samples: Sequence[Sample], checks: Iterable[str] = ()) -> dict:
+    """The counts of one prompt's samples, or of all of them. Each check (`checks`, and every leg a sample has) is
+    counted over every sample: a sample without that leg, such as a chain the reward service never saw, did not run
+    it."""
     n = len(samples)
     scored = [s for s in samples if s.status == "scored"]
     clean = sum(1 for s in samples if is_clean(s))
-    checks: dict[str, dict[str, int]] = {}
+    counts = {leg: dict.fromkeys(CHECK_OUTCOMES + ("not_applicable",), 0)
+              for leg in sorted(set(checks).union(*(s.legs for s in samples)))}
     for s in samples:
-        for leg, state in s.legs.items():
-            row = checks.setdefault(leg, dict.fromkeys(CHECK_OUTCOMES + ("not_applicable",), 0))
-            row[check_outcome(state)] += 1
+        for leg, row in counts.items():
+            row[check_outcome(s.legs.get(leg, "not_run"))] += 1
             row["not_applicable"] += leg in s.not_applicable
     replied = [s for s in samples if s.final_turn >= 0]
     compiled = [s for s in samples if s.end_reason == "compiled"]
@@ -185,7 +187,7 @@ def summarize(samples: Sequence[Sample]) -> dict:
         "unscored_by_reason": dict(sorted(Counter(s.unscored_reason or "no_reason" for s in samples
                                                   if s.status != "scored").items())),
         "reward": reward_distribution([s.reward for s in scored], [s.base for s in scored]),
-        "checks": {leg: checks[leg] for leg in sorted(checks)},
+        "checks": counts,
         "compile": {"compiled": len(compiled), "fraction": _fraction(len(compiled), n),
                     "at_turn": {str(t): c for t, c in sorted(Counter(s.final_turn for s in compiled).items())}},
         "repair_turns": {"used": {str(t): c for t, c in sorted(Counter(s.final_turn for s in replied).items())},
@@ -195,19 +197,21 @@ def summarize(samples: Sequence[Sample]) -> dict:
 
 
 def build_report(samples: Sequence[Sample], prompts: Sequence, header: dict) -> list[dict]:
-    """The report's rows: the run, one per prompt (in the order scored), then the totals."""
+    """The report's rows: the run, one per prompt (in the order scored), then the totals. Every row counts the same
+    checks: the legs of any sample."""
     by_prompt: dict[str, list[Sample]] = {p.prompt_id: [] for p in prompts}
     for s in samples:
         if s.prompt_id not in by_prompt:
             raise ValueError(f"{s.chain_id}: prompt {s.prompt_id!r} was not selected")
         by_prompt[s.prompt_id].append(s)
+    checks = set().union(*(s.legs for s in samples))
     rows = [dict(header, kind="run", schema=SCORE_REPORT_SCHEMA)]
     for p in prompts:
         mine = by_prompt[p.prompt_id]
         rows.append({"kind": "prompt", "prompt_id": p.prompt_id, "task_sha256": p.task.task_sha256,
-                     "any_clean": any(is_clean(s) for s in mine), **summarize(mine)})
+                     "any_clean": any(is_clean(s) for s in mine), **summarize(mine, checks)})
     total = {"kind": "total", "prompts": len(prompts),
-             "prompts_with_a_clean_sample": sum(1 for r in rows[1:] if r["any_clean"]), **summarize(samples)}
+             "prompts_with_a_clean_sample": sum(1 for r in rows[1:] if r["any_clean"]), **summarize(samples, checks)}
     return rows + [total]
 
 
@@ -502,6 +506,8 @@ class Scorer:
         return result
 
     def _close(self) -> None:
+        if not self._owns_run:  # nothing was started, and the rollout's shutdown removes the run's node directory
+            return
         for name, fn in (("reward", getattr(self.reward, "close", None)),
                          ("rollout", getattr(self.rollout, "shutdown", None))):
             if fn is not None:

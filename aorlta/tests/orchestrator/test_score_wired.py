@@ -17,7 +17,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_wiring_e2e as E  # noqa: E402 - the tiny model, its twin engines, the probes and the dataset
 
-from aorlta.config import config_from_dict  # noqa: E402
+from aorlta.config import ConfigError, config_from_dict  # noqa: E402
 from aorlta.ids import sha256_file  # noqa: E402
 from aorlta.orchestrator import wiring  # noqa: E402
 from aorlta.orchestrator.ports import RunStopped  # noqa: E402
@@ -127,6 +127,25 @@ def other_base(tiny_base, tmp_path_factory) -> Path:
     return d
 
 
+@pytest.fixture(scope="module")
+def other_norm(tiny_base, tmp_path_factory) -> tuple[Path, str]:
+    """The tiny base with one tensor that is not a LoRA target changed: the same targets, another model. Returns the
+    directory and the changed key."""
+    from safetensors.torch import load_file, save_file
+
+    keys = list(read_base_index(tiny_base))
+    key = sorted(k for k in keys if k not in target_keys(keys) and "visual" not in k and "norm" in k)[0]
+    d = tmp_path_factory.mktemp("tiny-other-norm")
+    for p in tiny_base.iterdir():
+        if p.suffix == ".safetensors":
+            t = load_file(str(p))
+            save_file({k: (v.float() + 0.25).to(v.dtype) if k == key else v for k, v in t.items()}, str(d / p.name),
+                      metadata={"format": "pt"})
+        elif p.is_file():
+            shutil.copy(p, d / p.name)
+    return d, key
+
+
 def test_a_wired_score_run_serves_the_model_directory_confirms_it_and_trains_nothing(tmp_path, tiny_base, dataset,
                                                                                      monkeypatch):
     monkeypatch.setattr(wiring, "TrainerAdapter", lambda *a, **k: pytest.fail("a score run built a trainer"))
@@ -145,7 +164,8 @@ def test_a_wired_score_run_serves_the_model_directory_confirms_it_and_trains_not
     assert landing["verdict"] == "PROVEN" and landing["round_trip"]["verdict"] == "PROVEN"
     assert model["model"]["kind"] == "merged_dir" and model["model"]["files"] == wiring.top_files(tiny_base)
     assert landing["files_sha256"] == model["model"]["files_sha256"]
-    assert landing["slot_tensors"] == landing["tensors_read"] == len(base) and landing["partial"] is True
+    assert landing["slot_tensors"] == landing["tensors_read"] == len(read_base_index(tiny_base)) > len(base)
+    assert landing["partial"] is False
     plan = read_json(cfg.run_dir / "run_plan.json")
     assert {k.partition("/")[2]: v["sha256"] for k, v in plan["extra_files"].items()} == model["model"]["files"]
     rows = [json.loads(x) for x in (cfg.run_dir / "score" / "report.jsonl").read_text().splitlines()]
@@ -198,6 +218,20 @@ def test_engines_that_loaded_another_model_stop_the_score_run_before_anything_is
     assert not (cfg.run_dir / "iterations").exists() and result["iterations_completed"] == 0
 
 
+def test_engines_that_loaded_a_model_with_the_same_lora_targets_and_another_tensor_stop_the_score_run(
+        tmp_path, tiny_base, dataset, other_norm):
+    other, key = other_norm
+    cfg = score_config(tmp_path, tiny_base, dataset, run_id="other-norm")
+    scorer, engines = build(cfg, lambda: other)
+    result = scorer.run()
+    assert result["status"] == "stopped" and result["stop"]["reason"] == "served_model_unconfirmed", result
+    rt = result["stop"]["detail"]["landing"]["round_trip"]
+    assert rt["verdict"] == "NOT_PROVEN" and rt["baseline_self_consistent"]
+    assert not (cfg.run_dir / "iterations").exists()
+    right = load_base_tensors(tiny_base, [key])
+    assert all(E.serves(e, right) for e in engines)  # whatever they loaded, the round trip leaves the model's tensors
+
+
 def test_a_model_file_that_changes_after_the_run_plan_stops_the_score_run(tmp_path, tiny_base, dataset, monkeypatch):
     base = tmp_path / "base-copy"
     shutil.copytree(tiny_base, base)
@@ -215,6 +249,48 @@ def test_a_model_file_that_changes_after_the_run_plan_stops_the_score_run(tmp_pa
     result = scorer.run()
     assert result["stop"]["reason"] == "served_model_changed", result
     assert result["stop"]["detail"]["files"] == ["config.json"] and all(e.reloads == [] for e in engines)
+
+
+def test_a_model_whose_index_names_a_shard_below_its_top_level_is_refused_before_the_engines_start(tmp_path, tiny_base,
+                                                                                                    dataset):
+    base = tmp_path / "nested"
+    shutil.copytree(tiny_base, base)
+    (base / "weights").mkdir()
+    for shard in base.glob("*.safetensors"):
+        shard.rename(base / "weights" / shard.name)
+    index = base / "model.safetensors.index.json"
+    data = read_json(index)
+    data["weight_map"] = {k: f"weights/{v}" for k, v in data["weight_map"].items()}
+    index.write_text(json.dumps(data))
+    cfg = score_config(tmp_path, base, dataset, run_id="nested")
+    scorer, engines = build(cfg, lambda: base)
+    result = scorer.run()
+    assert result["status"] == "stopped" and result["stop"]["reason"] == "model_shards_not_top_level", result
+    assert result["stop"]["detail"]["shards"] == ["weights/model.safetensors"]
+    assert all(e.started_on == [] for e in engines) and not (cfg.run_dir / "score").exists()
+
+
+def test_a_second_score_run_under_the_same_run_id_is_refused_and_removes_nothing_of_the_first(tmp_path, tiny_base,
+                                                                                              dataset):
+    cfg = score_config(tmp_path, tiny_base, dataset, run_id="twice", prompts=5)
+    node = wiring.node_dir(cfg)
+    first, _ = build(cfg, lambda: tiny_base)
+    seen = {}
+
+    def second(name, n):  # between the first run's two batches, while its engines hold slot w0
+        if name == "record.committed" and n == 1:
+            again, engines = build(cfg, lambda: tiny_base)
+            seen["before"] = sorted(p.relative_to(node).as_posix() for p in node.rglob("*"))
+            with pytest.raises(ConfigError, match="is already set"):
+                again.run()
+            seen["after"] = sorted(p.relative_to(node).as_posix() for p in node.rglob("*")) if node.exists() else []
+            seen["started"] = [e.started_on for e in engines]
+
+    first._point = second
+    result = first.run()
+    assert result["status"] == "completed" and result["iterations_completed"] == 2, result
+    assert seen["started"] == [[], []] and "w0/manifest.json" in seen["before"]
+    assert seen["after"] == seen["before"]
 
 
 def test_a_merge_that_fails_or_merged_other_inputs_is_refused(tmp_path, tiny_base, dataset, tiny_adapter):
