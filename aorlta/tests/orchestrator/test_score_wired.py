@@ -58,7 +58,7 @@ class LazyTwin(E.TwinEngine):
         self.fake.restart()
 
 
-def score_config(tmp_path, base, ds, *, run_id="scored", adapter=None, prompts=4):
+def score_config(tmp_path, base, ds, *, run_id="scored", adapter=None, prompts=4, scoring_s=None):
     model = {"base_dir": str(base), "source": "standin", **({"adapter_dir": str(adapter)} if adapter else {})}
     return config_from_dict({
         "run": {"run_id": run_id, "source": "standin", "root": str(tmp_path / "runs")},
@@ -67,17 +67,18 @@ def score_config(tmp_path, base, ds, *, run_id="scored", adapter=None, prompts=4
         "rollout": {"engines": [0, 1], "K": 4, "P": 4, "max_new_tokens": 512, "request_timeout_s": 300,
                     "compile_adapter": "fake.compile"},
         "reward": {"profile": "fake", "reward_fn": "standin.v11"},
-        "orchestrator": {"mode": "score", "run_seed": 7, "score": {"prompts": prompts, "passes": 1}},
+        "orchestrator": {"mode": "score", "run_seed": 7, "score": {"prompts": prompts, "passes": 1},
+                         **({"deadlines": {"scoring_s": scoring_s}} if scoring_s else {})},
         "sync": {"dir": str(tmp_path / "shm")},
     })
 
 
-def build(cfg, load_from):
+def build(cfg, load_from, reward_factories=None):
     family: list = []
     engines = [LazyTwin(load_from, E.FAKE, i, family) for i in range(len(cfg.rollout.engines))]
     family += engines + [threading.Lock()]
     parts = wiring.Parts(tokenizer=E.ByteTokenizer(), handles=[InProcessEngine(i, e) for i, e in enumerate(engines)],
-                         compiler=FakeCompiler(), probes=E.PROBES)
+                         compiler=FakeCompiler(), reward_factories=reward_factories, probes=E.PROBES)
     return wiring.build(cfg, parts=parts), engines
 
 
@@ -172,6 +173,33 @@ def test_a_wired_score_run_serves_the_model_directory_confirms_it_and_trains_not
     assert rows[-1]["samples"] == 16 and len(rows) == 1 + 4 + 1
     assert rows[0]["landing"]["verdict"] == "PROVEN" and "round_trip" not in rows[0]["landing"]
     assert not wiring.node_dir(cfg).exists()  # the slots are removed at shutdown
+
+
+def test_score_json_names_the_checks_still_running_at_the_scoring_deadline_and_at_the_retrys(tmp_path, tiny_base,
+                                                                                            dataset):
+    from aorlta.ids import candidate_id
+    from aorlta.reward.adapters.fake import FakeAdapterConfig, FakeCheckAdapter, FakeLegProfile, FakePlan
+    from aorlta.reward.clock import Clock
+
+    class Stalling(FakeCheckAdapter):  # the parse check of each sample k = 0 runs until the service closes it
+        def plan(self, job):
+            if job.leg == "gate.parse" and (job.candidate_id or "").endswith("/0"):
+                return FakePlan("unsettled", "worker_stalled", (), self.config.stall_s, True, "override")
+            return super().plan(job)
+
+    cfg = score_config(tmp_path, tiny_base, dataset, run_id="late", scoring_s=3.0)
+    checker = FakeAdapterConfig(seed=cfg.orchestrator.run_seed, default=FakeLegProfile(fail_rate=wiring.FAKE_FAIL_RATE),
+                                time_scale=1.0)
+    factories = {**wiring.fake_reward_factories(cfg, Clock()), "fake": lambda w: Stalling(checker)}
+    scorer, _ = build(cfg, lambda: tiny_base, reward_factories=factories)
+    result = scorer.run()
+    assert result["status"] == "completed", result
+    batch = read_json(cfg.run_dir / "iterations" / "iter-000001" / "score.json")
+    late = sorted(candidate_id("late", 1, p, 0) for p in batch["prompts"])
+    assert batch["retry"]["candidates"] >= len(late)
+    out = batch["deadlines"]["outstanding_at_deadline"]
+    assert sorted(o["candidate_id"] for o in out if o["leg"] == "gate.parse" and o["candidate_id"] in late) == sorted(
+        late * 2)  # once at the scoring deadline, once at the retry's
 
 
 def test_a_wired_score_run_merges_an_adapter_with_the_tool_and_serves_the_merge(tmp_path, tiny_base, dataset,
