@@ -1,8 +1,8 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `42615627016` (2026-11-09 12:22:10 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/42615627016)
+> ⚠️ **Stale** — latest sanitizer nightly run `42814082346` (2026-11-10 12:20:53 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/42814082346)
 
-Run `2026-11-09T122210-42615627016` · commit `ac11f84616a8` · 2026-11-09 12:22:10 UTC
+Run `2026-11-10T122053-42814082346` · commit `ac11f84616a8` · 2026-11-10 12:20:53 UTC
 
 🔴 **Failed** — 5/5 missing
 
@@ -208,6 +208,7 @@ Reproduce: `python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan --
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | daily-fpsan-match | daily-fpsan-mismatch | Gate |
 |---|---|---|---|---|---|---|---|
+| 2026-11-10T122053-42814082346 | `ac11f84616a8` | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | 🔴 failed |
 | 2026-11-09T122210-42615627016 | `ac11f84616a8` | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | 🔴 failed |
 | 2026-11-08T121935-42479241147 | `ac11f84616a8` | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | 🔴 failed |
 | 2026-11-07T140920-42371579575 | `ac11f84616a8` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | 🟢 healthy |
@@ -237,4 +238,3 @@ Reproduce: `python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan --
 | 2026-10-17T140956-39032141956 | `3c6a345ae84f` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | Observed: ⚪ —<br>**⚪ not run** | Observed: ⚪ —<br>**⚪ not run** | 🟢 healthy |
 | 2026-10-16T160650-38922506989 | `3c6a345ae84f` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | Observed: ⚪ —<br>**⚪ not run** | Observed: ⚪ —<br>**⚪ not run** | 🟢 healthy |
 | 2026-10-16T123432-38900327093 | `bf117600ca07` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🔴 error; expected 🟢 pass<br>**🔴 unmatched** | Observed: 🔴 error; expected 🔴 fail<br>**🔴 unmatched** | Observed: ⚪ —<br>**⚪ not run** | Observed: ⚪ —<br>**⚪ not run** | 🔴 failed |
-| 2026-10-15T123427-38734461239 | `bf117600ca07` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🔴 error; expected 🟢 pass<br>**🔴 unmatched** | Observed: 🔴 error; expected 🔴 fail<br>**🔴 unmatched** | Observed: ⚪ —<br>**⚪ not run** | Observed: ⚪ —<br>**⚪ not run** | 🔴 failed |
