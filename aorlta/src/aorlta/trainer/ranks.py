@@ -435,7 +435,7 @@ class RankTrainer:
         self.loss_sum += float(local.detach())
         self.counts["microbatches"] += 1
         self.counts["forward_tokens"] += mb.tokens
-        self.counts["loss_tokens"] += mb.loss_tokens
+        self.counts["loss_tokens"] += int(kept.sum())  # the tokens in the objective, which clipped_tokens counts
         self.counts["clipped_tokens"] += float(aux["clipped"].sum())
 
     def _old_logprobs(self, groups: Sequence[GroupPlan]) -> dict:
