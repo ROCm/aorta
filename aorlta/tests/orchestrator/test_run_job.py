@@ -60,3 +60,17 @@ def test_cleanup_removes_this_jobs_containers_and_not_another_jobs_whose_name_ex
     removed = [line.split(" ", 1)[1] for line in log.read_text().splitlines() if line.startswith("removed ")]
     assert sorted(" ".join(removed).split()) == ["aorlta-run-123", "aorlta-run-123-canary"]
     assert "containers left: 2" in out  # the stub still lists them: the count is this job's two, not five
+
+
+def test_a_read_only_directory_inside_a_read_write_mount_gets_its_own_mount(tmp_path):
+    funcs = re.search(r"^add_mounts\(\) \{.*?^\}\n", JOB, re.M | re.S).group(0)
+    hf, pkg = tmp_path / "hf", tmp_path / "pkg"
+    model = hf / "hub" / "models--org--name"
+    for d in (model / "snapshots", pkg / "pools"):
+        d.mkdir(parents=True)
+    script = (f"{funcs}M=()\nadd_mounts M rw {hf} {pkg}\n"
+              f"add_mounts M ro {model} {pkg}/pools {model}/snapshots {hf}\nprintf '%s\\n' \"${{M[@]}}\"")
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, timeout=60)
+    assert out.stdout.split() == ["-v", f"{hf}:{hf}", "-v", f"{pkg}:{pkg}", "-v", f"{model}:{model}:ro",
+                                  "-v", f"{pkg}/pools:{pkg}/pools:ro"]
+    assert f"{hf} is mounted rw already, not ro" in out.stderr  # docker refuses a destination twice

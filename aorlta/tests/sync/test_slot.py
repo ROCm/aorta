@@ -108,3 +108,28 @@ def test_the_slot_being_replaced_still_counts_until_the_new_one_is_complete(tiny
     with pytest.raises(W.ShmFullError, match="free"):
         W.write_slot(weights, base_dir=tiny_base, sync_dir=shm, run_id="r", version=2, margin=MARGIN)
     assert W.verify_slot(shm / "r" / "w0")["ok"] and not (shm / "r" / "w0.partial").exists()
+
+
+def test_the_copied_files_count_toward_the_space_a_slot_needs(tiny_base, tmp_path, monkeypatch):
+    import shutil
+
+    base = tmp_path / "base"
+    shutil.copytree(tiny_base, base)
+    (base / "tokenizer.json").write_bytes(b"{}" + b" " * (4 * MARGIN))  # copied into every slot
+    weights = targets(base)
+    total = sum(t.numel() * t.element_size() for t in weights.values())
+    shm = tmp_path / "shm"
+    monkeypatch.setattr(W, "free_bytes", lambda path: total + 2 * MARGIN - used(shm))
+    with pytest.raises(W.ShmFullError, match="for the copied files"):
+        W.write_slot(weights, base_dir=base, sync_dir=shm, run_id="r", version=0, margin=MARGIN)
+    assert not (shm / "r" / "w0.partial").exists() and not (shm / "r" / "w0").exists()
+
+
+def test_a_slot_whose_metadata_leaves_less_than_the_margin_is_not_published(tiny_base, tmp_path, monkeypatch):
+    weights = targets(tiny_base)
+    shm = tmp_path / "shm"
+    reads = iter([1 << 40])  # room at the start; then nothing left
+    monkeypatch.setattr(W, "free_bytes", lambda path: next(reads, MARGIN - 1))
+    with pytest.raises(W.ShmFullError, match="once slot 0 is written"):
+        W.write_slot(weights, base_dir=tiny_base, sync_dir=shm, run_id="r", version=0, margin=MARGIN)
+    assert not (shm / "r" / "w0.partial").exists() and not (shm / "r" / "w0").exists()

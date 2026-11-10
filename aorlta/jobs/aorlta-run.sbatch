@@ -120,16 +120,24 @@ vram_sampler() {  # every 10 s, from sysfs (no GPU context): UTC seconds, PCI ad
   done
 }
 add_mounts() {  # add_mounts ARRAY rw|ro DIR...: `-v DIR:DIR[:ro]` for each DIR that exists and is not inside a
-  # directory ARRAY already mounts. A missing DIR is reported and left out, since docker would create it root-owned.
+  # directory ARRAY already mounts the same way, so a read-only DIR inside a read-write mount gets its own mount. A
+  # missing DIR is reported and left out, since docker would create it root-owned.
   local -n _mounts=$1
-  local _mode=$2 _d _i
+  local _mode=$2 _d _i _dst _has
   shift 2
   for _d in "$@"; do
     _d=${_d%/}
     [ -n "$_d" ] || continue
     [ -d "$_d" ] || { echo "[mounts] not mounted, no such directory: $_d" >&2; continue; }
     for ((_i = 1; _i < ${#_mounts[@]}; _i += 2)); do
-      case "$_d/" in "${_mounts[_i]%%:*}/"*) continue 2 ;; esac
+      _dst=${_mounts[_i]%%:*}
+      case "${_mounts[_i]}" in *:ro) _has=ro ;; *) _has=rw ;; esac
+      if [ "$_d" = "$_dst" ]; then  # docker takes a destination once: the first mount stands
+        [ "$_has" = "$_mode" ] || echo "[mounts] $_d is mounted $_has already, not $_mode" >&2
+        continue 2
+      fi
+      [ "$_has" = "$_mode" ] || continue
+      case "$_d/" in "$_dst/"*) continue 2 ;; esac
     done
     if [ "$_mode" = ro ]; then _mounts+=(-v "$_d:$_d:ro"); else _mounts+=(-v "$_d:$_d"); fi
   done
