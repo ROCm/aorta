@@ -27,7 +27,7 @@ sanitizer_plan:
   policy:
     consan_policy: strict  # Required schema field; does not enable ConSan.
     on_missing_backend: fail
-    timeout_seconds: 900
-    waitcheck_max_diagnostics: 32
+    timeout_seconds: 120
+    waitcheck_max_diagnostics: 64
   output:
     report: sanitizer_report.json

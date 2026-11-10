@@ -1,6 +1,6 @@
 # Waitcheck: two kernels in one image
 
-**Draft development test; not run or qualified.** This tests whether selecting
+**Draft development procedure; one bounded isolation run is recorded below.** This tests whether selecting
 one kernel keeps a neighboring kernel out of the result. Follow the
 [common workflow](aorta-workflow.md) and applicable approval rules. Every cluster
 command, including listing and hashing, needs explicit approval where required
@@ -17,7 +17,8 @@ and verified entry offsets differ, apart from descriptive case labels.
 | `waitcheck_missing` | `ran/warn`, native exit 4, AORTA exit 0; intended scalar-wait finding | The hazardous entry is analyzed |
 | `waitcheck_corrected` | `ran/pass`, native exit 0, AORTA exit 0; zero diagnostics | Its hazardous neighbor does not contaminate the selection |
 
-These are expectations for a new build, not observed results. Investigate any
+These remain expectations when rebuilding; the recorded result applies only to
+the tested artifacts below. Investigate any
 unexpected result rather than changing expectations to pass. Neither outcome
 proves general correctness. **Never execute the compiled program or dispatch
 either kernel.** The unsafe assembly exists only as scanner input; the host stub
@@ -136,6 +137,40 @@ Use a saved, reviewed reader for returned evidence. Require:
 Success would establish isolation only for this build, target, tool and AORTA
 combination. It would not qualify other targets, arbitrary multi-entry worklists,
 timeouts, caps or the whole route. Those gates remain separate.
+
+## Recorded development result: 10 November 2026
+
+The packaged source was built with AMD Clang 22.0.0git from ROCm 7.2.4 for
+gfx1250. Listings established two kernels in image 0, with distinct `.text`
+entries. The same compiled file was then checked through AORTA in two separately
+selected scans, after both exact-entry dry-run reports passed validation.
+
+| Selected entry | AORTA result | Native exit | Findings |
+| --- | --- | --- | --- |
+| waitcheck_missing, 0x0 | complete, ran/warn; CLI0 | 4 | One intended scalar missing-wait diagnostic |
+| waitcheck_corrected, 0x100 | complete, ran/pass; CLI0 | 0 | None |
+
+Both dry runs were not_checked/dry_run, not sanitizer passes. Saved reports and
+raw native entry markers agreed with the selected entries. Input/tool/recipe
+fingerprints stayed unchanged before and after the commands. Downloaded evidence
+passed offline verification on Windows using AORTA's report reader.
+
+| Recorded artifact | SHA-256 |
+| --- | --- |
+| Shared compiled file | c81c3018816287dc08323aa12a70b1c0d27206f48a61c73136faea57d8d2bc1f |
+| Native rj_waitcheck | 2c406bcc3be32c48ae0ac46d0ca197a7b9a6173e0d25f5b5226fa972d8e31e77 |
+
+The Linux Python runtime was 3.12.3; installed AORTA package metadata reported
+0.3.1.dev336+gac11f846. Imported AORTA source paths/hashes were retained separately;
+the package version alone does not establish the checkout revision. Native-tool
+source provenance is still incomplete. Private machine paths and capture files
+are kept in development evidence, not distributed with the skill.
+
+This supports exact-entry isolation for this two-kernel artifact and recorded
+tool/AORTA combination. It is not proof for arbitrary kernel collections or a
+promotion of the full execution route. Rebuilding requires fresh hashes and
+listings; do not adopt these offsets as defaults. The three-case helper remains
+unsuitable for this pair; the development capture/verification runner is separate.
 
 Source basis: existing packaged controls, the
 [pinned RocJITsu guide](https://github.com/ROCm/rocm-systems/blob/d03c6fe410eed62b211d56bb7878dd1f494269fe/emulation/rocjitsu/docs/waitcheck/README.md),

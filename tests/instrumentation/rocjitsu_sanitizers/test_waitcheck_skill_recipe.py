@@ -58,6 +58,6 @@ def test_resolved_template_preserves_exact_identity_and_bounds(tmp_path: Path) -
     assert identity.entry_offset == 0x40
     assert recipe.sanitizers == ("waitcheck",)
     assert recipe.top_n == 1
-    assert recipe.timeout_seconds == 900
-    assert recipe.waitcheck_max_diagnostics == 32
+    assert recipe.timeout_seconds == 120
+    assert recipe.waitcheck_max_diagnostics == 64
     assert recipe.report_name == "sanitizer_report.json"

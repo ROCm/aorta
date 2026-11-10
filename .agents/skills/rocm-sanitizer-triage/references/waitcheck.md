@@ -80,6 +80,11 @@ does not establish that its executable is available today.
 
 ## 5. AORTA procedure
 
+For the complete user-input handoff, provenance record, bounded command shapes
+and offline evidence reader, use the [single-entry procedure](waitcheck-procedure.md).
+It remains draft; recorded development controls do not qualify arbitrary user
+execution.
+
 Copy the bundled [draft exact-entry recipe](../assets/waitcheck-exact-entry.yaml)
 to the task directory. Replace every `REQUIRED_...` value with verified facts.
 Index/offset placeholders deliberately fail parsing; do not delete them to bypass
@@ -117,7 +122,7 @@ Expected output paths for the template:
 - Retain the recipe, original/build identity and tool provenance separately.
   AORTA records binary identity but does not fetch its upstream manifest.
 
-The template proposes 900 seconds per scan and a 32-diagnostic cap. These are
+The template proposes 120 seconds per scan and a 64-diagnostic cap. These are
 starting bounds, not coverage evidence. This adapter accepts a positive cap, not
 zero, and does not request exhaustive JSONL mode. Do not equate these counts with
 an uncapped historical experiment.
@@ -126,6 +131,11 @@ an uncapped historical experiment.
 
 Use a compatible saved reader for reports/logs. Preserve the producing AORTA
 status, reason and execution state:
+
+The [single-entry report reader](waitcheck-procedure.md#4-read-the-saved-report-and-raw-log)
+summarizes a user-supplied AORTA report and optional raw log without executing a
+checker. Its successful exit means the summary was written, not that the kernel
+passed. Identity and provenance still need the producing run's external evidence.
 
 | Evidence | Explain |
 | --- | --- |
@@ -179,9 +189,12 @@ qualified AORTA route.
 ## 8. Qualification record
 
 The [qualification table](waitcheck-examples.md#qualification-gaps) separates
-the three verified controls from untested behavior. In particular, a single-kernel
-object does not prove isolation from neighboring kernels; the low diagnostic count
-does not exercise caps or early stopping. The native binary fingerprint is recorded,
+the verified controls from untested behavior. A separate
+[two-kernel development pair](waitcheck-isolation.md#recorded-development-result-10-november-2026)
+now supports exact-entry isolation for its recorded build and tool: the faulty
+entry warns while its corrected neighbor passes. This is not an arbitrary-kernel
+or multi-entry-worklist qualification. Low diagnostic counts do not exercise caps
+or early stopping. The native binary fingerprint is recorded,
 but its full upstream build provenance remains unresolved. Applicable agent
 evaluation and release acceptance are still required. Advance readiness only under the
 [common rules](aorta-workflow.md#route-readiness).
