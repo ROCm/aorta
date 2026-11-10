@@ -2,9 +2,9 @@
 # linear-attention fast path on gfx950 (fla-core for the gated-delta rule and the fused gated norm,
 # causal-conv1d built from source for gfx950), PEFT for the LoRA, and xxhash for the weight-slot manifests
 # (aorlta.sync).
-# Build context: this directory. Base: ts-grpo-tokenspeed:3b684074, TokenSpeed at commit 3b684074 built from its
+# Build context: this directory. Base: aorlta-tokenspeed:3b684074, TokenSpeed at commit 3b684074 built from its
 # docker/Dockerfile.amd (jobs/aorlta-run.sbatch builds it on a node that lacks it).
-FROM ts-grpo-tokenspeed:3b684074
+FROM aorlta-tokenspeed:3b684074
 
 USER root
 LABEL aorlta.image="trainer"

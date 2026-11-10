@@ -87,10 +87,18 @@ The paths a run needs are set here (the checks' defaults are under `/opt`):
 
 | what | where it is set |
 |---|---|
-| run directory, base model, prompt pool, checker sockets | the run config: `run.root`, `model.base_dir`, `data.prompt_pools`, `reward.remote.socket_dir` (under `/dev/shm`) |
-| `rj_waitcheck`, the rocjitsu hook, aorta, the libstdc++ shim, hipcc, llvm-readelf, the control kernels | `adapters:` in `src/aorlta/reward/profiles/standin-*.yaml` (defaults `/opt/rocjitsu/bin/rj_waitcheck`, `/opt/rocjitsu/lib/librocjitsu_dbi_hooks.so`, `/opt/aorta/src`, `/opt/libstdcxx-shim`, `/opt/rocm`) |
-| aorta, for the ASan node-health canary | `AORLTA_AORTA_SRC` (default `/opt/aorta/src`; the run job sets it from `AORLTA_AORTA_ROOT`) |
-| what the run job mounts and runs | environment variables, documented in the header of `jobs/aorlta-run.sbatch`: `AORLTA_VENV`, `TS_SRC`, `AORLTA_ASAN_LIB`, `AORLTA_AORTA_ROOT`, `AORLTA_ROCJITSU_ROOT`, `AORLTA_LIBSTDCXX_SHIM`, `AORLTA_HF_HOME`, `AORLTA_TMPDIR`, `AORLTA_DOCKER_CONFIG`, `AORLTA_MOUNTS`, `AORLTA_EXCLUDE_NODES`. The profiles' paths must lie inside what it mounts |
+| run directory, base model, prompt pool, checker sockets, weight slots | the run config: `run.root`, `model.base_dir`, `data.prompt_pools`, `reward.remote.socket_dir` (under `/dev/shm`), `sync.dir`; or a site file that `AORLTA_SITE` names (below), which sets only these |
+| the check tools | environment variables, read when a profile in `src/aorlta/reward/profiles/` is loaded: `AORLTA_ROCM_ROOT` (default `/opt/rocm`: hipcc and llvm-readelf), `AORLTA_ROCJITSU_ROOT` (`/opt/rocjitsu`: `bin/rj_waitcheck`, `lib/librocjitsu_dbi_hooks.so`), `AORLTA_AORTA_ROOT` (`/opt/aorta`: its `src/` and the control kernels), `AORLTA_LIBSTDCXX_SHIM` (`/opt/libstdcxx-shim`) |
+| what the run job mounts and runs | environment variables, documented in the header of `jobs/aorlta-run.sbatch`: `AORLTA_VENV`, `TS_SRC`, `AORLTA_ASAN_LIB`, `AORLTA_AORTA_ROOT`, `AORLTA_ROCJITSU_ROOT`, `AORLTA_LIBSTDCXX_SHIM`, `AORLTA_SITE`, `AORLTA_HF_HOME`, `AORLTA_TMPDIR`, `AORLTA_DOCKER_CONFIG`, `AORLTA_MOUNTS`, `AORLTA_EXCLUDE_NODES`. It mounts those directories and passes the check-tool variables into its containers, which use their image's `/opt/rocm` |
+
+A site file keeps a site's paths out of the committed config. It is YAML with only the keys in the first row, and
+`data.prompt_pools` gives one path per pool of the config, in order:
+
+```yaml
+run: {root: /scratch/me/aorlta-runs}
+model: {base_dir: /data/hf/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a}
+data: {prompt_pools: [/data/aorlta/standin-pool]}
+```
 
 ## Tests
 
@@ -126,16 +134,18 @@ under `$SCRATCH/runs/standin/`.
 
 ## A stand-in run on GPUs
 
-One Slurm job runs everything. Edit the site paths in `configs/standin.yaml`, commit it, and submit from `aorlta/`
-with the job's environment variables set (see "Requirements"; `AORLTA_ASAN_LIB` has no default):
+One Slurm job runs everything. Put the site paths in a site file (or edit them in `configs/standin.yaml` and commit
+it), and submit from `aorlta/` with the job's environment variables set (see "Requirements"; `AORLTA_ASAN_LIB` has no
+default):
 
 ```bash
 mkdir -p runs
-export AORLTA_ASAN_LIB=/path/to/rocm-7.0.2-asan/lib/asan TS_SRC=/path/to/tokenspeed-3b684074
+export AORLTA_SITE=/path/to/site.yaml AORLTA_ASAN_LIB=/path/to/rocm-7.0.2-asan/lib/asan TS_SRC=/path/to/tokenspeed-3b684074
 CONFIG=configs/standin.yaml sbatch jobs/aorlta-run.sbatch
 ```
 
-1. The job runs from a snapshot of the committed tree in `runs/<job id>/code`, so the config must be committed.
+1. The job runs from a snapshot of the committed tree in `runs/<job id>/code`, so the config must be committed; it
+   keeps a copy of the site file there too.
 2. It runs aorta's ASan node-health canary on the checker GPUs, starts one checker server per check and GPU, and
    runs them on aorta's test kernels; if either fails, it stops before building anything.
 3. It builds the images it needs, checks that the run's modules import inside them, and starts the orchestrator.

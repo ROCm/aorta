@@ -5,7 +5,7 @@ Recorded on a node with its hipcc:
   AMD clang version 20.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-7.0.2.1 26111 0604c5c177dde378b774c4c3cf7fc1807e6478b9)
 
 stderr-rocm-7.2.4.txt / rc-rocm-7.2.4.txt: the same sources compiled with the hipcc inside the rollout image
-ts-grpo-tokenspeed:3b684074:
+aorlta-tokenspeed:3b684074 (TokenSpeed at 3b684074, built from its docker/Dockerfile.amd):
   ROCm 7.2.4
   HIP version: 7.2.53211-97f5574fe2
   AMD clang version 22.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-7.2.4 26084 f58b06dce1f9c15707c5f808fd002e18c2accf7e)

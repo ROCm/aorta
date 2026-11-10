@@ -29,19 +29,20 @@ requires:
 leg_settings:
   gate.compile: {offload_arch: gfx950, flags: ["-c", "-O1"]}
   san.waitcheck: {target: gfx950, max_diagnostics: 32}
-# Site paths, to edit: aorta at commit d22f6116235c05395a0241a83d6f7e952a988454 (its src/ and its sanitizer fixtures);
-# rocjitsu's rj_waitcheck and librocjitsu_dbi_hooks.so, from ROCm/rocm-systems branch shared/rocjitsu/sanitizers;
-# a libstdc++ with GLIBCXX_3.4.31 for rj_waitcheck (ld_library_path).
+# Where the tools are: `${NAME}` is the environment variable NAME, or its default under /opt (profiles.TOOL_ROOTS).
+# aorta at commit d22f6116235c05395a0241a83d6f7e952a988454 (its src/ and its sanitizer fixtures); rocjitsu's
+# rj_waitcheck and librocjitsu_dbi_hooks.so, from ROCm/rocm-systems branch shared/rocjitsu/sanitizers; a libstdc++ with
+# GLIBCXX_3.4.31 for rj_waitcheck (ld_library_path).
 adapters:
-  standin.hipcc: {hipcc: /opt/rocm/bin/hipcc, readelf: /opt/rocm/llvm/bin/llvm-readelf}
+  standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", readelf: "${AORLTA_ROCM_ROOT}/llvm/bin/llvm-readelf"}
   standin.rj_waitcheck:
-    binary: /opt/rocjitsu/bin/rj_waitcheck
-    ld_library_path: /opt/libstdcxx-shim
-    aorta_src: /opt/aorta/src
+    binary: "${AORLTA_ROCJITSU_ROOT}/bin/rj_waitcheck"
+    ld_library_path: "${AORLTA_LIBSTDCXX_SHIM}"
+    aorta_src: "${AORLTA_AORTA_ROOT}/src"
   standin.aorta_consan:
-    hook: /opt/rocjitsu/lib/librocjitsu_dbi_hooks.so
-    aorta_src: /opt/aorta/src
-    control_source: /opt/aorta/recipes/sanitizers/fixtures/repro/consan_lds_race.hip
+    hook: "${AORLTA_ROCJITSU_ROOT}/lib/librocjitsu_dbi_hooks.so"
+    aorta_src: "${AORLTA_AORTA_ROOT}/src"
+    control_source: "${AORLTA_AORTA_ROOT}/recipes/sanitizers/fixtures/repro/consan_lds_race.hip"
   standin.aorta_asan:
-    aorta_src: /opt/aorta/src
-    control_source: /opt/aorta/recipes/sanitizers/fixtures/repro/asan_heap_overflow.hip
+    aorta_src: "${AORLTA_AORTA_ROOT}/src"
+    control_source: "${AORLTA_AORTA_ROOT}/recipes/sanitizers/fixtures/repro/asan_heap_overflow.hip"

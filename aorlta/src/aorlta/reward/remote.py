@@ -424,8 +424,9 @@ def standin_factory(config_path: str, adapter: str) -> Callable[[str], Any]:
 def node_health(out_dir: str) -> int:
     """aorta's ASan node-health canary on the GPUs this process sees: 0 healthy, 2 failed, 3 not verified."""
     from .adapters import aorta_import
+    from .profiles import tool_root
 
-    src = os.environ.get("AORLTA_AORTA_SRC", "/opt/aorta/src")
+    src = f"{tool_root('AORLTA_AORTA_ROOT')}/src"
     asan, why = aorta_import.load("asan", src)
     asan_run, why2 = aorta_import.load("asan_run", src)
     if asan is None or asan_run is None:

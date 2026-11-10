@@ -8,7 +8,7 @@ pools:
   gates: {resource: local_cpu, adapter: fake, timeout: gate, workers: 8}
   compile: {resource: local_cpu, adapter: fake, timeout: compile, workers: 8}
   sim: {resource: sim_cpu, adapter: fake, timeout: sim_run, controls: true}   # workers: reward.sim_workers
-  asan: {resource: partner_gpu, adapter: fake-asan, timeout: asan_request, controls: true, batched: true}
+  asan: {resource: external_gpu, adapter: fake-asan, timeout: asan_request, controls: true, batched: true}
 stages:
   - name: S0
     pool: gates
