@@ -95,3 +95,16 @@ def test_a_warmup_refuses_an_open_streamed_step():
     t.stream_begin()
     with pytest.raises(TrainerInputError, match="a streamed step is open"):
         t.warmup(group)
+
+
+def test_a_warmup_runs_its_loss_on_every_token_with_the_gap_gate_enforced():
+    """The warm-up group's engine log-probs are made up, so an enforced gap gate would take every sample out of the
+    objective and the loss would see no token."""
+    model = tiny_peft(torch.bfloat16, seed=0, b_std=0.02)
+    t = RankTrainer(model, merged_forward(model), LossSettings(loss_temperature=0.7, max_generation_gap=1e-3),
+                    OptimSettings(lr=1e-3, grad_clip=1.0), world=LocalWorld(), micro_batch_tokens=MB, amp=True)
+    group = warmup_group([[5, 6, 7, 8]], MB, max_new_tokens=64)
+    w = t.warmup(group)
+    assert w["counts"]["excluded"] == 0
+    assert w["counts"]["loss_tokens"] == sum(s.n_response for s in group.samples) > 0
+    assert t.gap_gate  # enforced again for the real steps

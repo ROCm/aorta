@@ -632,8 +632,12 @@ class RankTrainer:
         if self._streaming:
             raise TrainerInputError("a streamed step is open")
         self._reset()
+        # The group's engine log-probs are made up: gated, every sample would leave the objective, and the loss would
+        # compile on no token.
+        gate, self.gap_gate = self.gap_gate, False
         try:
             self._add([group], None, across_groups=False)
             return {"counts": dict(self.counts), "seconds": dict(self.seconds)}
         finally:
+            self.gap_gate = gate
             self._reset()
