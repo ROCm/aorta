@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from ...ids import sha256_text
 from ...schemas import SETTLED_STATES, ControlSpec, LegJob, LegResult
 
 log = logging.getLogger(__name__)
@@ -253,12 +255,26 @@ class ProcessRunner:
 
 # --- aorta verdicts --------------------------------------------------------------------------------
 
+REASON_CODE = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def reason_code(reason: str) -> str:
+    """An aorta reason as its leading code, with anything after the code replaced by `sha256:` and 12 hex digits of
+    the whole reason: the rest can quote the checked program's output (ConSan's `consan_output_parse_error: ...` quotes
+    the value it could not parse), and that output stays in aorta's logs in the run's directory."""
+    m = REASON_CODE.match(reason)
+    code = m.group(0) if m else ""
+    if code == reason:
+        return code
+    return (f"{code}: " if code else "") + "sha256:" + sha256_text(reason)[:12]
+
 
 def map_aorta_check(check: Any) -> tuple[str, str | None]:
     """An aorta `CheckResult` as a leg state (Section 6.2, the aorta stand-ins): PASS -> clean;
     FAIL with findings -> finding; waitcheck WARN with findings -> finding; anything else (ERROR,
-    NOT_CHECKED, TIMED_OUT, a verdict with no findings to back it) -> unsettled. An ASan PASS on a
-    node whose canary is NOT_VERIFIED is already NOT_CHECKED in aorta, so it maps to unsettled."""
+    NOT_CHECKED, TIMED_OUT, a verdict with no findings to back it) -> unsettled, with aorta's reason as
+    `reason_code` gives it. An ASan PASS on a node whose canary is NOT_VERIFIED is already NOT_CHECKED in aorta, so it
+    maps to unsettled."""
     state = getattr(getattr(check, "state", None), "value", None)
     verdict = getattr(getattr(check, "verdict", None), "value", None)
     findings = getattr(check, "findings", ())
@@ -267,7 +283,7 @@ def map_aorta_check(check: Any) -> tuple[str, str | None]:
         return "clean", None
     if state == "ran" and verdict in ("fail", "warn") and findings:
         return "finding", None
-    detail = f"{state}/{verdict}" + (f": {reason}" if reason else "")
+    detail = f"{state}/{verdict}" + (f": {reason_code(str(reason))}" if reason else "")
     return "unsettled", f"checker_not_settled:{detail}"[:300]
 
 

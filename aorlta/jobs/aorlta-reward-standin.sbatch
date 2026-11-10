@@ -110,10 +110,10 @@ timeout 2400 docker run --rm --name "$CNAME" --network=host --device=/dev/kfd --
   -e AORLTA_LIBSTDCXX_SHIM="$AORLTA_LIBSTDCXX_SHIM" \
   -e PYTHONDONTWRITEBYTECODE=1 -e TMPDIR="$AORLTA_TMPDIR/aorlta-reward-standin-$SLURM_JOB_ID" \
   -e AORTA_ASAN_ROCM_LIB="$AORLTA_ASAN_LIB" \
-  --entrypoint bash "$IMG" -c "export PATH=/opt/rocm/bin:\$PATH; mkdir -p \$TMPDIR; cd '$WT'; \
+  --entrypoint bash "$IMG" -c "export PATH=/opt/rocm/bin:\$PATH; mkdir -p \"\$TMPDIR\"; cd '$WT'; \
     ldd --version | head -1; echo rocm \$(cat /opt/rocm/.info/version); \
     '$PY' -m pytest -q -rA tests/reward/test_c2_t11_gpu.py 2>&1 | tail -40; \
-    rc=\${PIPESTATUS[0]}; chown -R $(id -u):$(id -g) '$OUT' \$TMPDIR; rm -rf \$TMPDIR; exit \$rc"
+    rc=\${PIPESTATUS[0]}; chown -R $(id -u):$(id -g) '$OUT' \"\$TMPDIR\"; rm -rf \"\$TMPDIR\"; exit \$rc"
 rc=$?
 stamp "pytest rc=$rc"
 [ -f "$OUT/t11-evidence.json" ] && "$PY" -c "
