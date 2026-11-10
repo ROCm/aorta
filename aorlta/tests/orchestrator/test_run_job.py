@@ -22,3 +22,10 @@ def test_the_orchestrator_and_the_checkers_get_the_tool_roots_and_the_site_file(
             assert f"-e {name}=" in block, name
     copy = JOB.index('cp "$AORLTA_SITE" "$OUT/site.yaml"')
     assert copy < JOB.index("load_config(")  # every config the job reads has the site applied
+
+
+def test_the_job_stops_before_the_run_if_the_docker_daemon_sees_a_mount_elsewhere():
+    check = JOB[JOB.index("MARK=.aorlta-mount-"):JOB.index("vram_sampler >>")]
+    assert JOB.index("add_mounts ORCH_MOUNTS rw") < JOB.index("MARK=.aorlta-mount-") < JOB.index("\norchestrator\n")
+    assert '"${ORCH_MOUNTS[@]}"' in check and "*:ro) ;;" in check  # every read-write mount, as the run gets them
+    assert "exit 95" in check and 'rm -f "$d/$MARK"' in check
