@@ -146,7 +146,7 @@ when it covers an untested integration behavior or a new claim the skill will ma
 | Claim | Current evidence | What is still needed |
 | --- | --- | --- |
 | Basic finding/no-finding/refusal | Three real, reviewed AORTA controls; packaged helper and relocated verification passed | These are not all checker behaviors; keep conclusions within tested scope |
-| Exact-entry selection | Matching identity in one-kernel inputs | One small multi-kernel object with a clean and hazardous entry; prove each selection stays within scope |
+| Exact-entry selection | Matching identity in one-kernel inputs | [Two-kernel preparation package](waitcheck-isolation.md); build/list/run and independent acceptance still required |
 | Failure handling | Wrong expected digest rejected | Focused missing-input/tool, wrong selector and timeout cases as applicable; no new kernel needed for most |
 | Count/completion semantics | Low-count output below cap | Targeted many-diagnostic/cap or early-stop evidence for each supported tool format; keep unknown formats unqualified |
 | Other targets/hazard classes | One scalar-wait pair on gfx1250 | Add targeted controls only when expanding the claimed scope |
@@ -157,6 +157,8 @@ when it covers an untested integration behavior or a new claim the skill will ma
 **Do we need more samples?** These three are enough to explain and regress the
 basic workflow. Do not collect more random kernels. For broader exact-entry
 qualification, the next useful additional sample is a two-kernel isolation case.
+Its [source, draft recipes and expected results](waitcheck-isolation.md) are now
+provided for preparation; no isolation result is claimed.
 Other gaps mostly need controlled failure/output fixtures or agent tests.
 Keep the route draft, or explicitly narrow its supported claims, until the
 relevant gaps are closed under the [readiness rules](aorta-workflow.md#route-readiness).
