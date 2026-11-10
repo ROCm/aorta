@@ -67,6 +67,13 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _identity(path: str) -> str:
+    try:
+        return _sha256(path)[:16]
+    except OSError:
+        return "missing"
+
+
 def single_kernel(source_text: str) -> str | None:
     """The source's one __global__ function, or None if it has none or several. Comments are not code."""
     names = sorted(set(GLOBAL_FN.findall(strip_comments(source_text))))
@@ -319,12 +326,8 @@ class AortaConsan(_AortaGpu):
     def __init__(self, *, hook: str, **kw):
         super().__init__(**kw)
         self.hook = hook
-        try:
-            ident = _sha256(hook)[:16]
-        except OSError:
-            ident = "missing"
-        self.version = (f"2+target-{self.target}+harness-{HARNESS_VERSION}+hook-{ident}"
-                        f"+aorta-{aorta_import.commit(self.aorta_src)[:12]}")
+        self.version = (f"2+target-{self.target}+harness-{HARNESS_VERSION}+hipcc-{_identity(self.hipcc)}"
+                        f"+hook-{_identity(hook)}+aorta-{aorta_import.commit(self.aorta_src)[:12]}")
 
     def build_flags(self) -> list[str]:
         return [f"--offload-arch={self.target}"]
@@ -352,8 +355,8 @@ class AortaAsan(_AortaGpu):
     def __init__(self, **kw):
         super().__init__(**kw)
         lib = os.environ.get("AORTA_ASAN_ROCM_LIB", "")
-        self.version = (f"2+target-{self.target}+harness-{HARNESS_VERSION}+asanlib-{sha256_text(lib)[:12]}"
-                        f"+aorta-{aorta_import.commit(self.aorta_src)[:12]}")
+        self.version = (f"2+target-{self.target}+harness-{HARNESS_VERSION}+hipcc-{_identity(self.hipcc)}"
+                        f"+asanlib-{sha256_text(lib)[:12]}+aorta-{aorta_import.commit(self.aorta_src)[:12]}")
 
     def build_flags(self) -> list[str]:
         return [f"--offload-arch={self.target}:xnack+", "-fsanitize=address", "-shared-libsan"]

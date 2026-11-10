@@ -40,6 +40,13 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _identity(path: str) -> str:
+    try:
+        return _sha256(path)[:16]
+    except OSError:
+        return "missing"
+
+
 class StandinRjWaitcheck:
     name = "standin.rj_waitcheck"
     legs = ("san.waitcheck",)
@@ -54,11 +61,8 @@ class StandinRjWaitcheck:
         self.timeout_s = timeout_s
         self._clock = clock
         self.runner = ProcessRunner()
-        try:
-            ident = _sha256(binary)[:16]
-        except OSError:
-            ident = "missing"
-        self.version = f"2+harness-{HARNESS_VERSION}+rj_waitcheck-{ident}+aorta-{aorta_import.commit(aorta_src)[:12]}"
+        self.version = (f"2+harness-{HARNESS_VERSION}+hipcc-{_identity(hipcc)}+rj_waitcheck-{_identity(binary)}"
+                        f"+aorta-{aorta_import.commit(aorta_src)[:12]}")
 
     def _execute(self, argv, *, timeout_seconds, env=None):
         execution, why = aorta_import.load("execution", self.aorta_src)
