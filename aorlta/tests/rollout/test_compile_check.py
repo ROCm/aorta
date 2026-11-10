@@ -87,6 +87,17 @@ def test_a_clean_compile_is_ok(tmp_path):
     assert res.ok and res.errors == []
 
 
+def test_a_relative_compiler_path_still_names_the_compiler_from_each_checks_directory(tmp_path, monkeypatch):
+    (tmp_path / "bin").mkdir()
+    script = tmp_path / "bin" / "hipcc"
+    script.write_text("#!/bin/bash\nexit 0\n")
+    script.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    cc = HipccCompiler(tmp_path / "w", hipcc="./bin/hipcc")
+    assert cc.hipcc == str(script)
+    assert cc.check("int x;\n", "t").ok
+
+
 def test_concurrent_compiles_with_the_same_stderr_all_seal_it(tmp_path, monkeypatch):
     """Every clean compile has the same (empty) stderr, so the compile pool's checks put one digest together."""
     script = tmp_path / "hipcc"
