@@ -165,7 +165,11 @@ class HipccCompiler:
         structure: Structure = compile_errors,
     ):
         self.workdir = Path(workdir)
-        self.hipcc = hipcc or shutil.which("hipcc") or "/opt/rocm/bin/hipcc"
+        if hipcc is None:
+            hipcc = shutil.which("hipcc") or "/opt/rocm/bin/hipcc"
+        elif os.sep not in hipcc:
+            hipcc = shutil.which(hipcc) or hipcc
+        self.hipcc = os.path.abspath(hipcc)  # check() runs the compiler from each check's own directory
         self.offload_arch = offload_arch
         self.opt = opt
         self.timeout_s = timeout_s
