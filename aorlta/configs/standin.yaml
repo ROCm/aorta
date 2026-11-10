@@ -4,8 +4,8 @@
 # one hung kernel cannot hold the only worker (one held it for 110 s). Each ConSan run of one kernel is stopped at
 # 30 s (the slowest real one took 5.8 s) and is then unsettled; ASan keeps its own 45 s share of the request timeout
 # (real ASan jobs took up to about 48 s with their build). Mechanics only: never reported as a training result.
-# Site-specific paths, to edit: run.root, model.base_dir, data.prompt_pools[0].path and reward.remote.socket_dir
-# (which must be under /dev/shm for jobs/aorlta-run.sbatch).
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir,
+# data.prompt_pools[0].path and reward.remote.socket_dir (which must be under /dev/shm for jobs/aorlta-run.sbatch).
 run:
   run_id: standin
   source: standin

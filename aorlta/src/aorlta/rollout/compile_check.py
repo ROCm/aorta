@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -104,6 +105,50 @@ class EvidenceStore:
         return digest
 
 
+def _run_in_own_group(argv: list[str], cwd: Path, timeout_s: float, grace_s: float) -> tuple[int, str]:
+    """(returncode, stderr) of `argv`, run in a session of its own. When it outlives `timeout_s` (or the wait is
+    interrupted), its whole process group, the compilers hipcc started included, is stopped before the exception
+    leaves this function."""
+    with subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+                          start_new_session=True) as proc:
+        try:
+            stderr = proc.communicate(timeout=timeout_s)[1]
+        except BaseException:
+            _stop_group(proc, grace_s)
+            raise
+    return proc.returncode, stderr
+
+
+def _stop_group(proc: subprocess.Popen, grace_s: float) -> None:
+    """SIGTERM the process group `proc` leads, SIGKILL it if a member outlasts `grace_s`, then give the members up to
+    `grace_s` more to be gone; `proc`, and any member left to this process, is reaped."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        deadline = time.monotonic() + grace_s
+        while (left := _group_left(proc)) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not left:
+            break
+    proc.wait()
+
+
+def _group_left(proc: subprocess.Popen) -> bool:
+    if proc.poll() is not None:  # hipcc is reaped: its zombie is not a member, and what is left is what it started
+        try:  # left to this process to reap when it is the reaper (PID 1 of a container run without an init)
+            while os.waitpid(-proc.pid, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            pass
+    try:
+        os.killpg(proc.pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
 class HipccCompiler:
     name = "standin.hipcc"
 
@@ -115,6 +160,7 @@ class HipccCompiler:
         offload_arch: str = "gfx950",
         opt: str = "-O1",
         timeout_s: float = 120.0,
+        kill_grace_s: float = 5.0,
         evidence: EvidenceStore | None = None,
         structure: Structure = compile_errors,
     ):
@@ -123,6 +169,7 @@ class HipccCompiler:
         self.offload_arch = offload_arch
         self.opt = opt
         self.timeout_s = timeout_s
+        self.kill_grace_s = kill_grace_s
         self.evidence = evidence
         self.structure = structure
         if not os.access(self.hipcc, os.X_OK):
@@ -142,10 +189,7 @@ class HipccCompiler:
             raise CompileUnavailable(f"cannot prepare {d}: {exc}") from exc
         t0 = time.monotonic()
         try:
-            proc = subprocess.run(
-                self.argv(), cwd=d, capture_output=True, text=True, errors="replace", timeout=self.timeout_s
-            )
-            rc, stderr = proc.returncode, proc.stderr
+            rc, stderr = _run_in_own_group(self.argv(), d, self.timeout_s, self.kill_grace_s)
         except subprocess.TimeoutExpired:
             rc, stderr = -9, f"hipcc: error: compile timed out after {self.timeout_s:g} s\n"
         except OSError as exc:
