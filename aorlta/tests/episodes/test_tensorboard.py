@@ -1,5 +1,8 @@
 """TensorBoard scalars: the file format, written without TensorBoard or protobuf installed."""
 
+import errno
+import os
+import stat
 import struct
 
 import pytest
@@ -84,3 +87,24 @@ def test_remove_after_drops_the_files_of_later_iterations(tmp_path):
     assert tb.remove_after(tmp_path, 1) == ["events.out.tfevents.0000000002.aorlta",
                                             "events.out.tfevents.0000000003.aorlta"]
     assert list(tb.read_scalars(tmp_path)) == [1]
+
+
+@pytest.mark.parametrize("code, written", [(errno.EINVAL, True), (errno.ENOTSUP, True), (errno.EIO, False)])
+def test_a_directory_that_refuses_fsync_is_tolerated_only_when_unsupported(tmp_path, monkeypatch, code, written):
+    """As for the checkpoint and the episodes: a filesystem without directory fsync still takes the file, and a storage
+    error stops the write."""
+    real = os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(code, os.strerror(code))
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    if written:
+        tb.write_iteration(tmp_path, 1, {"reward/mean": 0.5}, 1.8e9)
+        assert tb.read_scalars(tmp_path)[1]["reward/mean"] == pytest.approx(0.5)
+    else:
+        with pytest.raises(OSError) as exc:
+            tb.write_iteration(tmp_path, 1, {"reward/mean": 0.5}, 1.8e9)
+        assert exc.value.errno == code
