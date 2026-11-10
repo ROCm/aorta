@@ -328,12 +328,12 @@ def fp32_sum(w: torch.Tensor, a: torch.Tensor, b: torch.Tensor, scale: float) ->
 
 def check_rounding(base: dict, factors: dict, merged: dict) -> dict:
     """Every merged element is the round-to-nearest-even of the fp32 sum, checked by integer arithmetic, and every
-    sum is finite."""
+    sum and every merged element is finite (a finite sum above bf16's largest value rounds to infinity)."""
     bad, nonfinite, elements = [], 0, 0
     for key in sorted(merged):
         a, b, scale = factors[key]
         s = fp32_sum(base[key], a, b, scale)
-        nonfinite += int((~torch.isfinite(s)).sum())
+        nonfinite += int((~(torch.isfinite(s) & torch.isfinite(merged[key]))).sum())
         got = as_u16(merged[key])
         if not (torch.equal(as_u16(s.to(torch.bfloat16)), got) and torch.equal(rne_bf16_bits(s), got)):
             bad.append(key)

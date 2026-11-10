@@ -217,6 +217,8 @@ def write_slot(
               if f.is_file() and f.suffix in COPY_SUFFIXES and f.name not in (INDEX_NAME, MANIFEST_NAME)]
     copied = sum(f.stat().st_size for f in copies)
     final = slot_path(sync_dir, run_id, version, slots)
+    tmp = final.with_name(final.name + PARTIAL_SUFFIX)
+    shutil.rmtree(tmp, ignore_errors=True)  # an interrupted write's leftover, which must not count as used space
     # the served slot already takes its space, and a slot being replaced keeps its own until the rename below
     need = total + copied + margin
     free = free_bytes(final.parent)
@@ -224,8 +226,6 @@ def write_slot(
         raise ShmFullError(f"{final.parent}: {free} bytes free, need {need} ({total} for the tensors + {copied} for "
                            f"the copied files + margin {margin})")
 
-    tmp = final.with_name(final.name + PARTIAL_SUFFIX)
-    shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
     from safetensors.torch import save_file
 

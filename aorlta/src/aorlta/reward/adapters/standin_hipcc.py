@@ -2,11 +2,11 @@
 `hipcc --offload-arch=gfx950 -c -O1 source.hip -o object.o`, on CPU [M 0.5-0.7 s per file].
 
 The offload arch is always explicit, so hipcc never probes a GPU for it (the interactive node has
-GPUs, and nothing GPU-capable may run there). A compiler that ran and printed `error:` is the
-candidate's compile error (`fail`, reason `compile_error`, with the error count and the errors'
-classes, never their text: `error_class`). Anything else that does not produce an object (a launch
-failure, a crash, the adapter's own timeout, a kill by the watchdog) is `unsettled`: it says nothing
-about the candidate.
+GPUs, and nothing GPU-capable may run there). A compiler that exited with an error status and printed
+`error:` is the candidate's compile error (`fail`, reason `compile_error`, with the error count and the
+errors' classes, never their text: `error_class`). Anything else that does not produce an object (a
+launch failure, a crash, a kill by a signal, the adapter's own timeout, a kill by the watchdog) is
+`unsettled`: it says nothing about the candidate.
 
 A clean compile also carries a build fact (`base.TRUSTED_BUILD`) of the launch the stand-in ConSan and ASan legs
 make, when it can be read. A reward function may use it, for example to treat ConSan as not applicable on a launch
@@ -167,7 +167,7 @@ class StandinHipcc:
                 return make_result(job, "clean", findings=[fact] if fact else [], t_start=t0, t_end=self._clock())
             tmp.unlink(missing_ok=True)
             classes = error_classes(proc.stderr)
-            if proc.returncode not in (0, None) and classes:
+            if proc.returncode is not None and proc.returncode > 0 and classes:
                 return make_result(job, "fail", "compile_error",
                                    findings=[{"kind": "compile_error", "errors": len(classes), "classes": classes}],
                                    t_start=t0, t_end=self._clock())
