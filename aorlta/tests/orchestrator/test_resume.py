@@ -6,7 +6,7 @@ import shutil
 import pytest
 
 from aorlta.episodes import tensorboard as tb
-from aorlta.episodes.writer import AppendLedger, complete_iterations
+from aorlta.episodes.writer import AppendLedger, LedgerError, complete_iterations
 from aorlta.orchestrator.fakes import FakeRunSpec, build_fake_run
 from aorlta.orchestrator.resume import prepare_resume, remove_partials
 from aorlta.orchestrator.state import CheckpointError, complete_checkpoints
@@ -86,3 +86,29 @@ def test_committed_outputs_without_their_checkpoint_stop_the_resume(done_run):
 def test_checkpoints_beyond_keep_are_pruned(done_run):
     prepare_resume(done_run, keep_ckpts=2)
     assert complete_checkpoints(done_run / "ckpt") == [2, 3]
+
+
+def test_a_bad_line_before_a_ledgers_end_stops_the_resume_before_anything_is_removed(done_run):
+    """Only a torn final line is a crash's; a bad line inside a ledger is damage to committed history. Cutting it would
+    rewrite that history, and, in the evidence manifest, let the prune delete the blob whose entry was damaged."""
+    shutil.rmtree(done_run / "iterations" / "iter-000003")
+    (done_run / "ckpt" / "iter-000003.partial").mkdir()
+    manifest = done_run / "evidence" / "MANIFEST.jsonl"
+    manifest.parent.mkdir(exist_ok=True)
+    manifest.write_bytes(b'{"iteration": 1, "sha256": "a", "size": 1, "kind": "k"}\n{"iteration": 2, "sha2\n'
+                         b'{"iteration": 3, "sha256": "b", "size": 1, "kind": "k"}\n')
+    before = manifest.read_bytes()
+    with pytest.raises(LedgerError, match="MANIFEST.jsonl:2"):
+        prepare_resume(done_run, keep_ckpts=3)
+    assert manifest.read_bytes() == before and (done_run / "ckpt" / "iter-000003.partial").is_dir()
+
+
+def test_truncate_after_drops_a_torn_final_line_and_refuses_a_bad_line_anywhere_else(tmp_path):
+    path = tmp_path / "l.jsonl"
+    path.write_bytes(b'{"iteration": 1}\n{"iteration": 2}\n{"iterat')
+    assert AppendLedger(path).truncate_after(1) == 2 and path.read_bytes() == b'{"iteration": 1}\n'
+    for bad in (b'{"iteration": 1}\nnot json\n{"iteration": 2}\n', b'{"iteration": 1}\n[]\n{"iteration": 2}\n'):
+        path.write_bytes(bad)
+        with pytest.raises(LedgerError, match=":2:"):
+            AppendLedger(path).truncate_after(1)
+        assert path.read_bytes() == bad

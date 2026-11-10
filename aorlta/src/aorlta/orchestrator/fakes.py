@@ -531,6 +531,11 @@ class FakeTrainer:
     def begin(self, iteration: int) -> None:
         self._acc = {}
 
+    def warmup(self) -> dict:
+        """`trainer.startup_warmup`: the fake has no kernels to warm, so it trains nothing and keeps its state."""
+        return {"counts": {"microbatches": 0, "forward_tokens": 0, "loss_tokens": 0}, "seconds": {},
+                "state": "unchanged"}
+
     def add_group(self, group: GroupInput) -> GroupOutcome:
         if self._acc is None:
             raise FakeTrainerError("add_group before begin")

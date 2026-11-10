@@ -49,6 +49,14 @@ def test_the_entry_point_runs_the_fake_loop_from_a_config_and_resumes(tmp_path):
     assert resumed.returncode == 0 and json.loads(resumed.stdout.strip().splitlines()[-1])["iterations_completed"] == 2
 
 
+def test_the_fake_components_run_a_config_with_the_start_up_warmup(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.write_text(cfg.read_text() + "trainer: {startup_warmup: true}\n")  # as configs/standin.yaml has it
+    proc = _main("--config", str(cfg), "--components", "fake")
+    assert proc.returncode == 0, proc.stdout[-1500:] + proc.stderr[-1500:]
+    assert json.loads(proc.stdout.strip().splitlines()[-1])["iterations_completed"] == 2
+
+
 def test_real_components_refuse_what_the_wiring_cannot_run(tmp_path):
     proc = _main("--config", str(_config(tmp_path)))
     assert proc.returncode == 2, proc.stderr[-1500:]

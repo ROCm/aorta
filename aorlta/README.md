@@ -177,7 +177,7 @@ already exists, so for a new run copy the config, give it a new `run.run_id`, an
 | step checks | each step | a non-finite or zero gradient, a non-finite loss, or a group trained twice; after the step, a LoRA tensor that is non-finite or did not move, a frozen weight that moved, or ranks that disagree. The run stops before the weights are published |
 | landing check | each weight sync | an engine whose probe log-probs did not change after a real update (NOT_LANDED), or differ from the trainer's by more than a limit calibrated at start (MISMATCH): the run stops. Five updates in a row that change nothing on the engines (NOOP) stop it too |
 | generation barrier | each weight sync | a reload while an engine still holds a request |
-| resume | resume | a checkpoint whose files do not match its manifest, a trainer state that does not match the saved digest, or a changed prompt pool |
+| resume | resume | a run another process still holds (`run.lock`), a ledger with a bad line before its end, a checkpoint whose files do not match its manifest, a trainer state that does not match the saved digest, or a changed prompt pool |
 
 ## Run outputs
 
@@ -187,6 +187,7 @@ The run directory is `<run.root>/<run.source>/<run.run_id>/`; `<n>` is the itera
 |---|---|
 | `run_plan.json` | the resolved config, the code commit and file hashes; written first |
 | `run_result.json` | `completed` or `stopped`, the stop reason, one entry per attempt |
+| `run.lock` | locked by the one process running or resuming the run, while it does |
 | `iterations/iter-<n>/` | a committed iteration: `episodes.jsonl`, `summary.json`, `spans.jsonl`, `cursor.json` |
 | `ckpt/iter-<n>/` | `trainer/trainer.pt` (the fp32 LoRA latent, Adam state, RNG states), `state.json`, `MANIFEST.json`; the last 2 are kept |
 | `tb/` | one TensorBoard event file per iteration, scalars only (52 in the last stand-in training run) |
