@@ -24,14 +24,14 @@ import subprocess
 import sys
 import types
 import typing
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 
-from .atomic import atomic_write_json
+from .atomic import atomic_write_json, is_partial
 from .ids import IdError, sha256_file, sha256_json, validate_run_id
 
 Source = Literal["standin"]  # the stand-in data source; a new source adds a value here
@@ -281,6 +281,32 @@ def plain(obj: Any) -> Any:
     return obj
 
 
+class _FrozenMapping(Mapping):
+    """A read-only mapping, so a frozen section's mapping cannot change after its checks; unlike
+    types.MappingProxyType it pickles and copies, as the sections do."""
+
+    def __init__(self, data: Mapping) -> None:
+        self._data = dict(data)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self._data!r})"
+
+
+def _frozen(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _FrozenMapping({k: _frozen(v) for k, v in value.items()})
+    return value
+
+
 class _Section:
     """Frozen config section: normalises and checks its fields on construction, from YAML or code."""
 
@@ -288,7 +314,7 @@ class _Section:
         hints = _hints(type(self))
         for f in dataclasses.fields(self):
             value = getattr(self, f.name)
-            normal = strict_decode(hints[f.name], value, f.name)
+            normal = _frozen(strict_decode(hints[f.name], value, f.name))
             if normal is not value:
                 object.__setattr__(self, f.name, normal)
         self._validate()
@@ -897,22 +923,20 @@ def write_run_plan(
 ) -> Path:
     """Write `<run_dir>/run_plan.json`, the first file of a run.
 
-    A run_id is set once: an existing plan is never overwritten. With `exist_ok` (resume) an existing
-    plan is accepted only if its resolved config hashes the same, and it is left untouched. A run
-    directory that already holds other files but no plan is refused, because the plan comes first.
+    A run_id is set once: an existing plan is never overwritten, and of launchers racing to write it
+    exactly one publishes; the others are checked against its plan as if they came later. With
+    `exist_ok` (resume) an existing plan is accepted only if its resolved config hashes the same, and
+    it is left untouched. A run directory that already holds other files but no plan is refused,
+    because the plan comes first.
     """
     run_dir = cfg.run_dir
     plan_path = run_dir / RUN_PLAN_NAME
     resolved = plain(cfg)
     config_sha256 = sha256_json(resolved)
     if plan_path.exists():
-        if not exist_ok:
-            raise ConfigError(f"{plan_path} exists: run_id {cfg.run.run_id!r} is already set")
-        recorded = json.loads(plan_path.read_text(encoding="utf-8")).get("config_sha256")
-        if recorded != config_sha256:
-            raise ConfigError(f"{plan_path} was written for a different config ({recorded} != {config_sha256})")
-        return plan_path
-    if run_dir.exists() and any(run_dir.iterdir()):
+        return _existing_plan(plan_path, cfg, config_sha256, exist_ok)
+    # a racing launcher's plan or temporary file is not another file of the run: the publication below decides
+    if run_dir.exists() and any(p.name != RUN_PLAN_NAME and not is_partial(p) for p in run_dir.iterdir()):
         raise ConfigError(f"{run_dir} already holds files but no {RUN_PLAN_NAME}; the plan must be written first")
     plan = {
         "schema": RUN_PLAN_SCHEMA,
@@ -933,5 +957,17 @@ def write_run_plan(
         "environment": {"python": sys.version.split()[0], "pyyaml": yaml.__version__},
     }
     run_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(plan_path, plan)
+    try:
+        atomic_write_json(plan_path, plan, replace=False)
+    except FileExistsError:  # a launcher racing this one published first
+        return _existing_plan(plan_path, cfg, config_sha256, exist_ok)
+    return plan_path
+
+
+def _existing_plan(plan_path: Path, cfg: RunConfig, config_sha256: str, exist_ok: bool) -> Path:
+    if not exist_ok:
+        raise ConfigError(f"{plan_path} exists: run_id {cfg.run.run_id!r} is already set")
+    recorded = json.loads(plan_path.read_text(encoding="utf-8")).get("config_sha256")
+    if recorded != config_sha256:
+        raise ConfigError(f"{plan_path} was written for a different config ({recorded} != {config_sha256})")
     return plan_path

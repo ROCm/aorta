@@ -82,8 +82,10 @@ def test_a_complete_plan_is_usable():
     (lambda: plan(full(**{"san.asan": entry("skip", 1.5)})), "bad_p_finding"),
     (lambda: plan(full(**{"san.asan": entry("skip", True)})), "bad_p_finding"),
     (lambda: plan(full(**{"san.asan": entry("skip", float("nan"))})), "bad_p_finding"),
+    (lambda: plan(full(**{"san.asan": entry("skip", 10**400)})), "bad_p_finding"),  # no float holds it
     (lambda: plan(full(**{"san.asan": entry("skip", None, float("inf"))})), "bad_score"),
     (lambda: plan(full(**{"san.asan": entry("skip", None, "high")})), "bad_score"),
+    (lambda: plan(full(**{"san.asan": entry("skip", None, 10**400)})), "bad_score"),
 ])
 def test_a_plan_that_breaks_the_interface_is_rejected(bad, reason):
     assert plan_problem(bad(), PLANNED) == reason

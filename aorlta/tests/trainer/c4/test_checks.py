@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from c4_helpers import (
-    SharedCollective, engine_logprobs_from, merged_forward, run_ranks, synthetic_iteration, tiny_peft,
+    NoMerge, SharedCollective, engine_logprobs_from, merged_forward, run_ranks, synthetic_iteration, tiny_peft,
 )
 from aorlta.sync.merge import merge_weight
 from aorlta.trainer import checks as C
@@ -45,6 +45,14 @@ def _ranks(n, perturb=None):
     if perturb:
         perturb(parts)
     return shared, parts
+
+
+def _swap_two(t):
+    """Swap the first entry of `t` with the first one that differs from it: every moment of `t` is kept."""
+    flat = t.detach().view(-1)
+    j = int((flat != flat[0]).nonzero()[0])
+    with torch.no_grad():
+        flat[0], flat[j] = flat[j].clone(), flat[0].clone()
 
 
 def test_lora_latent_is_fp32_and_only_it_trains():
@@ -102,6 +110,23 @@ def test_c4_t8_a_planted_base_tensor_change_is_caught(which):
         t.train_iteration(plans)
     assert exc.value.failed == ["frozen_control_unchanged"]
     assert exc.value.report["checks"]["frozen_control_unchanged"]["moved"] == [key]
+
+
+def test_c4_t8_an_a_permuted_while_its_b_was_zero_is_caught():
+    model, merged, plans, t = _setup()
+    name, (a, _) = next(iter(t.lora.modules.items()))
+    step = t.optimizer.step
+
+    def step_and_permute(*args, **kw):
+        out = step(*args, **kw)
+        _swap_two(a)
+        return out
+
+    t.optimizer.step = step_and_permute
+    with pytest.raises(C.TrainerCheckFailed) as exc:
+        t.train_iteration(plans)
+    assert exc.value.failed == ["every_trained_tensor_moved"]
+    assert exc.value.report["checks"]["every_trained_tensor_moved"]["a_moved_while_b_was_zero"] == [f"{name}.lora_A"]
 
 
 def test_a_base_change_before_the_forward_is_caught_by_the_gap_gate_first():
@@ -272,10 +297,42 @@ def test_replicas_that_drift_apart_during_the_run_are_caught():
     assert "replicas_identical" in exc.value.failed
 
 
-def test_ranks_that_do_not_start_from_the_same_latent_are_refused():
+def test_replicas_whose_latents_differ_by_a_permutation_are_caught():
+    """The latent comparison on its own (this merged forward holds no W_eff): rank 1's step ends with two entries
+    of one B swapped."""
+    shared, parts = _ranks(2)
+
+    def rank(r):
+        model, _, plans = parts[r]
+        t = _trainer(model, NoMerge(), world=shared.world(r))
+        if r == 1:
+            _, b = next(iter(t.lora.modules.values()))
+            step = t.optimizer.step
+
+            def step_and_permute(*args, **kw):
+                out = step(*args, **kw)
+                _swap_two(b)
+                return out
+
+            t.optimizer.step = step_and_permute
+        return t.train_iteration(plans)
+
+    with pytest.raises(C.TrainerCheckFailed) as exc:
+        run_ranks([lambda r=r: rank(r) for r in range(2)], shared)
+    assert exc.value.failed == ["replicas_identical"]
+    assert exc.value.report["checks"]["replicas_identical"]["latent"] is False
+
+
+@pytest.mark.parametrize("change", ["shifted", "permuted"])
+def test_ranks_that_do_not_start_from_the_same_latent_are_refused(change):
+    """B is PEFT's zero, so W_eff = W on both ranks and only the latent can show that their A differ."""
     def drift(parts):
-        with torch.no_grad():
-            _first_a(parts[1][0]).view(-1)[0] += 1e-3
+        a = _first_a(parts[1][0])
+        if change == "permuted":
+            _swap_two(a)
+        else:
+            with torch.no_grad():
+                a.view(-1)[0] += 1e-3
 
     shared, parts = _ranks(2, drift)
     with pytest.raises(TrainerInputError, match="same LoRA latent"):

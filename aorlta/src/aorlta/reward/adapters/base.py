@@ -1,6 +1,6 @@
 """The CheckAdapter protocol (design Section 6.2, Plug-in adapters) and what every
-adapter shares: building results, running one job without ever raising, a killable subprocess
-runner, and the mapping from aorta's sanitizer verdicts to leg states.
+adapter shares: building results, running one job without ever raising, a run's own names, a killable
+subprocess runner, and the mapping from aorta's sanitizer verdicts to leg states.
 
 The one rule every adapter keeps: `run` never raises. Anything unexpected becomes
 `state="unsettled"`, never clean. Only an adapter may report a timeout attributed to the candidate
@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import signal
 import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ...schemas import SETTLED_STATES, ControlSpec, LegJob, LegResult
@@ -85,6 +87,19 @@ def make_result(job: LegJob, state: str, reason: str | None = None, *, findings:
 
 def unsettled(job: LegJob, reason: str, *, t_start: float, t_end: float) -> LegResult:
     return make_result(job, "unsettled", reason, t_start=t_start, t_end=t_end)
+
+
+def run_tag(job: LegJob) -> str:
+    """A name for one run of a job, unique across workers and processes. A job's output directory is content-addressed,
+    so jobs with identical content share it, and a retry can overlap the retired worker's run of the same job."""
+    return f"a{job.attempt}-{os.getpid()}-{secrets.token_hex(4)}"
+
+
+def run_dir(job: LegJob) -> Path:
+    """A new directory under the job's output directory, for this run's files alone (`run_tag`)."""
+    d = Path(job.output_dir) / run_tag(job)
+    d.mkdir(parents=True)
+    return d
 
 
 def safe_run(adapter: Any, job: LegJob, clock: Callable[[], float] = time.time) -> LegResult:
@@ -205,7 +220,10 @@ class ProcessRunner:
         except OSError as exc:
             return ProcResult(None, "", "", time.monotonic() - t0, False, False, f"{type(exc).__name__}: {exc}")
         with self._lock:
-            self._proc = proc
+            if self._closed.is_set():  # close() came after the check above, and found nothing to kill
+                self._kill(proc)
+            else:
+                self._proc = proc
         try:
             out, err = proc.communicate(timeout=timeout_s)
             timed_out = False

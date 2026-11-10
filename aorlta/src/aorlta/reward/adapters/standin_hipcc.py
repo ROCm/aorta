@@ -4,9 +4,9 @@
 The offload arch is always explicit, so hipcc never probes a GPU for it (the interactive node has
 GPUs, and nothing GPU-capable may run there). A compiler that ran and printed `error:` is the
 candidate's compile error (`fail`, reason `compile_error`, with the error count and the errors'
-classes, never their text). Anything else that does not produce an object (a launch failure, a
-crash, the adapter's own timeout, a kill by the watchdog) is `unsettled`: it says nothing about the
-candidate.
+classes, never their text: `error_class`). Anything else that does not produce an object (a launch
+failure, a crash, the adapter's own timeout, a kill by the watchdog) is `unsettled`: it says nothing
+about the candidate.
 
 A clean compile also carries a build fact (`base.TRUSTED_BUILD`) of the launch the stand-in ConSan and ASan legs
 make, when it can be read. A reward function may use it, for example to treat ConSan as not applicable on a launch
@@ -34,22 +34,81 @@ import time
 from pathlib import Path
 
 from ...atomic import atomic_write_json
+from ...ids import sha256_text
 from ...schemas import ControlSpec, LegJob, LegResult
 from . import descriptors
-from .base import TRUSTED_BUILD, ProcessRunner, make_result, unsettled
+from .base import TRUSTED_BUILD, ProcessRunner, make_result, run_tag, unsettled
 from .standin_harness import HARNESS_VERSION, HarnessUnsupported, dynamic_lds_bytes, has_main, plan, write_harness
 
 # "fatal error" too: a missing header (`#include <cuda_runtime.h>`) is the candidate's compile error, not the checker's.
 ERROR_LINE = re.compile(r"^[^\n]*?:\d+:\d+: (?:fatal )?error: (?P<msg>[^\n]*)$", re.MULTILINE)
 QUOTED = re.compile(r"'[^']*'")
+AKA = re.compile(r" \(aka <name>\)")
+# Clang's wording of the errors stand-in candidates make most, each quoted name as <name>. A message that is not one
+# of these is reported by a hash: an unquoted part of a message (an #error line, a static assertion's text) can be the
+# candidate's own source.
+KNOWN_CLASSES = frozenset({
+    "<name> file not found",
+    "<name> is not a class, namespace, or enumeration",
+    "a type specifier is required for all declarations",
+    "arithmetic on a pointer to void",
+    "cannot cast from type <name> to pointer type <name>",
+    "cannot initialize a variable of type <name> with an lvalue of type <name>",
+    "cannot initialize a variable of type <name> with an rvalue of type <name>",
+    "declaration of <name> shadows template parameter",
+    "expected <name>",
+    "expected <name> after top level declarator",
+    "expected <name> for function-style cast or type construction",
+    "expected expression",
+    "expected identifier or <name>",
+    "expected unqualified-id",
+    "explicit instantiation of <name> does not refer to a function template, variable template, member function, "
+    "member class, or static data member",
+    "explicit specialization of undeclared template struct <name>",
+    "expression is not assignable",
+    "extraneous closing brace (<name>)",
+    "invalid operands to binary expression (<name> and <name>)",
+    "invalid use of non-static data member <name>",
+    "member reference base type <name> is not a structure or union",
+    "no function template matches function template specialization <name>",
+    "no matching function for call to <name>",
+    "no matching function for call to object of type <name>",
+    "no matching member function for call to <name>",
+    "no member named <name> in <name>",
+    "no member named <name> in namespace <name>",
+    "no member named <name> in namespace <name>; did you mean simply <name>?",
+    "no viable overloaded <name>",
+    "read-only variable is not assignable",
+    "redefinition of <name>",
+    "reference to __host__ function <name> in __global__ function",
+    "reference to __host__ variable <name> in __global__ function",
+    "reinterpret_cast from <name> to <name> casts away qualifiers",
+    "static_cast from <name> to <name> is not allowed",
+    "subscript of pointer to incomplete type <name>",
+    "subscripted value is not an array, pointer, or vector",
+    "template specialization requires <name>",
+    "too many template arguments for class template <name>",
+    "unknown type name <name>",
+    "unknown type name <name>; did you mean <name>?",
+    "use of undeclared identifier <name>",
+    "use of undeclared identifier <name>; did you mean <name>?",
+    "variable has incomplete type <name>",
+    "variable length array declaration cannot have <name> storage duration",
+})
 FACT_SOURCE = "standin.hipcc"  # the build fact's `source`
 FACT_FILE = "launched_lds.json"
 MIN_STEP_S = 1.0  # time left below which the fact is not attempted
 
 
+def error_class(message: str) -> str:
+    """A clang error message as its class (Section 6.1's `cls`): the message with every quoted name replaced by <name>
+    if that is one of KNOWN_CLASSES, else `sha256:` and 12 hex digits of it, never its text."""
+    cls = AKA.sub("", QUOTED.sub("<name>", message)).strip()
+    return cls if cls in KNOWN_CLASSES else "sha256:" + sha256_text(cls)[:12]
+
+
 def error_classes(stderr: str, limit: int = 20) -> list[str]:
-    """The clang error messages with every quoted name replaced by <name> (Section 6.1's `cls`)."""
-    return [QUOTED.sub("<name>", m.group("msg")).strip()[:160] for m in ERROR_LINE.finditer(stderr)][:limit]
+    return [error_class(m.group("msg")) for m in ERROR_LINE.finditer(stderr)][:limit]
 
 
 class _Killed(Exception):
@@ -68,7 +127,7 @@ class StandinHipcc:
         self.timeout_s = timeout_s
         self._clock = clock
         self.runner = runner or ProcessRunner()
-        self.version = (f"2+{self._identity(self.hipcc)}+readelf-{self._identity(self.readelf)}"
+        self.version = (f"3+{self._identity(self.hipcc)}+readelf-{self._identity(self.readelf)}"
                         f"+harness-{HARNESS_VERSION}")
 
     @staticmethod
@@ -91,7 +150,8 @@ class StandinHipcc:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self._clock())
             out = Path(job.output_dir)
             out.mkdir(parents=True, exist_ok=True)
-            tmp = out / f"object.o.partial-{os.getpid()}-{job.attempt}"
+            tag = run_tag(job)
+            tmp = out / f"object.o.partial-{tag}"
             argv = [self.hipcc, f"--offload-arch={arch}", *flags, src, "-o", str(tmp)]
             proc = self.runner.run(argv, timeout_s=self.timeout_s)
             if proc.killed:
@@ -102,8 +162,7 @@ class StandinHipcc:
                 return unsettled(job, "timeout", t_start=t0, t_end=self._clock())
             if proc.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 0:
                 os.replace(tmp, out / "object.o")
-                fact, why = self.build_fact(src, arch, flags, out / f"lds.partial-{os.getpid()}-{job.attempt}",
-                                            deadline)
+                fact, why = self.build_fact(src, arch, flags, out / f"lds.partial-{tag}", deadline)
                 atomic_write_json(out / FACT_FILE, {"fact": fact, "why": why}, canonical=True)
                 return make_result(job, "clean", findings=[fact] if fact else [], t_start=t0, t_end=self._clock())
             tmp.unlink(missing_ok=True)

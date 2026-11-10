@@ -3,6 +3,8 @@ processes (the hand-written all-reduce of Section 6.4, Ranks)."""
 
 from __future__ import annotations
 
+import random
+
 import pytest
 import torch
 
@@ -125,6 +127,24 @@ def test_a_step_is_refused_unless_every_ledger_group_was_trained_once_on_its_ran
     assert exc.value.failed == ["groups_trained_once"]
 
 
+def test_one_rank_without_a_ledger_refuses_a_group_accumulated_twice():
+    plans = _ledger_plans()
+    t = RankTrainer(tiny_peft(torch.float32, seed=5, b_std=0.05), NoMerge(), LossSettings(loss_temperature=0.7),
+                    OptimSettings(lr=1e-3, grad_clip=0.0), micro_batch_tokens=128, amp=False)
+    before = [p.detach().clone() for p in t.params]
+    t.stream_begin()
+    t.stream_add(plans[0])
+    t.stream_add(plans[0])
+    with pytest.raises(C.StepRefused) as exc:
+        t.stream_finish()
+    assert exc.value.failed == ["groups_trained_once"]
+    assert all(C.bit_identical(p, q) for p, q in zip(t.params, before))
+    t.stream_begin()
+    for g in plans:
+        t.stream_add(g)
+    assert t.stream_finish()["checks"]["groups_trained_once"]["passed"]
+
+
 def test_a_streamed_step_over_several_ranks_needs_its_ledger():
     from c4_helpers import SharedCollective
 
@@ -151,6 +171,43 @@ def test_the_weights_checksum_sees_one_bit():
     assert R.weights_checksum(NoMerge()) is None
 
 
+class Held(NoMerge):
+    """A merged forward that holds the given W_eff tensors."""
+
+    def __init__(self, weights):
+        super().__init__()
+        self.weights = weights
+
+
+def _swapped(w, i, j):
+    out = w.clone()
+    out[i], out[j] = w[j], w[i]
+    assert not torch.equal(out, w)
+    return out
+
+
+def test_the_weights_checksum_sees_a_permutation_a_shape_and_a_dtype():
+    w = torch.randn(70_000, generator=torch.Generator().manual_seed(0)).to(torch.bfloat16)
+    held = R.weights_checksum(Held({"t": w}))
+    assert R.weights_checksum(Held({"t": w.clone()})) == held
+    assert R.weights_checksum(Held({"t": _swapped(w, 0, 65_521)})) != held  # 65,521 apart
+    assert R.weights_checksum(Held({"t": w.view(700, 100)})) != held  # the same bytes, another shape
+    assert R.weights_checksum(Held({"t": w.view(torch.int16)})) != held  # the same bytes, another dtype
+
+
+def test_ranks_whose_w_eff_differs_by_a_permutation_do_not_start():
+    from c4_helpers import SharedCollective, run_ranks
+
+    w = torch.randn(70_000, generator=torch.Generator().manual_seed(0)).to(torch.bfloat16)
+    merged = [Held({"t": w}), Held({"t": _swapped(w, 0, 65_521)})]
+    shared = SharedCollective(2)
+    models = [tiny_peft(torch.float32, seed=5) for _ in range(2)]
+    with pytest.raises(TrainerInputError, match="same merged weights"):
+        run_ranks([lambda r=r: RankTrainer(models[r], merged[r], LossSettings(loss_temperature=0.7), OptimSettings(),
+                                           world=shared.world(r), micro_batch_tokens=128, amp=False)
+                   for r in range(2)], shared)
+
+
 def test_split_minibatches_is_contiguous_and_balanced_in_samples():
     groups = [_g(f"g{i}", [10] * k) for i, k in enumerate([4, 4, 4, 4, 2, 6])]
     m = split_minibatches(groups, 2)
@@ -158,6 +215,26 @@ def test_split_minibatches_is_contiguous_and_balanced_in_samples():
     assert [sum(len(g.samples) for g in x) for x in m] == [12, 12]
     with pytest.raises(TrainerInputError):
         split_minibatches(groups[:1], 2)
+
+
+def test_split_minibatches_fills_every_step_in_order():
+    """[8, 2, 2] over 3 steps is one group per step (the sample count alone puts them in mini-batches 0, 2, 2). Any
+    split that already gave every step a group is unchanged."""
+    groups = [_g(f"g{i}", [10] * k) for i, k in enumerate([8, 2, 2])]
+    assert split_minibatches(groups, 3) == [[g] for g in groups]
+    rnd = random.Random(3)
+    for _ in range(300):
+        gs = [_g(f"h{i}", [10] * rnd.randint(1, 9)) for i in range(rnd.randint(1, 7))]
+        total = sum(len(g.samples) for g in gs)
+        for steps in range(1, len(gs) + 1):
+            m = split_minibatches(gs, steps)
+            assert [g.key for x in m for g in x] == [g.key for g in gs] and all(m)
+            by_count, seen = [[] for _ in range(steps)], 0
+            for g in gs:
+                by_count[min(steps - 1, seen * steps // total)].append(g)
+                seen += len(g.samples)
+            if all(by_count):
+                assert m == by_count
 
 
 def test_clip_coefficient_is_megatrons():
@@ -198,15 +275,16 @@ def test_two_steps_per_iteration_ratio_against_the_sampling_weights(monkeypatch)
     assert step2 and max(step2) > 1e-4  # the weights moved, pi_old did not
 
 
-def test_the_old_logprobs_of_step_2_are_the_initial_policys():
-    model = tiny_peft(torch.float32, seed=4, b_std=0.05)
+@pytest.mark.parametrize("packing", [True, False])  # False: the linear attention on transformers' torch path
+def test_the_old_logprobs_of_step_2_are_the_initial_policys(packing):
+    model = tiny_peft(torch.float32, seed=4, b_std=0.05, packing=packing)
     samples, results = synthetic_iteration(groups=6, k=4, seed=4, unscored=0.0, quarantined=0.0,
                                            one_scored_group=False, scored_without_sample=0)
     groups = build_groups(engine_logprobs_from(model, samples), results)
     t = RankTrainer(model, NoMerge(), LossSettings(loss_temperature=0.7, steps_per_iteration=2),
                     OptimSettings(lr=5e-2, grad_clip=0.0), micro_batch_tokens=4096, amp=False)
     old = t._old_logprobs(split_minibatches(groups, 2)[1])
-    fresh = tiny_peft(torch.float32, seed=4, b_std=0.05)
+    fresh = tiny_peft(torch.float32, seed=4, b_std=0.05, packing=packing)
     from aorlta.trainer.batching import forward_microbatch, make_microbatch
 
     for g in split_minibatches(groups, 2)[1]:

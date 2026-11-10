@@ -37,6 +37,9 @@ TORCH_FALLBACKS = {
     "chunk_gated_delta_rule": "torch_chunk_gated_delta_rule",
     "recurrent_gated_delta_rule": "torch_recurrent_gated_delta_rule",
 }
+# The layer attributes a forward without a KV cache runs: the only ones that see a packed row's sequence boundaries
+# (`seq_idx`, `cu_seq_lens_q`). On the torch path neither boundary is read.
+PACKING_KERNELS = ("causal_conv1d_fn", "chunk_gated_delta_rule")
 VERSION_DISTS = (
     "torch",
     "transformers",
@@ -116,6 +119,18 @@ def _expected_linear_layers(model) -> int | None:
     return None
 
 
+def _torch_path(layer, mod) -> list[str]:
+    """The kernels `layer` runs on transformers' torch path (a missing one included)."""
+    bad = []
+    if getattr(layer, "causal_conv1d_fn", None) is None:
+        bad.append("causal_conv1d_fn")
+    for attr, torch_name in TORCH_FALLBACKS.items():
+        fn = getattr(layer, attr, None)
+        if fn is None or fn is getattr(mod, torch_name, None):
+            bad.append(attr)
+    return bad
+
+
 def _model_reasons(model, mod) -> tuple[list[str], int]:
     reasons: list[str] = []
     layer_cls = getattr(mod, "Qwen3_5GatedDeltaNet", None)
@@ -129,13 +144,7 @@ def _model_reasons(model, mod) -> tuple[list[str], int]:
     if expected is not None and len(layers) != expected:
         reasons.append(f"found {len(layers)} linear-attention layers, the config declares {expected}")
     for name, layer in layers:
-        bad = []
-        if getattr(layer, "causal_conv1d_fn", None) is None:
-            bad.append("causal_conv1d_fn")
-        for attr, torch_name in TORCH_FALLBACKS.items():
-            fn = getattr(layer, attr, None)
-            if fn is None or fn is getattr(mod, torch_name, None):
-                bad.append(attr)
+        bad = _torch_path(layer, mod)
         if fused_norm is None or not isinstance(getattr(layer, "norm", None), fused_norm):
             bad.append("norm")
         if bad:
@@ -168,6 +177,20 @@ def check_environment(modeling=None) -> FastPathReport:
 def check_model(model, modeling=None) -> FastPathReport:
     """`check_environment`, plus every linear-attention layer of `model` actually holds the fast kernels."""
     return _check(model, modeling)
+
+
+def honours_packing(model, modeling=None) -> bool:
+    """Whether a packed row's sequences stay apart in `model`'s linear-attention layers: no layer runs one of
+    `PACKING_KERNELS` on the torch path, which runs the row as one sequence (each sequence after the first starts
+    from the state the earlier ones left). Fail-closed: an import error or an unknown layout counts as not."""
+    try:
+        mod = modeling if modeling is not None else importlib.import_module(MODELING)
+        if not (hasattr(mod, "Qwen3_5GatedDeltaNet") and hasattr(mod, TORCH_FALLBACKS["chunk_gated_delta_rule"])):
+            return False
+        layers = [m for _, m in model.named_modules() if isinstance(m, mod.Qwen3_5GatedDeltaNet)]
+        return not any(set(PACKING_KERNELS) & set(_torch_path(m, mod)) for m in layers)
+    except Exception:
+        return False
 
 
 class FallbackLogWatcher(logging.Handler):

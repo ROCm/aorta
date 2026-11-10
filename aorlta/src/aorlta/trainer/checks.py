@@ -35,6 +35,8 @@ from typing import Any
 
 import torch
 
+from aorlta.sync.writer import tensor_xxh64
+
 GATING_PRE = ("gradient_is_finite_and_nonzero", "loss_is_finite", "off_policy_fraction", "loss_temperature_applied",
               "groups_trained_once")
 GATING_POST = ("trained_tensors_are_finite", "every_trained_tensor_moved", "frozen_control_unchanged",
@@ -57,10 +59,15 @@ class StepRefused(TrainerCheckFailed):
 
 
 def fingerprint(t: torch.Tensor) -> tuple[float, float, float]:
-    """(sum, sum of squares, sum of absolutes) in float64: did this tensor move. Three moments, because a
-    change that preserves the sum does not preserve all three."""
+    """(sum, sum of squares, sum of absolutes) in float64, for the finiteness check. A permutation of the elements
+    keeps all three, so they cannot tell whether a tensor moved or two tensors are the same (`digest` can)."""
     f = t.detach().double()
     return float(f.sum()), float(f.pow(2).sum()), float(f.abs().sum())
+
+
+def digest(t: torch.Tensor) -> tuple[str, tuple[int, ...], str]:
+    """(dtype, shape, xxh64 of the bytes): equal for two tensors with the same bits in the same places."""
+    return str(t.dtype).removeprefix("torch."), tuple(t.shape), tensor_xxh64(t.detach().cpu())
 
 
 def bit_identical(a: torch.Tensor, b: torch.Tensor) -> bool:
@@ -151,7 +158,7 @@ class BaseControl:
 class PreStep:
     """What the post-step checks compare against: taken after the final gradient, right before the step."""
 
-    fingerprints: dict[str, tuple[float, float, float]]
+    digests: dict[str, tuple[str, tuple[int, ...], str]]
     b_zero: dict[str, bool]  # module -> its B was exactly zero
     audit: dict[str, torch.Tensor]
     audit_grad: dict[str, torch.Tensor]
@@ -160,14 +167,14 @@ class PreStep:
     @classmethod
     def take(cls, lora: LoraTensors, merged, n_audit: int = 8) -> "PreStep":
         named = lora.named()
-        fps = {n: fingerprint(p) for n, p in named.items()}
+        digests = {n: digest(p) for n, p in named.items()}
         b_zero = {m: not bool(b.detach().ne(0).any()) for m, (_, b) in lora.modules.items()}
         names = sorted(named)
         pick = names[:: max(1, len(names) // n_audit)][:n_audit]
         audit = {n: named[n].detach().clone() for n in pick}
         grads = {n: (named[n].grad.detach().clone() if named[n].grad is not None else torch.zeros_like(named[n]))
                  for n in pick}
-        return cls(fps, b_zero, audit, grads, getattr(merged, "version", None))
+        return cls(digests, b_zero, audit, grads, getattr(merged, "version", None))
 
 
 def cosine_delta_vs_negative_grad(pre: PreStep, lora: LoraTensors) -> float:
@@ -185,14 +192,14 @@ def cosine_delta_vs_negative_grad(pre: PreStep, lora: LoraTensors) -> float:
 def post_step_checks(pre: PreStep, lora: LoraTensors, control: BaseControl, merged, *, weight_decay: float,
                      replicas_identical: bool) -> dict[str, dict]:
     named = lora.named()
-    post = {n: fingerprint(p) for n, p in named.items()}
-    non_finite = sorted(n for n, m in post.items() if not all(math.isfinite(x) for x in m))
+    non_finite = sorted(n for n, p in named.items() if not all(math.isfinite(x) for x in fingerprint(p)))
+    post = {n: digest(p) for n, p in named.items()}
     unmoved, a_moved_with_b_zero, a_unchecked = [], [], []
     for mname in lora.modules:
         a_key, b_key = f"{mname}.lora_A", f"{mname}.lora_B"
-        if post[b_key] == pre.fingerprints[b_key]:
+        if post[b_key] == pre.digests[b_key]:
             unmoved.append(b_key)
-        a_same = post[a_key] == pre.fingerprints[a_key]
+        a_same = post[a_key] == pre.digests[a_key]
         if not pre.b_zero[mname]:
             if a_same:
                 unmoved.append(a_key)

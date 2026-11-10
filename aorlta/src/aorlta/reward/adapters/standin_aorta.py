@@ -12,10 +12,14 @@ PASS on a node whose health canary is NOT_VERIFIED is already NOT_CHECKED in aor
 For ConSan, an unhealthy waitcheck preflight (ERROR or NOT_CHECKED) also leaves the leg unsettled,
 since aorta's report would not be clean either. A harness that does not build is unsettled.
 
+Everything a job builds, runs and leaves as evidence is in `<run>`, a directory of its own under the leg's output
+directory (`base.run_dir`): that directory is shared by every job with identical content, and by a retry that can
+overlap the retired worker's run of the same job.
+
 A kernel-only source is checked one kernel at a time (`standin_harness.plan`: each kernel instance gets its own
-harness program, in `<out>/k<i>/`, and its own aorta run, since aorta's ConSan and ASan each take one selected
+harness program, in `<run>/k<i>/`, and its own aorta run, since aorta's ConSan and ASan each take one selected
 kernel). The leg is a finding if any kernel's run found something, clean only if every kernel's run is clean, and
-unsettled otherwise (a kernel the harness cannot launch included); `<out>/kernels.json` lists each kernel's
+unsettled otherwise (a kernel the harness cannot launch included); `<run>/kernels.json` lists each kernel's
 verdict. A source with its own `main` (aorta's fixtures, the trusted controls) runs as it is, on its one kernel.
 
 Trusted controls are aorta's clean fixtures (the single-wave LDS repro for ConSan, the in-bounds
@@ -26,6 +30,11 @@ timeout): aorta stops the program at the limit, and if aorta has not returned `C
 killed here, by its path. A check that reached the limit is unsettled (`check_timeout`) whatever came back: a
 timeout is never clean. A kernel that hangs then holds its worker for the limit, not for the whole pool timeout
 (one such kernel held the only ConSan worker for 110 s).
+
+aorta launches the checked program (and ASan's node-health canary, and the canary's build) with its own subprocess
+calls, which this adapter's runner never sees. So `close()` (the watchdog retiring the worker, a client going away)
+kills every process whose command line names the directory of a run in progress, and goes on doing so every `REAP_S`
+until those runs have ended; no check starts after it, and a check it interrupted is unsettled (`worker_died`).
 
 These adapters run only inside a Slurm job (`jobs/aorlta-reward-standin.sbatch`), never on the
 interactive node.
@@ -44,7 +53,7 @@ from pathlib import Path
 from ...ids import sha256_text
 from ...schemas import ControlSpec, LegJob, LegResult
 from . import aorta_import
-from .base import ProcessRunner, aorta_findings, make_result, map_aorta_check, unsettled
+from .base import ProcessRunner, aorta_findings, make_result, map_aorta_check, run_dir, unsettled
 from .standin_harness import (HARNESS_VERSION, GLOBAL_FN, HarnessUnsupported, has_main, plan, strip_comments,
                               write_harness)
 
@@ -64,11 +73,32 @@ def single_kernel(source_text: str) -> str | None:
 
 
 CHECK_GRACE_S = 10.0  # past the per-check limit, before the program is killed here rather than by aorta
+REAP_S = 0.05  # after close(), how often what the runs still start is killed, until they have ended
+
+
+def kill_in(dirs: list[Path]) -> int:
+    """SIGKILL every process whose command line names a path inside one of `dirs`, a run's own directories: the program
+    aorta launched, the ASan node-health canary and its build. Returns how many were signalled."""
+    inside, n = [str(d).rstrip("/") + "/" for d in dirs], 0
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            argv = (d / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
+        except OSError:
+            continue
+        if any(p in a for a in argv for p in inside):
+            try:
+                os.kill(int(d.name), signal.SIGKILL)
+                n += 1
+            except OSError:
+                pass
+    return n
 
 
 def kill_program(exe: str | Path) -> int:
-    """SIGKILL every process whose argv[0] is `exe` (the harness program aorta launched for this check; its path is
-    unique to the job). Returns how many were signalled."""
+    """SIGKILL every process whose argv[0] is `exe` (the harness program aorta launched for this check; its path is in
+    the run's own directory). Returns how many were signalled."""
     target, n = str(exe), 0
     for d in Path("/proc").iterdir():
         if not d.name.isdigit():
@@ -110,6 +140,9 @@ class _AortaGpu:
         self._clock = clock
         self.runner = ProcessRunner()
         self.legs = (self.leg,)
+        self._closed = threading.Event()
+        self._lock = threading.Lock()
+        self._runs: set[Path] = set()  # the directories of the runs in progress
 
     def _build(self, src: str, out: Path, flags: list[str]) -> tuple[Path | None, str | None]:
         exe = out / "harness"
@@ -135,25 +168,34 @@ class _AortaGpu:
             src = job.inputs.get("source")
             if job.leg != self.leg or not src or not job.output_dir:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self._clock())
+            if self._closed.is_set():
+                return unsettled(job, "worker_died", t_start=t0, t_end=self._clock())
             text = Path(src).read_text(encoding="utf-8")
             models, why = aorta_import.load("models", self.aorta_src)
             if models is None:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self._clock())
-            out = Path(job.output_dir)
-            if not has_main(text):  # a kernel-only candidate: the stand-in harness launches each kernel
-                state, reason, findings = self._each_kernel(models, Path(src), out)
-                return make_result(job, state, reason, findings=findings, t_start=t0, t_end=self._clock())
-            kernel = job.leg_settings.get("kernel") or single_kernel(text)
-            if not kernel:
-                return unsettled(job, "harness_unsupported: a program with no one kernel to select", t_start=t0,
-                                 t_end=self._clock())
-            exe, why = self._build(src, out, self.build_flags())
-            if exe is None:
-                return unsettled(job, why, t_start=t0, t_end=self._clock())
-            state, reason, findings = self.bounded_check(models, exe, kernel, out)
+            out = run_dir(job)
+            with self._lock:
+                self._runs.add(out)
+            try:
+                state, reason, findings = self._check_source(models, Path(src), text, out, job.leg_settings)
+            finally:
+                with self._lock:
+                    self._runs.discard(out)
             return make_result(job, state, reason, findings=findings, t_start=t0, t_end=self._clock())
         except Exception:
             return unsettled(job, "adapter_error", t_start=t0, t_end=self._clock())
+
+    def _check_source(self, models, src: Path, text: str, out: Path, settings: dict):
+        if not has_main(text):  # a kernel-only candidate: the stand-in harness launches each kernel
+            return self._each_kernel(models, src, out)
+        kernel = settings.get("kernel") or single_kernel(text)
+        if not kernel:
+            return "unsettled", "harness_unsupported: a program with no one kernel to select", []
+        exe, why = self._build(str(src), out, self.build_flags())
+        if exe is None:
+            return "unsettled", why, []
+        return self.bounded_check(models, exe, kernel, out)
 
     def _each_kernel(self, models, src: Path, out: Path):
         """Every kernel of a kernel-only source, one harness program and one aorta run each, combined."""
@@ -181,6 +223,8 @@ class _AortaGpu:
         """`check` under the per-check wall-clock limit. aorta stops the program at `check_s` itself; a check still
         running `CHECK_GRACE_S` later has its program killed here. Reaching the limit is unsettled, never clean."""
         limit, box = self.check_s, {}
+        if self._closed.is_set():
+            return "unsettled", "worker_died", []
 
         def work() -> None:
             try:
@@ -196,6 +240,8 @@ class _AortaGpu:
             kill_program(exe)
             thread.join(CHECK_GRACE_S)
         elapsed = time.monotonic() - t0
+        if self._closed.is_set():  # its program was killed by close(): whatever came back is no verdict
+            return "unsettled", "worker_died", []
         if thread.is_alive() or elapsed >= limit:
             return "unsettled", f"check_timeout: {elapsed:.1f} s, limit {limit:g} s", []
         return box["result"]
@@ -212,7 +258,24 @@ class _AortaGpu:
         return {"name": self.name, "responsive": True}
 
     def close(self) -> None:
+        """Stop the job in progress: the runner's subprocess, and every process aorta launched for a run in progress or
+        launches for it until the run ends (`kill_in`, every REAP_S); no check starts after this."""
+        self._closed.set()
         self.runner.close()
+        with self._lock:
+            live = list(self._runs)
+        if live:
+            kill_in(live)
+            threading.Thread(target=self._reap, name=f"{self.name}-reap", daemon=True).start()
+
+    def _reap(self) -> None:
+        while True:
+            with self._lock:
+                live = list(self._runs)
+            if not live:
+                return
+            time.sleep(REAP_S)
+            kill_in(live)
 
 
 def combine(results: list[tuple[str, str | None, list]]) -> tuple[str, str | None, list]:
@@ -238,7 +301,8 @@ class AortaConsan(_AortaGpu):
             ident = _sha256(hook)[:16]
         except OSError:
             ident = "missing"
-        self.version = f"2+harness-{HARNESS_VERSION}+hook-{ident}+aorta-{aorta_import.commit(self.aorta_src)[:12]}"
+        self.version = (f"2+target-{self.target}+harness-{HARNESS_VERSION}+hook-{ident}"
+                        f"+aorta-{aorta_import.commit(self.aorta_src)[:12]}")
 
     def build_flags(self) -> list[str]:
         return [f"--offload-arch={self.target}"]
@@ -266,7 +330,7 @@ class AortaAsan(_AortaGpu):
     def __init__(self, **kw):
         super().__init__(**kw)
         lib = os.environ.get("AORTA_ASAN_ROCM_LIB", "")
-        self.version = (f"2+harness-{HARNESS_VERSION}+asanlib-{sha256_text(lib)[:12]}"
+        self.version = (f"2+target-{self.target}+harness-{HARNESS_VERSION}+asanlib-{sha256_text(lib)[:12]}"
                         f"+aorta-{aorta_import.commit(self.aorta_src)[:12]}")
 
     def build_flags(self) -> list[str]:
