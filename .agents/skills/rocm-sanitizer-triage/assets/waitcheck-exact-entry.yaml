@@ -1,0 +1,33 @@
+# DRAFT PREPARATION TEMPLATE. Not a qualified execution route.
+# Copy out of the installed skill; replace ALL REQUIRED_ values with verified facts.
+# Index/offset placeholders intentionally fail schema loading until resolved.
+# Do not delete entry_offset: its omission changes scope to a whole-object scan.
+# Values are literal; this loader does not expand shell variables.
+schema_version: 1
+mode: sanitizer
+ticket: WAITCHECK-EXACT-ENTRY
+description: Draft offline Waitcheck plan for one verified compiled kernel entry.
+sanitizer_plan:
+  target: REQUIRED_ARCHITECTURE
+  source:
+    kind: kernel
+    kernel:
+      name: REQUIRED_EXACT_KERNEL_NAME
+      code_object: REQUIRED_OBJECT_PATH_RELATIVE_TO_THIS_RECIPE
+      code_object_sha256: REQUIRED_VERIFIED_SHA256
+      code_object_index: REQUIRED_IMAGE_INDEX
+      entry_offset: REQUIRED_VERIFIED_TEXT_OFFSET
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict  # Required schema field; does not enable ConSan.
+    on_missing_backend: fail
+    timeout_seconds: 900
+    waitcheck_max_diagnostics: 32
+  output:
+    report: sanitizer_report.json

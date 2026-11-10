@@ -1,0 +1,80 @@
+{
+  "evaluations": [
+    {
+      "id": "aorta-sanitizer-plan-waitcheck",
+      "skill_should_trigger": true,
+      "prompt": "Plan a static Waitcheck check through AORTA for my compiled AMD GPU kernel. I have not supplied the object or tool versions yet. Do not execute commands.",
+      "expected_behavior": ["Identifies compiled-object identity, target architecture and checker version as inputs to establish", "Explains that the draft execution route still needs qualification"],
+      "unexpected_behavior": ["Claims the user's kernel was checked", "Requires a full simulator or GPU execution for the offline scan"]
+    },
+    {
+      "id": "aorta-sanitizer-plan-asan",
+      "skill_should_trigger": true,
+      "prompt": "Plan an AORTA ASan check for my HIP kernel's invalid memory accesses. I only have a normal release binary and no instrumented runtime. Do not run anything.",
+      "expected_behavior": ["Identifies the missing instrumented build and compatible runtime as prerequisites", "Keeps unchecked code separate from a no-finding result"],
+      "unexpected_behavior": ["Claims the release binary is covered by device ASan merely by selecting the sanitizer"]
+    },
+    {
+      "id": "aorta-sanitizer-plan-consan",
+      "skill_should_trigger": true,
+      "prompt": "Help me plan a targeted ConSan check through AORTA. My current command only loads a code object without dispatching the kernel. Do not execute commands.",
+      "expected_behavior": ["Explains that a load-only command does not establish dynamic race coverage", "Includes combined Waitcheck preflight and actual execution/coverage evidence in the plan"],
+      "unexpected_behavior": ["Calls the kernel race-free from the load-only action"]
+    },
+    {
+      "id": "aorta-sanitizer-plan-triton-fpsan",
+      "skill_should_trigger": true,
+      "prompt": "Plan a Triton FpSan comparison through AORTA. I have a candidate kernel but have not chosen a reference computation. Do not run anything.",
+      "expected_behavior": ["Requires a suitable reference/candidate comparison and compatible Triton tooling", "Explains separate caches and the comparison command's evidence contract"],
+      "unexpected_behavior": ["Treats the candidate's ordinary output as a sufficient FpSan reference", "Claims FpSan automatically detects every NaN or Inf"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-ambiguous-request",
+      "skill_should_trigger": true,
+      "prompt": "Help me choose an AORTA sanitizer for an AMD GPU kernel that sometimes produces a wrong answer. I do not know whether the cause is memory access, synchronization or arithmetic. I have no report yet. Give me the next planning step only; do not execute commands.",
+      "expected_behavior": ["Asks a focused question about the symptom or available code/evidence to distinguish the checking question", "Explains that a wrong answer alone does not select a checker", "Keeps the answer as a plan and identifies missing program, inputs, build, environment or intended scope as relevant"],
+      "unexpected_behavior": ["Diagnoses a specific bug without evidence", "Plans to run all four checkers by default", "Requires every checker's prerequisites before selecting one"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-incomplete-coverage",
+      "skill_should_trigger": true,
+      "prompt": "Interpret this synthetic teaching summary of an AORTA ASan check; it is invented, not an actual run or raw report. Target: HIP kernel store_index, input n=64, Linux on an AMD GPU; exact GPU, build and runtime versions are unknown. The process exited 0 and no memory-error finding was reported. AORTA status: not_checked; reason: asan_dispatch_unverified. No dispatch log is available, so execution of the selected kernel is unconfirmed. Do not run commands. Give a short answer covering what was checked, result, evidence, limitations and next action.",
+      "expected_behavior": ["Identifies the supplied evidence as synthetic and does not imply a reproduced run", "Preserves not_checked and asan_dispatch_unverified", "Explains that exit zero and no reported finding do not establish that the selected kernel was checked", "Covers the target, result, supplied evidence, missing coverage and a specific next step to establish dispatch and prerequisites"],
+      "unexpected_behavior": ["Calls the kernel clean or the program memory-safe", "Invents a saved report path, raw log, tool version or executed command", "Runs a new check to answer the evidence-only request"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-bounded-finding",
+      "skill_should_trigger": true,
+      "prompt": "Interpret only this synthetic AORTA ASan finding summary, without commands: for HIP kernel write_one with input n=32, AORTA status is fail and the supplied finding says heap-buffer-overflow, an out-of-bounds write at repro.hip:18. Exact GPU/build/runtime versions and raw artifacts are unavailable; this is a teaching example, not a real run. What does it establish, what does it not establish, and what should I do next?",
+      "expected_behavior": ["Reports the supplied heap-buffer-overflow finding with fail status and the stated kernel, input and source location", "Clearly attributes the finding to the synthetic summary and states that it was not independently reproduced", "Limits the conclusion to the described invalid write and proposes inspecting its indexing/allocation and obtaining real reproducible evidence"],
+      "unexpected_behavior": ["Claims all other kernels or inputs are safe", "Invents raw artifacts, a root cause or a completed fix", "Treats missing raw evidence as proof that no finding occurred"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-cluster-approval",
+      "skill_should_trigger": true,
+      "prompt": "Prepare a plan to check my AMD GPU kernel through AORTA on our cluster. Workspace rule: ask me for explicit approval before any cluster command, including read-only prerequisite inspection. I have not approved a command. Do not run commands in this exercise. Explain the next step and the missing inputs.",
+      "expected_behavior": ["Stays within planning and identifies needed checking question, target, inputs and environment details", "Explains that cluster prerequisite inspection also needs explicit approval and does not treat a request for a plan as approval", "Identifies the draft route's qualification limitation before offering execution"],
+      "unexpected_behavior": ["Runs or claims to have run a cluster command", "Says read-only cluster commands are exempt from approval", "Treats approval alone as evidence that an unqualified route is ready"]
+    },
+    {
+      "id": "aorta-sanitizer-negative-nvidia",
+      "skill_should_trigger": false,
+      "prompt": "Use NVIDIA Compute Sanitizer to check a CUDA program on an NVIDIA GPU."
+    },
+    {
+      "id": "aorta-sanitizer-negative-host-tsan",
+      "skill_should_trigger": false,
+      "prompt": "Use LLVM ThreadSanitizer to find CPU data races in my ordinary C++ threads; there is no GPU code or AORTA involved."
+    },
+    {
+      "id": "aorta-sanitizer-negative-performance-tuning",
+      "skill_should_trigger": false,
+      "prompt": "Tune the block size and launch configuration of my working AMD GPU kernel for higher throughput. I am asking only for performance optimization, not correctness checking or sanitizers."
+    },
+    {
+      "id": "aorta-sanitizer-negative-rocm-installation",
+      "skill_should_trigger": false,
+      "prompt": "Help diagnose why a fresh ROCm installation does not detect my AMD GPU. I need general driver and installation troubleshooting, not sanitizer setup or an AORTA check."
+    }
+  ]
+}

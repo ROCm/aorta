@@ -75,6 +75,8 @@ overlap_debug*/
 # Exception: the manual ASan results Pages adds to the sanitizer dashboard are
 # committed data, not run output -- there is no ASan nightly to write them.
 !docs/sanitizers/asan-manual-runs.json
+# Skill evaluation prompts are maintained source, not experiment output.
+!/.agents/skills/rocm-sanitizer-triage/evals/evals.json
 *_merged_enhanced.json
 nccl_thread_sweep_*.log
 nccl_thread_sweep_summary_*.txt
