@@ -74,3 +74,17 @@ def test_a_read_only_directory_inside_a_read_write_mount_gets_its_own_mount(tmp_
     assert out.stdout.split() == ["-v", f"{hf}:{hf}", "-v", f"{pkg}:{pkg}", "-v", f"{model}:{model}:ro",
                                   "-v", f"{pkg}/pools:{pkg}/pools:ro"]
     assert f"{hf} is mounted rw already, not ro" in out.stderr  # docker refuses a destination twice
+
+
+def test_an_adapter_inside_the_hugging_face_cache_is_mounted_read_only(tmp_path):
+    funcs = re.search(r"^add_mounts\(\) \{.*?^\}\n", JOB, re.M | re.S).group(0)
+    mounting = JOB[JOB.index("ORCH_MOUNTS=()\n"):JOB.index("# A directory the docker daemon sees")]
+    hf, pkg, runs = tmp_path / "hf", tmp_path / "pkg", tmp_path / "runs"
+    model, adapter = hf / "hub" / "models--org--base", hf / "hub" / "models--org--adapter"
+    for d in (model, adapter, pkg, runs):
+        d.mkdir(parents=True)
+    state = (f"P={pkg} RUN_ROOT={runs} MODEL_DIR={model} AORLTA_HF_HOME={hf} AORLTA_TMPDIR= ADAPTER_DIR={adapter} "
+             "AORLTA_AORTA_ROOT= AORLTA_ROCJITSU_ROOT= AORLTA_LIBSTDCXX_SHIM=\nPOOL_DIRS=()\nEXTRA_MOUNTS=()\n")
+    out = subprocess.run(["bash", "-c", f"{funcs}{state}{mounting}printf '%s\\n' \"${{ORCH_MOUNTS[@]}}\""],
+                         capture_output=True, text=True, check=True, timeout=60).stdout.split()
+    assert f"{hf}:{hf}" in out and f"{adapter}:{adapter}:ro" in out
