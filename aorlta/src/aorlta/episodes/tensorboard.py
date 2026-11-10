@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ..atomic import PARTIAL_SUFFIX, read_bytes
+from ..atomic import PARTIAL_SUFFIX, _fsync_dir, read_bytes
 
 FILE_VERSION = "brain.Event:2"
 FILE_RE = re.compile(r"events\.out\.tfevents\.([0-9]{10})\.aorlta")
@@ -237,11 +237,7 @@ def write_iteration(tb_dir: Path, n: int, scalars: Mapping[str, Any], wall_time:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, final)
-    fd = os.open(tb_dir, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    _fsync_dir(tb_dir)
     return final
 
 
