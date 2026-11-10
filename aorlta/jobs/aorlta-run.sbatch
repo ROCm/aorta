@@ -29,11 +29,15 @@
 #                          config on the host and runs the checkers in their containers, which mount it and the Python
 #                          it was made from (pyvenv.cfg's `home`; one under /usr is left to the image's python3.12)
 #   TS_SRC                 no default. TokenSpeed's source tree at commit 3b684074, needed only on a node without the
-#                          image ts-grpo-tokenspeed:3b684074, which is then built from its docker/Dockerfile.amd
+#                          image aorlta-tokenspeed:3b684074, which is then built from its docker/Dockerfile.amd
 #   AORLTA_AORTA_ROOT      default /opt/aorta. aorta at commit d22f6116235c05395a0241a83d6f7e952a988454: its src/ for
 #                          the checkers and the import check, its recipes/sanitizers/fixtures for the pre-flight
 #   AORLTA_ROCJITSU_ROOT   default /opt/rocjitsu. rocjitsu's bin/rj_waitcheck and lib/librocjitsu_dbi_hooks.so
 #   AORLTA_LIBSTDCXX_SHIM  default /opt/libstdcxx-shim. A libstdc++ with GLIBCXX_3.4.31, for rj_waitcheck
+#                          (these three are also where the check profiles look for the tools; the job passes them into
+#                          its containers, whose hipcc is the image's /opt/rocm)
+#   AORLTA_SITE            default none. A site file of the run's paths, applied over the config (aorlta.config
+#                          apply_site); the job keeps a copy in its output directory, which its containers read
 #   AORLTA_ASAN_LIB        no default; remote checkers need it. The ROCm 7.0.2 ASan runtime libraries (lib/asan of
 #                          ROCm's *-asan packages), which aorta gets as AORTA_ASAN_ROCM_LIB
 #   AORLTA_HF_HOME         default $HF_HOME, else $HOME/.cache/huggingface. The Hugging Face cache (HF_HOME), read
@@ -50,7 +54,7 @@
 # A container sees each directory at its host path. Mounted besides the directories above: the package root, /dev/shm
 # (reward.remote.socket_dir must be under it, and sync.dir is by default), and from the config run.root,
 # model.base_dir (for a Hugging Face snapshot, the model's whole cache directory, so the snapshot's links resolve) and
-# each prompt pool's dataset directory. The paths in the profile's `adapters:` must lie inside these mounts.
+# each prompt pool's dataset directory.
 #SBATCH -N 1
 #SBATCH --exclusive
 #SBATCH --no-requeue
@@ -86,7 +90,7 @@ KILL_AFTER_ITER=${KILL_AFTER_ITER:-}
 KILL_DELAY_S=${KILL_DELAY_S:-120}
 SMOKE=${SMOKE:-}
 SRC=${TS_SRC:-}
-BASE=ts-grpo-tokenspeed:3b684074
+BASE=aorlta-tokenspeed:3b684074
 CHK_IMG=rocm/dev-ubuntu-24.04:7.0.2
 PY=$AORLTA_VENV/bin/python  # Python 3.12 (aorlta needs it), on the host and in the checker containers
 [ -x "$PY" ] || { echo "[guard] no Python at $PY: set AORLTA_VENV to a Python 3.12 venv with requirements-dev.txt" >&2
@@ -133,6 +137,10 @@ add_mounts() {  # add_mounts ARRAY rw|ro DIR...: `-v DIR:DIR[:ro]` for each DIR 
 CODE=$OUT/code
 mkdir -p "$CODE"
 COMMIT=$(/usr/bin/git -C "$P" rev-parse HEAD) || { echo "[guard] cannot read HEAD of $P" >&2; exit 93; }
+if [ -n "${AORLTA_SITE:-}" ]; then
+  cp "$AORLTA_SITE" "$OUT/site.yaml" || { echo "[guard] cannot read the site file $AORLTA_SITE" >&2; exit 94; }
+  export AORLTA_SITE=$OUT/site.yaml
+fi
 /usr/bin/git -C "$P" archive HEAD | tar -x -C "$CODE" || { echo "[guard] cannot snapshot HEAD of $P" >&2; exit 93; }
 [ -f "$CODE/$CONFIG" ] || { echo "[guard] $CONFIG is not committed at $COMMIT" >&2; exit 94; }
 read -r RUN_ID SYNC_DIR RUN_DIR RUN_ROOT < <(PYTHONPATH="$CODE/src" "$PY" -c "
@@ -236,7 +244,8 @@ if [ -n "$SOCK_DIR" ]; then
   CHK_DOCKER=(--network=host --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --ulimit core=0
               --security-opt seccomp=unconfined "${CHK_MOUNTS[@]}"
               -e SLURM_JOB_ID="$SLURM_JOB_ID" -e AORTA_ASAN_ROCM_LIB="$AORLTA_ASAN_LIB" -e TMPDIR="$SOCK_DIR/tmp"
-              -e AORLTA_AORTA_ROOT="$AORLTA_AORTA_ROOT" -e AORLTA_AORTA_SRC="$AORLTA_AORTA_ROOT/src"
+              -e AORLTA_AORTA_ROOT="$AORLTA_AORTA_ROOT" -e AORLTA_ROCJITSU_ROOT="$AORLTA_ROCJITSU_ROOT"
+              -e AORLTA_LIBSTDCXX_SHIM="$AORLTA_LIBSTDCXX_SHIM" -e AORLTA_SITE="${AORLTA_SITE:-}"
               -e PYTHONPATH="$CODE/src" -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 -w "$CODE")
   GPUS=$(printf '%s\n' "${REMOTE[@]:1}" | awk '{print $2}' | sort -un | paste -sd, -)
   stamp "CHECKERS: aorta's ASan node-health canary on GPUs $GPUS"
@@ -342,7 +351,9 @@ orchestrator() {  # extra arguments for aorlta.orchestrator.run
     --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --ipc=host --ulimit memlock=-1 \
     --ulimit nofile=65535:65535 --network=host "${ORCH_MOUNTS[@]}" \
     -e SLURM_JOB_ID="$SLURM_JOB_ID" -e PYTHONUNBUFFERED=1 -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH="$CODE/src" \
-    -e HF_HOME="$AORLTA_HF_HOME" -e HF_HUB_OFFLINE=1 -e TMPDIR="$AORLTA_TMPDIR" \
+    -e HF_HOME="$AORLTA_HF_HOME" -e HF_HUB_OFFLINE=1 -e TMPDIR="$AORLTA_TMPDIR" -e AORLTA_SITE="${AORLTA_SITE:-}" \
+    -e AORLTA_AORTA_ROOT="$AORLTA_AORTA_ROOT" -e AORLTA_ROCJITSU_ROOT="$AORLTA_ROCJITSU_ROOT" \
+    -e AORLTA_LIBSTDCXX_SHIM="$AORLTA_LIBSTDCXX_SHIM" \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True -w "$CODE" \
     --entrypoint python3 "$IMG" -m aorlta.orchestrator.run "${ARGS[@]}" "$@" >> "$OUT/run.log" 2>&1 &
   ORCH_PID=$!

@@ -139,9 +139,10 @@ stages:
 - `stages` run in order, each only while the reward function still answers `NeedMore`; a stage's legs run one
   at a time unless it sets `parallel: true` (`speculative` leaves it to `reward.speculative_parallel`).
 - `requires`: a leg runs only after these legs are clean; otherwise it is `not_run`.
-- `leg_settings` go into the cache key; `adapters` holds each adapter's settings, the tool paths among them;
-  `materialize: true` writes each candidate's files for adapters that read them; `clean_repeats` is how many
-  settled-clean repeats a clean reward needs.
+- `leg_settings` go into the cache key; `adapters` holds each adapter's settings, the tool paths among them,
+  written from the tool roots: `${AORLTA_ROCM_ROOT}/bin/hipcc` is the environment variable's value, or its default
+  under `/opt` (`TOOL_ROOTS` in `reward/profiles.py`); `materialize: true` writes each candidate's files for
+  adapters that read them; `clean_repeats` is how many settled-clean repeats a clean reward needs.
 
 Results are cached by the candidate's source hash, the task hash, the leg, its settings, and the checker's name and
 version. Only settled legs are cached. `reward.remote.adapters` in the run config serves an adapter from separate
