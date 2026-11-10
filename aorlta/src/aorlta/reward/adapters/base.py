@@ -24,7 +24,7 @@ from ...schemas import SETTLED_STATES, ControlSpec, LegJob, LegResult
 
 log = logging.getLogger(__name__)
 
-RESOURCES = ("local_cpu", "sim_cpu", "partner_gpu", "own_gpu")
+RESOURCES = ("local_cpu", "sim_cpu", "external_gpu", "own_gpu")
 # The kind of a build fact a clean `gate.compile` may carry among its findings (adapters/standin_hipcc.py): the
 # launched kernels' LDS, read from their descriptors. It is a record of the build, not a finding.
 TRUSTED_BUILD = "trusted_build"
@@ -35,7 +35,7 @@ class CheckAdapter(Protocol):
     name: str
     version: str
     legs: tuple[str, ...]
-    resource: str  # "local_cpu" | "sim_cpu" | "partner_gpu" | "own_gpu"
+    resource: str  # "local_cpu" | "sim_cpu" | "external_gpu" | "own_gpu"
 
     def run(self, job: LegJob) -> LegResult: ...  # never raises: errors become state="unsettled"
 
