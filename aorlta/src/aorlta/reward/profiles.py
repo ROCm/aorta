@@ -13,11 +13,14 @@ part of the cache key. Stages can change without code changes.
     adapters: {<adapter name>: {...}} # settings for the adapter factories
 
 Unknown keys are errors, as in the run config. Profiles shipped with the package are in
-`profiles/*.yaml`; `load_profile("fake")` reads `profiles/fake.yaml`.
+`profiles/*.yaml`; `load_profile("fake")` reads `profiles/fake.yaml`. In `adapters:`, `${NAME}` is a check
+tool's install root (TOOL_ROOTS): the environment variable NAME, or its default under /opt.
 """
 
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,11 +31,38 @@ from ..config import ConfigError, parse_yaml, strict_decode
 PROFILE_DIR = Path(__file__).resolve().parent / "profiles"
 PROFILE_NAMES = ("standin-static", "standin-gpu", "fake")
 TIMEOUT_KEYS = ("gate", "compile", "sim_run", "asan_request")
+TOOL_ROOTS = {
+    "AORLTA_ROCM_ROOT": "/opt/rocm",  # hipcc, llvm-readelf
+    "AORLTA_ROCJITSU_ROOT": "/opt/rocjitsu",  # bin/rj_waitcheck, lib/librocjitsu_dbi_hooks.so
+    "AORLTA_AORTA_ROOT": "/opt/aorta",  # src/, recipes/sanitizers/fixtures/
+    "AORLTA_LIBSTDCXX_SHIM": "/opt/libstdcxx-shim",  # a libstdc++ with GLIBCXX_3.4.31, for rj_waitcheck
+}
+_ROOT_RE = re.compile(r"\$\{([^}]*)\}")
+
+
+def tool_root(name: str) -> str:
+    """Where a check tool is installed: the environment variable `name`, or its default in TOOL_ROOTS."""
+    return (os.environ.get(name) or TOOL_ROOTS[name]).rstrip("/") or "/"
+
+
+def expand_tool_roots(value: Any, source: str = "<profile>") -> Any:
+    """`value` with each `${NAME}` in its strings replaced by tool_root(NAME)."""
+    if isinstance(value, str):
+        def sub(m: re.Match) -> str:
+            if m.group(1) not in TOOL_ROOTS:
+                raise ConfigError(f"{source}: ${{{m.group(1)}}} is not one of {', '.join(TOOL_ROOTS)}")
+            return tool_root(m.group(1))
+        return _ROOT_RE.sub(sub, value)
+    if isinstance(value, Mapping):
+        return {k: expand_tool_roots(v, source) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [expand_tool_roots(v, source) for v in value]
+    return value
 
 
 @dataclass(frozen=True)
 class PoolSpec:
-    resource: Literal["local_cpu", "sim_cpu", "partner_gpu", "own_gpu"]
+    resource: Literal["local_cpu", "sim_cpu", "external_gpu", "own_gpu"]
     adapter: str
     timeout: Literal["gate", "compile", "sim_run", "asan_request"]
     workers: int | None = None  # None: the sim pool uses reward.sim_workers; a batched pool grows on demand
@@ -125,6 +155,8 @@ def profile_problems(p: Profile) -> list[str]:
 def profile_from_dict(data: Mapping[str, Any], source: str = "<profile>") -> Profile:
     if not isinstance(data, Mapping):
         raise ConfigError(f"{source}: a profile is a mapping")
+    if "adapters" in data:
+        data = {**data, "adapters": expand_tool_roots(data["adapters"], source)}
     try:
         return strict_decode(Profile, data, "")
     except ConfigError as exc:

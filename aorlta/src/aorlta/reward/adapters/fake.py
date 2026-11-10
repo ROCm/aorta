@@ -40,7 +40,7 @@ GATES = ("parse", "contract", "static", "reference", "compile", "no_artifact", "
 ALL_LEGS = tuple(f"gate.{g}" for g in GATES) + ("ref.native", "ref.edge", "san.consan", "san.waitcheck", "san.asan")
 LEG_RE = re.compile(r"(gate|ref|san)\.[a-z0-9_]+")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
-Resource = Literal["local_cpu", "sim_cpu", "partner_gpu", "own_gpu"]
+Resource = Literal["local_cpu", "sim_cpu", "external_gpu", "own_gpu"]
 
 
 def default_fail_reasons(leg: str) -> tuple[str, ...]:
@@ -137,7 +137,7 @@ class FakeAdapterConfig:
         if not legs or len(set(legs)) != len(legs) or not all(isinstance(g, str) and LEG_RE.fullmatch(g) for g in legs):
             raise ValueError(f"legs must be unique gate.*, ref.* or san.* names, got {legs!r}")
         object.__setattr__(self, "legs", legs)
-        if self.resource not in ("local_cpu", "sim_cpu", "partner_gpu", "own_gpu"):
+        if self.resource not in ("local_cpu", "sim_cpu", "external_gpu", "own_gpu"):
             raise ValueError(f"unknown resource {self.resource!r}")
         extra = sorted(set(self.per_leg) - set(legs))
         if extra:
