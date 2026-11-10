@@ -199,7 +199,7 @@ clean_img() {  # an image this node has, for removing root-owned files
 }
 cleanup() {
   [ -n "$VRAM_PID" ] && kill "$VRAM_PID" 2>/dev/null
-  docker ps -aq --filter "name=$CNAME" | xargs -r docker rm -f >/dev/null 2>&1
+  docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?" | xargs -r docker rm -f >/dev/null 2>&1
   find "$OUT" -maxdepth 3 -name 'gpucore.*' -type f -delete 2>/dev/null
   local img mounts=()
   img=$(clean_img)
@@ -216,14 +216,14 @@ cleanup() {
   [ "$BUILT_TRAINER" = 1 ] && docker rmi -f "$IMG" >/dev/null 2>&1 && echo "removed $IMG"
   [ "$BUILT_BASE" = 1 ] && docker rmi -f "$BASE" >/dev/null 2>&1 && echo "removed $BASE"
   [ "$PULLED_CHK" = 1 ] && docker rmi -f "$CHK_IMG" >/dev/null 2>&1 && echo "removed $CHK_IMG (pulled by this job)"
-  echo "containers left: $(docker ps -a --format '{{.Names}}' | grep -c "$CNAME")"
+  echo "containers left: $(docker ps -a --format '{{.Names}}' | grep -cxE "$CNAME(-[a-z]+)?")"
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT
 
 stamp "node $(hostname -s) job $SLURM_JOB_ID run $RUN_ID config $CONFIG components $COMPONENTS resume $RESUME commit $COMMIT"
 # The node is exclusive: a container of this run left by an earlier, cancelled job is removed before starting.
-stale=$(docker ps -aq --filter "name=aorlta-run-")
+stale=$(docker ps -a --format '{{.Names}}' | grep -xE 'aorlta-run-[0-9]+(-[a-z]+)?')
 [ -n "$stale" ] && { stamp "removing stale containers"; echo "$stale" | xargs -r docker rm -f >/dev/null 2>&1; }
 df -h /dev/shm | tail -1
 
