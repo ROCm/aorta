@@ -22,6 +22,7 @@ from aorlta.config import RewardSection
 from aorlta.ids import sha256_text
 from aorlta.reward.adapters import aorta_import, standin_harness, standin_hipcc
 from aorlta.reward.adapters.base import ProcessRunner, map_aorta_check
+from aorlta.reward.adapters.standin_aorta import AortaAsan, AortaConsan
 from aorlta.reward.adapters.standin_hipcc import StandinHipcc, error_classes
 from aorlta.reward.adapters.standin_parse import StandinParse, last_cpp_block
 from aorlta.reward.adapters.standin_rj_waitcheck import StandinRjWaitcheck
@@ -180,6 +181,7 @@ def test_a_missing_header_is_the_candidates_compile_error_not_the_checkers(tmp_p
     ("sleep 30\n", "timeout"),                      # its own subprocess deadline
     ("exit 139\n", "adapter_error"),                # crashed, printed no error
     ("echo 'x.hip:1:1: warning: w' >&2; exit 1\n", "adapter_error"),
+    ("echo \"x.hip:1:1: error: use of undeclared identifier 'y'\" >&2; kill -KILL $$\n", "adapter_error"),  # a signal
 ])
 def test_a_compiler_that_does_not_settle_is_unsettled(tmp_path, body, reason):
     fake = script(tmp_path / "hipcc", body)
@@ -374,6 +376,17 @@ def test_a_waitcheck_of_a_source_that_defines_no_kernel_scans_the_gates_object(t
     assert r.state == "clean" and [o for o, _ in seen] == [str(obj)]
 
 
+@pytest.mark.parametrize("make", [
+    lambda hipcc: StandinRjWaitcheck("/nonexistent/rj_waitcheck", hipcc=hipcc),  # a template kernel's instantiation
+    lambda hipcc: AortaConsan(hook="/nonexistent", aorta_src="/nonexistent", hipcc=hipcc),
+    lambda hipcc: AortaAsan(aorta_src="/nonexistent", hipcc=hipcc),
+], ids=["rj_waitcheck", "aorta_consan", "aorta_asan"])
+def test_an_adapter_that_builds_with_its_own_compiler_names_it_in_its_identity(tmp_path, make):
+    a, b = script(tmp_path / "hipcc-a", "exit 0\n"), script(tmp_path / "hipcc-b", "exit 1\n")
+    first, again, other = (make(h).version for h in (a, a, b))
+    assert first == again != other
+
+
 @needs_rj
 def test_a_waitcheck_timeout_is_unsettled(tmp_path):
     fake = script(tmp_path / "rj_waitcheck", "sleep 30\n")
@@ -404,6 +417,32 @@ def test_aorta_verdicts_map_to_leg_states(state, verdict, with_finding, expected
                                reason=None if state != "not_checked" else "asan_node_health_not_verified: x",
                                findings=findings)
     assert map_aorta_check(check)[0] == expected
+
+
+CANARY_REASON = "consan_output_parse_error: ConSan field reader must be an integer, got 'program_output_canary'"
+
+
+def test_an_unsettled_reason_keeps_aortas_code_and_only_a_hash_of_its_text():
+    def unsettled(reason):
+        return map_aorta_check(SimpleNamespace(state=SimpleNamespace(value="error"),
+                                               verdict=SimpleNamespace(value="error"), findings=(), reason=reason))
+    state, reason = unsettled(CANARY_REASON)
+    assert state == "unsettled" and "program_output_canary" not in reason
+    assert reason.startswith("checker_not_settled:error/error: consan_output_parse_error: sha256:")
+    assert reason == unsettled(CANARY_REASON)[1] != unsettled(CANARY_REASON + "2")[1]
+    assert unsettled("combined_hook_timeout")[1] == "checker_not_settled:error/error: combined_hook_timeout"
+
+
+@pytest.mark.skipif(not Path(AORTA).exists(), reason="no aorta checkout (AORLTA_AORTA_ROOT)")
+def test_consans_parse_error_on_what_the_program_printed_never_reaches_the_leg_reason():
+    consan, _ = aorta_import.load("consan", AORTA)
+    execution, _ = aorta_import.load("execution", AORTA)
+    printed = "[rocjitsu-dbi-hooks] ConSan auto report reader=program_output_canary\n"
+    _, check = consan.evaluate_consan_output(execution.ProcessResult(
+        argv=("harness",), returncode=0, stdout=printed, stderr="", timed_out=False, launch_error=None), strict=True)
+    assert check.reason == CANARY_REASON
+    state, reason = map_aorta_check(check)
+    assert state == "unsettled" and "program_output_canary" not in reason
 
 
 # --- standin-static end to end ----------------------------------------------------------------------

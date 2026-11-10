@@ -445,8 +445,8 @@ class RewardAdapter:
     def resubmit(self, candidate):
         return self.service().resubmit(candidate)
 
-    def drain(self, deadline_monotonic: float) -> None:
-        self.service().drain(deadline_monotonic)
+    def drain(self, deadline_monotonic: float) -> Any:
+        return self.service().drain(deadline_monotonic)
 
     def reopen(self) -> None:
         self.service().reopen()

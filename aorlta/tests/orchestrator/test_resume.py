@@ -1,5 +1,6 @@
 """The file half of a resume (Section 6.6): what `prepare_resume` keeps, removes and rewrites."""
 
+import hashlib
 import json
 import shutil
 
@@ -101,6 +102,30 @@ def test_a_bad_line_before_a_ledgers_end_stops_the_resume_before_anything_is_rem
     with pytest.raises(LedgerError, match="MANIFEST.jsonl:2"):
         prepare_resume(done_run, keep_ckpts=3)
     assert manifest.read_bytes() == before and (done_run / "ckpt" / "iter-000003.partial").is_dir()
+
+
+def _files(run_dir):
+    return {p.relative_to(run_dir).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in run_dir.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("name, data", [
+    ("ledgers/b.jsonl", b'{"iteration": 1}\n[]\n{"iteration": 2}\n'),
+    ("ledgers/b.jsonl", b'{"iteration": 1}\n{}'),
+    ("evidence/MANIFEST.jsonl", b'{"iteration": 1, "sha256": "a", "size": 1, "kind": "k"}\n'
+                                b'{"iteration": -1, "sha256": "b", "size": 1, "kind": "k"}\n'),
+], ids=["a-line", "the-final-line", "the-manifest"])
+def test_a_record_that_names_no_iteration_stops_the_resume_before_anything_is_removed(done_run, name, data):
+    shutil.rmtree(done_run / "iterations" / "iter-000003")
+    (done_run / "ckpt" / "iter-000003.partial").mkdir()
+    (done_run / "ckpt" / "iter-000003.partial" / "trainer_state.json").write_text("{")
+    AppendLedger(done_run / "ledgers" / "a.jsonl").append([{"iteration": 2}, {"iteration": 3}])
+    (done_run / name).parent.mkdir(exist_ok=True)
+    (done_run / name).write_bytes(data)
+    before = _files(done_run)
+    with pytest.raises(LedgerError, match=name.rsplit("/", 1)[1] + ":2: a record with no iteration"):
+        prepare_resume(done_run, keep_ckpts=3)
+    assert _files(done_run) == before
 
 
 def test_truncate_after_drops_a_torn_final_line_and_refuses_a_bad_line_anywhere_else(tmp_path):

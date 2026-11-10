@@ -332,6 +332,19 @@ def test_the_reward_adapter_runs_the_fake_profile_with_the_log_only_hook(tmp_pat
     assert not r.work_dir.exists()
 
 
+def test_the_reward_adapter_returns_the_services_drain_report(tmp_path):
+    """The loop and score mode record the legs a drain's deadline caught from the report `drain` returns."""
+    from aorlta.reward.service import DrainReport
+
+    r = wiring.RewardAdapter(_cfg(tmp_path), clock=None, spans=None)
+    report = DrainReport(resolved=1, scored=0, unscored=1, unscored_by_reason={"sanitizer_not_settled": 1},
+                         outstanding_at_deadline=[{"candidate_id": "w/1/p/0", "leg": "san.asan", "where": "running"}],
+                         hit_deadline=True, t_drain=10.0, t_done=40.0)
+    deadlines = []
+    r._svc = types.SimpleNamespace(drain=lambda deadline: deadlines.append(deadline) or report)
+    assert r.drain(40.0) is report and deadlines == [40.0]
+
+
 def test_a_profile_scored_by_another_reward_function_is_refused(tmp_path, monkeypatch):
     from aorlta.reward import profiles
 

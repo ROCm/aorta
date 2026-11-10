@@ -16,6 +16,7 @@ renamed; that second rename commits iteration n (resume.py).
 
 from __future__ import annotations
 
+import errno
 import os
 import random
 import re
@@ -139,8 +140,9 @@ def _fsync_path(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
-    except OSError:
-        if not path.is_dir():
+    except OSError as exc:
+        # Some filesystems do not support fsync on a directory; any other failure is a failed sync.
+        if not (exc.errno in (errno.EINVAL, errno.ENOTSUP) and path.is_dir()):
             raise
     finally:
         os.close(fd)

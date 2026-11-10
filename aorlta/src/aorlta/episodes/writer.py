@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -41,8 +42,9 @@ def _fsync(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
-    except OSError:
-        if not path.is_dir():
+    except OSError as exc:
+        # Some filesystems do not support fsync on a directory; any other failure is a failed sync.
+        if not (exc.errno in (errno.EINVAL, errno.ENOTSUP) and path.is_dir()):
             raise
     finally:
         os.close(fd)
@@ -134,9 +136,15 @@ class LedgerError(ValueError):
     pass
 
 
+def _iteration_of(rec: Any) -> int | None:
+    it = rec.get("iteration") if isinstance(rec, dict) else None
+    return it if isinstance(it, int) and not isinstance(it, bool) and it >= 0 else None
+
+
 class AppendLedger:
     """Append-only JSONL. `append` writes one batch and fsyncs it. `read` skips a torn final line (a write the crash
-    cut short) and refuses a bad line anywhere else. `truncate_after(n)` keeps the records of iterations <= n."""
+    cut short) and refuses any other line that is not a record naming its iteration. `truncate_after(n)` keeps the
+    records of iterations <= n."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -146,8 +154,7 @@ class AppendLedger:
         if not records:
             return
         for r in records:
-            it = r.get("iteration") if isinstance(r, dict) else None
-            if not (isinstance(it, int) and not isinstance(it, bool) and it >= 0):
+            if _iteration_of(r) is None:
                 raise LedgerError(f"{self.path.name}: every record names its iteration (an int >= 0), got {r!r:.120}")
         data = jsonl_bytes(records)
         with self._lock:
@@ -164,17 +171,16 @@ class AppendLedger:
         lines = raw.split(b"\n")
         torn = lines.pop() if lines else b""  # the bytes after the last newline: empty unless a write was cut
         out = []
-        for i, line in enumerate(lines, 1):
+        for i, line in enumerate(lines + ([torn] if torn else []), 1):
             try:
                 rec = json.loads(line)
             except ValueError:
+                if i > len(lines):  # the torn final line
+                    continue
                 raise LedgerError(f"{self.path}:{i}: not a JSON record") from None
+            if _iteration_of(rec) is None:
+                raise LedgerError(f"{self.path}:{i}: a record with no iteration")
             out.append(rec)
-        if torn:
-            try:
-                out.append(json.loads(torn))  # a complete record that only lacks its newline
-            except ValueError:
-                pass
         return out
 
     def truncate_after(self, n: int) -> int:
@@ -196,8 +202,8 @@ class AppendLedger:
                     dropped += 1
                     continue
                 raise LedgerError(f"{self.path}:{i}: not a JSON record") from None
-            it = rec.get("iteration") if isinstance(rec, dict) else None
-            if not (isinstance(it, int) and not isinstance(it, bool)):
+            it = _iteration_of(rec)
+            if it is None:
                 raise LedgerError(f"{self.path}:{i}: a record with no iteration")
             if it <= n:
                 kept.append(line + b"\n")

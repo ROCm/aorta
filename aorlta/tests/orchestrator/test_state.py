@@ -1,13 +1,17 @@
 """Prompt selection, run state and checkpoints (Section 6.6, "Checkpoint and resume")."""
 
+import errno
 import json
+import os
 import random
+import stat
 
 import pytest
 
-from aorlta.orchestrator.fakes import make_pool
+from aorlta.episodes.writer import complete_iterations
+from aorlta.orchestrator.fakes import FakeRunSpec, build_fake_run, make_pool
 from aorlta.orchestrator.state import (RUN_STATE_SCHEMA, CheckpointError, RunState, complete_checkpoints, cursor_for,
-                                       epoch_order, pool_digest, prune_checkpoints, python_rng_state,
+                                       epoch_order, fsync_tree, pool_digest, prune_checkpoints, python_rng_state,
                                        restore_python_rng, select_prompts, verify_checkpoint, write_checkpoint)
 
 
@@ -112,6 +116,61 @@ def test_pruning_keeps_the_newest_and_goes_through_a_partial_name(tmp_path):
     assert prune_checkpoints(root, 2) == ["iter-000001", "iter-000002"]
     assert complete_checkpoints(root) == [3, 4]
     assert not list(root.glob("*.partial"))
+
+
+def _fail_dir_fsync(monkeypatch, code, names=None):
+    """`os.fsync` fails with `code` on a directory, or only on directories with one of `names`."""
+    real = os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and (
+                names is None or os.path.basename(os.readlink(f"/proc/self/fd/{fd}")) in names):
+            raise OSError(code, os.strerror(code))
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+
+
+@pytest.mark.parametrize("code", [errno.EIO, errno.ENOSPC])
+def test_a_failed_directory_sync_fails_the_checkpoint_instead_of_passing_as_written(tmp_path, monkeypatch, code):
+    pending = write_checkpoint(tmp_path / "ckpt", _state(1), _save(b"a"))
+    _fail_dir_fsync(monkeypatch, code)
+    for step in (lambda: fsync_tree(pending.tmp), pending.commit):
+        with pytest.raises(OSError) as exc:
+            step()
+        assert exc.value.errno == code
+
+
+@pytest.mark.parametrize("code", [errno.EINVAL, errno.ENOTSUP])
+def test_a_checkpoint_commits_on_a_filesystem_without_directory_fsync(tmp_path, monkeypatch, code):
+    root = tmp_path / "ckpt"
+    _fail_dir_fsync(monkeypatch, code)
+    write_checkpoint(root, _state(1), _save(b"a")).commit()
+    assert complete_checkpoints(root) == [1] and verify_checkpoint(root / "iter-000001").iteration == 1
+
+
+def test_only_a_directory_may_refuse_fsync(tmp_path, monkeypatch):
+    (tmp_path / "f").write_bytes(b"x")
+
+    def refuse(fd):
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    monkeypatch.setattr(os, "fsync", refuse)
+    with pytest.raises(OSError):
+        fsync_tree(tmp_path)
+
+
+def test_an_iteration_whose_checkpoint_sync_fails_stops_the_run_uncommitted_and_unpruned(tmp_path, monkeypatch):
+    def point(name, iteration):
+        if name == "record.summary" and iteration == 2:  # the next step renames the checkpoint and syncs ckpt/
+            _fail_dir_fsync(monkeypatch, errno.EIO, {"ckpt"})
+
+    r = build_fake_run(FakeRunSpec(root=str(tmp_path / "runs"), iterations=2, eval_every=None, keep_ckpts=1),
+                       point=point)
+    with pytest.raises(OSError) as exc:
+        r.orchestrator.run()
+    assert exc.value.errno == errno.EIO
+    assert complete_iterations(r.cfg.run_dir) == [1] and complete_checkpoints(r.cfg.run_dir / "ckpt") == [1, 2]
 
 
 def test_the_python_rng_state_round_trips():
