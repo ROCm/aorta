@@ -119,7 +119,7 @@ def test_c3_t2_the_evaluator_reproduces_the_fake_logs_skip_and_miss_rates_exactl
                                                              "san.waitcheck": 9900.0, "san.asan": 8389.5}
     b = report["options"]["B"]
     assert b["saved_s"] == 24889.5 and sum(b["run_s_by_resource"].values()) == 118062.0
-    assert b["saved_s_by_resource"] == {"partner_gpu": 8389.5, "sim_cpu": 16500.0}
+    assert b["saved_s_by_resource"] == {"external_gpu": 8389.5, "sim_cpu": 16500.0}
 
 
 def test_c3_t2_the_audited_rates_are_the_same_counts_over_the_audited_samples(fake):

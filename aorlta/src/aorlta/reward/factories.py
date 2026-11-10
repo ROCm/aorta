@@ -12,7 +12,7 @@ from .adapters.standin_hipcc import StandinHipcc
 from .adapters.standin_parse import StandinParse
 from .adapters.standin_rj_waitcheck import StandinRjWaitcheck
 from .clock import Clock
-from .profiles import Profile
+from .profiles import Profile, tool_root
 
 
 def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, float] | None = None,
@@ -23,6 +23,7 @@ def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, flo
     timeouts = timeouts or {}
     check_s = check_s or {}
     cfg = profile.adapters
+    hipcc = f"{tool_root('AORLTA_ROCM_ROOT')}/bin/hipcc"
     out: dict[str, Callable[[str], Any]] = {}
     names = {p.adapter for p in profile.pools.values()}
     pool_timeout = {p.adapter: timeouts.get(p.timeout, 120.0) for p in profile.pools.values()}
@@ -35,23 +36,23 @@ def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, flo
     if "standin.hipcc" in names:
         c = cfg.get("standin.hipcc", {})
         out["standin.hipcc"] = lambda wid, c=c: StandinHipcc(
-            c.get("hipcc", "/opt/rocm/bin/hipcc"), readelf=c.get("readelf", "/opt/rocm/llvm/bin/llvm-readelf"),
+            c.get("hipcc", hipcc), readelf=c.get("readelf", f"{tool_root('AORLTA_ROCM_ROOT')}/llvm/bin/llvm-readelf"),
             timeout_s=own("standin.hipcc"), clock=clock.wall)
     if "standin.rj_waitcheck" in names:
         c = cfg.get("standin.rj_waitcheck", {})
         out["standin.rj_waitcheck"] = lambda wid, c=c: StandinRjWaitcheck(
             c["binary"], aorta_src=c.get("aorta_src"), ld_library_path=c.get("ld_library_path"),
-            timeout_s=own("standin.rj_waitcheck"), clock=clock.wall, hipcc=c.get("hipcc", "/opt/rocm/bin/hipcc"))
+            timeout_s=own("standin.rj_waitcheck"), clock=clock.wall, hipcc=c.get("hipcc", hipcc))
     if "standin.aorta_consan" in names:
         c = cfg.get("standin.aorta_consan", {})
         out["standin.aorta_consan"] = lambda wid, c=c: AortaConsan(
-            hook=c["hook"], aorta_src=c["aorta_src"], hipcc=c.get("hipcc", "/opt/rocm/bin/hipcc"),
+            hook=c["hook"], aorta_src=c["aorta_src"], hipcc=c.get("hipcc", hipcc),
             target=c.get("target", "gfx950"), timeout_s=own("standin.aorta_consan"),
             check_timeout_s=check_s.get("san.consan"), control_source=c.get("control_source"), clock=clock.wall)
     if "standin.aorta_asan" in names:
         c = cfg.get("standin.aorta_asan", {})
         out["standin.aorta_asan"] = lambda wid, c=c: SequentialBatch(AortaAsan(
-            aorta_src=c["aorta_src"], hipcc=c.get("hipcc", "/opt/rocm/bin/hipcc"), target=c.get("target", "gfx950"),
+            aorta_src=c["aorta_src"], hipcc=c.get("hipcc", hipcc), target=c.get("target", "gfx950"),
             timeout_s=max(1.0, own("standin.aorta_asan") / 18), check_timeout_s=check_s.get("san.asan"),
             control_source=c.get("control_source"), clock=clock.wall), max_packages=16, inband_controls=True)
     return out

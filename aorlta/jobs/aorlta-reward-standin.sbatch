@@ -106,7 +106,8 @@ add_mounts MOUNTS ro "$AORLTA_VENV" "$PY_BASE" "$AORLTA_AORTA_ROOT" "$AORLTA_ROC
 timeout 2400 docker run --rm --name "$CNAME" --network=host --device=/dev/kfd --device=/dev/dri \
   --group-add video --ipc=host --security-opt seccomp=unconfined "${MOUNTS[@]}" \
   -e SLURM_JOB_ID -e AORLTA_STANDIN_GPU=1 -e AORLTA_T11_OUT="$OUT" -e AORLTA_AORTA_ROOT="$AORLTA_AORTA_ROOT" \
-  -e AORLTA_RJ_WAITCHECK="$AORLTA_ROCJITSU_ROOT/bin/rj_waitcheck" -e AORLTA_LIBSTDCXX_SHIM="$AORLTA_LIBSTDCXX_SHIM" \
+  -e AORLTA_ROCJITSU_ROOT="$AORLTA_ROCJITSU_ROOT" -e AORLTA_RJ_WAITCHECK="$AORLTA_ROCJITSU_ROOT/bin/rj_waitcheck" \
+  -e AORLTA_LIBSTDCXX_SHIM="$AORLTA_LIBSTDCXX_SHIM" \
   -e PYTHONDONTWRITEBYTECODE=1 -e TMPDIR="$AORLTA_TMPDIR/aorlta-reward-standin-$SLURM_JOB_ID" \
   -e AORTA_ASAN_ROCM_LIB="$AORLTA_ASAN_LIB" \
   --entrypoint bash "$IMG" -c "export PATH=/opt/rocm/bin:\$PATH; mkdir -p \$TMPDIR; cd '$WT'; \
