@@ -25,3 +25,19 @@ def test_every_factory_reads_its_own_settings():
         close = getattr(a, "close", None)
         if close:
             close()
+
+
+def test_a_site_rocm_root_reaches_every_adapter_that_compiles(monkeypatch):
+    monkeypatch.setenv("AORLTA_ROCM_ROOT", "/site/rocm")
+    profile = load_profile("standin-gpu")
+    f = standin_factories(profile, Clock())
+    adapters = [f[name](f"{name}/1") for name in ("standin.hipcc", "standin.rj_waitcheck", "standin.aorta_consan")]
+    adapters.append(f["standin.aorta_asan"]("asan/1").adapter)
+    try:
+        assert {a.hipcc for a in adapters} == {"/site/rocm/bin/hipcc"}
+        assert adapters[0].readelf == "/site/rocm/llvm/bin/llvm-readelf"
+    finally:
+        for a in adapters:
+            close = getattr(a, "close", None)
+            if close:
+                close()

@@ -19,11 +19,12 @@ requires:
 leg_settings:
   gate.compile: {offload_arch: gfx950, flags: ["-c", "-O1"]}
   san.waitcheck: {target: gfx950, max_diagnostics: 32}
-# Site paths, to edit: rocjitsu's rj_waitcheck, from ROCm/rocm-systems branch shared/rocjitsu/sanitizers; a libstdc++
-# with GLIBCXX_3.4.31 for it (ld_library_path); aorta at commit d22f6116235c05395a0241a83d6f7e952a988454 (its src/).
+# Where the tools are: `${NAME}` is the environment variable NAME, or its default under /opt (profiles.TOOL_ROOTS).
+# rocjitsu's rj_waitcheck, from ROCm/rocm-systems branch shared/rocjitsu/sanitizers; a libstdc++ with GLIBCXX_3.4.31 for
+# it (ld_library_path); aorta at commit d22f6116235c05395a0241a83d6f7e952a988454 (its src/).
 adapters:
-  standin.hipcc: {hipcc: /opt/rocm/bin/hipcc}
+  standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc"}
   standin.rj_waitcheck:
-    binary: /opt/rocjitsu/bin/rj_waitcheck
-    ld_library_path: /opt/libstdcxx-shim
-    aorta_src: /opt/aorta/src
+    binary: "${AORLTA_ROCJITSU_ROOT}/bin/rj_waitcheck"
+    ld_library_path: "${AORLTA_LIBSTDCXX_SHIM}"
+    aorta_src: "${AORLTA_AORTA_ROOT}/src"
