@@ -405,7 +405,7 @@ def test_every_container_of_the_run_job_dumps_no_core():
     text = (REPO / "jobs" / "aorlta-run.sbatch").read_text()
     runs = [text[i:text.index(' "$', text.index("--entrypoint", i))] for i in range(len(text))
             if text.startswith("docker run ", i)]
-    assert len(runs) == 6 and "--ulimit core=0" in text[text.index("CHK_DOCKER=("):text.index(")", text.index(
+    assert len(runs) == 7 and "--ulimit core=0" in text[text.index("CHK_DOCKER=("):text.index(")", text.index(
         "CHK_DOCKER=("))]
     assert all("--ulimit core=0" in r or "${CHK_DOCKER[@]}" in r for r in runs), runs
 
