@@ -1,6 +1,8 @@
 """Each stand-in adapter is built from its own settings in the profile (a regression: late-bound
 closures once gave every factory the last adapter's settings)."""
 
+import os
+
 from aorlta.reward.clock import Clock
 from aorlta.reward.factories import standin_factories
 from aorlta.reward.profiles import load_profile
@@ -41,3 +43,16 @@ def test_a_site_rocm_root_reaches_every_adapter_that_compiles(monkeypatch):
             close = getattr(a, "close", None)
             if close:
                 close()
+
+
+def test_aortas_asan_canary_is_given_the_compiler_the_candidates_are_built_with(monkeypatch):
+    """aorta's ASan node-health canary builds with $HIPCC when it is set, else from aorta's own ROCm lookup, which a
+    site's AORLTA_ROCM_ROOT does not reach. Building the factories names the candidates' compiler there; a $HIPCC
+    already set stands."""
+    monkeypatch.setenv("AORLTA_ROCM_ROOT", "/site/rocm")
+    monkeypatch.delenv("HIPCC", raising=False)
+    standin_factories(load_profile("standin-gpu"), Clock())
+    assert os.environ["HIPCC"] == "/site/rocm/bin/hipcc"
+    monkeypatch.setenv("HIPCC", "/chosen/hipcc")
+    standin_factories(load_profile("standin-gpu"), Clock())
+    assert os.environ["HIPCC"] == "/chosen/hipcc"
