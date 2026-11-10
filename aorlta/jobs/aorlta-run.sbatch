@@ -391,7 +391,7 @@ cfg = load_config(sys.argv[1])
 if cfg.orchestrator.mode == "score":
     from aorlta.orchestrator.score import REPORT_DIR, SUMMARY_NAME
     path = cfg.run_dir / REPORT_DIR / SUMMARY_NAME
-    print(path.read_text() if path.is_file() else f"no score summary at {path}", end="")
+    print(path.read_text() if path.is_file() else f"no score summary at {path}\n", end="")
     sys.exit(0)
 for n in complete_iterations(cfg.run_dir):
     s = read_summary(cfg.run_dir, n)
