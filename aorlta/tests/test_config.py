@@ -78,6 +78,40 @@ def test_the_example_config_loads_with_doc_defaults(tmp_path: Path):
     assert cfg.run_dir == tmp_path / "runs" / "standin" / "dev-standin-001"
 
 
+# --- site files -----------------------------------------------------------------------------------
+
+
+def test_a_site_file_sets_the_site_paths_and_nothing_else_changes(tmp_path: Path, monkeypatch):
+    path = tmp_path / "run.yaml"
+    path.write_text(json.dumps(edit(standin(), "reward.remote", REMOTE)))
+    site = tmp_path / "site.yaml"
+    site.write_text("run: {root: /local/runs}\nmodel: {base_dir: /local/hf/model}\n"
+                    "data: {prompt_pools: [/local/pool/listings]}\nsync: {dir: /dev/shm/me}\n"
+                    "reward: {remote: {socket_dir: /dev/shm/aorlta-checkers/me}}\n")
+    expected = C.plain(load_config(path))
+    expected["run"]["root"], expected["model"]["base_dir"] = "/local/runs", "/local/hf/model"
+    expected["data"]["prompt_pools"][0]["path"], expected["sync"]["dir"] = "/local/pool/listings", "/dev/shm/me"
+    expected["reward"]["remote"]["socket_dir"] = "/dev/shm/aorlta-checkers/me"
+    assert C.plain(load_config(path, site=site)) == expected
+    monkeypatch.setenv(C.SITE_ENV, str(site))
+    assert C.plain(load_config(path)) == expected
+
+
+@pytest.mark.parametrize("site, message", [
+    ("rollout: {K: 16}\n", "rollout.K: a site file sets only"),
+    ("run: {run_id: other}\n", "run.run_id: a site file sets only"),
+    ("data: {prompt_pools: [/a, /b]}\n", "data.prompt_pools: give a list of 1 path"),
+    ("data: {prompt_pools: {path: /a}}\n", "data.prompt_pools.path: a site file sets only"),
+    ("reward: {remote: {socket_dir: /dev/shm/x}}\n", "reward.remote.socket_dir: the config has no reward.remote"),
+    ("- /a\n", "a site file must be a mapping"),
+    ("run: {root: relative/runs}\n", "root"),
+])
+def test_a_site_file_cannot_change_what_the_run_does(tmp_path: Path, site, message):
+    path = tmp_path / "run.yaml"
+    path.write_text(STANDIN_YAML.format(root="/scratch/runs"))
+    (tmp_path / "site.yaml").write_text(site)
+    with pytest.raises(ConfigError, match=message):
+        load_config(path, site=tmp_path / "site.yaml")
 
 
 def test_config_is_frozen():

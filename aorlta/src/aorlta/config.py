@@ -11,11 +11,13 @@ its range. The sections and their defaults are the "Configuration." lines of Sec
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import datetime as _dt
 import functools
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -784,9 +786,60 @@ def config_from_dict(data: Any, source: str = "<config>") -> RunConfig:
     return strict_decode(RunConfig, data, "")
 
 
-def load_config(path: str | Path) -> RunConfig:
+SITE_ENV = "AORLTA_SITE"
+# What a site file may set: where a run's data and scratch are, never what the run does.
+SITE_KEYS = ("run.root", "model.base_dir", "data.prompt_pools", "reward.remote.socket_dir", "sync.dir")
+
+
+def _leaves(node: Mapping, prefix: str = ""):
+    for key, value in node.items():
+        if isinstance(value, Mapping):
+            yield from _leaves(value, f"{prefix}{key}.")
+        else:
+            yield f"{prefix}{key}", value
+
+
+def apply_site(data: Any, site: Any, source: str = "<site>") -> Any:
+    """The run config `data` with a site file's paths in place: a mapping of the keys in SITE_KEYS, where
+    `data.prompt_pools` is one path per pool of the config, in its order. A config can then be committed without
+    the site's paths, and the run plan still records the paths a run used."""
+    if not isinstance(site, Mapping):
+        raise ConfigError(f"{source}: a site file must be a mapping, got {_describe(site)}")
+    if not isinstance(data, Mapping):
+        return data
+    out = copy.deepcopy(dict(data))
+    for key, value in _leaves(site):
+        if key not in SITE_KEYS:
+            raise ConfigError(f"{source}: {key}: a site file sets only {', '.join(SITE_KEYS)}")
+        if key == "data.prompt_pools":
+            pools = out.get("data", {}).get("prompt_pools") if isinstance(out.get("data"), Mapping) else None
+            if not (isinstance(value, list) and isinstance(pools, list) and len(value) == len(pools)
+                    and all(isinstance(p, Mapping) for p in pools)):
+                n = len(pools) if isinstance(pools, list) else 0
+                raise ConfigError(f"{source}: data.prompt_pools: give a list of {n} path(s), one per prompt pool")
+            out["data"]["prompt_pools"] = [{**pool, "path": path} for pool, path in zip(pools, value)]
+            continue
+        *parents, leaf = key.split(".")
+        node = out
+        for name in parents:
+            if name == "sync" and node is out and node.get("sync") is None:
+                node["sync"] = {}
+            node = node.get(name) if isinstance(node, Mapping) else None
+        if not isinstance(node, dict):
+            raise ConfigError(f"{source}: {key}: the config has no {'.'.join(parents)} section to set it in")
+        node[leaf] = value
+    return out
+
+
+def load_config(path: str | Path, *, site: str | Path | None = None) -> RunConfig:
+    """The run config at `path`, with the site file `site` applied (apply_site), or the one AORLTA_SITE names."""
     path = Path(path)
-    return config_from_dict(parse_yaml(path.read_bytes(), str(path)), str(path))
+    data = parse_yaml(path.read_bytes(), str(path))
+    site = site if site is not None else os.environ.get(SITE_ENV) or None
+    if site is not None:
+        site = Path(site)
+        data = apply_site(data, parse_yaml(site.read_bytes(), str(site)), str(site))
+    return config_from_dict(data, str(path))
 
 
 # --- run_plan.json ---------------------------------------------------------------------------------
