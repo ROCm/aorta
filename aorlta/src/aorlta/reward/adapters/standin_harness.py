@@ -37,7 +37,7 @@ The launch arguments come from the instantiated kernel's own signature (a functi
 Anything else fails closed and leaves the leg unsettled, never clean: a struct the rule cannot build, a template
 template parameter, a value parameter of another type, a kernel that is a class member, an instantiation that does not
 compile with any attempt (`harness_build_failed`), or a source in which clang finds no kernel definition
-(`HarnessUnsupported`).
+(`NoKernel`, a `HarnessUnsupported`).
 
 This is a stand-in. Its launch is not the kernel's intended one, so a clean leg means "no memory error or race in this
 one launch", and a finding may come from a launch the kernel was not written for. Runs on it are mechanics only.
@@ -85,6 +85,10 @@ INTEGRAL_TYPES = frozenset({
 
 class HarnessUnsupported(ValueError):
     """The harness cannot launch this source's kernels; the leg stays unsettled."""
+
+
+class NoKernel(HarnessUnsupported):
+    """Clang read the source and found no kernel defined in it: nothing to launch, and nothing to instantiate."""
 
 
 def has_main(source_text: str) -> bool:
@@ -280,7 +284,7 @@ def find_kernels(source_path: str | Path, *, hipcc: str = "/opt/rocm/bin/hipcc",
             spec = _specialization(fn) if tparams is None else None
             found.append(Kernel(name, _scope(qualified, name), tparams, ftype, specialization=spec))
     if not found:
-        raise HarnessUnsupported("no kernel definition in the source")
+        raise NoKernel("no kernel definition in the source")
     keys = [(k.scope, k.name) for k in found]  # a plain kernel shares its name with a template: it is taken by type
     return [dataclasses.replace(k, overloaded=keys.count((k.scope, k.name)) > 1) for k in found]
 

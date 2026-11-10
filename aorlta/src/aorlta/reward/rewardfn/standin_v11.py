@@ -69,6 +69,7 @@ class StandinV11:
         if not (isinstance(clean_repeats, int) and not isinstance(clean_repeats, bool) and clean_repeats >= 1):
             raise ValueError(f"clean_repeats must be an int >= 1, got {clean_repeats!r}")
         self.k = clean_repeats
+        self.settings = {"clean_repeats": clean_repeats}
         self.code_sha256 = code_sha256(__file__, base.__file__)
 
     # --- Appendix B --------------------------------------------------------------------------------

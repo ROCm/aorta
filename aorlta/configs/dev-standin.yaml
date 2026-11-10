@@ -1,6 +1,7 @@
 # AORLTA development run on stand-in data only: the public Qwen3.5-4B, stand-in prompts (a kernel dataset's original
 # listings) and the standin-static reward profile. Mechanics only; never reported as a training result.
-# Site-specific paths, to edit: run.root, model.base_dir and data.prompt_pools[0].path.
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir and
+# data.prompt_pools[0].path.
 run:
   run_id: dev-standin
   source: standin

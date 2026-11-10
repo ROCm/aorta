@@ -345,7 +345,8 @@ def test_each_kernel_is_checked_and_the_leg_is_clean_only_if_every_kernel_is(tmp
         assert (r.state, r.reason) == expect
         assert sorted(k for k, _ in check.seen) == ["elementwise", "over", "over", "softmax", "spec", "spec"]
         assert sorted(d for _, d in check.seen) == [f"k{i}" for i in range(6)]  # each kernel, its own program
-        rows = json.loads((out / "kernels.json").read_text())["kernels"]
+        (run,) = out.iterdir()  # the run's own directory
+        rows = json.loads((run / "kernels.json").read_text())["kernels"]
         assert [row["dir"] for row in rows] == [f"k{i}" for i in range(6)]
     assert src.read_text() == SHAPES  # the candidate itself is never edited
 
@@ -384,7 +385,8 @@ def test_waitcheck_scans_the_instantiation_of_a_template_source(tmp_path):
         out = src.parent / "wc"
         r = wc.run(_job("san.waitcheck", src, out, object=str(obj)))
         assert r.state == expect, (name, r.reason)
-        assert (out / "instantiation.o").is_file() == instantiated
+        (run,) = out.iterdir()  # the run's own directory
+        assert (run / "instantiation.o").is_file() == instantiated
     gate_only = StandinRjWaitcheck(RJ, aorta_src=AORTA, ld_library_path=RJ_LIB)  # the gate's object alone: no code
     src = tmp_path / "t" / "source.hip"
     r = gate_only.run(LegJob(job_id="c#san.waitcheck#a1", leg="san.waitcheck", candidate_id="c", control_id=None,

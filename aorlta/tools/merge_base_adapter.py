@@ -162,7 +162,7 @@ def load_adapter(path: str | Path) -> Adapter:
     fields = check_adapter_config(cfg)
     rank, alpha = cfg["r"], cfg["lora_alpha"]
     targets = cfg.get("target_modules")
-    leaf_names = set(targets) if isinstance(targets, list) else None
+    listed = [t for t in targets if isinstance(t, str)] if isinstance(targets, list) else None
     pairs: dict[str, dict[str, torch.Tensor]] = {}
     namings = set()
     with safe_open(str(w_path), framework="pt", device="cpu") as f:
@@ -180,9 +180,9 @@ def load_adapter(path: str | Path) -> Adapter:
             if mm is None:
                 raise Refused(f"{key}: not a text decoder layer (model.layers.N.* or model.language_model.layers.N.*)")
             namings.add("model.language_model.layers.N" if mm.group("lm") else "model.layers.N")
-            leaf = module.rsplit(".", 1)[-1]
-            if leaf_names is not None and leaf not in leaf_names:
-                raise Refused(f"{key}: module {leaf!r} is not in target_modules")
+            # PEFT's rule for a list: the module's full name is an entry, or ends with "." + an entry
+            if listed is not None and not any(module == t or module.endswith("." + t) for t in listed):
+                raise Refused(f"{key}: module {module!r} is not in target_modules")
             t = f.get_tensor(key)
             if t.dtype not in FLOAT_DTYPES or t.dim() != 2:
                 raise Refused(f"{key}: expected a 2-D float tensor, got {t.dtype} {tuple(t.shape)}")
@@ -507,6 +507,9 @@ def compare_bytes(base: Path, out: Path, merged: Merged) -> dict:
     files, tensors, problems = {}, {}, []
     changed_targets = 0
     for name in base_files(base):
+        if not (out / name).is_file():
+            problems.append(f"{name}: missing from the output")
+            continue
         if name not in shards:
             hb, ho = sha256_path(base / name), sha256_path(out / name)
             files[name] = {"bytes": (out / name).stat().st_size, "sha256": ho}
@@ -589,14 +592,22 @@ def reread(base: Path, out: Path, merged: Merged) -> dict:
             "pass": not problems}
 
 
+def _unreadable(name: str, exc: Exception) -> str:
+    return f"{name}: cannot be read: {type(exc).__name__}: {str(exc)[:120]}"
+
+
 def check_index(base: Path, out: Path) -> dict:
-    same = json.loads((out / INDEX_NAME).read_text()) == json.loads((base / INDEX_NAME).read_text())
+    want = json.loads((base / INDEX_NAME).read_text())
+    try:
+        same = json.loads((out / INDEX_NAME).read_text()) == want
+    except (OSError, ValueError) as exc:  # missing, or not JSON
+        return {"weight_map_identical": False, "problem": _unreadable(INDEX_NAME, exc), "pass": False}
     return {"weight_map_identical": same, "pass": same}
 
 
 def run_checks(base: Path, out: Path, merged: Merged) -> dict:
     t = time.monotonic()
-    names = set(p.name for p in out.iterdir() if p.is_file()) - {MANIFEST_NAME}
+    names = {p.name for p in out.iterdir() if p.is_file()} - {MANIFEST_NAME} if out.is_dir() else set()
     file_set = {"pass": names == set(base_files(base)), "extra": sorted(names - set(base_files(base))),
                 "missing": sorted(set(base_files(base)) - names)}
     checks = {"file_set": file_set, "index": check_index(base, out)}
@@ -730,14 +741,20 @@ def cmd_verify(args) -> int:
     merged = merge_in_memory(base, adapter, expect_scale=args.expect_scale, expect_modules=args.expect_modules)
     checks = run_checks(base, out, merged)
     checks["rounding"] = check_rounding(merged.base_targets, merged.factors, merged.weights)
-    recorded = json.loads((out / MANIFEST_NAME).read_text()) if (out / MANIFEST_NAME).is_file() else None
+    problems = [checks["index"]["problem"]] if "problem" in checks["index"] else []
+    try:
+        recorded = json.loads((out / MANIFEST_NAME).read_text())["output"]["files"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:  # missing, not JSON, or not a merge manifest
+        recorded = None
+        problems.append(_unreadable(MANIFEST_NAME, exc))
     files = checks["bytes"]["files"]
-    same_as_manifest = recorded is not None and recorded["output"]["files"] == files
+    same_as_manifest = recorded is not None and recorded == files
     ok = checks["pass"] and checks["rounding"]["pass"] and same_as_manifest
     print(json.dumps({"pass": ok, "checks_pass": checks["pass"], "rounding_pass": checks["rounding"]["pass"],
                       "files_match_manifest": same_as_manifest, "files": files,
                       "targets_changed": checks["bytes"]["targets_changed"],
-                      "problems": checks["bytes"]["problems"][:3] + checks["reread"]["problems"][:3]}, indent=1))
+                      "problems": problems + checks["bytes"]["problems"][:3] + checks["reread"]["problems"][:3]},
+                     indent=1))
     return 0 if ok else 1
 
 

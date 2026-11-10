@@ -9,8 +9,8 @@ serves those positions from the prefix cache (the admission probe is capped at `
 Verdicts, with changed(n) = elements where W_eff(n) != W_eff(n-1):
 - LANDED: changed(n) > 0, the engine's probe log-probs differ bitwise from its previous ones, and the mean
   |engine - trainer| per token is <= tau.
-- NOOP: changed(n) == 0 and the engine's log-probs are bitwise unchanged.
-- NOT_LANDED: changed(n) > 0 but the engine's log-probs are bitwise unchanged. Stop.
+- NOOP: changed(n) == 0, the engine's log-probs are bitwise unchanged, and the mean gap is <= tau.
+- NOT_LANDED: changed(n) > 0 but the engine's log-probs are bitwise unchanged, whatever the gap. Stop.
 - MISMATCH: the mean gap exceeds tau, or the engine changed under a zero update, or a log-prob is not finite. Stop.
 
 tau = max(tau_floor, 3 x the median over the v0 probes of each probe's mean per-token gap). The calibration and
@@ -140,7 +140,8 @@ class ProbeSet:
 def build_probes(tokenizer, user_texts: Sequence[str], *, system: str, tokens: int = 1024,
                  reply: str = PROBE_REPLY, reply_min: int = 256) -> ProbeSet:
     """One probe per user text: the chat-rendered prompt (thinking off) plus the fixed reply, exactly `tokens`
-    long. Long prompts are cut at a line boundary so that at least `reply_min` reply tokens fit."""
+    long. Long prompts are cut at a line boundary so that at least `reply_min` reply tokens fit; a prompt that
+    leaves less room even cut to its first line is refused."""
     reply_ids = tokenizer(reply, add_special_tokens=False)["input_ids"]
     if len(reply_ids) < reply_min:
         raise LandingError(f"the probe reply has {len(reply_ids)} tokens, fewer than reply_min {reply_min}")
@@ -152,8 +153,11 @@ def build_probes(tokenizer, user_texts: Sequence[str], *, system: str, tokens: i
             rendered = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
                                                      enable_thinking=False)
             prompt_ids = tokenizer(rendered, add_special_tokens=False)["input_ids"]
-            if len(prompt_ids) + reply_min <= tokens or len(lines) <= 1:
+            if len(prompt_ids) + reply_min <= tokens:
                 break
+            if len(lines) <= 1:
+                raise LandingError(f"a probe prompt is {len(prompt_ids)} tokens even cut to its first line: "
+                                   f"reply_min {reply_min} reply tokens do not fit in {tokens}")
             lines = lines[:-1]
         ids = (prompt_ids + reply_ids)[:tokens]
         if len(ids) != tokens:
@@ -317,6 +321,8 @@ def landing_verdict(changed: int, engine_now: Sequence[Sequence[float]], engine_
     if changed == 0:
         if engine_changed:
             return result("MISMATCH", "the merge changed nothing, yet the engine's log-probs changed")
+        if mean_gap > tau:
+            return result("MISMATCH", f"the merge changed nothing, yet mean gap {mean_gap:.6g} > tau {tau:.6g}")
         return result("NOOP", "the update fell below bf16 resolution and the engine is unchanged")
     if not engine_changed:
         return result("NOT_LANDED", f"{changed} elements changed but the engine's log-probs did not")
