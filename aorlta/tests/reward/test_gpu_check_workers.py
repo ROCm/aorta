@@ -260,6 +260,40 @@ def test_identical_checks_at_once_build_and_run_apart_and_a_timeout_kills_only_i
     assert programs[5.0] != programs[600.0] and not _running(programs[600.0])
 
 
+def test_a_limit_reached_in_the_asan_canary_kills_the_canary_and_the_program_aorta_starts_after(tmp_path, monkeypatch):
+    """The limit can pass while aorta's ASan still builds or runs its node-health canary, before the program exists.
+    The canary is killed at the limit, the program aorta goes on to launch is killed as it starts, and close() covers
+    the run until aorta returns."""
+    monkeypatch.setattr(standin_aorta, "CHECK_GRACE_S", 0.3)
+    out = tmp_path / "out"
+    exe = out / "k0" / "python"
+    exe.parent.mkdir(parents=True)
+    exe.symlink_to(sys.executable)
+    procs, returned = [], threading.Event()
+
+    def aorta_like(models, exe_, kernel, out_):
+        procs.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", str(out_ / "node-health")]))
+        procs[-1].wait()
+        procs.append(subprocess.Popen([str(exe_), "-c", "import time; time.sleep(60)"]))
+        procs[-1].wait()
+        returned.set()
+        return "clean", None, []
+
+    a = AortaAsan(aorta_src="/nonexistent", timeout_s=45.0, check_timeout_s=0.3)
+    monkeypatch.setattr(a, "check", aorta_like)
+    try:
+        state, reason, _ = a.bounded_check(_models(), exe, "k", out)
+        assert state == "unsettled" and reason.startswith("check_timeout:")
+        assert returned.wait(timeout=30) and [p.returncode for p in procs] == [-9, -9]
+        deadline = time.monotonic() + 10
+        while a._lingering and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not a._lingering
+    finally:
+        for p in procs:
+            p.kill()
+
+
 def test_close_kills_what_aorta_launched_for_the_check_and_what_it_launches_after(tmp_path, monkeypatch):
     """aorta's backends run their programs with their own subprocess calls, which the adapter's runner never sees. Here
     a stand-in does what aorta's ASan can: a build (of the node-health canary) that close() interrupts, after which it
