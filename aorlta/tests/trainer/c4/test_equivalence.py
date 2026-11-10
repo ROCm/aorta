@@ -202,3 +202,20 @@ def test_c4_t7_streaming_in_random_group_order_equals_one_batched_step(agg):
         assert cosine(t.last_flat_grad, batched.last_flat_grad) >= GRAD_COS
         assert rep["totals"] == b_rep["totals"]
     assert b_rep["totals"]["groups"] == sum(1 for g in groups if g.samples)
+
+
+def test_the_gap_gates_view_packs_as_the_step_does_on_the_torch_fallback():
+    """measure.gap.score_packed packs each group as the streaming step does: on the torch fallback one sequence per
+    row, so every sample's log-probs are those of its forward alone."""
+    from aorlta.measure.gap import score_packed
+
+    groups = _iteration()
+    model = tiny_peft(torch.float32, seed=SEED, b_std=0.05, packing=False)
+    packed = score_packed(model, groups, micro_batch_tokens=96, device="cpu", temperature=0.7, amp=False)
+    samples = [s for g in groups for s in g.samples]
+    assert len(packed) == len(samples)
+    with torch.no_grad():
+        for s in samples:
+            mb = make_microbatch([s])
+            _, raw, _ = forward_microbatch(model, mb, device="cpu", temperature=0.7, amp=False)
+            assert torch.equal(packed[s.chain_id], raw[mb.sample_slices()[0]].float())

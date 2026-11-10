@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from aorlta.trainer import kernels
 from aorlta.trainer.batching import (DEFAULT_CHUNK_TOKENS, _head_logits, amp_context, backbone_and_head,
                                      forward_microbatch, pack)
 from aorlta.trainer.loss import TrainerInputError, TurnSpan, turn_spans
@@ -121,15 +122,17 @@ def score_items(model, items: Sequence[ChainItem], *, device, temperature: float
 def score_packed(model, plans: Sequence, *, micro_batch_tokens: int, device, temperature: float, amp: bool = True,
                  lm_head_fp32: bool = False, chunk_tokens: int = DEFAULT_CHUNK_TOKENS) -> dict[str, torch.Tensor]:
     """The gap gate's view: each group's samples packed as the streaming step packs them (`RankTrainer._add` with
-    across_groups=False: one `pack` per group), forwarded by `forward_microbatch` without grad. Returns the raw
-    log-probs of each sample's response (its final turn), by chain id."""
+    across_groups=False: one `pack` per group, one sequence per row where the linear attention would run a packed row
+    as one sequence), forwarded by `forward_microbatch` without grad. Returns the raw log-probs of each sample's
+    response (its final turn), by chain id."""
     model.eval()
+    max_sequences = None if kernels.honours_packing(model) else 1
     out: dict[str, torch.Tensor] = {}
     with torch.no_grad():
         for g in plans:
             if not g.samples:
                 continue
-            for mb in pack(list(g.samples), micro_batch_tokens):
+            for mb in pack(list(g.samples), micro_batch_tokens, max_sequences=max_sequences):
                 _, raw, _ = forward_microbatch(model, mb, device=device, temperature=temperature, amp=amp,
                                                lm_head_fp32=lm_head_fp32, chunk_tokens=chunk_tokens)
                 for s, sl in zip(mb.samples, mb.sample_slices()):
