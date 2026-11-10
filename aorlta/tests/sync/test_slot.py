@@ -86,18 +86,6 @@ def test_a_slot_that_would_leave_less_than_the_margin_free_is_refused(tiny_base,
     assert not (shm / "r" / "w1.partial").exists()
 
 
-def test_a_slot_that_would_leave_less_than_the_margin_free_is_refused(tiny_base, tmp_path, monkeypatch):
-    weights = targets(tiny_base)
-    total = sum(t.numel() * t.element_size() for t in weights.values())
-    shm = tmp_path / "shm"
-    capacity = slot_bytes(tiny_base, tmp_path, weights) + total + MARGIN - 1
-    monkeypatch.setattr(W, "free_bytes", lambda path: capacity - used(shm))
-    W.write_slot(weights, base_dir=tiny_base, sync_dir=shm, run_id="r", version=0, margin=MARGIN)
-    with pytest.raises(W.ShmFullError, match="free"):
-        W.write_slot(weights, base_dir=tiny_base, sync_dir=shm, run_id="r", version=1, margin=MARGIN)
-    assert not (shm / "r" / "w1.partial").exists()
-
-
 def test_the_slot_being_replaced_still_counts_until_the_new_one_is_complete(tiny_base, tmp_path, monkeypatch):
     weights = targets(tiny_base)
     shm = tmp_path / "shm"
@@ -108,6 +96,20 @@ def test_the_slot_being_replaced_still_counts_until_the_new_one_is_complete(tiny
     with pytest.raises(W.ShmFullError, match="free"):
         W.write_slot(weights, base_dir=tiny_base, sync_dir=shm, run_id="r", version=2, margin=MARGIN)
     assert W.verify_slot(shm / "r" / "w0")["ok"] and not (shm / "r" / "w0.partial").exists()
+
+
+def test_a_stale_partial_of_the_slot_is_removed_before_the_space_is_measured(tiny_base, tmp_path, monkeypatch):
+    import shutil
+
+    weights = targets(tiny_base)
+    shm = tmp_path / "shm"
+    capacity = 2 * slot_bytes(tiny_base, tmp_path, weights) + MARGIN
+    monkeypatch.setattr(W, "free_bytes", lambda path: capacity - used(shm))
+    served = W.write_slot(weights, base_dir=tiny_base, sync_dir=shm, run_id="r", version=0, margin=MARGIN)
+    stale = shm / "r" / "w1.partial"
+    shutil.copytree(served.path, stale)  # a write of version 1 interrupted after its last shard
+    info = W.write_slot(weights, base_dir=tiny_base, sync_dir=shm, run_id="r", version=1, margin=MARGIN)
+    assert W.verify_slot(info.path)["ok"] and W.verify_slot(served.path)["ok"] and not stale.exists()
 
 
 def test_the_copied_files_count_toward_the_space_a_slot_needs(tiny_base, tmp_path, monkeypatch):
