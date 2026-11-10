@@ -17,11 +17,11 @@ import sys
 import traceback
 from pathlib import Path
 
-from ..config import load_config
+from ..config import ConfigError, load_config
 from .ports import describe_error
 
 
-def fake_components(cfg, *, config_path: Path | None = None):
+def fake_components(cfg, *, config_path: Path | None = None, commit: str | None = None):
     from ..spans import SpanRecorder
     from .fakes import (FakeEvalHook, FakeExporter, FakeReward, FakeRollout, FakeRolloutConfig, FakeSync, FakeTrainer,
                         FakeTrainerConfig, VirtualClock, ensure_fake_base, make_pool)
@@ -40,7 +40,7 @@ def fake_components(cfg, *, config_path: Path | None = None):
                             spans=spans, source=cfg.run.source)
     return Orchestrator(cfg, pool=make_pool(2 * cfg.rollout.P, source=cfg.run.source), rollout=rollout,
                         reward=FakeReward(clock), trainer=trainer, sync=sync, eval_hook=hook, clock=clock,
-                        spans=spans, config_path=config_path)
+                        spans=spans, commit=commit, config_path=config_path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,9 +52,13 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except (ConfigError, OSError) as exc:
+        print(f"cannot load the config: {exc}", file=sys.stderr)
+        return 2
     if args.components == "fake":
-        orch = fake_components(cfg, config_path=args.config)
+        orch = fake_components(cfg, config_path=args.config, commit=args.commit)
     else:
         from . import wiring
 

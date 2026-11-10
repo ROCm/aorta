@@ -2,9 +2,12 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -23,8 +26,8 @@ orchestrator: {{iterations: 2, run_seed: 7, eval_every: 2, min_scored_fraction: 
     return path
 
 
-def _main(*args):
-    env = dict(os.environ, PYTHONPATH=str(SRC), PYTHONDONTWRITEBYTECODE="1")
+def _main(*args, src=SRC):
+    env = dict(os.environ, PYTHONPATH=str(src), PYTHONDONTWRITEBYTECODE="1")
     return subprocess.run([sys.executable, "-m", "aorlta.orchestrator.run", *args], capture_output=True, text=True,
                           env=env, timeout=120)
 
@@ -51,3 +54,34 @@ def test_real_components_refuse_what_the_wiring_cannot_run(tmp_path):
     assert proc.returncode == 2, proc.stderr[-1500:]
     assert "trainer.ranks is 4" in proc.stderr and "eval_every is set" in proc.stderr
     assert not (tmp_path / "runs").exists()  # refused before the run directory was made
+
+
+def test_the_fake_components_record_the_commit_given_for_a_snapshot_without_git(tmp_path):
+    snapshot = tmp_path / "snapshot" / "src"  # an exported tree with no .git, as the run job executes
+    shutil.copytree(SRC, snapshot, ignore=shutil.ignore_patterns("__pycache__"))
+    commit = "c0ffee" * 6 + "c0ff"
+    proc = _main("--config", str(_config(tmp_path)), "--components", "fake", "--commit", commit, src=snapshot)
+    assert proc.returncode == 0, proc.stdout[-1500:] + proc.stderr[-1500:]
+    code = json.loads((tmp_path / "runs" / "standin" / "cli-smoke" / "run_plan.json").read_text())["code"]
+    assert (code["commit"], code["dirty"], code["package_dir"]) == (commit, None, str(snapshot / "aorlta"))
+
+
+def _write(path: Path, text: str) -> Path:
+    path.write_text(text)
+    return path
+
+
+@pytest.mark.parametrize("make, message", [
+    (lambda d: d / "absent.yaml", "No such file or directory"),
+    (lambda d: d, "Is a directory"),
+    (lambda d: _write(d / "torn.yaml", "run: {run_id: x, source: standin\nmodel: [\n"), "invalid YAML"),
+    (lambda d: _write(d / "k1.yaml", _config(d).read_text().replace("K: 8", "K: 1")), "rollout.K: must be >= 2"),
+])
+def test_a_config_that_does_not_load_is_a_usage_error_with_a_message(tmp_path, make, message):
+    path = make(tmp_path)
+    for components in ("fake", "real"):
+        proc = _main("--config", str(path), "--components", components)
+        assert proc.returncode == 2, proc.stderr[-1500:]
+        assert proc.stderr.startswith("cannot load the config: ") and message in proc.stderr
+        assert "Traceback" not in proc.stderr and proc.stdout == ""
+    assert not (tmp_path / "runs").exists()

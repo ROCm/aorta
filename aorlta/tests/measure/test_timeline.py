@@ -235,6 +235,35 @@ def test_v2_bounds_run_between_consecutive_publications():
         tl.bounds_v2(spans[1:], 1)
 
 
+def _no_step_iteration(it=1, at=152.0):
+    """An iteration that took no optimizer step (every group scored alike): no step and no sync tail, and the
+    loop's zero-length `no_step` marker where the landing would have ended it."""
+    tail = {"train.final", "merge", "write", "reload", "landing"}
+    return [s for s in v1_iteration(it) if s.name not in tail] + [sp("no_step", at, at, it, reason="zero_advantage")]
+
+
+def test_an_iteration_that_took_no_step_ends_at_its_no_step_marker():
+    b = tl.bounds_v1(_no_step_iteration(), 1)
+    assert (b.t_begin - T0, b.t_end - T0, b.begin_from, b.end_from) == (0, 152, "select", "no_step")
+    (t,) = tl.summarize_run(_no_step_iteration(), verdicts={1: []})
+    assert t.wall_s == 152 and sum(t.critical_s.values()) == pytest.approx(152) and t.unclassified == ()
+    spans = [sp("landing", 5, 6, it=0, verdict="LANDED")] + _no_step_iteration(1) + \
+        [Span(s.name, 2, s.t_start + 200, s.t_end + 200, s.attrs) for s in v1_iteration(2)]
+    b2 = tl.bounds_v2(spans, 2)
+    assert (b2.t_begin - T0, b2.t_end - T0, b2.begin_from) == (152, 376, "no_step(1)")
+    assert tl.bounds_v2(spans, 1).end_from == "no_step"
+
+
+@pytest.mark.parametrize("spans, verdicts, message", [
+    (_no_step_iteration() + [sp("landing", 175, 176, verdict="LANDED")], None, "1 'landing' spans"),
+    (_no_step_iteration() + [sp("no_step", 160, 160)], None, "2 'no_step' markers"),
+    (_no_step_iteration(), {1: ["LANDED"]}, "took no step, but its summary gives landing verdicts"),
+])
+def test_a_no_step_marker_fails_closed(spans, verdicts, message):
+    with pytest.raises(TimelineError, match=message):
+        tl.bounds_v1(spans, 1, verdicts)
+
+
 def test_envelope_bounds_are_marked_as_such():
     spans = [sp("gen.turn0", 3, 10), sp("compile", 10, 11)]
     b = tl.bounds_envelope(spans, 1)

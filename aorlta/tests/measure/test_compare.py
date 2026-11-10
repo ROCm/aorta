@@ -12,11 +12,13 @@ import pytest
 from measure_helpers import T0, v1_iteration
 
 from aorlta.config import plain
+from aorlta.episodes.writer import SPANS_NAME, complete_iterations, iteration_dir_name, read_episodes, read_summary
 from aorlta.measure import compare as cmp
 from aorlta.measure import per256
 from aorlta.measure.compare import (Allocation, Bundle, CompareError, Heldout, IterationRecord, Protocol, Validation,
                                     ValidationPoint)
-from aorlta.spans import Span
+from aorlta.orchestrator.fakes import FakeRunSpec, build_fake_run
+from aorlta.spans import Span, read_jsonl
 
 # --- statistics --------------------------------------------------------------------------------------
 
@@ -306,6 +308,33 @@ def test_bundle_from_run_needs_prompt_ids_and_markers():
     with pytest.raises(CompareError, match="v1 or v2"):
         cmp.bundle_from_run(spans, episodes, system="A", held_equal=HELD, allocation=Allocation(8, 1), stalls={},
                             mode="envelope")
+
+
+@pytest.mark.parametrize("spec, planted", [
+    (dict(engine={"error_rate": 0.2, "seed": 4}), lambda eps, sums: any(not e["turns"] for e in eps)),
+    (dict(leak_check=True, engine={"error_rate": 0.0}, rollout={"quarantine_rate": 0.5}),
+     lambda eps, sums: any(e["status"] == "quarantined" for e in eps)),
+    (dict(engine={"error_rate": 0.0}, reward={"constant": 0.5}),
+     lambda eps, sums: not any(s["trainer"]["step_taken"] for s in sums.values())),
+], ids=["lost-before-a-reply", "quarantined", "no-step"])
+def test_bundle_from_run_measures_every_iteration_a_fake_run_committed(tmp_path, spec, planted):
+    r = build_fake_run(FakeRunSpec(root=str(tmp_path / "runs"), iterations=2, eval_every=None, **spec))
+    assert r.orchestrator.run()["status"] == "completed"
+    its = complete_iterations(r.cfg.run_dir)
+    sums = {n: read_summary(r.cfg.run_dir, n) for n in its}
+    eps = [e for n in its for e in read_episodes(r.cfg.run_dir, n)]
+    assert planted(eps, sums)
+    spans = [s for n in its for s in read_jsonl(r.cfg.run_dir / "iterations" / iteration_dir_name(n) / SPANS_NAME)]
+    verdicts = {n: list(s["sync"]["verdicts"].values()) for n, s in sums.items() if s["sync"]["published"]}
+    b = cmp.bundle_from_run(spans, eps, system="AORLTA", held_equal=HELD, allocation=Allocation(8, 1), stalls={},
+                            landing_verdicts=verdicts)
+    assert [x.iteration for x in b.iterations] == its == [1, 2]
+    for x in b.iterations:
+        s = sums[x.iteration]
+        assert (x.samples, x.scored, x.unscored_by_reason) == (s["samples"]["total"], s["samples"]["scored"],
+                                                                s["unscored_by_reason"])
+        assert x.wall_s == pytest.approx(s["timing"]["wall_s"], rel=1e-12)
+        assert x.noop == (not s["trainer"]["step_taken"])
 
 
 def test_the_prompt_set_hash_ignores_order_and_repeats():

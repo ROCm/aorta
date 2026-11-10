@@ -178,12 +178,13 @@ class AppendLedger:
         return out
 
     def truncate_after(self, n: int) -> int:
-        """Keep the records of iterations <= n (and drop a torn line); return how many were dropped."""
+        """Keep the records of iterations <= n (and drop a torn line); return how many were dropped. A kept last
+        record that lacks its newline gets it back, or the next append would run on into the same line."""
         if not self.path.exists():
             return 0
-        lines = self.path.read_bytes().split(b"\n")
+        raw = self.path.read_bytes()
         kept, dropped = [], 0
-        for line in lines:
+        for line in raw.split(b"\n"):
             if not line:
                 continue
             try:
@@ -195,9 +196,10 @@ class AppendLedger:
                 kept.append(line + b"\n")
             else:
                 dropped += 1
-        if dropped:
+        data = b"".join(kept)
+        if data != raw:
             with self._lock:
-                atomic_write_bytes(self.path, b"".join(kept))
+                atomic_write_bytes(self.path, data)
         return dropped
 
 

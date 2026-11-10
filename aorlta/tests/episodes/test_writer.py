@@ -97,6 +97,17 @@ def test_a_ledger_appends_skips_a_torn_last_line_and_truncates_by_iteration(tmp_
         led.append([{"a": 5}])  # every record names its iteration
 
 
+def test_truncating_gives_a_kept_last_record_back_the_newline_a_crash_cut(tmp_path):
+    led = AppendLedger(tmp_path / "x.jsonl")
+    led.append([{"iteration": 1, "a": 1}, {"iteration": 2, "a": 2}])
+    clean = os.stat(led.path).st_ino
+    assert led.truncate_after(2) == 0 and os.stat(led.path).st_ino == clean  # nothing to change: not rewritten
+    led.path.write_bytes(led.path.read_bytes()[:-1])  # the crash cut only the final newline
+    assert led.truncate_after(2) == 0
+    led.append([{"iteration": 3, "a": 3}])
+    assert [r["a"] for r in led.read()] == [1, 2, 3]
+
+
 def test_a_ledger_with_a_bad_line_before_the_end_is_refused(tmp_path):
     p = tmp_path / "x.jsonl"
     p.write_bytes(b'{"iteration": 1}\nnot json\n{"iteration": 2}\n')

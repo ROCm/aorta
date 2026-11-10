@@ -68,7 +68,7 @@ class IterationRecord:
     prompts_sha256: str | None = None  # the iteration's prompt set (prompt_set_sha256)
     unscored_by_reason: dict[str, int] = field(default_factory=dict)
     truncated: int | None = None  # final answers that ended on the length cap
-    noop: bool | None = None  # the landing verdict was NOOP
+    noop: bool | None = None  # the landing verdict was NOOP, or no optimizer step was taken
     category_coverage_s: dict[str, float] = field(default_factory=dict)  # wall-clock coverage by category
     category_critical_s: dict[str, float] = field(default_factory=dict)  # critical-path seconds by category
     check_share: tuple[float, float] | None = None  # verify70 lower and upper bounds
@@ -596,7 +596,7 @@ def bundle_from_run(spans: Sequence[Span], episodes: Sequence[Mapping[str, Any]]
             iteration=n, wall_s=t.wall_s, samples=c.samples, scored=c.scored, stalled=s.stalled,
             stall_reason=s.stall_reason, mean_train_reward=c.mean_train_reward,
             prompts_sha256=prompt_set_sha256(prompts[n]), unscored_by_reason=dict(c.unscored_by_reason),
-            truncated=c.truncated, noop=t.bounds.end_from == "landing:NOOP",
+            truncated=c.truncated, noop=t.bounds.end_from in ("landing:NOOP", timeline.NO_STEP_SPAN),
             category_coverage_s={k: v for k, v in t.category_coverage_s.items()},
             category_critical_s=dict(t.category_critical_s), check_share=(row.lower, row.upper),
             check_status=row.status))

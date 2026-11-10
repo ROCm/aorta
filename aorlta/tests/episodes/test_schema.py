@@ -6,8 +6,10 @@ from collections import Counter
 import pytest
 
 from aorlta.episodes.schema import EPISODE_KEYS, EpisodeError, validate_episode, validate_summary
+from aorlta.episodes.summary import span_check
 from aorlta.episodes.writer import complete_iterations, read_episodes, read_summary
 from aorlta.orchestrator.fakes import FakeRunSpec, build_fake_run
+from aorlta.spans import Span
 
 
 @pytest.fixture(scope="module")
@@ -148,3 +150,15 @@ def test_a_summary_that_breaks_a_rule_is_refused(runs):
         mutate(bad)
         with pytest.raises(EpisodeError):
             validate_summary(bad)
+
+
+def test_the_span_check_asks_an_iteration_that_took_no_step_for_its_no_step_marker():
+    spans = [Span(name, 1, 0.0, 1.0, {}) for name in ("select", "gen.turn0", "score.wait", "record", "ckpt")]
+
+    def missing(ss, step_taken):
+        return span_check(ss, 0.0, 2.0, step_taken=step_taken, any_repair=False, any_compile=False,
+                          any_trained_group=False)["missing"]
+
+    assert missing(spans, False) == ["no_step"]
+    assert missing(spans + [Span("no_step", 1, 1.0, 1.0, {})], False) == []
+    assert missing(spans, True) == ["landing", "merge", "reload", "train.final", "write"]
