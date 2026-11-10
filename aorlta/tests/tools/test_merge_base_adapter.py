@@ -288,6 +288,8 @@ REFUSALS = {
         sd, _first(sd, "mlp.gate_proj.lora_A.weight")[: -len(".lora_A.weight")].replace(TEXT_PREFIX, LM_PREFIX))),
     "wrong_rank": dict(tensors=lambda sd: sd.update(
         {_first(sd, "self_attn.q_proj.lora_A.weight"): torch.zeros(5, 64)})),
+    "overflowing_merge": dict(tensors=lambda sd: sd.update(
+        {k: torch.full_like(v, 1e30) for k, v in sd.items() if ".self_attn.q_proj.lora_" in k})),
 }
 
 

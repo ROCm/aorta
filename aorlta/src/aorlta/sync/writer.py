@@ -213,12 +213,16 @@ def write_slot(
             raise SyncError(f"{name}: dtype {t.dtype} is not one the writer knows")
     sizes = {name: t.numel() * t.element_size() for name, t in tensors.items()}
     total = sum(sizes.values())
+    copies = [f for f in sorted(base_dir.iterdir())
+              if f.is_file() and f.suffix in COPY_SUFFIXES and f.name not in (INDEX_NAME, MANIFEST_NAME)]
+    copied = sum(f.stat().st_size for f in copies)
     final = slot_path(sync_dir, run_id, version, slots)
     # the served slot already takes its space, and a slot being replaced keeps its own until the rename below
-    need = total + margin
+    need = total + copied + margin
     free = free_bytes(final.parent)
     if free < need:
-        raise ShmFullError(f"{final.parent}: {free} bytes free, need {need} ({total} for the slot + margin {margin})")
+        raise ShmFullError(f"{final.parent}: {free} bytes free, need {need} ({total} for the tensors + {copied} for "
+                           f"the copied files + margin {margin})")
 
     tmp = final.with_name(final.name + PARTIAL_SUFFIX)
     shutil.rmtree(tmp, ignore_errors=True)
@@ -240,10 +244,9 @@ def write_slot(
         _fsync_path(tmp / fn)
         del shard
     atomic_write_json(tmp / INDEX_NAME, {"metadata": {"total_size": total}, "weight_map": weight_map})
-    for f in sorted(base_dir.iterdir()):
-        if f.is_file() and f.suffix in COPY_SUFFIXES and f.name not in (INDEX_NAME, MANIFEST_NAME):
-            shutil.copyfile(f, tmp / f.name)
-            _fsync_path(tmp / f.name)
+    for f in copies:
+        shutil.copyfile(f, tmp / f.name)
+        _fsync_path(tmp / f.name)
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "run_id": run_id,
@@ -254,6 +257,10 @@ def write_slot(
     }
     atomic_write_json(tmp / MANIFEST_NAME, manifest)
     _fsync_path(tmp)
+    left = free_bytes(final.parent)
+    if left < margin:  # the shard headers, the index and the manifest took the rest
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise ShmFullError(f"{final.parent}: {left} bytes free once slot {version} is written, under the margin {margin}")
     if final.exists():  # slot n-2, never the one served (that is slot n-1)
         shutil.rmtree(final)
     os.rename(tmp, final)

@@ -13,8 +13,9 @@ Verdicts, with changed(n) = elements where W_eff(n) != W_eff(n-1):
 - NOT_LANDED: changed(n) > 0 but the engine's log-probs are bitwise unchanged, whatever the gap. Stop.
 - MISMATCH: the mean gap exceeds tau, or the engine changed under a zero update, or a log-prob is not finite. Stop.
 
-tau = max(tau_floor, 3 x the median over the v0 probes of each probe's mean per-token gap). The calibration and
-the verdict use the same statistic, a per-token mean, so v0 itself passes. If a solo prefill is not bitwise
+tau = max(tau_floor, 3 x the larger of the median over the v0 probes of each probe's mean per-token gap and the
+pooled per-token mean gap, which the verdict compares), so v0 itself passes with a margin even when one probe's gap
+dwarfs the others'. If a solo prefill is not bitwise
 repeatable (C5.T3), "unchanged" falls back to a tolerance: the largest per-token change is <= repeat_eps.
 """
 
@@ -258,6 +259,7 @@ class Calibration:
     tau_floor: float
     per_probe_gap: tuple[float, ...]
     median_gap: float
+    mean_gap: float  # the pooled per-token mean, the statistic landing_verdict compares with tau
     pooled_median_token_gap: float  # reported only: the median over every token, not used for tau
 
 
@@ -270,8 +272,9 @@ def calibrate_tau(engine_v0: Sequence[Sequence[float]], trainer_v0: Sequence[Seq
         raise LandingError(f"tau_floor must be > 0, got {tau_floor}")
     med = statistics.median(gaps)
     tokens = [abs(e - t) for es, ts in zip(engine_v0, trainer_v0) for e, t in zip(es, ts)]
-    return Calibration(tau=max(tau_floor, 3.0 * med), tau_floor=tau_floor, per_probe_gap=tuple(gaps),
-                       median_gap=med, pooled_median_token_gap=statistics.median(tokens))
+    mean = sum(tokens) / len(tokens)
+    return Calibration(tau=max(tau_floor, 3.0 * max(med, mean)), tau_floor=tau_floor, per_probe_gap=tuple(gaps),
+                       median_gap=med, mean_gap=mean, pooled_median_token_gap=statistics.median(tokens))
 
 
 @dataclass(frozen=True)
