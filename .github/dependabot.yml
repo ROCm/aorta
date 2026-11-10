@@ -5,14 +5,35 @@
 # https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
 
 version: 2
+
 updates:
-  - package-ecosystem: "github-actions"
-    # "/" covers .github/workflows; composite actions keep their own `uses:`
-    # pins, so .github/actions has to be listed separately to get bumped.
+  # Python deps (pyproject.toml extras + requirements*.txt).
+  - package-ecosystem: pip
     directory: "/"
     schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "python"]
+
+  # ROCm base image + other pinned images (bumps the FROM ... @sha256 digests).
+  - package-ecosystem: docker
+    directory: "/docker"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "docker", "rocm"]
+
+  # GitHub Actions used by the workflows.
+  - package-ecosystem: github-actions
+    # "/" covers .github/workflows; composite actions keep their own `uses:`
+    # pins, so .github/actions has to be listed separately to get bumped.
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
       interval: "daily"
-      # Wait a week before adopting newly released action versions.
+    # Wait one week before adopting newly released action versions.
+    # ROCm security actions are excluded from the cooldown.
     cooldown:
       default-days: 7
       exclude:
@@ -22,3 +43,6 @@ updates:
         patterns: ["ROCm/rocm-security-gh*"]
       github-actions:
         patterns: ["*"]
+
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "github-actions"]
