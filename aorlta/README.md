@@ -91,7 +91,8 @@ The paths a run needs are set here (the checks' defaults are under `/opt`):
 | what the run job mounts and runs | environment variables, documented in the header of `jobs/aorlta-run.sbatch`: `AORLTA_VENV`, `TS_SRC`, `AORLTA_ASAN_LIB`, `AORLTA_AORTA_ROOT`, `AORLTA_ROCJITSU_ROOT`, `AORLTA_LIBSTDCXX_SHIM`, `AORLTA_SITE`, `AORLTA_HF_HOME`, `AORLTA_TMPDIR`, `AORLTA_DOCKER_CONFIG`, `AORLTA_MOUNTS`, `AORLTA_EXCLUDE_NODES`. It mounts those directories and passes the check-tool variables into its containers, which use their image's `/opt/rocm` |
 
 Docker mounts each of these directories, and the package root, at its host path, so the docker daemon must be able
-to read them: a root-squashed network home will not do.
+to read them, at the same paths as the job: a root-squashed network home will not do, nor a Slurm job's private
+`/tmp` (`job_container/tmpfs`). The run job checks the second before it starts the run.
 
 A site file keeps a site's paths out of the committed config. It is YAML with only the keys in the first row, and
 `data.prompt_pools` gives one path per pool of the config, in order:
