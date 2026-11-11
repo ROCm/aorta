@@ -158,7 +158,12 @@ def load_adapter(path: str | Path) -> Adapter:
     cfg_path, w_path = path / ADAPTER_CONFIG, path / ADAPTER_WEIGHTS
     if not cfg_path.is_file() or not w_path.is_file():
         raise Refused(f"{path}: needs {ADAPTER_CONFIG} and {ADAPTER_WEIGHTS}")
-    cfg = json.loads(cfg_path.read_text())
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except (OSError, ValueError) as exc:  # unreadable, or not JSON
+        raise Refused(_unreadable(str(cfg_path), exc)) from None
+    if not isinstance(cfg, dict):
+        raise Refused(f"{cfg_path}: not a JSON object")
     fields = check_adapter_config(cfg)
     rank, alpha = cfg["r"], cfg["lora_alpha"]
     targets = cfg.get("target_modules")
@@ -251,14 +256,19 @@ def base_revision(base: Path) -> dict:
 
 def check_pins(base: Path, pins_file: Path, files: dict[str, dict], revision: dict) -> dict:
     """The base files against a pin list ({"base_model": {"revision", "files": [{"name", "bytes", "sha256"}]}})."""
-    pins = json.loads(pins_file.read_text())["base_model"]
+    try:
+        pins = json.loads(pins_file.read_text())["base_model"]
+        rows = [(row["name"], row["bytes"], row["sha256"]) for row in pins["files"]]
+        pins.get("revision")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:  # unreadable, or not a pin list
+        raise Refused(_unreadable(str(pins_file), exc)) from None
     bad = []
-    for row in pins["files"]:
-        got = files.get(row["name"])
+    for name, size, sha in rows:
+        got = files.get(name)
         if got is None:
-            bad.append(f"{row['name']}: missing")
-        elif got["bytes"] != row["bytes"] or got["sha256"] != row["sha256"]:
-            bad.append(f"{row['name']}: differs")
+            bad.append(f"{name}: missing")
+        elif got["bytes"] != size or got["sha256"] != sha:
+            bad.append(f"{name}: differs")
     if revision["snapshot"] is not None and pins.get("revision") != revision["snapshot"]:
         bad.append(f"revision {pins.get('revision')} != snapshot {revision['snapshot']}")
     return {"file": str(pins_file), "sha256": sha256_path(pins_file), "revision": pins.get("revision"),
@@ -277,10 +287,14 @@ def read_header(path: Path) -> tuple[int, dict[str, dict]]:
         n = struct.unpack("<Q", raw)[0]
         if not 0 < n < 1 << 28:
             raise Refused(f"{path}: implausible header length {n}")
-        header = json.loads(f.read(n))
-    header.pop("__metadata__", None)
-    entries = {k: {"dtype": v["dtype"], "shape": list(v["shape"]), "begin": int(v["data_offsets"][0]),
-                   "end": int(v["data_offsets"][1])} for k, v in header.items()}
+        raw = f.read(n)
+    try:
+        header = json.loads(raw)
+        header.pop("__metadata__", None)
+        entries = {k: {"dtype": v["dtype"], "shape": list(v["shape"]), "begin": int(v["data_offsets"][0]),
+                       "end": int(v["data_offsets"][1])} for k, v in header.items()}
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:  # not a safetensors header
+        raise Refused(_unreadable(f"{path}'s header", exc)) from None
     return n, entries
 
 
@@ -429,6 +443,8 @@ class Merged:
 
 
 def merge_in_memory(base: Path, adapter: Adapter, *, expect_scale: float | None, expect_modules: int | None) -> Merged:
+    from safetensors import SafetensorError
+
     from aorlta.sync.writer import load_base_tensors
 
     if expect_scale is not None and adapter.scale != expect_scale:
@@ -439,7 +455,10 @@ def merge_in_memory(base: Path, adapter: Adapter, *, expect_scale: float | None,
     if expect_modules is not None and len(factors) != expect_modules:
         raise Refused(f"{len(factors)} modules, expected {expect_modules}")
     t = time.monotonic()
-    base_t = load_base_tensors(base, targets)
+    try:
+        base_t = load_base_tensors(base, targets)
+    except (OSError, SafetensorError, SyncError) as exc:  # a shard that is missing or not a safetensors file
+        raise Refused(_unreadable("the base shards", exc)) from None
     load_s = time.monotonic() - t
     try:
         res = merge_all(base_t, factors, base_t, version=0)
@@ -776,7 +795,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("merge", "verify"):
         p = sub.add_parser(name)
-        p.add_argument("--base", required=True, help="base checkpoint directory with model.safetensors.index.json")
+        p.add_argument("--base", required=True, help="base checkpoint directory: model.safetensors.index.json "
+                       "and its shards, or one model.safetensors")
         p.add_argument("--adapter", required=True, help="PEFT adapter directory")
         p.add_argument("--expect-scale", type=float, default=None, help="refuse unless lora_alpha / r is this")
         p.add_argument("--expect-modules", type=int, default=None, help="refuse unless the adapter has this many")
