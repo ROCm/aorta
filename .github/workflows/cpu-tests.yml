@@ -391,10 +391,9 @@ jobs:
   # only when aorlta/ or this workflow changes (and on pushes to main), so other
   # pull requests do not wait for it. Its tests need no GPU: the ones that need
   # hipcc, a GPU, the stand-in dataset or the checker tools skip with a reason.
-  # The suite runs in three parts on three runners. This runner's CPU has no AVX-512, so the tiny models' bf16
-  # steps run several times slower than on a workstation, and the tests that hold several copies of a model
-  # (marked `heavy`) outgrow its 16 GB when four run at once; the one long CPU run (`cpu_run`, the t10
-  # measurement) runs alone, as its module fixture would otherwise compete with them for four cores.
+  # The suite runs in three parts on three runners: the tests that hold several copies of a model (marked
+  # `heavy`) outgrow this runner's 16 GB when four run at once, so two run, with two torch threads each; the one
+  # long CPU run (`cpu_run`, the t10 measurement) runs alone, with all four cores; the rest run four at once.
   aorlta_tests:
     name: pytest (AORLTA ${{ matrix.part }}, py3.12)
     runs-on: ubuntu-latest
@@ -407,12 +406,15 @@ jobs:
         include:
           - part: light
             workers: "4"
+            threads: "1"
             markers: not heavy and not cpu_run
           - part: heavy
             workers: "2"
+            threads: "2"
             markers: heavy
           - part: cpu run
             workers: "0"
+            threads: "4"
             markers: cpu_run
     defaults:
       run:
@@ -435,7 +437,7 @@ jobs:
           pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt
           pip install -e . --no-deps
 
-      # One torch thread per xdist worker: the reward-service tests run on a scaled clock, and a torch test
+      # Never more torch threads than cores: the reward-service tests run on a scaled clock, and a torch test
       # taking every core in another worker would stall them past their timeouts. A test that hangs fails
       # with its stack after 15 minutes instead of holding the job to its limit.
       # glibc's default mmap threshold grows as tensors are freed, so later tensors come from the heap and
@@ -444,7 +446,7 @@ jobs:
       # arenas give the memory back (10 GiB peak on 4 CPUs). The step prints the job's peak memory and swap.
       - name: Run the AORLTA test suite
         env:
-          OMP_NUM_THREADS: "1"
+          OMP_NUM_THREADS: ${{ matrix.threads }}
           MALLOC_MMAP_THRESHOLD_: "65536"
           MALLOC_ARENA_MAX: "2"
           PYTEST_WORKERS: ${{ matrix.workers }}
