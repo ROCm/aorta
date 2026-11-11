@@ -292,6 +292,7 @@ def test_two_wired_iterations_train_publish_and_land(tmp_path, tiny_base, datase
     assert "setup.warmup" not in [s["name"] for s in setup_spans(cfg)]  # the warm-up is off by default
 
 
+@pytest.mark.cpu_run  # two wired runs, one of them with four rank processes: on a runner of its own in CI
 def test_four_wired_ranks_train_the_model_one_rank_trains(tmp_path, tiny_base, dataset):
     """`trainer.ranks: 4`, one rank beside each of 4 engines (spawned processes over gloo on CPU), against one rank,
     from the same seeds and run id: the same samples train with the same totals, every group is one `train.stream`
