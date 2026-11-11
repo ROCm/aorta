@@ -460,3 +460,27 @@ def test_an_index_naming_a_shard_outside_the_model_directory_is_refused_before_w
     assert rc == 2 and "REFUSED" in capsys.readouterr().err
     assert hashlib.sha256((base / shard).read_bytes()).hexdigest() == before
     assert not out.exists() and not out.with_name("out.partial").exists()
+
+
+def test_a_base_saved_as_one_file_without_an_index_merges_to_the_same_tensors(tiny, merged, tmp_path):
+    """A checkpoint small enough for one file is saved as `model.safetensors` with no index; its merge holds the same
+    tensors as the two-shard base's, in one file, with no index either."""
+    from safetensors.torch import load_file, save_file
+
+    base = tmp_path / "one"
+    shutil.copytree(tiny.base, base)
+    tensors = read_all(base)
+    for shard in SHARDS:
+        (base / shard).unlink()
+    (base / M.INDEX_NAME).unlink()
+    save_file(tensors, str(base / "model.safetensors"), metadata={"format": "pt"})
+    out = tmp_path / "out"
+    rc = run("merge", "--base", str(base), "--adapter", str(tiny.text), "--out", str(out), "--expect-scale", "2.0",
+             "--expect-modules", str(TINY.TINY_TARGETS))
+    assert rc == 0
+    assert not (out / M.INDEX_NAME).exists() and (out / "model.safetensors").is_file()
+    got, want = load_file(str(out / "model.safetensors")), read_all(merged)
+    assert sorted(got) == sorted(want)
+    assert all(got[k].dtype == want[k].dtype and torch.equal(got[k].view(torch.uint8), want[k].view(torch.uint8))
+               for k in want)
+    assert run("verify", "--base", str(base), "--adapter", str(tiny.text), "--merged", str(out)) == 0
