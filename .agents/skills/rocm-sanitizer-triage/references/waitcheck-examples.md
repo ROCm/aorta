@@ -137,7 +137,130 @@ records also passed offline verification on Windows. This validates the packaged
 workflow and relocated evidence handling; it does not claim a fresh source rebuild
 or native Windows scanner support.
 
+## Recorded diagnostic-limit result
+
+On 11 November 2026, the separate
+[multi-hazard control](../assets/waitcheck-controls/multiple_missing_waits.hip)
+was scanned through AORTA for gfx1250, image 0 / entry 0. Its recorded object
+SHA-256 is `37beb79e69cb835178bce70666ca874bf50dce09f0bb5c7e2b19d2fd62ba4b75`.
+The native tool fingerprint is the same as the baseline above. Captured
+input/tool/helper/runtime fingerprints agreed before and after each call.
+
+| Diagnostic limit | Raw summary count | Retained details | Report truncation | Native / AORTA exit | Original frozen reader |
+| --- | --- | --- | --- | --- | --- |
+| 64 | 3 | 3 | false | 4 / 0 | Compatible warning evidence for this control |
+| 1 | 3 | 1 | false | 4 / 0 | Count/detail compatibility gap; reader exit 2 |
+
+Both reports say `ran/warn`, execution `complete`. Neither raw summary uses the
+older `>=` marker. At limit 1, a false truncation field therefore does not establish
+that all diagnostic details were retained. Preserve the warning, raw count and
+stored-detail count separately; exact native completion/count semantics need
+version-appropriate qualification. These counts are not a count of distinct bugs.
+
+The updated offline reader now recognizes the low-cap log's terminal
+`omitted 2 diagnostic(s) after limit`. The old count gate stopped before considering
+that line. In the pinned supported format it explains an exact observed count3,
+one emitted detail, incomplete details and reported completed native analysis;
+reader0 means that summary was written. The high-cap log has no explicit terminal
+signal: its three records account for its reported3, while count meaning and native
+completion remain unknown. A bare count/detail mismatch without a supported signal
+still returns reader2. The original reports, frozen reader outputs and stopped
+capture remain unchanged. This local interpretation does not prove binary build
+provenance or general checker coverage. No rescan is needed: cap64 already has
+the control's three details.
+
+The bounded capture stopped at its strict raw-count/detail gate. Four dry runs
+completed, but native invalid-image and invalid-entry scans were not reached.
+A dry run does not establish native selector rejection. The capture helper's
+exit 1 records the evidence-validation stop, not a demonstrated checker crash.
+The overall execution route remains draft; this is bounded development evidence.
+
+## Subsequent updated-report and selector results
+
+On 11 November 2026, separate bounded development runs exercised the updated
+AORTA producer and reader on the same Linux host and recorded native binary.
+The original stopped capture above remains unchanged. Actual saved captures
+were replayed independently with matching source/import/input/tool identities
+and before/after receipts.
+
+For the multi-hazard object above, cap64 and cap1 retained warning/native4/AORTA0.
+New per-entry diagnostic_summary metadata records requested limits64/1, reported
+counts3/3 and emitted records3/1. Cap64 leaves count meaning, detail completeness
+and native completion unknown; its conservative check aggregate count is null.
+Cap1 records exact observed count3, incomplete details and reported completed
+native analysis from the explicit omitted2 signal. Both readers exit0; neither
+means a kernel pass. These are newly produced report results, beyond replay of
+the legacy reports alone. Broader formats and complete binary provenance remain
+unestablished.
+
+The separate selector check reused the shared-image isolation object,
+SHA-256 `c81c3018816287dc08323aa12a70b1c0d27206f48a61c73136faea57d8d2bc1f`,
+with accepted inventory image0/entries0 and256:
+
+| Deliberate selection | Native message | Native / AORTA exit |
+| --- | --- | --- |
+| Image1, entry256 | failed to select gfx1250 code object 1 | 2 / 1 |
+| Image0, entry20480 | kernel entry offset is not present in the code object | 2 / 1 |
+
+Both scans retain error states, check reason worklist_not_fully_checked and
+per-entry waitcheck_backend_exit_2 with the native message. Actual native logs
+and validated invocation receipts support bounded native selection rejection;
+exit2 alone would not establish the cause. This is distinct from an adapter
+rejecting output after native exit0/4. Empty findings are failed checking, never
+clean results. Dry runs remain not_checked/dry_run and cannot prove rejection.
+The recorded source snapshot and tool bytes identify this evidence's scope;
+arbitrary targets, entries and binary versions remain unqualified.
+
+## Recorded attention-kernel result
+
+On 11 November 2026, an authorized offline AORTA scan checked one catalog-verified
+entry in a retained attention code object: gfx1250, image0, `.text` entry0,
+SHA-256 `04220a091086a29960a3e7e4e6253bb35c7d0d98b22ad5ac697cb4bf7236d23d`.
+The native binary fingerprint matches the baseline above. A reviewed dry capture
+and before/after input/tool/source/runtime checks preserved the intended scope.
+No kernel dispatch, workload registration or original-container recreation was
+needed. The private input and development captures are not part of this package.
+
+| Evidence | Recorded result |
+| --- | --- |
+| AORTA / native exit | 0 / 4 |
+| Execution / check and entry verdict | complete / ran-warn, null reasons |
+| Raw counters | 1670 instructions, 456 memory events, 769 diagnostic records |
+| Requested limit / emitted and retained unique records | 64 / 64 and 64 |
+| Explicit omission signal | omitted 705 diagnostic(s) after limit |
+| Detail completeness / native analysis | incomplete / reported complete under the supported format semantics |
+
+Independent offline verification agreed with the raw report and preserved command
+and identity receipts. `diagnostics_truncated:false` retains its historical meaning;
+the explicit omission shows that diagnostic details are incomplete. These769
+records do not establish769 distinct bugs or a crash cause. A representative
+finding reports missing `s_wait_asynccnt <= 0` before a memory operation at
+`.text+0x1c34`, with producer `.text+0x1c20` and consumer `.text+0x1c34`.
+
+A subsequent skill-guided offline interpretation correctly separated the warning,
+native4, supplied AORTA0 and reader0, retained the omission and provenance limits,
+and proposed no automatic rescan. Its answer content was independently accepted;
+complete setup/model/command activity was not supplied. Full native build and
+generating compiler provenance remain unknown. This is bounded application
+evidence, not general execution qualification, memory safety or numerical validation.
+
 ## Qualification gaps
+
+Further targeted inputs are available as **unqualified development drafts**:
+the [multi-hazard source](../assets/waitcheck-controls/multiple_missing_waits.hip),
+[high-cap](../assets/waitcheck-cap-high.yaml) and
+[low-cap](../assets/waitcheck-cap-low.yaml) templates, and
+[invalid-image](../assets/waitcheck-invalid-image.yaml) /
+[invalid-entry](../assets/waitcheck-invalid-entry.yaml) templates. Preserve the
+original controls. Establish each new build's actual identity before completing
+its recipes. The recorded high-cap build now shows three diagnostic records;
+source sites alone do not establish counts for other builds. The cap1 comparison
+exposed the original count gate; subsequent updated-producer checks are recorded
+above. Invalid selectors must be absent
+from verified inventory; container size is not a general proof of `.text` extent.
+Schema or missing-tool failures do not establish native selector rejection.
+Templates themselves confer no qualification and do not check the user's kernel;
+the bounded actual results above apply only to their recorded inputs and tool.
 
 Focus on AORTA integration and the agent's decisions. This project does not need
 to recreate the upstream checker's full instruction test suite. Add a control
@@ -147,11 +270,11 @@ when it covers an untested integration behavior or a new claim the skill will ma
 | --- | --- | --- |
 | Basic finding/no-finding/refusal | Three real, reviewed AORTA controls; packaged helper and relocated verification passed | These are not all checker behaviors; keep conclusions within tested scope |
 | Exact-entry selection | [One shared-image missing/corrected pair](waitcheck-isolation.md#recorded-development-result-10-november-2026) produced scoped warn/pass with matching entry markers | Broader kernel collections, targets and multi-entry worklists are not established; reverify new builds |
-| Failure handling | Real wrong-digest refusal and focused local recipe/report tests for missing input/tool, invalid schema, simulated refusal/timeout and capped output | Native invalid-selection behavior remains open; mocks do not establish the installed tool's response or Linux process cleanup |
-| Count/completion semantics | Low-count output below cap | Targeted many-diagnostic/cap or early-stop evidence for each supported tool format; keep unknown formats unqualified |
+| Failure handling | Real wrong-digest refusal; bounded native image/entry rejection above; local missing-input/tool/schema/refusal/timeout cases | Broader native failures, versions and applicable Linux process cleanup remain unestablished |
+| Count/completion semantics | Real cap64/cap1 count3/details3/1; updated producer and reader separate counts, requested limits and completion while preserving unknowns | Full binary build provenance, broader format/version qualification and exhaustive checker coverage remain open |
 | Other targets/hazard classes | One scalar-wait pair on gfx1250 | Add targeted controls only when expanding the claimed scope |
-| Realistic application | Historical attention results were direct-tool evidence | Fresh approved AORTA comparison if that application scope is claimed |
-| Agent behavior | Shared-base manual checks exist | Scoped instruction-following cases for these outcomes, no silent scope fallback and no pass from empty/error results |
+| Realistic application | Authorized exact-entry attention AORTA scan above; report/raw/command identity independently verified | Generating compiler/native build provenance and broader application coverage remain unknown |
+| Agent behavior | Shared-base manual checks and supplied Waitcheck evidence-answer content accepted; real-attention interpretation content accepted | Complete model/settings and activity evidence; answer content alone is not a full command audit |
 | Release | Examples and retained local evidence | Owner/license/intake, CI execution and applicable evaluation gates |
 
 **Do we need more samples?** These three are enough to explain and regress the

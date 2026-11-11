@@ -1,0 +1,32 @@
+# DRAFT DEVELOPMENT CASE. Not a user-kernel check or qualified launch procedure.
+# prepare_cases.py binds this to the retained accepted object before node review.
+# Change only the image selector; keep the explicit entry and original object hash.
+# A clean result for this deliberately absent image is a qualification failure.
+schema_version: 1
+mode: sanitizer
+ticket: WAITCHECK-INVALID-IMAGE
+description: Deliberately absent image in the accepted two-kernel object; not a clean-check control.
+sanitizer_plan:
+  target: gfx1250
+  source:
+    kind: kernel
+    kernel:
+      name: waitcheck_corrected
+      code_object: REQUIRED_ACCEPTED_OBJECT_PATH
+      code_object_sha256: REQUIRED_ACCEPTED_OBJECT_SHA256
+      code_object_index: REQUIRED_IMAGE_INDEX
+      entry_offset: REQUIRED_ENTRY_OFFSET
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict  # Schema field only; does not enable ConSan.
+    on_missing_backend: fail
+    timeout_seconds: 120
+    waitcheck_max_diagnostics: 64
+  output:
+    report: sanitizer_report.json

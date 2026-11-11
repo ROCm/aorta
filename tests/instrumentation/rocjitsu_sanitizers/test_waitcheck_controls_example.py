@@ -38,6 +38,10 @@ def prepared(tmp_path):
 
 @pytest.fixture
 def completed(tmp_path, prepared, monkeypatch):
+    # Linux platform.platform() may probe `uname -p` when its cache is cold.
+    # Keep metadata deterministic so the process mock remains AORTA-only.
+    monkeypatch.setattr(helper.platform, "_platform_cache", None)
+    monkeypatch.setattr(helper.platform, "platform", lambda: "synthetic-no-probe-platform")
     aorta = tmp_path / "aorta"
     aorta.write_text("inert fake CLI", encoding="utf-8")
     aorta.chmod(0o755)
@@ -112,6 +116,15 @@ def test_three_cases_only_aorta_called_and_mismatch_never_scanned(completed):
     assert "missing: CLI=0, native=4, state=ran, verdict=warn" in summary
     assert "mismatch: CLI=1, native=None, state=error, verdict=error" in summary
     assert not (output / "mismatch/waitcheck/waitcheck-0.log").exists()
+
+
+def test_cold_platform_metadata_does_not_escape_aorta_process_mock(completed):
+    output, calls, backend_calls = completed
+    manifest = helper.load(output / "run.json")
+    assert helper.platform._platform_cache is None
+    assert manifest["platform"] == "synthetic-no-probe-platform"
+    assert len(calls) == 3 and all(argv[1:4] == ["sweep", "run", "--recipe"] for argv in calls)
+    assert len(backend_calls) == 2
 
 
 def test_downloaded_run_verifies_without_original_runtime_paths(completed, tmp_path):

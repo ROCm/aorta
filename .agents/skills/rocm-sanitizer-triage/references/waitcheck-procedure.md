@@ -141,6 +141,14 @@ leaving the originals available for a version-appropriate reader.
 Use the external receipts in steps 1–3 for those facts. A reader exit of 0 alone
 is not a clean sanitizer result.
 
+The summary separates raw count/meaning, emitted diagnostic records, unique
+retained findings, requested limit, detail completeness and native completion.
+Missing report fields remain unknown. Deduplication alone does not imply omitted
+details. Only supported explicit omission/early-stop messages establish newer
+semantics; an unexplained bare count/record mismatch remains a compatibility gap.
+The historical truncation Boolean and AORTA execution status are preserved,
+without upgrading false/complete into native completeness claims.
+
 Use [the interpretation rules](waitcheck.md#6-evidence-and-interpretation) and
 the common answer: checked/proposed scope, result, supporting evidence, limits,
 next action. A supplied prose summary supports a conditional explanation without
@@ -151,8 +159,17 @@ or race freedom from Waitcheck.
 
 Finding/corrected/digest-refusal controls and one shared-image isolation pair have
 retained real evidence. Local failure tests also cover report handling with
-simulated responses. Native invalid selection, actual cap/completion behavior,
-applicable process cleanup, complete tool provenance and final agent evaluations
-remain open. Capped output can say `ran/warn`, execution `complete`, CLI 0 while
-`diagnostics_truncated` is true. Unknown completion formats remain unqualified.
+simulated responses. A real cap64/cap1 comparison now records three summary
+diagnostics with three/one retained details; the low-cap report leaves truncation
+false. The original reader rejected its count mismatch; the updated reader now
+explains its supported explicit omission signal. See the
+[recorded result](waitcheck-examples.md#recorded-diagnostic-limit-result).
+Native invalid selection was not reached in that original run. Subsequent bounded
+runs independently validated updated-producer cap64/cap1 metadata and native
+rejection of deliberately absent image/entry selectors; see the
+[subsequent results](waitcheck-examples.md#subsequent-updated-report-and-selector-results).
+This closes those recorded integration cases, not broader format/target support.
+Applicable process cleanup, complete tool provenance, full agent activity/model
+evidence and the real-attention skill walkthrough remain open. Preserve warnings
+and count evidence; unknown completion formats remain unqualified.
 See [qualification gaps](waitcheck-examples.md#qualification-gaps).

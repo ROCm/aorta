@@ -55,7 +55,8 @@ package two attributed HIP sources, a portable helper and generated recipes for
 finding, corrected and digest-refusal outcomes. The helper's focused tests are
 `tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_controls_example.py`;
 run these locally without a GPU or native checker. A dedicated skill CI workflow
-is planned but not yet included. Local tests are distinct from real node
+exists at `.github/workflows/sanitizer-skill-checks.yml`; its definition is not
+evidence that GitHub or model evaluations passed. Local tests are distinct from real node
 validation. The reference's qualification table records remaining gaps.
 It intentionally rejects unresolved index/offset values. Its local contract test is
 `tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_skill_recipe.py`:
@@ -152,9 +153,12 @@ it to today's CPU-only dataset without changing CI is not a valid handoff.
 
 ## Checks and CI
 
-The proposed shared workflow is not yet included in this branch. Its planned
-Skillscope version is v0.1.2 at `68b69e2eff60c41f5d5482bb89f24e07ce4fbebb`.
-The following table describes intended checks, not checks already configured.
+The shared workflow is included at `.github/workflows/sanitizer-skill-checks.yml`.
+It pins Skillscope v0.1.2 at `68b69e2eff60c41f5d5482bb89f24e07ce4fbebb`, configures
+CPU helper/recipe tests and structural checks, and provides explicit manual
+planning model evaluations. The table describes the configured scope. Verify
+actual GitHub results, evaluation credentials and model runs separately for the
+revision being reviewed; workflow configuration alone establishes no passing run.
 
 | Check | When and what it proves |
 | --- | --- |
@@ -174,7 +178,7 @@ pinned revision into a separate directory, set `PYTHONPATH` to that checkout, th
 run from the AORTA root:
 
 ```text
-python -m skillscope structural --skills-dir .agents/skills/rocm-sanitizer-triage --skill-files skill-card.md --skill-sections Description,Owner,License --docs docs/sanitizers/skill-maintenance.md
+python -m skillscope structural --skills-dir .agents/skills/rocm-sanitizer-triage --skill-files skill-card.md --skill-sections Description,Owner,License --docs docs/sanitizers/skill-maintenance.md,docs/sanitizers/waitcheck-reporting.md
 ```
 
 Retain the source commit, harness version, command, output, tested case IDs, agent

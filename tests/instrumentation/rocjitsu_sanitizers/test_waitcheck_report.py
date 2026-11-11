@@ -7,7 +7,8 @@ import pytest
 
 from aorta.instrumentation.rocjitsu_sanitizers.models import (
     CheckResult, ExecutionState, KernelCheckResult, KernelIdentity, KernelObservation,
-    KernelWorklist, SelectionRequirement, Verdict)
+    KernelWorklist, SelectionRequirement, Verdict,
+    aggregate_diagnostic_summaries)
 from aorta.instrumentation.rocjitsu_sanitizers.report import build_report, write_report
 from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import parse_waitcheck_text
 
@@ -214,3 +215,221 @@ def test_report_only_native_completion_conflict(evidence, kind, native_exit):
     assert 'native exit is missing or contradicts' in summary
     assert f'"native_returncode": {json.dumps(native_exit)}' in summary
     assert f'"entry_verdict": "{"pass" if kind == "clean" else "warn"}"' in summary
+
+
+def rewrite_evidence(report_path, log_path, text, *, include_metadata=False, requested_limit=None):
+    """Portable synthetic derivatives; never execute a native program."""
+    from dataclasses import replace
+    from aorta.instrumentation.rocjitsu_sanitizers.report import read_report
+    report = read_report(report_path)
+    previous = report.checks[0].kernel_results[0]
+    parsed = parse_waitcheck_text(text, expected=previous.identity)
+    metadata = replace(parsed.diagnostic_summary, requested_limit=requested_limit) if include_metadata else None
+    result = replace(previous, findings=parsed.findings, diagnostics_truncated=parsed.diagnostics_truncated,
+                     diagnostic_summary=metadata)
+    check = replace(report.checks[0], findings=result.findings, kernel_results=(result,),
+                    diagnostics_truncated=result.diagnostics_truncated,
+                    diagnostic_summary=aggregate_diagnostic_summaries((result,)) if include_metadata else None)
+    write_report(build_report(target=report.target, worklist=report.worklist, checks=(check,)), report_path)
+    log_path.write_text(text, encoding='utf-8')
+
+
+def test_duplicate_records_are_not_omitted_details(evidence):
+    report, log = evidence('warn')
+    text = log.read_text().replace('diagnostics=1', 'diagnostics=2')
+    text += text.splitlines()[1] + '\n'
+    rewrite_evidence(report, log, text, include_metadata=True)
+    summary, code = helper.summarize(report, log)
+    assert code == 0
+    assert 'emitted records=2, retained unique findings=1' in summary
+    assert 'compatibility gap' not in summary
+    assert 'native analysis=unknown' in summary
+
+
+@pytest.mark.parametrize('include_metadata', [False, True])
+def test_plain_limited_details_remain_explicit_compatibility_gap(evidence, include_metadata):
+    report, log = evidence('warn')
+    text = log.read_text().replace('diagnostics=1', 'diagnostics=3')
+    rewrite_evidence(report, log, text, include_metadata=include_metadata, requested_limit=1)
+    summary, code = helper.summarize(report, log)
+    assert code == 2
+    assert 'compatibility gap' in summary
+    assert 'reported diagnostics=3, emitted records=1, retained unique findings=1' in summary
+    assert 'count meaning=unknown' in summary
+    assert 'native analysis=unknown' in summary
+    assert '"native_returncode": 4' in summary
+    assert '"diagnostics_truncated": false' in summary
+    assert '"reported_count": 3' in summary
+    assert '"emitted_records": 1' in summary
+
+
+@pytest.mark.parametrize('include_metadata', [False, True])
+def test_explicit_storage_omission_is_supported_separately_from_completion(evidence, include_metadata):
+    report, log = evidence('warn')
+    text = log.read_text().replace('diagnostics=1', 'diagnostics=3')
+    text += 'omitted 2 diagnostic(s) after limit\n'
+    rewrite_evidence(report, log, text, include_metadata=include_metadata, requested_limit=1)
+    summary, code = helper.summarize(report, log)
+    assert code == 0
+    assert 'Count meaning=exact; details=incomplete; native analysis=complete' in summary
+    assert '"diagnostics_truncated": false' in summary
+
+
+@pytest.mark.parametrize('signal', ['omitted at least 2 diagnostic(s) after limit',
+                                    'analysis stopped early; additional diagnostics may exist'])
+def test_explicit_early_stop_is_not_completed_analysis(evidence, signal):
+    report, log = evidence('cap')
+    text = log.read_text().replace('instructions=4', 'instructions=>=4').replace('memory-events=2', 'memory-events=>=2')
+    if signal.startswith('omitted'):
+        text = text.replace('diagnostics=>=1', 'diagnostics=>=3')
+    text += signal + '\n'
+    rewrite_evidence(report, log, text, include_metadata=True, requested_limit=1)
+    summary, code = helper.summarize(report, log)
+    assert code == 0
+    assert 'Count meaning=lower_bound' in summary
+    assert 'native analysis=incomplete' in summary
+    assert '"execution_status": "complete"' in summary
+
+
+def test_reaching_requested_cap_does_not_establish_completeness(evidence):
+    report, log = evidence('warn')
+    rewrite_evidence(report, log, log.read_text(), include_metadata=True, requested_limit=1)
+    summary, code = helper.summarize(report, log)
+    assert code == 0
+    assert '"requested_limit": 1' in summary
+    assert 'Count meaning=unknown; details=unknown; native analysis=unknown' in summary
+
+
+def test_legacy_report_without_new_or_old_optional_metadata_is_readable(evidence):
+    report, log = evidence('clean')
+    data = json.loads(report.read_text())
+    for item in (data['checks'][0], data['checks'][0]['kernel_results'][0]):
+        item.pop('diagnostics_truncated')
+        item.pop('diagnostic_summary', None)
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report, log)
+    assert code == 0
+    assert 'Legacy report' in summary
+    assert 'Count meaning=unknown; details=unknown; native analysis=unknown' in summary
+
+
+def test_report_only_keeps_metadata_and_missing_raw_limit(evidence):
+    report, log = evidence('warn')
+    rewrite_evidence(report, log, log.read_text(), include_metadata=True, requested_limit=64)
+    summary, code = helper.summarize(report)
+    assert code == 0
+    assert '"requested_limit": 64' in summary
+    assert '"native_analysis": "unknown"' in summary
+    assert 'Raw findings/entry evidence was not compared' in summary
+    assert '"diagnostic_summary_raw": null' in summary
+
+
+@pytest.mark.parametrize('key,value', [('reported_count', True), ('emitted_records', -1),
+                                      ('requested_limit', 0), ('details', 'yes'),
+                                      ('native_analysis', 'success'), ('unknown_key', 1)])
+def test_malformed_new_metadata_is_rejected(evidence, key, value):
+    report, log = evidence('warn')
+    rewrite_evidence(report, log, log.read_text(), include_metadata=True, requested_limit=1)
+    data = json.loads(report.read_text())
+    data['checks'][0]['kernel_results'][0]['diagnostic_summary'][key] = value
+    report.write_text(json.dumps(data))
+    with pytest.raises((ValueError, TypeError)):
+        helper.summarize(report, log)
+
+
+def test_new_metadata_cannot_claim_a_different_raw_count(evidence):
+    report, log = evidence('warn')
+    rewrite_evidence(report, log, log.read_text(), include_metadata=True, requested_limit=1)
+    data = json.loads(report.read_text())
+    data['checks'][0]['kernel_results'][0]['diagnostic_summary']['reported_count'] = 2
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report, log)
+    assert code == 2
+    assert 'raw reported_count differs from report metadata' in summary
+
+
+def test_report_completion_claim_requires_supporting_raw_signal(evidence):
+    report, log = evidence('warn')
+    rewrite_evidence(report, log, log.read_text(), include_metadata=True, requested_limit=1)
+    data = json.loads(report.read_text())
+    for item in (data['checks'][0], data['checks'][0]['kernel_results'][0]):
+        item['diagnostic_summary'].update(reported_count=1, count_meaning='exact', native_analysis='complete')
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report, log)
+    assert code == 2
+    assert 'raw count_meaning does not support report metadata' in summary
+
+
+@pytest.mark.parametrize('terminal', ['omitted 9 diagnostic(s) after limit',
+                                     'omitted some diagnostics after limit',
+                                     'scan complete'])
+def test_conflicting_or_unknown_terminal_lines_do_not_confirm_completion(evidence, terminal):
+    report, log = evidence('warn')
+    log.write_text(log.read_text() + terminal + '\n')
+    summary, code = helper.summarize(report, log)
+    assert code == 2
+    assert 'INCONSISTENT OR UNSUPPORTED' in summary
+
+
+def test_empty_optional_metadata_stays_unknown(evidence):
+    report, _ = evidence('clean')
+    data = json.loads(report.read_text())
+    for item in (data['checks'][0], data['checks'][0]['kernel_results'][0]):
+        item['diagnostic_summary'] = {}
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report)
+    assert code == 0
+    assert '"reported_count": null' in summary
+    assert '"native_analysis": "unknown"' in summary
+
+
+@pytest.mark.parametrize('kind,count,records', [
+    ('clean', 3, 0), ('clean', None, 1), ('warn', 0, None), ('warn', 1, 0),
+    ('warn', 1, 2),
+])
+def test_report_only_metadata_count_records_and_native_exit_conflicts(evidence, kind, count, records):
+    report, _ = evidence(kind)
+    data = json.loads(report.read_text())
+    data['checks'][0]['kernel_results'][0]['diagnostic_summary'] = {
+        'reported_count': count, 'emitted_records': records,
+    }
+    if kind == 'warn' and records == 0:
+        data['checks'][0]['findings'] = []
+        data['checks'][0]['kernel_results'][0]['findings'] = []
+    report.write_text(json.dumps(data))
+    # The reader preserves original claims and flags them without needing raw.
+    summary, code = helper.summarize(report)
+    assert code == 2
+    assert 'Report consistency: INCONSISTENT' in summary
+    assert '"native_returncode": ' + ('0' if kind == 'clean' else '4') in summary
+
+
+@pytest.mark.parametrize('cap,records,meaning,native', [
+    (64, 3, 'unknown', 'unknown'), (1, 1, 'exact', 'complete')])
+@pytest.mark.parametrize('include_metadata', [False, True])
+def test_saved_text_derivatives_keep_the_real_omission_signal(tmp_path, cap, records, meaning, native, include_metadata):
+    from dataclasses import replace
+    text = (Path(__file__).parent / 'fixtures' / f'waitcheck-cap{cap}.txt').read_text()
+    identity = KernelIdentity(name='waitcheck_multiple_missing', target='gfx1250',
+                              code_object='/fixtures/multiple_missing_waits',
+                              code_object_sha256='a' * 64, code_object_index=0, entry_offset=0)
+    worklist = KernelWorklist(requirement=SelectionRequirement.TOP_TIME, top_n=1,
+                             kernels=(KernelObservation(identity=identity, sources=('fixture',)),))
+    parsed = parse_waitcheck_text(text, expected=identity)
+    result = KernelCheckResult(identity=identity, state=ExecutionState.RAN, verdict=Verdict.WARN,
+                               findings=parsed.findings, returncode=4,
+                               diagnostic_summary=replace(parsed.diagnostic_summary, requested_limit=cap) if include_metadata else None)
+    check = CheckResult(sanitizer='waitcheck', state=ExecutionState.RAN, verdict=Verdict.WARN,
+                        findings=result.findings, kernel_results=(result,),
+                        diagnostic_summary=aggregate_diagnostic_summaries((result,)) if include_metadata else None)
+    report_path, log_path = tmp_path / 'report.json', tmp_path / 'native.txt'
+    write_report(build_report(target='gfx1250', worklist=worklist, checks=(check,)), report_path)
+    log_path.write_text(text)
+    summary, code = helper.summarize(report_path, log_path)
+    assert code == 0
+    assert f'emitted records={records}, retained unique findings={records}' in summary
+    assert f'Count meaning={meaning}' in summary
+    assert f'native analysis={native}' in summary
+    assert '"native_returncode": 4' in summary
+    if cap == 1:
+        assert 'Supported raw signal: omitted 2 diagnostic(s) after limit' in summary

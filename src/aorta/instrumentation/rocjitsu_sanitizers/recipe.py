@@ -261,11 +261,11 @@ def _optional_timeout_seconds(block: Mapping[str, object]) -> float | None:
 def _optional_waitcheck_max_diagnostics(block: Mapping[str, object]) -> int | None:
     """Parse an optional positive ``waitcheck_max_diagnostics`` from a block.
 
-    Absent keeps the backend's own cap (``rj_waitcheck --max-diagnostics``, 32
-    per code object), which reports a capped scan as ``diagnostics_truncated``.
+    Absent keeps the backend's own default. The requested per-invocation detail
+    limit is not proof of count or native analysis completeness.
     A bool, non-integer, or non-positive value is rejected at load so a
     malformed knob cannot silently reinstate the default cap on a lane that
-    asked for a complete count.
+    requested a different diagnostic detail limit.
     """
 
     if "waitcheck_max_diagnostics" not in block:

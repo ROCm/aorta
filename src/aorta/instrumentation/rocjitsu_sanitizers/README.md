@@ -538,17 +538,19 @@ complaint. The run that motivated this is written up in
 - `pass` only means a requested backend ran healthily and produced no finding;
   a bounded ConSan snapshot is not proof that a program is race-free.
 
-A Waitcheck finding count is not automatically the whole hazard count.
-`rj_waitcheck` stops collecting at `--max-diagnostics` (32 per code object by
-default, and each code object is its own subprocess) and marks a capped scan by
-prefixing the summary count with `>=` (`diagnostics=>=32`). aorta carries that
-marker through as `diagnostics_truncated: true` on the kernel result and on the
-check, so `sanitizer_report.json` distinguishes a complete count from a floor —
-the gpt-oss `_topk_topp_kernel` object scanned at the default cap reports 32 of
-its 45 hazards ([#480](https://github.com/ROCm/aorta/issues/480)). Set
-`sanitizer_plan.policy.waitcheck_max_diagnostics` to raise the cap for a lane
-that needs the complete count; a higher cap costs analysis time, so the flag,
-not a hard-coded larger default, is what makes the partial result visible.
+A Waitcheck finding count is not automatically the whole hazard count. Optional
+`diagnostic_summary` separates the raw reported count and its meaning, emitted
+records before deduplication, requested per-scan limit, detail completeness and
+native analysis completion. Missing metadata means unknown evidence. A bare
+numeric summary or native exit0/4 does not prove exhaustive analysis.
+`diagnostics_truncated` retains the historical `diagnostics=>=N` signal; false
+does not establish complete details. Newer explicit omitted-detail and early-stop
+messages are interpreted separately. Aggregates never present a partial or
+unknown count as an exact total. See the
+[metadata and compatibility contract](../../../../docs/sanitizers/waitcheck-reporting.md).
+The recipe's positive `sanitizer_plan.policy.waitcheck_max_diagnostics` requests
+a detail limit; reaching it does not prove more diagnostics exist. Never silently
+raise it or rescan to recover details.
 
 A ConSan conflict locates its two accesses by reader and text offset
 (`first_instruction` / `second_instruction`, kept in the finding's metadata) and

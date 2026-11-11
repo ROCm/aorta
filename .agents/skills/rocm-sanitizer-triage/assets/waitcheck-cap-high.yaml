@@ -1,0 +1,33 @@
+# DRAFT DEVELOPMENT CASE; build, inventory and actual diagnostic count are pending.
+# Resolve the same object/hash/image/entry in both cap recipes after build/list.
+# Run cap64 first; it must establish more than one diagnostic before cap1 is useful.
+# Preserve raw count/completion semantics; never infer full coverage from CLI0.
+# This requests a detail limit; equality with it alone does not prove omission.
+schema_version: 1
+mode: sanitizer
+ticket: WAITCHECK-CAP-HIGH
+description: Higher-cap baseline for the separate multi-hazard static control.
+sanitizer_plan:
+  target: gfx1250
+  source:
+    kind: kernel
+    kernel:
+      name: waitcheck_multiple_missing
+      code_object: REQUIRED_MULTI_OBJECT_PATH
+      code_object_sha256: REQUIRED_MULTI_OBJECT_SHA256
+      code_object_index: REQUIRED_MULTI_IMAGE_INDEX
+      entry_offset: REQUIRED_MULTI_ENTRY_OFFSET
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict  # Schema field only; does not enable ConSan.
+    on_missing_backend: fail
+    timeout_seconds: 120
+    waitcheck_max_diagnostics: 64
+  output:
+    report: sanitizer_report.json

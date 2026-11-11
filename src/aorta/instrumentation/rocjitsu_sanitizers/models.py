@@ -433,6 +433,95 @@ class ObjectCoverage:
         return coverage
 
 
+class CountMeaning(str, Enum):
+    UNKNOWN = "unknown"
+    EXACT = "exact"
+    LOWER_BOUND = "lower_bound"
+
+
+class EvidenceStatus(str, Enum):
+    UNKNOWN = "unknown"
+    COMPLETE = "complete"
+    INCOMPLETE = "incomplete"
+
+
+@dataclass(frozen=True)
+class DiagnosticSummary:
+    """Native count/output evidence, independent of retained unique findings.
+
+    Missing metadata conveys unknown evidence. ``requested_limit`` is per scan,
+    not an aggregate budget. See docs/sanitizers/waitcheck-reporting.md.
+    """
+
+    reported_count: int | None = None
+    count_meaning: CountMeaning = CountMeaning.UNKNOWN
+    emitted_records: int | None = None
+    requested_limit: int | None = None
+    details: EvidenceStatus = EvidenceStatus.UNKNOWN
+    native_analysis: EvidenceStatus = EvidenceStatus.UNKNOWN
+
+    def __post_init__(self) -> None:
+        for key in ("reported_count", "emitted_records", "requested_limit"):
+            value = getattr(self, key)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+                or value < (1 if key == "requested_limit" else 0)
+            ):
+                raise ValueError(f"{key} must be a non-negative integer (limit positive) or null")
+        if not isinstance(self.count_meaning, CountMeaning):
+            raise TypeError("count_meaning must be CountMeaning")
+        if not all(isinstance(value, EvidenceStatus) for value in (self.details, self.native_analysis)):
+            raise TypeError("details and native_analysis must be EvidenceStatus")
+        if self.reported_count is None and self.count_meaning is not CountMeaning.UNKNOWN:
+            raise ValueError("known count meaning requires reported_count")
+        if (self.count_meaning is CountMeaning.EXACT and self.emitted_records is not None
+                and self.reported_count < self.emitted_records):
+            raise ValueError("exact reported count is smaller than emitted records")
+        if (self.details is EvidenceStatus.INCOMPLETE and self.reported_count is not None
+                and self.emitted_records is not None and self.reported_count <= self.emitted_records):
+            raise ValueError("incomplete details require evidence of omitted records")
+        if self.details is EvidenceStatus.COMPLETE and (
+            self.count_meaning is not CountMeaning.EXACT or self.emitted_records is None
+            or self.emitted_records != self.reported_count
+        ):
+            raise ValueError("complete details require exact count/record agreement")
+        if (self.native_analysis is EvidenceStatus.COMPLETE
+                and self.count_meaning is not CountMeaning.EXACT):
+            raise ValueError("complete native analysis requires an exact count")
+        if (self.native_analysis is EvidenceStatus.INCOMPLETE
+                and self.count_meaning is CountMeaning.EXACT):
+            raise ValueError("incomplete native analysis cannot establish an exact total")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "reported_count": self.reported_count,
+            "count_meaning": self.count_meaning.value,
+            "emitted_records": self.emitted_records,
+            "requested_limit": self.requested_limit,
+            "details": self.details.value,
+            "native_analysis": self.native_analysis.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> DiagnosticSummary:
+        known = {"reported_count", "count_meaning", "emitted_records", "requested_limit", "details", "native_analysis"}
+        if data.keys() - known:
+            raise ValueError("unsupported diagnostic_summary fields")
+        return cls(
+            reported_count=_optional_int(data, "reported_count"),
+            count_meaning=CountMeaning(data.get("count_meaning", "unknown")),
+            emitted_records=_optional_int(data, "emitted_records"),
+            requested_limit=_optional_int(data, "requested_limit"),
+            details=EvidenceStatus(data.get("details", "unknown")),
+            native_analysis=EvidenceStatus(data.get("native_analysis", "unknown")),
+        )
+
+
+def _diagnostic_summary(data: Mapping[str, object]) -> DiagnosticSummary | None:
+    value = data.get("diagnostic_summary")
+    return None if value is None else DiagnosticSummary.from_dict(_mapping(value, name="diagnostic_summary"))
+
+
 @dataclass(frozen=True)
 class KernelCheckResult:
     identity: KernelIdentity
@@ -441,10 +530,9 @@ class KernelCheckResult:
     findings: tuple[Finding, ...] = ()
     reason: str | None = None
     returncode: int | None = None
-    # True when the backend stopped collecting diagnostics at its own cap, so
-    # ``findings`` is a floor rather than the kernel's full hazard count
-    # (Waitcheck's ``diagnostics=>=N`` summary, #480).
+    # Historical >= marker only. False does not establish completeness.
     diagnostics_truncated: bool = False
+    diagnostic_summary: DiagnosticSummary | None = None
 
     def __post_init__(self) -> None:
         if self.state is ExecutionState.NOT_CHECKED:
@@ -459,6 +547,15 @@ class KernelCheckResult:
             raise ValueError("failed kernel execution cannot be clean")
         if self.verdict is Verdict.PASS and self.findings:
             raise ValueError("a PASS kernel result cannot carry findings")
+        if self.diagnostic_summary is not None:
+            if not isinstance(self.diagnostic_summary, DiagnosticSummary):
+                raise TypeError("diagnostic_summary must be DiagnosticSummary or null")
+            records = self.diagnostic_summary.emitted_records
+            if records is not None and records < len(self.findings):
+                raise ValueError("emitted records cannot be fewer than retained findings")
+            if (self.diagnostics_truncated
+                    and self.diagnostic_summary.count_meaning is CountMeaning.EXACT):
+                raise ValueError("historical lower-bound marker contradicts exact count")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -469,6 +566,7 @@ class KernelCheckResult:
             "reason": self.reason,
             "returncode": self.returncode,
             "diagnostics_truncated": self.diagnostics_truncated,
+            **({"diagnostic_summary": self.diagnostic_summary.to_dict()} if self.diagnostic_summary is not None else {}),
         }
 
     @classmethod
@@ -484,7 +582,40 @@ class KernelCheckResult:
             reason=_optional_str(data, "reason"),
             returncode=_optional_int(data, "returncode"),
             diagnostics_truncated=_optional_bool(data, "diagnostics_truncated", default=False),
+            diagnostic_summary=_diagnostic_summary(data),
         )
+
+
+def aggregate_diagnostic_summaries(
+    results: tuple[KernelCheckResult, ...],
+) -> DiagnosticSummary | None:
+    """Never present a partial sum as a check-level exact total."""
+    summaries = [result.diagnostic_summary for result in results]
+    if not summaries or not any(summary is not None for summary in summaries):
+        return None
+    all_present = all(summary is not None for summary in summaries)
+    known = [summary for summary in summaries if summary is not None]
+    healthy = all(result.state is ExecutionState.RAN for result in results)
+    exact = healthy and all_present and all(s.count_meaning is CountMeaning.EXACT for s in known)
+    records = (sum(s.emitted_records for s in known)
+               if all_present and all(s.emitted_records is not None for s in known) else None)
+    limits = {s.requested_limit for s in known}
+
+    def status(key: str) -> EvidenceStatus:
+        values = [getattr(s, key) for s in known]
+        if EvidenceStatus.INCOMPLETE in values:
+            return EvidenceStatus.INCOMPLETE
+        if healthy and all_present and all(value is EvidenceStatus.COMPLETE for value in values):
+            return EvidenceStatus.COMPLETE
+        return EvidenceStatus.UNKNOWN
+
+    return DiagnosticSummary(
+        reported_count=sum(s.reported_count for s in known) if exact else None,
+        count_meaning=CountMeaning.EXACT if exact else CountMeaning.UNKNOWN,
+        emitted_records=records,
+        requested_limit=next(iter(limits)) if all_present and len(limits) == 1 else None,
+        details=status("details"), native_analysis=status("native_analysis"),
+    )
 
 
 @dataclass(frozen=True)
@@ -500,9 +631,9 @@ class CheckResult:
     kernel_results: tuple[KernelCheckResult, ...] = ()
     coverage: tuple[ObjectCoverage, ...] = ()
     backend: tuple[tuple[str, str], ...] = ()
-    # True when any scanned kernel hit the backend's diagnostic cap, so this
-    # check's aggregated ``findings`` under-counts the hazards present (#480).
+    # Historical OR of per-entry >= marker flags; false is not completeness.
     diagnostics_truncated: bool = False
+    diagnostic_summary: DiagnosticSummary | None = None
 
     def __post_init__(self) -> None:
         if not self.sanitizer:
@@ -532,6 +663,11 @@ class CheckResult:
             result.diagnostics_truncated for result in self.kernel_results
         ):
             raise ValueError("a check cannot report a complete count over a truncated kernel")
+        if self.diagnostic_summary is not None:
+            if not isinstance(self.diagnostic_summary, DiagnosticSummary):
+                raise TypeError("diagnostic_summary must be DiagnosticSummary or null")
+            if self.diagnostic_summary != aggregate_diagnostic_summaries(self.kernel_results):
+                raise ValueError("check diagnostic_summary contradicts per-entry evidence")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -545,6 +681,7 @@ class CheckResult:
             "coverage": [item.to_dict() for item in self.coverage],
             "backend": dict(self.backend),
             "diagnostics_truncated": self.diagnostics_truncated,
+            **({"diagnostic_summary": self.diagnostic_summary.to_dict()} if self.diagnostic_summary is not None else {}),
         }
 
     @classmethod
@@ -576,6 +713,7 @@ class CheckResult:
                 sorted((key, value) for key, value in backend.items() if isinstance(value, str))
             ),
             diagnostics_truncated=_optional_bool(data, "diagnostics_truncated", default=False),
+            diagnostic_summary=_diagnostic_summary(data),
         )
 
 
@@ -609,6 +747,40 @@ class SanitizerReport:
         names = [check.sanitizer for check in self.checks]
         if len(names) != len(set(names)):
             raise ValueError("report contains duplicate sanitizer results")
+        for check in self.checks:
+            summary = check.diagnostic_summary
+            if summary is None:
+                continue
+            # New affirmative aggregate claims require the full selected scope.
+            # Whole-object scans intentionally collapse aliases of one object.
+            def matches(left: KernelIdentity, right: KernelIdentity) -> bool:
+                return left == right or (
+                    left.code_object_scan and right.code_object_scan
+                    and left.target == right.target
+                    and left.code_object_sha256 == right.code_object_sha256
+                    and left.code_object_index == right.code_object_index
+                )
+
+            if (summary.count_meaning is CountMeaning.EXACT
+                    or EvidenceStatus.COMPLETE in (summary.details, summary.native_analysis)):
+                if not self.worklist.kernels or not all(
+                    any(matches(result.identity, item.identity) for result in check.kernel_results)
+                    for item in self.worklist.kernels
+                ):
+                    raise ValueError("aggregate diagnostic evidence is missing selected results")
+                if any(
+                    not any(matches(result.identity, item.identity) for item in self.worklist.kernels)
+                    for result in check.kernel_results
+                ):
+                    raise ValueError("aggregate diagnostic evidence includes unselected results")
+                keys = [
+                    ("object", result.identity.target, result.identity.code_object_sha256,
+                     result.identity.code_object_index)
+                    if result.identity.code_object_scan else ("entry", result.identity.stable_key)
+                    for result in check.kernel_results
+                ]
+                if len(keys) != len(set(keys)):
+                    raise ValueError("aggregate diagnostic evidence contains duplicate results")
         verdict = (
             Verdict.NOT_CHECKED
             if not self.checks

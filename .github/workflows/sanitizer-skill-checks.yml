@@ -4,10 +4,10 @@ on:
   pull_request:
     paths:
       - '.agents/skills/rocm-sanitizer-triage/**'
-      - 'docs/sanitizers/skill-maintenance.md'
+      - 'docs/sanitizers/**'
+      - 'src/aorta/instrumentation/rocjitsu_sanitizers/**'
       - '.github/workflows/sanitizer-skill-checks.yml'
-      - 'tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_controls_example.py'
-      - 'tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_skill_recipe.py'
+      - 'tests/instrumentation/rocjitsu_sanitizers/**'
   workflow_dispatch:
     inputs:
       run_agent_evals:
@@ -32,11 +32,20 @@ jobs:
           python-version: '3.12'
       - name: Install AORTA and test runner
         run: python -m pip install -e . pytest
-      - name: Check example preparation and evidence handling
+      - name: Check examples and reporting contracts
         run: >-
           python -m pytest -q
           tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_skill_recipe.py
           tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_controls_example.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_isolation_recipe.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_native_cases.py
+          tests/instrumentation/rocjitsu_sanitizers/test_diagnostic_summary.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_failures.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_report.py
+          tests/instrumentation/rocjitsu_sanitizers/test_report_pipeline.py
+          tests/instrumentation/rocjitsu_sanitizers/test_selection_models.py
+          tests/instrumentation/rocjitsu_sanitizers/test_recipe_daily.py
 
   structural:
     name: Skill structure and AMD card
@@ -54,7 +63,7 @@ jobs:
           args: >-
             --skill-files skill-card.md
             --skill-sections Description,Owner,License
-            --docs docs/sanitizers/skill-maintenance.md
+            --docs docs/sanitizers/skill-maintenance.md,docs/sanitizers/waitcheck-reporting.md
 
   agent-evals:
     name: Manual planning evaluations

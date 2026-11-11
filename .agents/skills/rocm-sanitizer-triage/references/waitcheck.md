@@ -67,9 +67,10 @@ Verify the selected checker's prerequisites:
    it. AORTA accepts an entry offset but does not discover it. A symbol value or
    descriptor address must not be guessed to be the `.text` entry offset.
 4. Establish output compatibility. This AORTA adapter reads text, not the separate
-   experimental exhaustive-JSONL report. It recognizes older
-   `diagnostics=>=N` truncation and does not fully interpret newer completion
-   semantics. It validates an entry marker when present; absence of that marker
+   experimental exhaustive-JSONL report. It preserves older `diagnostics=>=N`
+   lower bounds and recognizes explicit omitted-detail/early-stop text signals
+   from the pinned source. Bare counts have unknown native completion. It validates
+   an entry marker when present; absence of that marker
    is not independent proof of exact-entry coverage.
 5. Resolve all recipe values. YAML values are literal; the loader does not expand
    environment variables. Syntax acceptance does not verify a real entry or host.
@@ -148,13 +149,26 @@ The native tool can exit 4 for hazards; AORTA can exit zero for a complete warni
 Process exit alone is not a clean result. Expose conflicts between summaries and
 raw output instead of turning inconsistent evidence into a pass.
 
-Counts are version-dependent. Older `diagnostics=>=N` means a lower bound.
-Newer pinned upstream can omit diagnostic details while completing the scan with
-an exact observed total; early stopping makes the total a lower bound. The local
-AORTA parser/model does not fully distinguish these cases. Preserve its report
-and raw output, explain the compatibility gap, and do not infer full coverage from
-parser success. Diagnostic records are not necessarily distinct bugs. Matching
-warnings across builds do not prove identical code or a crash explanation.
+Counts are version-dependent. Optional `diagnostic_summary` separates reported
+count/meaning, emitted records before deduplication, requested detail limit, detail
+completeness and native analysis completion. Missing metadata stays unknown.
+Older `diagnostics=>=N` is a lower bound with unknown native completion. The
+historical `diagnostics_truncated` Boolean retains that marker; false is no proof
+of complete details. Newer `omitted N diagnostic(s) after limit` supports an exact
+observed count, incomplete details and completed native analysis in that format.
+`omitted at least N diagnostic(s) after limit` or the supported early-stop sentence
+establishes early termination. Bare numeric summaries, cap equality and exit0/4
+alone establish neither exhaustive analysis nor complete details.
+
+Compare the summary count with raw diagnostic records, then separately count
+retained unique findings. Deduplication alone is not omitted output. Unexplained
+raw count/record differences remain a compatibility gap (reader2), not proof of
+corruption or a checker crash. Preserve the warning and all counts. The existing
+cap64 control already supplies its three details; use those rather than silently
+rescanning. Recommend a separately authorized higher-limit run only if needed.
+Diagnostic records are not necessarily distinct bugs. Matching warnings across
+builds do not prove identical code or a crash explanation. AORTA execution
+`complete` describes adapter execution, separately from native analysis.
 
 ## 7. Required examples and agent cases
 
@@ -193,11 +207,21 @@ the verified controls from untested behavior. A separate
 [two-kernel development pair](waitcheck-isolation.md#recorded-development-result-10-november-2026)
 now supports exact-entry isolation for its recorded build and tool: the faulty
 entry warns while its corrected neighbor passes. This is not an arbitrary-kernel
-or multi-entry-worklist qualification. Low diagnostic counts do not exercise caps
-or early stopping. The native binary fingerprint is recorded,
+or multi-entry-worklist qualification. A
+[three-diagnostic limit comparison](waitcheck-examples.md#recorded-diagnostic-limit-result)
+originally stopped at a raw-count/retained-detail gate at limit1; the updated reader
+now explains the saved explicit omission signal. Broader cap/completion semantics
+and early stopping are not natively qualified. The native binary
+fingerprint is recorded,
 but its full upstream build provenance remains unresolved. Applicable agent
 evaluation and release acceptance are still required. Advance readiness only under the
 [common rules](aorta-workflow.md#route-readiness).
+
+The [recorded attention result](waitcheck-examples.md#recorded-attention-kernel-result)
+adds one independently verified real-application AORTA warning with an explicit
+omission signal, plus accepted agent interpretation content. It preserves the
+same exact-entry and provenance boundaries; it does not qualify arbitrary kernels
+or remove the remaining agent-activity and release gates.
 
 Sources:
 [AORTA recipe](https://github.com/ROCm/aorta/blob/12e75e694488cd29937f2ee83dccf530c1f0a92a/src/aorta/instrumentation/rocjitsu_sanitizers/recipe.py),
