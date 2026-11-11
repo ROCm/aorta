@@ -152,14 +152,18 @@ class Adapter:
 
 
 def load_adapter(path: str | Path) -> Adapter:
-    from safetensors import safe_open
+    """Each file is read once, and its hash and its contents come from the same bytes: a file rewritten while the
+    tool runs cannot be hashed as one adapter and merged as another."""
+    from safetensors import SafetensorError
+    from safetensors.torch import load as load_safetensors
 
     path = Path(path)
     cfg_path, w_path = path / ADAPTER_CONFIG, path / ADAPTER_WEIGHTS
     if not cfg_path.is_file() or not w_path.is_file():
         raise Refused(f"{path}: needs {ADAPTER_CONFIG} and {ADAPTER_WEIGHTS}")
     try:
-        cfg = json.loads(cfg_path.read_text())
+        cfg_bytes = cfg_path.read_bytes()
+        cfg = json.loads(cfg_bytes)
     except (OSError, ValueError) as exc:  # unreadable, or not JSON
         raise Refused(_unreadable(str(cfg_path), exc)) from None
     if not isinstance(cfg, dict):
@@ -170,31 +174,35 @@ def load_adapter(path: str | Path) -> Adapter:
     listed = [t for t in targets if isinstance(t, str)] if isinstance(targets, list) else None
     pairs: dict[str, dict[str, torch.Tensor]] = {}
     namings = set()
-    with safe_open(str(w_path), framework="pt", device="cpu") as f:
-        keys = list(f.keys())
-        for key in keys:
-            m = LORA_KEY_RE.fullmatch(key)
-            if m is None:
-                raise Refused(f"{key}: not a lora_A/lora_B weight (an embedding, head or bias change is not merged "
-                              f"by this formula)")
-            module = m.group("module")
-            if not module.startswith(PEFT_PREFIX):
-                raise Refused(f"{key}: does not start with {PEFT_PREFIX!r}")
-            module = module[len(PEFT_PREFIX):]
-            mm = MODULE_RE.fullmatch(module)
-            if mm is None:
-                raise Refused(f"{key}: not a text decoder layer (model.layers.N.* or model.language_model.layers.N.*)")
-            namings.add("model.language_model.layers.N" if mm.group("lm") else "model.layers.N")
-            # PEFT's rule for a list: the module's full name is an entry, or ends with "." + an entry
-            if listed is not None and not any(module == t or module.endswith("." + t) for t in listed):
-                raise Refused(f"{key}: module {module!r} is not in target_modules")
-            t = f.get_tensor(key)
-            if t.dtype not in FLOAT_DTYPES or t.dim() != 2:
-                raise Refused(f"{key}: expected a 2-D float tensor, got {t.dtype} {tuple(t.shape)}")
-            slot = pairs.setdefault(module, {})
-            if m.group("ab") in slot:
-                raise Refused(f"{key}: lora_{m.group('ab')} appears twice for {module}")
-            slot[m.group("ab")] = t
+    try:
+        w_bytes = w_path.read_bytes()
+        weights = load_safetensors(w_bytes)
+    except (OSError, SafetensorError) as exc:  # unreadable, or not a safetensors file
+        raise Refused(_unreadable(str(w_path), exc)) from None
+    keys = sorted(weights)
+    for key in keys:
+        m = LORA_KEY_RE.fullmatch(key)
+        if m is None:
+            raise Refused(f"{key}: not a lora_A/lora_B weight (an embedding, head or bias change is not merged "
+                          f"by this formula)")
+        module = m.group("module")
+        if not module.startswith(PEFT_PREFIX):
+            raise Refused(f"{key}: does not start with {PEFT_PREFIX!r}")
+        module = module[len(PEFT_PREFIX):]
+        mm = MODULE_RE.fullmatch(module)
+        if mm is None:
+            raise Refused(f"{key}: not a text decoder layer (model.layers.N.* or model.language_model.layers.N.*)")
+        namings.add("model.language_model.layers.N" if mm.group("lm") else "model.layers.N")
+        # PEFT's rule for a list: the module's full name is an entry, or ends with "." + an entry
+        if listed is not None and not any(module == t or module.endswith("." + t) for t in listed):
+            raise Refused(f"{key}: module {module!r} is not in target_modules")
+        t = weights[key]
+        if t.dtype not in FLOAT_DTYPES or t.dim() != 2:
+            raise Refused(f"{key}: expected a 2-D float tensor, got {t.dtype} {tuple(t.shape)}")
+        slot = pairs.setdefault(module, {})
+        if m.group("ab") in slot:
+            raise Refused(f"{key}: lora_{m.group('ab')} appears twice for {module}")
+        slot[m.group("ab")] = t
     if not keys:
         raise Refused(f"{w_path}: no tensors")
     if len(namings) != 1:
@@ -209,7 +217,8 @@ def load_adapter(path: str | Path) -> Adapter:
         modules[module] = (a, b)
     return Adapter(path=path, config=fields, rank=rank, alpha=float(alpha), scale=alpha / rank, modules=modules,
                    naming=namings.pop(), dtypes=tuple(sorted({str(t.dtype) for ab in modules.values() for t in ab})),
-                   tensors=len(keys), weights_sha256=sha256_path(w_path), config_sha256=sha256_path(cfg_path))
+                   tensors=len(keys), weights_sha256=hashlib.sha256(w_bytes).hexdigest(),
+                   config_sha256=hashlib.sha256(cfg_bytes).hexdigest())
 
 
 def checkpoint_keys(adapter: Adapter, base_keys: list[str]) -> dict[str, str]:
