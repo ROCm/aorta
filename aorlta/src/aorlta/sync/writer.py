@@ -62,6 +62,9 @@ def read_base_index(base_dir: str | Path) -> dict[str, str]:
     wm = data.get("weight_map") if isinstance(data, dict) else None
     if not isinstance(wm, dict) or not wm or not all(isinstance(k, str) and isinstance(v, str) for k, v in wm.items()):
         raise SyncError(f"{path}: weight_map missing or malformed")
+    outside = sorted({v for v in wm.values() if v in ("", ".", "..") or Path(v).name != v})
+    if outside:  # `base_dir / name` must be a file of the model directory, and the merge tool writes `out / name`
+        raise SyncError(f"{path}: weight_map names shards that are not file names in the directory: {outside[:3]}")
     return dict(wm)
 
 

@@ -284,12 +284,18 @@ def read_header(path: Path) -> tuple[int, dict[str, dict]]:
     return n, entries
 
 
+def base_index(base: Path) -> dict[str, str]:
+    """The base's weight map (WP3's reader, which refuses a shard name that is not a file of the directory)."""
+    try:
+        return read_base_index(base)
+    except SyncError as exc:
+        raise Refused(f"base index: {exc}") from exc
+
+
 def shard_files(base: Path) -> dict[str, list[str]]:
-    wm = read_base_index(base)
+    wm = base_index(base)
     out: dict[str, list[str]] = {}
     for key, fn in wm.items():
-        if fn in ("", ".", "..") or Path(fn).name != fn:  # `out / fn` must stay a copy inside the output directory
-            raise Refused(f"{key}: the index names the shard {fn!r}, which is not a file name in the model directory")
         out.setdefault(fn, []).append(key)
     for fn, keys in out.items():
         _, entries = read_header(base / fn)
@@ -427,7 +433,7 @@ def merge_in_memory(base: Path, adapter: Adapter, *, expect_scale: float | None,
 
     if expect_scale is not None and adapter.scale != expect_scale:
         raise Refused(f"lora_alpha / r = {adapter.alpha:g} / {adapter.rank} = {adapter.scale}, expected {expect_scale}")
-    base_keys = list(read_base_index(base))
+    base_keys = list(base_index(base))
     factors = factors_for(adapter, base_keys)
     targets = sorted(target_keys(base_keys))
     if expect_modules is not None and len(factors) != expect_modules:
