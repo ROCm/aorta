@@ -74,6 +74,10 @@ def _any_unsettled(result: RewardResult) -> bool:
     return any(getattr(leg, "state", None) == "unsettled" for leg in (result.legs or {}).values())
 
 
+def _any_inconsistent(result: RewardResult) -> bool:
+    return any(not isinstance(leg, LegResult) or inconsistency(leg) is not None for leg in (result.legs or {}).values())
+
+
 class _Writer:
     """Writes cache files off the caller's thread, in order; once closed, on the caller's thread."""
 
@@ -257,13 +261,17 @@ class RewardCache:
             return None
         if result.reward is None or result.status != "scored" or _any_unsettled(result):
             return None
+        if _any_inconsistent(result):  # a reward hit does not pass through get_leg's checks
+            with self.rewards.lock:
+                self.rewards.stats["corrupt"] += 1
+            return None
         return result
 
     def put_reward(self, key: str, fields: dict, result: RewardResult) -> bool:
         """Only scored results are cached, and none with an unsettled leg: a finding can score a candidate while
         another leg timed out, and that leg must run again for the next identical candidate."""
         if (not self.enabled or result.reward is None or result.status != "scored" or not result.full_check
-                or _any_unsettled(result)):
+                or _any_unsettled(result) or _any_inconsistent(result)):
             return False
         self.rewards.put(key, fields, {"result": to_dict(result)})
         return True
