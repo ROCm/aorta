@@ -60,6 +60,7 @@ def test_an_iteration_where_every_group_has_zero_advantage_is_a_noop_not_a_stop(
         s = read_summary(r.cfg.run_dir, n)
         assert "zero_advantage" in s["warnings"] and s["trainer"]["step_taken"] is False
         assert s["sync"]["published"] is False and s["groups"]["zero_advantage"] == s["groups"]["total"]
+        assert s["samples"]["trained"] == 0 and s["groups"]["trained"] == 0  # no step, so no group trained
         assert s["spans"]["missing"] == []
         (mark,) = [x for x in read_jsonl(r.cfg.run_dir / "iterations" / f"iter-{n:06d}" / "spans.jsonl")
                    if x.name in ("landing", "no_step")]
@@ -89,6 +90,8 @@ def test_an_iteration_where_only_some_groups_have_zero_advantage_still_steps(mak
     s = read_summary(r.cfg.run_dir, 1)
     assert r.trainer.steps == 1 and s["trainer"]["step_taken"] is True and "zero_advantage" not in s["warnings"]
     assert s["groups"]["zero_advantage"] == len(prompts) - 1
+    trained = {e["prompt_id"] for e in read_episodes(r.cfg.run_dir, 1) if e["trained"]}
+    assert s["groups"]["trained"] == len(trained) > 0  # the groups with a sample in the step taken
 
 
 def test_a_run_refused_at_its_run_plan_stops_nothing(make_spec):

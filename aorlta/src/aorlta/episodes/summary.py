@@ -191,7 +191,8 @@ def build_summary(*, run_id: str, source: str, iteration: int, sampled: str, tra
     rescued_total = sum(1 for e in failed0 if e["end_reason"] == "compiled")
     final_capped = sum(1 for e in with_turns if e["turns"][-1]["finish_reason"].get("type") == "length")
     final_lens = [len(e["turns"][-1]["response_ids"]) for e in with_turns if e["end_reason"] != "quarantined"]
-    groups_trained = sum(1 for g in groups.values() if getattr(g, "trained", ()))
+    groups_streamed = sum(1 for g in groups.values() if getattr(g, "trained", ()))  # handed to the trainer
+    groups_trained = len({e["prompt_id"] for e in episodes if e["trained"]})  # with a sample in the step taken
     dropped = Counter(g.dropped for g in groups.values() if getattr(g, "dropped", None))
     zero_adv = sum(1 for g in groups.values() if not g.dropped and g.advantages
                    and all(a == 0.0 for a in g.advantages.values()))
@@ -204,7 +205,7 @@ def build_summary(*, run_id: str, source: str, iteration: int, sampled: str, tra
     any_compile = any(tr["compile"] is not None for e in with_turns for tr in e["turns"])
     span_info = span_check(spans, t_start, t_landed, step_taken=step is not None,
                            any_repair=any(len(e["turns"]) > 1 for e in with_turns), any_compile=any_compile,
-                           any_trained_group=groups_trained > 0)
+                           any_trained_group=groups_streamed > 0)
     warnings = list(warnings) + (["span_gap"] if span_info["gap_flag"] else [])
     return {
         "schema": SUMMARY_SCHEMA, "source": source, "run_id": run_id, "iteration": iteration,
