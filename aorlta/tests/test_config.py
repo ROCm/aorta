@@ -240,6 +240,7 @@ def test_yaml_1_2_scalars():
         ("rollout.K", 8.0, "rollout.K: expected an int"),
         ("trainer.lr", "1e-5", "trainer.lr: expected a finite number"),
         ("trainer.lr", float("inf"), "trainer.lr: expected a finite number"),
+        ("trainer.lr", 10 ** 400, "trainer.lr: expected a finite number"),  # too large for a float
         ("rollout.thinking", False, "quote it"),
         ("rollout.engines", 0, "rollout.engines: expected a list"),
         ("run.run_id", 7, "run.run_id: expected a string"),
