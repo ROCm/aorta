@@ -116,18 +116,25 @@ def safe_run(adapter: Any, job: LegJob, clock: Callable[[], float] = time.time) 
     return checked_result(job, result, t0, clock())
 
 
+def inconsistency(result: LegResult) -> str | None:
+    """Why a leg's state contradicts its findings, or None: a finding needs findings, and a clean leg has none
+    (a trusted build fact is not a finding)."""
+    if result.state == "finding" and not result.findings:
+        return "finding_without_findings"
+    if result.state == "clean" and any(not (isinstance(f, dict) and f.get("kind") == TRUSTED_BUILD)
+                                       for f in result.findings):
+        return "clean_with_findings"
+    return None
+
+
 def checked_result(job: LegJob, result: Any, t0: float, t1: float) -> LegResult:
     ok = (isinstance(result, LegResult) and result.leg == job.leg
           and result.state in ("clean", "finding", "fail", "unsettled")
           and isinstance(result.findings, list))
     if not ok:
         return unsettled(job, "adapter_error", t_start=t0, t_end=t1)
-    if result.state == "finding" and not result.findings:
-        return unsettled(job, "finding_without_findings", t_start=t0, t_end=t1)
-    if result.state == "clean" and any(not (isinstance(f, dict) and f.get("kind") == TRUSTED_BUILD)
-                                       for f in result.findings):  # a trusted build fact is not a finding
-        return unsettled(job, "clean_with_findings", t_start=t0, t_end=t1)
-    return result
+    why = inconsistency(result)
+    return unsettled(job, why, t_start=t0, t_end=t1) if why else result
 
 
 def safe_run_batch(adapter: Any, jobs: Sequence[LegJob], clock: Callable[[], float] = time.time) -> list[LegResult]:
