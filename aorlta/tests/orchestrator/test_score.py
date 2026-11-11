@@ -363,6 +363,20 @@ def test_the_entry_point_runs_a_score_config_with_the_fakes_and_never_resumes_it
     assert again.returncode == 2 and "a score run is not resumed" in again.stderr
 
 
+def test_a_retry_does_not_lengthen_the_next_batchs_scoring_deadline(tmp_path):
+    """The next deadline is SCORING_FACTOR x the history's median, and the history holds the first phase's duration,
+    as the training loop's does: a retry's time is not in it."""
+    from aorlta.orchestrator.deadlines import SCORING_FACTOR
+
+    s = spec(tmp_path, score={"prompts": 8, "passes": 1}, pool_size=8, scoring_s=60.0, engine=NO_ERRORS,
+             reward={"stall_rate": 1.0, "faulty_attempts": [1]})  # every first attempt stalls past the deadline
+    r, res = scored(s)
+    assert res["status"] == "completed"
+    b1, b2 = (json.loads((r.cfg.run_dir / "iterations" / f"iter-{n:06d}" / "score.json").read_text()) for n in (1, 2))
+    assert b1["retry"] is not None and b1["deadlines"]["scoring_dur_s"] <= b1["deadlines"]["scoring_s"]
+    assert b2["deadlines"]["scoring_s"] == SCORING_FACTOR * b1["deadlines"]["scoring_dur_s"]
+
+
 def test_the_fake_components_hold_as_many_prompts_as_a_score_config_asks_for(tmp_path):
     path = tmp_path / "score.yaml"
     path.write_text(json.dumps(score_dict(tmp_path, score={"prompts": 16, "passes": 1})))  # P is 4

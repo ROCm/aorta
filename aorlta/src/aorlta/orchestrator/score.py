@@ -405,6 +405,7 @@ class Scorer:
         with self.spans.span("score.wait", n, deadline_s=score_s):
             drain = self.reward.drain(t_barrier + score_s)
             late = ledger.wait_results(RESULT_WAIT_S)
+        score_dur = self.clock.now() - t_barrier  # the first phase only, as the training loop takes it for the history
         if late:
             warnings.append("reward_unresolved")
         outstanding = list(getattr(drain, "outstanding_at_deadline", []) or [])
@@ -420,7 +421,6 @@ class Scorer:
                 ledger.wait_results(RESULT_WAIT_S)
             outstanding += list(getattr(drain2, "outstanding_at_deadline", []) or [])
             retry = {"candidates": len(cands), "deadline_s": retry_s, "scored": ledger.scored()}
-        score_dur = self.clock.now() - t_barrier
         self.point("score.drained", n)
         episodes, samples = self._episodes(n, ledger)
         outs = IterationOutputs(self.run_dir, n)
