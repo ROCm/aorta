@@ -196,15 +196,16 @@ def summarize(samples: Sequence[Sample], checks: Iterable[str] = ()) -> dict:
     }
 
 
-def build_report(samples: Sequence[Sample], prompts: Sequence, header: dict) -> list[dict]:
+def build_report(samples: Sequence[Sample], prompts: Sequence, header: dict, *,
+                 checks: Iterable[str] = ()) -> list[dict]:
     """The report's rows: the run, one per prompt (in the order scored), then the totals. Every row counts the same
-    checks: the legs of any sample."""
+    checks: `checks` (the reward service's legs) and the legs of any sample."""
     by_prompt: dict[str, list[Sample]] = {p.prompt_id: [] for p in prompts}
     for s in samples:
         if s.prompt_id not in by_prompt:
             raise ValueError(f"{s.chain_id}: prompt {s.prompt_id!r} was not selected")
         by_prompt[s.prompt_id].append(s)
-    checks = set().union(*(s.legs for s in samples))
+    checks = set(checks).union(*(s.legs for s in samples))
     rows = [dict(header, kind="run", schema=SCORE_REPORT_SCHEMA)]
     for p in prompts:
         mine = by_prompt[p.prompt_id]
@@ -481,7 +482,7 @@ class Scorer:
         }
 
     def _report(self) -> None:
-        rows = build_report(self.samples, self.prompts, self.header())
+        rows = build_report(self.samples, self.prompts, self.header(), checks=getattr(self.reward, "legs", ()))
         out = self.run_dir / REPORT_DIR
         atomic_write_bytes(out / REPORT_NAME, jsonl_bytes(rows))
         text = summary_text(rows)

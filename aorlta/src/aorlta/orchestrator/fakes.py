@@ -343,6 +343,8 @@ def _leg(leg: str, state: str, reason: str | None, worker: str | None, t: float,
 
 
 class FakeReward:
+    legs = ("gate.parse", "gate.compile", "san.waitcheck", "san.asan")  # every leg a result of this fake can carry
+
     def __init__(self, clock: VirtualClock, config: FakeRewardConfig | None = None):
         self.clock = clock
         self.c = config or FakeRewardConfig()

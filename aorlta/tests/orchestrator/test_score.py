@@ -191,6 +191,16 @@ def test_a_sample_the_reward_service_never_saw_did_not_run_any_check():
     assert rows[-1]["checks"]["san.asan"]["not_run"] == 2
 
 
+def test_a_check_no_sample_carries_is_counted_as_not_run():
+    """When no chain reached the reward service (a generation deadline that expired before any request started),
+    no sample carries a leg: the report still counts every check the service runs."""
+    lost = [sample("a", k, status="unscored", end="engine_error", turn=-1, handed=False, reason="engine_error")
+            for k in range(2)]
+    rows = S.build_report(lost, [_prompt("a")], {}, checks=("gate.parse", "san.asan"))
+    none = {"pass": 0, "fail": 0, "unsettled": 0, "not_run": 2, "not_applicable": 0}
+    assert [row["checks"] for row in rows[1:]] == [{"gate.parse": none, "san.asan": none}] * 2
+
+
 def test_the_reward_distribution_is_over_scored_samples_only():
     samples = [sample(k=0, reward=-0.95, base=-0.9), sample(k=1, reward=-0.92, base=-0.9),
                sample(k=2, reward=0.98, base=1.0), sample(k=3, status="unscored"), sample(k=4, reward=-1.0, base=-1.0)]
@@ -315,6 +325,14 @@ def test_every_check_counts_every_sample_when_engines_lose_chains(tmp_path):
     for row in rows[1:]:
         assert row["checks"].keys() == rows[-1]["checks"].keys() != set()
         assert all(sum(c[o] for o in S.CHECK_OUTCOMES) == row["samples"] for c in row["checks"].values()), row
+
+
+def test_a_score_run_reports_every_check_its_reward_service_runs(tmp_path):
+    r = build_fake_run(spec(tmp_path, score={"prompts": 4, "passes": 1}, engine=NO_ERRORS))
+    r.reward.legs = (*r.reward.legs, "san.never")  # a check no sample carries
+    assert r.orchestrator.run()["status"] == "completed"
+    rows = report(r.cfg)
+    assert all(row["checks"]["san.never"]["not_run"] == row["samples"] > 0 for row in rows[1:])
 
 
 def test_not_applicable_legs_are_counted_beside_their_states(tmp_path):

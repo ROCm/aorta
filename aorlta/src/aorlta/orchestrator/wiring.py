@@ -402,6 +402,7 @@ class RewardAdapter:
 
         self.cfg, self.clock, self.spans = cfg, clock, spans
         self.profile = load_profile(cfg.reward.profile)
+        self.legs = tuple(self.profile.legs)
         try:
             self.rewardfn = standin_rewardfn(self.profile)
         except UnsupportedRewardFn as exc:
