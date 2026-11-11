@@ -39,6 +39,7 @@ from ...schemas import ControlSpec, LegJob, LegResult
 from . import descriptors
 from .base import TRUSTED_BUILD, ProcessRunner, make_result, run_tag, unsettled
 from .standin_harness import HARNESS_VERSION, HarnessUnsupported, dynamic_lds_bytes, has_main, plan, write_harness
+from .toolchain import toolchain_identity
 
 # "fatal error" too: a missing header (`#include <cuda_runtime.h>`) is the candidate's compile error, not the checker's.
 ERROR_LINE = re.compile(r"^[^\n]*?:\d+:\d+: (?:fatal )?error: (?P<msg>[^\n]*)$", re.MULTILINE)
@@ -127,7 +128,7 @@ class StandinHipcc:
         self.timeout_s = timeout_s
         self._clock = clock
         self.runner = runner or ProcessRunner()
-        self.version = (f"3+{self._identity(self.hipcc)}+readelf-{self._identity(self.readelf)}"
+        self.version = (f"4+{toolchain_identity(self.hipcc)}+readelf-{self._identity(self.readelf)}"
                         f"+harness-{HARNESS_VERSION}")
 
     @staticmethod
