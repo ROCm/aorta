@@ -8,7 +8,7 @@
         "group": "gpt-oss",
         "label": "fpsan-gpt-oss",
         "name": "fpsan-gpt-oss",
-        "report_rel": "runs/2026-11-10T122053-42814082346/survey/fpsan-gpt-oss/sanitizer_report.json",
+        "report_rel": "runs/2026-11-11T122106-43018719581/survey/fpsan-gpt-oss/sanitizer_report.json",
         "sanitizer": "fpsan",
         "staged": true,
         "summary": {
@@ -1428,7 +1428,7 @@
         "group": "qwen3",
         "label": "fpsan-qwen3",
         "name": "fpsan-qwen3",
-        "report_rel": "runs/2026-11-10T122053-42814082346/survey/fpsan-qwen3/sanitizer_report.json",
+        "report_rel": "runs/2026-11-11T122106-43018719581/survey/fpsan-qwen3/sanitizer_report.json",
         "sanitizer": "fpsan",
         "staged": true,
         "summary": {
@@ -1474,9 +1474,9 @@
               "detail": "",
               "dispatch": 1,
               "findings": 0,
-              "name": "_fwd_kernel",
+              "name": "_topk_topp_kernel",
               "offset": null,
-              "sha": "336ef011aa",
+              "sha": "0673f02020",
               "time_ms": 0.0,
               "verdict": "pass"
             },
@@ -1485,9 +1485,9 @@
               "detail": "",
               "dispatch": 1,
               "findings": 0,
-              "name": "_topk_topp_kernel",
+              "name": "_fwd_kernel",
               "offset": null,
-              "sha": "0673f02020",
+              "sha": "336ef011aa",
               "time_ms": 0.0,
               "verdict": "pass"
             }
@@ -1511,6 +1511,164 @@
         "workload": null
       }
     ],
+    "gate": false,
+    "meta": {
+      "cases": [
+        "waitcheck",
+        "consan-clean",
+        "consan-racy",
+        "fpsan-match",
+        "fpsan-mismatch"
+      ],
+      "commit": "ac11f84616a8",
+      "commit_full": "ac11f84616a8bf7cc475e455bfb4a7ae250d4928",
+      "date": "2026-11-11T12:21:06+00:00",
+      "gate": false,
+      "gpu": "gfx950",
+      "run": "2026-11-11T122106-43018719581",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/43018719581"
+    },
+    "rel": "runs/2026-11-11T122106-43018719581",
+    "rows": {
+      "consan-clean": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "missing",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": false,
+        "observation": "report missing",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "consan-racy": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "missing",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": false,
+        "observation": "report missing",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-match": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "missing",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": false,
+        "observation": "report missing",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "fpsan-mismatch": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "missing",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": false,
+        "observation": "report missing",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "waitcheck": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "missing",
+        "expected": "warn",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
+        "match": false,
+        "observation": "report missing",
+        "present": false,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
+        },
+        "report_rel": null,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      }
+    },
+    "survey": []
+  },
+  {
     "gate": false,
     "meta": {
       "cases": [
@@ -1665,8 +1823,7 @@
           "top_n": null
         }
       }
-    },
-    "survey": []
+    }
   },
   {
     "gate": false,
@@ -8327,252 +8484,6 @@
           "verdict": "warn"
         },
         "report_rel": "runs/2026-10-16T160650-38922506989/waitcheck/sanitizer_report.json",
-        "verdict": "warn",
-        "worklist": {
-          "kernel_count": 3,
-          "requirement": "top_dispatch_count",
-          "top_n": 3
-        }
-      }
-    }
-  },
-  {
-    "gate": false,
-    "meta": {
-      "cases": [
-        "waitcheck",
-        "consan-clean",
-        "consan-racy"
-      ],
-      "commit": "bf117600ca07",
-      "commit_full": "bf117600ca0754ec60d680a3de2ad5db6a89fcde",
-      "date": "2026-10-16T12:34:32+00:00",
-      "gate": false,
-      "gpu": "gfx950",
-      "run": "2026-10-16T123432-38900327093",
-      "run_url": "https://github.com/ROCm/aorta/actions/runs/38900327093"
-    },
-    "rel": "runs/2026-10-16T123432-38900327093",
-    "rows": {
-      "consan-clean": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "error",
-        "expected": "pass",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [
-          {
-            "code_object": null,
-            "code_object_index": null,
-            "code_object_sha256": null,
-            "entry_offset": null,
-            "kernel": "consan_lds_race",
-            "label": "consan_lds_race",
-            "reason": "combined_hook_exit_1"
-          }
-        ],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "combined_hook_exit_1",
-            "dispatch": 1,
-            "findings": 0,
-            "name": "consan_lds_race",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "error"
-          }
-        ],
-        "match": false,
-        "observation": "consan error; reason combined_hook_exit_1; consan_lds_race: combined_hook_exit_1; preflight error",
-        "present": true,
-        "primary": {
-          "preflight": "error",
-          "reason": "combined_hook_exit_1",
-          "sanitizer": "consan",
-          "verdict": "error"
-        },
-        "report_rel": "runs/2026-10-16T123432-38900327093/consan-clean/sanitizer_report.json",
-        "verdict": "error",
-        "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
-        }
-      },
-      "consan-racy": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "error",
-        "expected": "fail",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [
-          {
-            "code_object": null,
-            "code_object_index": null,
-            "code_object_sha256": null,
-            "entry_offset": null,
-            "kernel": "consan_lds_race_2wave",
-            "label": "consan_lds_race_2wave",
-            "reason": "combined_hook_exit_1"
-          }
-        ],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "combined_hook_exit_1",
-            "dispatch": 1,
-            "findings": 0,
-            "name": "consan_lds_race_2wave",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "error"
-          }
-        ],
-        "match": false,
-        "observation": "consan error; reason combined_hook_exit_1; consan_lds_race_2wave: combined_hook_exit_1; preflight error",
-        "present": true,
-        "primary": {
-          "preflight": "error",
-          "reason": "combined_hook_exit_1",
-          "sanitizer": "consan",
-          "verdict": "error"
-        },
-        "report_rel": "runs/2026-10-16T123432-38900327093/consan-racy/sanitizer_report.json",
-        "verdict": "error",
-        "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
-        }
-      },
-      "fpsan-match": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "not run",
-        "expected": "pass",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [],
-        "kernels": [],
-        "match": true,
-        "observation": "not run: this control was added after this run",
-        "present": false,
-        "primary": {
-          "preflight": null,
-          "reason": null,
-          "sanitizer": null,
-          "verdict": null
-        },
-        "report_rel": null,
-        "required": false,
-        "verdict": "\u2014",
-        "worklist": {
-          "kernel_count": 0,
-          "requirement": null,
-          "top_n": null
-        }
-      },
-      "fpsan-mismatch": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "not run",
-        "expected": "fail",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [],
-        "kernels": [],
-        "match": true,
-        "observation": "not run: this control was added after this run",
-        "present": false,
-        "primary": {
-          "preflight": null,
-          "reason": null,
-          "sanitizer": null,
-          "verdict": null
-        },
-        "report_rel": null,
-        "required": false,
-        "verdict": "\u2014",
-        "worklist": {
-          "kernel_count": 0,
-          "requirement": null,
-          "top_n": null
-        }
-      },
-      "waitcheck": {
-        "backend": {
-          "name": "rj_waitcheck",
-          "sha": "2c406bcc3be3"
-        },
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "complete",
-        "expected": "warn",
-        "finding_groups": [
-          {
-            "code": "wait_hazard",
-            "count": 64,
-            "example": "sol_126578.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20",
-            "sanitizer": "waitcheck",
-            "severity": "warning"
-          }
-        ],
-        "findings": 64,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "sol_126578.hsaco",
-            "detail": "",
-            "dispatch": 479,
-            "findings": 32,
-            "name": "gemm_NT_M256_N4096_K1024",
-            "offset": null,
-            "sha": "57c5d8efa4",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_175415.hsaco",
-            "detail": "same code object as gemm_NT_M256_N4096_K1024; scanned once",
-            "dispatch": 471,
-            "findings": 0,
-            "name": "gemm_NT_M128_N4096_K1280",
-            "offset": null,
-            "sha": "57c5d8efa4",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_137678.hsaco",
-            "detail": "",
-            "dispatch": 440,
-            "findings": 32,
-            "name": "gemm_TT_M64_N64_K1280",
-            "offset": null,
-            "sha": "aeb46fded1",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          }
-        ],
-        "match": true,
-        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
-        "present": true,
-        "primary": {
-          "preflight": null,
-          "reason": null,
-          "sanitizer": "waitcheck",
-          "verdict": "warn"
-        },
-        "report_rel": "runs/2026-10-16T123432-38900327093/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
           "kernel_count": 3,
