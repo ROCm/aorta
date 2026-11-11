@@ -30,5 +30,5 @@ pythonpath = ["src"]
 addopts = ["--import-mode=importlib", "-p", "no:cacheprovider"]
 markers = [
     "heavy: holds several copies of a model; CI runs these on a runner of their own, two at a time",
-    "cpu_run: one long CPU run in a module fixture; CI runs it on a runner of its own",
+    "cpu_run: a long CPU run; CI runs these on a runner of their own, one at a time, also when marked heavy",
 ]
