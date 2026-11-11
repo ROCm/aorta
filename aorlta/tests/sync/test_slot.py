@@ -147,5 +147,6 @@ def test_a_base_index_naming_a_shard_outside_the_model_directory_is_refused(tiny
     key = next(iter(index["weight_map"]))
     index["weight_map"][key] = name
     (base / W.INDEX_NAME).write_text(json.dumps(index))
-    with pytest.raises(W.SyncError, match="not file names in the directory"):
+    with pytest.raises(W.ShardNameError, match="not file names in the directory") as exc:
         W.read_base_index(base)
+    assert exc.value.names == [name]
