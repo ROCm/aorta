@@ -319,6 +319,37 @@ def test_adapters_the_formula_does_not_cover_are_refused_before_writing(tiny, tm
     assert not out.exists() and not out.with_name("out.partial").exists()
 
 
+@pytest.mark.parametrize("text", ['{"r": 4', "[]"])
+def test_an_adapter_config_that_is_not_a_json_object_is_refused(tiny, tmp_path, capsys, text):
+    adapter = _adapter_variant(tiny, tmp_path / "adapter")
+    (adapter / M.ADAPTER_CONFIG).write_text(text)
+    out = tmp_path / "out"
+    assert run("merge", "--base", str(tiny.base), "--adapter", str(adapter), "--out", str(out)) == 2
+    assert "REFUSED" in capsys.readouterr().err and not out.exists()
+    assert run("verify", "--base", str(tiny.base), "--adapter", str(adapter), "--merged", str(out)) == 2
+    assert "REFUSED" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("text", ['{"base_model": ', '{"base_model": []}', "[]"])
+def test_a_pin_file_that_is_not_a_pin_list_is_refused(tiny, tmp_path, capsys, text):
+    pins = tmp_path / "pins.json"
+    pins.write_text(text)
+    out = tmp_path / "out"
+    assert run("merge", "--base", str(tiny.base), "--adapter", str(tiny.text), "--out", str(out),
+               "--base-pins", str(pins)) == 2
+    assert "REFUSED" in capsys.readouterr().err and not out.exists()
+
+
+@pytest.mark.parametrize("header", [b"{", b"[]", b'{"x": {"dtype": "BF16"}}'])
+def test_a_base_shard_with_a_malformed_header_is_refused(tiny, tmp_path, capsys, header):
+    base = tmp_path / "base"
+    shutil.copytree(tiny.base, base)
+    (base / SHARDS[0]).write_bytes(struct.pack("<Q", len(header)) + header)
+    out = tmp_path / "out"
+    assert run("merge", "--base", str(base), "--adapter", str(tiny.text), "--out", str(out)) == 2
+    assert "REFUSED" in capsys.readouterr().err and not out.exists()
+
+
 def _modules(adapter: Path) -> list[str]:
     from safetensors import safe_open
 
