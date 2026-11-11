@@ -3,6 +3,7 @@
 import errno
 import os
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -163,6 +164,19 @@ def test_an_iteration_commits_on_a_filesystem_without_directory_fsync(tmp_path, 
     _fail_dir_fsync(monkeypatch, code)
     out.commit()
     assert complete_iterations(tmp_path) == [1] and len(read_episodes(tmp_path, 1)) == 1
+
+
+def test_a_new_ledger_syncs_its_directory_so_a_power_loss_cannot_drop_the_file(tmp_path, monkeypatch):
+    from aorlta.episodes import writer
+
+    synced = []
+    monkeypatch.setattr(writer, "_fsync_dir", lambda d: synced.append(Path(d)))
+    ledger = AppendLedger(tmp_path / "evidence" / "MANIFEST.jsonl")
+    ledger.append([{"iteration": 1}])
+    ledger.append([{"iteration": 2}])
+    assert synced == [tmp_path / "evidence"] and [r["iteration"] for r in ledger.read()] == [1, 2]
+    AppendLedger(ledger.path).append([{"iteration": 3}])  # a resumed run: the entry may never have been synced
+    assert synced == [tmp_path / "evidence"] * 2
 
 
 def test_the_evidence_store_is_content_addressed_owner_only_and_verifiable(tmp_path):
