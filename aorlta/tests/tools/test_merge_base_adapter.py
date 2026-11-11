@@ -350,6 +350,16 @@ def test_a_base_shard_with_a_malformed_header_is_refused(tiny, tmp_path, capsys,
     assert "REFUSED" in capsys.readouterr().err and not out.exists()
 
 
+def test_a_base_index_that_is_not_json_is_refused(tiny, tmp_path, capsys):
+    base = tmp_path / "base"
+    shutil.copytree(tiny.base, base)
+    (base / M.INDEX_NAME).write_text('{"weight_map":')
+    out = tmp_path / "out"
+    assert run("merge", "--base", str(base), "--adapter", str(tiny.text), "--out", str(out)) == 2
+    assert "REFUSED" in capsys.readouterr().err and not out.exists()
+    assert run("verify", "--base", str(base), "--adapter", str(tiny.text), "--merged", str(out)) == 2
+
+
 def _modules(adapter: Path) -> list[str]:
     from safetensors import safe_open
 

@@ -72,11 +72,17 @@ def read_base_index(base_dir: str | Path) -> dict[str, str]:
         single = Path(base_dir) / SINGLE_FILE
         if not single.is_file():
             raise SyncError(f"{path}: the base has no index and no {SINGLE_FILE}; the name map needs one")
-        from safetensors import safe_open
+        from safetensors import SafetensorError, safe_open
 
-        with safe_open(str(single), framework="pt") as f:
-            return {k: SINGLE_FILE for k in f.keys()}
-    data = json.loads(read_text(path))
+        try:
+            with safe_open(str(single), framework="pt") as f:
+                return {k: SINGLE_FILE for k in f.keys()}
+        except (OSError, SafetensorError) as exc:
+            raise SyncError(f"{single}: cannot be read: {type(exc).__name__}: {str(exc)[:120]}") from None
+    try:
+        data = json.loads(read_text(path))
+    except (OSError, ValueError) as exc:  # unreadable, or not JSON
+        raise SyncError(f"{path}: cannot be read: {type(exc).__name__}: {str(exc)[:120]}") from None
     wm = data.get("weight_map") if isinstance(data, dict) else None
     if not isinstance(wm, dict) or not wm or not all(isinstance(k, str) and isinstance(v, str) for k, v in wm.items()):
         raise SyncError(f"{path}: weight_map missing or malformed")
