@@ -176,6 +176,20 @@ def test_the_evidence_store_is_content_addressed_owner_only_and_verifiable(tmp_p
     assert any("does not match" in p for p in store.verify())
 
 
+def test_a_put_whose_listing_failed_lists_the_blob_when_it_is_retried(tmp_path, monkeypatch):
+    store = EvidenceStore(tmp_path / "evidence")
+
+    def disk_full(records):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(store.manifest, "append", disk_full)
+    with pytest.raises(OSError):
+        store.put(b"raw", kind="stderr", iteration=1)
+    monkeypatch.undo()
+    sha = store.put(b"raw", kind="stderr", iteration=1)
+    assert store.verify() == [] and store.prune_unlisted() == [] and store.get(sha) == b"raw"
+
+
 def test_the_evidence_store_drops_blobs_of_uncommitted_iterations_at_resume(tmp_path):
     store = EvidenceStore(tmp_path / "evidence")
     keep = store.put(b"one", kind="stderr", iteration=1)

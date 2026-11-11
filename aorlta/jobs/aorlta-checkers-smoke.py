@@ -28,12 +28,14 @@ from aorlta.reward.remote import RemoteAdapter, servers
 from aorlta.schemas import LegJob
 
 FIXTURES = Path(os.environ.get("AORLTA_AORTA_ROOT", "/opt/aorta")) / "recipes" / "sanitizers" / "fixtures"
-# fixture -> {leg: expected state}; ConSan on a kernel with no LDS, barrier, atomic or fence site is NOT_CHECKED,
-# which stays unsettled
+# fixture -> {leg: (expected state, the start of the expected reason or None)}. ConSan on a kernel with no LDS,
+# barrier, atomic or fence site is NOT_CHECKED as not applicable, which stays unsettled; another unsettled reason
+# (an adapter error, a harness that did not build, a timeout) fails the smoke test.
+NOT_APPLICABLE = "checker_not_settled:not_checked/not_checked: consan_not_applicable"
 EXPECTED = {
-    "tiny_vecadd": {"san.asan": "clean", "san.consan": "unsettled"},
-    "lds_reduce": {"san.asan": "clean", "san.consan": "clean"},
-    "asan_overflow": {"san.asan": "finding"},
+    "tiny_vecadd": {"san.asan": ("clean", None), "san.consan": ("unsettled", NOT_APPLICABLE)},
+    "lds_reduce": {"san.asan": ("clean", None), "san.consan": ("clean", None)},
+    "asan_overflow": {"san.asan": ("finding", None)},
 }
 
 
@@ -111,14 +113,14 @@ def main(config: str, out_dir: str) -> int:
             t0 = time.monotonic()
             r = run_bounded(a, job, limit)
             dt = time.monotonic() - t0
-            want = "clean" if want is None else want  # a control must be clean
+            want, why = ("clean", None) if want is None else want  # a control must be clean
             if r is None:
                 ok, hung = False, True
                 rows.append({"adapter": name, "gpu": gpu, "job": label, "leg": leg, "expected": want, "state": None,
                              "reason": f"no answer in {limit:g} s", "findings": [], "seconds": round(dt, 2)})
                 print(f"BAD  {where:27s} {label:40s} {'-':9s} want {want:9s} no answer in {limit:g} s", flush=True)
                 break  # the adapter is closed: its server's other jobs cannot run
-            good = r.state == want
+            good = r.state == want and (why is None or (r.reason or "").startswith(why))
             ok &= good
             rows.append({"adapter": name, "gpu": gpu, "job": label, "leg": leg, "expected": want, "state": r.state,
                          "reason": r.reason, "findings": [f.get("kind") for f in r.findings], "seconds": round(dt, 2)})
