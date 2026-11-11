@@ -288,6 +288,8 @@ def shard_files(base: Path) -> dict[str, list[str]]:
     wm = read_base_index(base)
     out: dict[str, list[str]] = {}
     for key, fn in wm.items():
+        if fn in ("", ".", "..") or Path(fn).name != fn:  # `out / fn` must stay a copy inside the output directory
+            raise Refused(f"{key}: the index names the shard {fn!r}, which is not a file name in the model directory")
         out.setdefault(fn, []).append(key)
     for fn, keys in out.items():
         _, entries = read_header(base / fn)

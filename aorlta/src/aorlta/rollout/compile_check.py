@@ -95,8 +95,13 @@ class EvidenceStore:
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
+        self._sealed = False  # made owner-only at the first write, which comes after the run plan
 
     def put(self, text: str) -> str:
+        if not self._sealed:
+            self.root.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.root, 0o700)  # an existing root included: what it holds quotes the sources
+            self._sealed = True
         digest = sha256_text(text)
         path = self.root / digest[:2] / f"{digest}.txt"
         if not path.exists():

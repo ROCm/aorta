@@ -441,3 +441,22 @@ def test_verify_reports_missing_or_malformed_output_files_as_a_failed_check(tiny
     assert run("verify", "--base", str(tiny.base), "--adapter", str(tiny.text), "--merged", str(copy)) == 1
     summary = json.loads(capsys.readouterr().out)
     assert summary["pass"] is False and summary["problems"]
+
+
+@pytest.mark.parametrize("where", ["absolute", "parent"])
+def test_an_index_naming_a_shard_outside_the_model_directory_is_refused_before_writing(tiny, tmp_path, capsys, where):
+    """`out / name` with such a name is the base's own shard, which the merge would then rewrite in place."""
+    base = tmp_path / "base"
+    shutil.copytree(tiny.base, base)
+    index = json.loads((base / M.INDEX_NAME).read_text())
+    shard = sorted(set(index["weight_map"].values()))[0]
+    moved = str((base / shard).resolve()) if where == "absolute" else f"../base/{shard}"
+    index["weight_map"] = {k: moved if fn == shard else fn for k, fn in index["weight_map"].items()}
+    (base / M.INDEX_NAME).write_text(json.dumps(index))
+    before = hashlib.sha256((base / shard).read_bytes()).hexdigest()
+    out = tmp_path / "out"
+    rc = run("merge", "--base", str(base), "--adapter", str(tiny.text), "--out", str(out), "--expect-scale", "2.0",
+             "--expect-modules", str(TINY.TINY_TARGETS))
+    assert rc == 2 and "REFUSED" in capsys.readouterr().err
+    assert hashlib.sha256((base / shard).read_bytes()).hexdigest() == before
+    assert not out.exists() and not out.with_name("out.partial").exists()

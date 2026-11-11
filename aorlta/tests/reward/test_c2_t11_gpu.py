@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from aorlta.config import RewardSection
+from aorlta.config import RewardCache, RewardSection
 from aorlta.reward.clock import Clock
 from aorlta.reward.factories import standin_factories
 from aorlta.reward.profiles import load_profile
@@ -68,7 +68,8 @@ def test_the_four_aorta_fixtures_score_as_expected():
     clock = Clock()
     spans = SpanRecorder(monotonic=clock.now, wall=clock.wall)
     profile = site_profile()
-    reward = RewardSection(profile="fake", reward_fn="standin.v11")  # timeouts and controls at the defaults
+    # timeouts and controls at the defaults; no cache, so a reused output directory cannot answer for this GPU
+    reward = RewardSection(profile="fake", reward_fn="standin.v11", cache=RewardCache(enabled=False))
     timeouts = {"gate": reward.timeouts.gate, "compile": reward.timeouts.compile, "sim_run": reward.timeouts.sim_run,
                 "asan_request": reward.timeouts.asan_request}
     svc = RewardService(reward, profile, StandinV11(), standin_factories(profile, clock, timeouts=timeouts),
