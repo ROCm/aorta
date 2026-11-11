@@ -38,6 +38,13 @@ def test_the_lane_installs_the_package_with_its_pins_and_runs_its_tests():
     assert "pytest -q -n auto" in script
 
 
+def test_the_lane_gives_freed_memory_back_and_reports_its_peak():
+    step = next(s for s in _jobs()["aorlta_tests"]["steps"] if "pytest" in str(s.get("run")))
+
+    assert step["env"]["MALLOC_MMAP_THRESHOLD_"] == "65536" and step["env"]["MALLOC_ARENA_MAX"] == "2"
+    assert "peak memory in use" in step["run"] and 'exit "$rc"' in step["run"]
+
+
 def test_the_lane_runs_on_its_own_paths_and_fails_open():
     job = _jobs()["aorlta_tests"]
     gate = _gate_step("aorlta")
