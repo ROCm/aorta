@@ -195,13 +195,29 @@ def prepare_model(model, *, require_fast_path: bool = True, watcher=None, modeli
 
 def _head_logits(head, h: torch.Tensor, fp32: bool) -> torch.Tensor:
     if not fp32:
-        return head(h)
+        return _bf16_head_on_cpu(head, h) if _runs_bf16_on_cpu(head, h) else head(h)
     w32 = getattr(head, "_aorlta_weight_fp32", None)
     if w32 is None or w32.device != head.weight.device:
         w32 = head.weight.detach().float()
         head._aorlta_weight_fp32 = w32  # the head is frozen (tied to the frozen embeddings)
     with torch.autocast(h.device.type, enabled=False):
         return F.linear(h.float(), w32)
+
+
+def _runs_bf16_on_cpu(head, h: torch.Tensor) -> bool:
+    if h.device.type != "cpu":
+        return False
+    autocast = torch.is_autocast_enabled("cpu")
+    return (torch.get_autocast_dtype("cpu") if autocast else head.weight.dtype) == torch.bfloat16
+
+
+def _bf16_head_on_cpu(head, h: torch.Tensor) -> torch.Tensor:
+    """`head(h)` in bf16 (bf16 inputs, fp32 accumulation, a bf16 result), done as an fp32 GEMM: on a CPU without
+    AVX-512, PyTorch's bf16 GEMM runs the backward over the 248k-row head about 30 times slower than fp32 does."""
+    bias = getattr(head, "bias", None)
+    with torch.autocast("cpu", enabled=False):
+        return F.linear(h.to(torch.bfloat16).float(), head.weight.to(torch.bfloat16).float(),
+                        None if bias is None else bias.to(torch.bfloat16).float()).to(torch.bfloat16)
 
 
 def _chunk_logprobs(head, temperature: float, fp32: bool, h: torch.Tensor, targets: torch.Tensor):
