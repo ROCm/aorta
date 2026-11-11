@@ -229,18 +229,20 @@ def logprobs_usable(s: "TrainSample") -> bool:
         for x in lp)
 
 
-def turn_spans(sample: TrainingSample, chain, *, history: bool = True) -> tuple[TurnSpan, ...]:
+def turn_spans(sample: TrainingSample, chain, *, rerendered: bool = False) -> tuple[TurnSpan, ...]:
     """Every turn's reply located in the final sequence, from the chain's TurnRecords; refuses a chain whose
-    records do not reproduce the sample's ids (Appendix C: ids_{t+1} starts with ids_t + reply_t). Without `history`
-    (`repair_turn_ids: rerender`, where the template drops earlier think blocks and trims earlier replies, so they
-    are not in the final sequence as sampled) only the final turn is located."""
+    records do not reproduce the sample's ids (Appendix C: ids_{t+1} starts with ids_t + reply_t). A `rerendered`
+    chain (`repair_turn_ids: rerender`: the template drops earlier think blocks and trims earlier replies) keeps the
+    final turn's check and leaves out an earlier turn whose reply is not in the final sequence as sampled."""
     full = [*sample.prompt_ids, *sample.response_ids]
     if chain.chain_id != sample.chain_id or not chain.turns:
         raise TrainerInputError(f"{sample.chain_id}: chain record {chain.chain_id!r} does not match")
     spans = []
-    for tr in (chain.turns if history else chain.turns[-1:]):
+    for tr in chain.turns:
         start, reply = tr.input_len, list(tr.response_ids)
         if full[start:start + len(reply)] != reply or len(tr.response_logprobs) != len(reply):
+            if rerendered and tr is not chain.turns[-1]:
+                continue
             raise TrainerInputError(f"{sample.chain_id}: turn {tr.turn}'s reply is not at {start} in the sequence")
         spans.append(TurnSpan(tr.turn, start, len(reply), tuple(tr.response_logprobs)))
     last = spans[-1]
@@ -250,13 +252,13 @@ def turn_spans(sample: TrainingSample, chain, *, history: bool = True) -> tuple[
 
 
 def build_groups(samples: Iterable[TrainingSample], results: Iterable[RewardResult],
-                 *, min_scored: int = 2, chains: dict | None = None, history: bool = True) -> list[GroupPlan]:
+                 *, min_scored: int = 2, chains: dict | None = None, rerendered: bool = False) -> list[GroupPlan]:
     """Join samples with their reward results and form groups (key: iteration, prompt_id).
 
     Every scored result counts in its group's mean, also one whose chain has no TrainingSample (a
     `logprob_error` chain is scored but never trained, Section 6.1). A sample without a result is unscored,
-    never a default reward. `chains` (chain_id -> ChainRecord), when given, adds the turn spans (the final turn's
-    only, without `history`). Groups come back sorted by key.
+    never a default reward. `chains` (chain_id -> ChainRecord), when given, adds the turn spans (`rerendered`: see
+    `turn_spans`). Groups come back sorted by key.
     """
     if min_scored < 2:
         raise TrainerInputError("min_scored must be >= 2")
@@ -303,7 +305,7 @@ def build_groups(samples: Iterable[TrainingSample], results: Iterable[RewardResu
             trained.append(TrainSample(
                 chain_id=cid, group=key, prompt_ids=tuple(s.prompt_ids), response_ids=tuple(s.response_ids),
                 engine_logprobs=tuple(s.response_logprobs), reward=reward, advantage=reward - mean,
-                turns=turn_spans(s, chains[cid], history=history) if chains is not None and cid in chains else (),
+                turns=turn_spans(s, chains[cid], rerendered=rerendered) if chains is not None and cid in chains else (),
             ))
         plans.append(GroupPlan(key, len(keys[key]), len(scored), mean, tuple(trained), None, dict(excluded)))
     return plans

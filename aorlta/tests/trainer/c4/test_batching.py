@@ -249,9 +249,10 @@ def test_c4_t4_no_gradient_from_any_token_but_the_final_reply(adv):
     assert roles.count("feedback") > 20
 
 
-def test_a_rerendered_chain_locates_only_its_final_turn_and_an_appended_one_is_still_checked():
+def test_a_rerendered_chain_leaves_out_an_earlier_reply_it_does_not_hold_and_an_appended_one_is_checked():
     """`repair_turn_ids: rerender` drops earlier think blocks and trims earlier replies, so an earlier reply is not
-    in the final sequence as sampled: without history only the final turn is located, as the sample's response."""
+    in the final sequence as sampled. A rerendered chain leaves that turn out and keeps the rest, the final turn still
+    checked as the sample's response; an appended chain with the same mismatch is refused."""
     from c4_helpers import RUN, _result
     from aorlta.ids import chain_id
     from aorlta.schemas import ChainRecord, TrainingSample, TurnRecord
@@ -272,6 +273,6 @@ def test_a_rerendered_chain_locates_only_its_final_turn_and_an_appended_one_is_s
     results = [_result(cid, 1.0, "scored", None), _result(other, 0.0, "scored", None)]
     with pytest.raises(TrainerInputError, match="turn 0's reply"):
         build_groups(samples, results, chains=chains)
-    (group,) = build_groups(samples, results, chains=chains, history=False)
+    (group,) = build_groups(samples, results, chains=chains, rerendered=True)
     s = next(x for x in group.samples if x.chain_id == cid)
-    assert [(t.turn, t.start, t.length) for t in s.turns] == [(2, len(rendered), len(final))]
+    assert [t.turn for t in s.turns] == [1, 2] and s.turns[-1].start == len(rendered)  # reply 1 still lines up

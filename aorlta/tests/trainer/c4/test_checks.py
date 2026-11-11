@@ -392,3 +392,12 @@ def test_an_engine_logprob_the_rollout_accepts_is_usable_for_the_gap():
     for v, ok in ((-0.5, True), (0.0, True), (MAX_LOGPROB / 2, True), (MAX_LOGPROB, True), (2 * MAX_LOGPROB, False)):
         assert logprobs_usable(SimpleNamespace(engine_logprobs=[-1.0, v], response_ids=[1, 2])) is ok
         assert logprobs_aligned({"output_ids": [1, 2], "lp_ids": [1, 2], "lp_vals": [-1.0, v]}) is ok
+
+
+def test_the_ratio_takes_an_engine_logprob_above_0_as_0():
+    from types import SimpleNamespace
+
+    from aorlta.trainer.ranks import engine_tensor
+
+    s = SimpleNamespace(engine_logprobs=(-1.0, 5e-4, 0.0), n_response=3)
+    assert engine_tensor(s, True).tolist() == [-1.0, 0.0, 0.0] and engine_tensor(s, False).tolist() == [0.0] * 3
