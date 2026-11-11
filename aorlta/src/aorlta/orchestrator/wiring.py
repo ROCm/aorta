@@ -1074,6 +1074,16 @@ class ServedModel:
         if (adapter.get("adapter_model.safetensors"), adapter.get("adapter_config.json")) != (
                 ad["weights_sha256"], ad["config_sha256"]):
             problems.append("the merged adapter is not the adapter the run plan hashed")
+        # The tool hashes the base before it reads and copies it, and checks the output against the base as it is
+        # after, so a base file changed in between passes its checks. The copies must be the files it hashed, and
+        # the base must still be them once the merge is done.
+        shards = {t["file"] for t in manifest["output"]["tensors"].values()}
+        copies = sorted(n for n, f in manifest["output"]["files"].items()
+                        if n in made_from and n not in shards and f["sha256"] != made_from[n])
+        now = top_files(m.base_dir)
+        changed = sorted(set(copies) | {n for n in set(now) | set(made_from) if now.get(n) != made_from.get(n)})
+        if changed:
+            problems.append(f"the base changed while it was merged: {', '.join(changed[:5])}")
         if problems:
             raise RunStopped("model_merge_unverified", {"problems": problems})
         checks = manifest["checks"]["bytes"]

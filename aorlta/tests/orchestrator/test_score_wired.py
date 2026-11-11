@@ -363,6 +363,47 @@ def test_a_merge_that_fails_or_merged_other_inputs_is_refused(tmp_path, tiny_bas
     assert identity["kind"] == "base_plus_adapter" and identity["merge"]["targets_changed"] > 0
 
 
+@pytest.mark.parametrize("restored", [False, True], ids=["left_changed", "changed_back_after_the_checks"])
+def test_a_base_file_that_changes_while_it_is_merged_is_refused(tmp_path, tiny_base, dataset, tiny_adapter, restored):
+    """config.json rewritten after the tool hashed the base and before it copied it: the copy and the tool's own
+    check agree with each other and not with the run plan, so the run would serve a config nobody recorded, also if
+    the file is changed back once the tool's checks are done."""
+    base = tmp_path / "shared-base"
+    shutil.copytree(tiny_base, base)
+    recorded = {f"base/{n}": h for n, h in wiring.top_files(base).items()}
+    recorded.update({f"adapter/{n}": sha256_file(tiny_adapter / n)
+                     for n in ("adapter_model.safetensors", "adapter_config.json")})
+    racing = tmp_path / "racing_tool.py"
+    racing.write_text(f"""import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("merge_tool", {str(wiring.MERGE_TOOL)!r})
+tool = sys.modules["merge_tool"] = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+hashed = tool.sha256_path
+def sha256_path(path):
+    digest = hashed(path)
+    if path == pathlib.Path({str(base)!r}) / "config.json":
+        path.write_text(path.read_text().rstrip().rstrip("}}") + ', "changed_while_merged": true}}')
+    return digest
+tool.sha256_path = sha256_path
+checks = tool.run_checks
+def run_checks(base, out, merged):
+    result = checks(base, out, merged)
+    if {restored!r}:
+        (base / "config.json").write_bytes({(base / "config.json").read_bytes()!r})
+    return result
+tool.run_checks = run_checks
+sys.exit(tool.main())
+""")
+    cfg = score_config(tmp_path, base, dataset, run_id="raced", adapter=tiny_adapter)
+    model = wiring.ServedModel(cfg, None, None, spans=None, dataset=None, probes=E.PROBES, merge_tool=racing)
+    with pytest.raises(RunStopped) as stop:
+        model.prepare(recorded)
+    assert stop.value.reason == "model_merge_unverified", stop.value.detail
+    assert stop.value.detail["problems"] == ["the base changed while it was merged: config.json"]
+    if restored:  # the base is the plan's again, and only the copy shows the change
+        assert {f"base/{n}": h for n, h in wiring.top_files(base).items()}.items() <= recorded.items()
+
+
 def test_a_weight_slot_whose_files_are_not_its_manifest_stops_the_score_run(tmp_path, tiny_base, dataset,
                                                                              monkeypatch):
     from aorlta.sync import writer
