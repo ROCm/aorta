@@ -221,7 +221,7 @@ class AppendLedger:
 
 class EvidenceStore:
     """Raw artifacts, content-addressed: `blobs/<sha[:2]>/<sha>`, with `MANIFEST.jsonl` (sha256, size, kind,
-    iteration per blob). Owner-only permissions."""
+    iteration per put). Owner-only permissions."""
 
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -248,13 +248,14 @@ class EvidenceStore:
             if path.exists():
                 if hashlib.sha256(path.read_bytes()).hexdigest() != sha:
                     raise LedgerError(f"evidence blob {sha} does not match its name")
-                return sha
-            old = os.umask(0o077)
-            try:
-                path.parent.mkdir(exist_ok=True)
-                atomic_write_bytes(path, bytes(data))
-            finally:
-                os.umask(old)
+            else:
+                old = os.umask(0o077)
+                try:
+                    path.parent.mkdir(exist_ok=True)
+                    atomic_write_bytes(path, bytes(data))
+                finally:
+                    os.umask(old)
+            # listed on every put, stored once: a resume keeps a blob while a committed iteration lists it
             self.manifest.append([{"iteration": iteration, "sha256": sha, "size": len(data), "kind": kind}])
         return sha
 
