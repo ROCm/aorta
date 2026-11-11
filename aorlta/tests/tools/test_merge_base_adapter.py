@@ -525,3 +525,33 @@ def test_a_base_saved_as_one_file_without_an_index_merges_to_the_same_tensors(ti
     assert all(got[k].dtype == want[k].dtype and torch.equal(got[k].view(torch.uint8), want[k].view(torch.uint8))
                for k in want)
     assert run("verify", "--base", str(base), "--adapter", str(tiny.text), "--merged", str(out)) == 0
+
+
+def test_an_adapter_whose_weights_cannot_be_read_is_refused(tiny, tmp_path, capsys):
+    adapter = tmp_path / "adapter"
+    shutil.copytree(tiny.text, adapter)
+    weights = adapter / M.ADAPTER_WEIGHTS
+    weights.write_bytes(weights.read_bytes()[: weights.stat().st_size // 2])
+    out = tmp_path / "out"
+    assert run("merge", "--base", str(tiny.base), "--adapter", str(adapter), "--out", str(out)) == 2
+    assert "REFUSED" in capsys.readouterr().err and not out.exists()
+    assert run("verify", "--base", str(tiny.base), "--adapter", str(adapter), "--merged", str(out)) == 2
+
+
+def test_the_adapter_hashes_are_of_the_bytes_the_merge_used(tiny, tmp_path, monkeypatch):
+    """A config rewritten on disk after it was read: the recorded hash is still that of the config the scale came from,
+    so a run plan that hashed the first config is not matched by a merge made with another."""
+    adapter = tmp_path / "adapter"
+    shutil.copytree(tiny.text, adapter)
+    cfg_path = adapter / M.ADAPTER_CONFIG
+    first = cfg_path.read_bytes()
+    check = M.check_adapter_config
+
+    def rewritten_after_reading(cfg):
+        cfg_path.write_text(json.dumps(dict(json.loads(first), lora_alpha=2 * json.loads(first)["lora_alpha"])))
+        return check(cfg)
+
+    monkeypatch.setattr(M, "check_adapter_config", rewritten_after_reading)
+    a = M.load_adapter(adapter)
+    assert a.config_sha256 == hashlib.sha256(first).hexdigest() and a.alpha == json.loads(first)["lora_alpha"]
+    assert a.weights_sha256 == hashlib.sha256((adapter / M.ADAPTER_WEIGHTS).read_bytes()).hexdigest()
