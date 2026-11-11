@@ -9,8 +9,9 @@ just before that (loop.py, step 10). `prepare_resume` is the file half of a resu
 
 - the last committed iteration n_c is the newest n with both `ckpt/iter-<n>/` and `iterations/iter-<n>/`; that
   checkpoint is verified against its manifest, and a committed checkpoint that fails the check stops the resume;
-- every `.partial` file or directory anywhere under the run directory is removed (Section 5 item 6: readers never
-  open them, and a new process cannot finish what a dead one started);
+- every `.partial` file or directory under the run directory is removed (Section 5 item 6: readers never open
+  them, and a new process cannot finish what a dead one started), except in the external evaluator's outbox, which
+  that evaluator may still be writing;
 - a checkpoint newer than n_c is removed: it was renamed, but its iteration never committed;
 - records of iterations after n_c are cut from the append-only ledgers and the evidence manifest (a ledger with a
   bad line before its end stops the resume before anything is removed; only a torn final line is dropped); TensorBoard
@@ -44,11 +45,18 @@ class ResumePoint:
     removed: list[str] = field(default_factory=list)
 
 
-def remove_partials(root: Path) -> list[str]:
-    """Delete every `.partial` entry under `root`, without descending into the ones it deletes."""
+# Directories another process writes while the run restarts: the external evaluator publishes its results through
+# `.partial` files in its outbox, and may still be running.
+NOT_THE_RUNS = (Path("eval") / "outbox",)
+
+
+def remove_partials(root: Path, *, skip: tuple[Path, ...] = ()) -> list[str]:
+    """Delete every `.partial` entry under `root`, without descending into the ones it deletes or into `skip`
+    (paths relative to `root`)."""
     removed = []
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         here = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if (here / d).relative_to(root) not in skip]
         for d in list(dirnames):
             if d.endswith(PARTIAL_SUFFIX):
                 shutil.rmtree(here / d)
@@ -78,7 +86,7 @@ def prepare_resume(run_dir: Path, keep_ckpts: int) -> ResumePoint:
     store = EvidenceStore(run_dir / EVIDENCE_DIR) if (run_dir / EVIDENCE_DIR).is_dir() else None
     for ledger in ledgers + ([store.manifest] if store else []):
         ledger.read()  # raises LedgerError on a bad line before a ledger's end, before anything is removed
-    removed = remove_partials(run_dir)
+    removed = remove_partials(run_dir, skip=NOT_THE_RUNS)
     for n in complete_checkpoints(ckpt_root):
         if n > n_c:
             shutil.rmtree(ckpt_root / iteration_dir_name(n))

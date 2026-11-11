@@ -50,6 +50,23 @@ def test_the_cursor_names_the_pool_so_a_changed_pool_is_detected():
     assert cursor_for(1, a, 7, 4)["pool_sha256"] != cursor_for(1, b, 7, 4)["pool_sha256"]
 
 
+@pytest.mark.parametrize("field, other", [
+    ("parent_healthy", lambda v: not v),
+    ("reference_kind", lambda v: "frozen" if v == "self_written" else "self_written"),
+    ("parent_id", lambda v: "standin:other"),
+    ("contract_id", lambda v: "c2")])
+def test_a_change_to_any_part_of_a_task_changes_the_cursor(field, other):
+    """Each part of the task can move a reward (`parent_healthy` and `reference_kind` move standin.v11's), so a
+    resume onto a pool that changed any of them is refused as a changed pool."""
+    import dataclasses
+
+    recs = make_pool(12).records()
+    value = other(getattr(recs[0].task, field))
+    changed = [dataclasses.replace(recs[0], task=dataclasses.replace(recs[0].task, **{field: value})), *recs[1:]]
+    assert getattr(recs[0].task, field) != value
+    assert cursor_for(1, recs, 7, 4)["pool_sha256"] != cursor_for(1, changed, 7, 4)["pool_sha256"]
+
+
 def test_a_pool_smaller_than_p_or_with_a_repeated_id_is_refused():
     with pytest.raises(ValueError):
         select_prompts(make_pool(3).records(), 1, 7, 4)

@@ -137,3 +137,14 @@ def test_truncate_after_drops_a_torn_final_line_and_refuses_a_bad_line_anywhere_
         with pytest.raises(LedgerError, match=":2:"):
             AppendLedger(path).truncate_after(1)
         assert path.read_bytes() == bad
+
+
+def test_a_resume_leaves_the_external_evaluators_outbox_alone(done_run):
+    """The evaluator may still be writing a result when the orchestrator restarts: its `.partial` is its own."""
+    outbox = done_run / "eval" / "outbox"
+    outbox.mkdir(parents=True)
+    (outbox / "req-1.json.partial").write_text("{")
+    (done_run / "stray.json.partial").write_text("{")
+    rp = prepare_resume(done_run, keep_ckpts=3)
+    assert (outbox / "req-1.json.partial").is_file() and not (done_run / "stray.json.partial").exists()
+    assert rp.removed == ["stray.json.partial"]

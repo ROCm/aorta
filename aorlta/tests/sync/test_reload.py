@@ -124,3 +124,14 @@ def test_version_book():
     book.record(1, 2, "/x/w0")
     assert not book.all_at(3)
     assert book.as_dict()[1] == {"version": 2, "slot": "/x/w0"}
+
+
+def test_an_engine_that_cannot_be_restarted_fails_with_its_engine_and_the_cause(slot):
+    bad = (True, f"Succeeded to update model weights from {slot} (30 checkpoint tensors read)", 0)
+    engines = [FakeEngine(0, [_ok(slot)]), FakeEngine(1, [bad, bad])]
+
+    def restart(engine):
+        raise RuntimeError("the replacement engine found no GPU")
+
+    with pytest.raises(R.ReloadError, match=r"1 of 2 engines .*engine 1: restart failed: RuntimeError: the replacement"):
+        R.reload_all(engines, slot, 31, in_flight=lambda: 0, restart=restart)
