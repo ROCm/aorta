@@ -22,7 +22,7 @@ import random
 import re
 import shutil
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..atomic import PARTIAL_SUFFIX, atomic_write_json, read_text
@@ -51,11 +51,12 @@ def iteration_dir_name(n: int) -> str:
 
 
 def pool_digest(records: Sequence[PromptRecord]) -> str:
-    """sha256 of the pool's prompts, independent of their order; a prompt id may appear only once."""
+    """sha256 of the pool's prompts with everything their rewards depend on (the whole task), independent of their
+    order; a prompt id may appear only once."""
     ids = [r.prompt_id for r in records]
     if len(set(ids)) != len(ids):
         raise ValueError("a prompt id appears twice in the pool")
-    rows = sorted([r.prompt_id, r.prompt_ids_sha256, r.task.task_sha256, r.source] for r in records)
+    rows = sorted([r.prompt_id, r.prompt_ids_sha256, asdict(r.task), r.source] for r in records)
     return sha256_json(rows)
 
 
