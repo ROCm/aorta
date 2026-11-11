@@ -439,6 +439,28 @@ def test_closing_services_leaves_no_cache_writer_running(tmp_path):
     assert _cache_writers() == before
 
 
+def test_a_cache_entry_json_cannot_hold_is_not_written_and_the_writer_keeps_going(tmp_path):
+    """A finding can carry a NaN, which the JSON files do not hold: that entry stays in memory only, and the entries
+    after it are still written."""
+    cache = RewardCache(tmp_path / "cache")
+    try:
+        keyed = [(sha256_json(f), f) for f in ({"leg": "san.consan", "n": n} for n in range(2))]
+        bracket = {"before": "x", "after": "y", "clean": True}
+        nan = leg("san.consan", "finding", bracket=bracket, findings=[{"kind": "race", "offset": float("nan")}])
+        assert cache.put_leg(*keyed[0], nan, bracketed=True)
+        assert cache.put_leg(*keyed[1], leg("san.consan", "finding", bracket=bracket), bracketed=True)
+        flushed = threading.Event()
+        threading.Thread(target=lambda: (cache.flush(), flushed.set()), daemon=True).start()
+        assert flushed.wait(30) and cache._writer.thread.is_alive()
+        fresh = RewardCache(tmp_path / "cache")
+        try:
+            assert fresh.get_leg(*keyed[0]) is None and fresh.get_leg(*keyed[1]) is not None
+        finally:
+            fresh.close()
+    finally:
+        cache.close()
+
+
 def test_a_closed_cache_still_writes_and_flush_stays_usable(tmp_path):
     cache = RewardCache(tmp_path / "cache")
     keyed = [(sha256_json(f), f) for f in ({"leg": "gate.parse", "n": n} for n in range(3))]

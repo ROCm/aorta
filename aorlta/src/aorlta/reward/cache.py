@@ -103,7 +103,7 @@ class _Writer:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_json(path, entry)
-        except OSError as exc:
+        except (OSError, ValueError, TypeError) as exc:  # a full disk, or what JSON cannot hold (a NaN in a finding)
             log.warning("cache: could not write %s (%s)", path.name, type(exc).__name__)
 
     def put(self, path: Path, entry: dict) -> None:
