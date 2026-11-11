@@ -300,6 +300,22 @@ def test_a_model_whose_index_names_a_shard_below_its_top_level_is_refused_before
     assert all(e.started_on == [] for e in engines) and not (cfg.run_dir / "score").exists()
 
 
+def test_a_model_saved_as_one_file_without_an_index_is_served_and_confirmed(tmp_path, tiny_base, dataset):
+    """Hugging Face saves a checkpoint small enough for one file as `model.safetensors`, with no index."""
+    base = tmp_path / "one"
+    shutil.copytree(tiny_base, base)
+    (base / "model.safetensors.index.json").unlink()
+    assert sorted(p.name for p in base.glob("*.safetensors")) == ["model.safetensors"]
+    cfg = score_config(tmp_path, base, dataset, run_id="one-file")
+    scorer, engines = build(cfg, lambda: base)
+    result = scorer.run()
+    assert result["status"] == "completed", result
+    landing = read_json(cfg.run_dir / "score" / "model.json")["landing"]
+    assert landing["verdict"] == "PROVEN" and landing["round_trip"]["verdict"] == "PROVEN"
+    assert landing["slot_tensors"] == landing["tensors_read"] == len(read_base_index(base))
+    assert all(e.started_on == [base] for e in engines) and all(E.serves(e, targets_of(base)) for e in engines)
+
+
 def test_a_second_score_run_under_the_same_run_id_is_refused_and_removes_nothing_of_the_first(tmp_path, tiny_base,
                                                                                               dataset):
     cfg = score_config(tmp_path, tiny_base, dataset, run_id="twice", prompts=5)
