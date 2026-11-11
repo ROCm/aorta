@@ -247,3 +247,31 @@ def test_c4_t4_no_gradient_from_any_token_but_the_final_reply(adv):
         else:
             assert float(g[p]) == 0.0, f"{role} at {p} got gradient {float(g[p])}"
     assert roles.count("feedback") > 20
+
+
+def test_a_rerendered_chain_locates_only_its_final_turn_and_an_appended_one_is_still_checked():
+    """`repair_turn_ids: rerender` drops earlier think blocks and trims earlier replies, so an earlier reply is not
+    in the final sequence as sampled: without history only the final turn is located, as the sample's response."""
+    from c4_helpers import RUN, _result
+    from aorlta.ids import chain_id
+    from aorlta.schemas import ChainRecord, TrainingSample, TurnRecord
+    from aorlta.trainer.loss import TrainerInputError, build_groups
+
+    toks, roles, final = _chain_layout()
+    replies = {r: [t for t, x in zip(toks, roles) if x == r] for r in ("reply0", "reply1")}
+    turns = [TurnRecord(t, 1, "0", roles.index(name) if name != "final" else len(toks),
+                        replies[name] if name != "final" else final, [-1.0] * len(replies.get(name, final)),
+                        {"type": "stop"}, 0, 0, 0.0, 0.0, None, None, "pass")
+             for t, name in enumerate(("reply0", "reply1", "final"))]
+    rendered = [t if r != "reply0" else (t + 1) % 290 for t, r in zip(toks, roles)]  # reply 0 as re-rendered
+    cid = chain_id(RUN, 1, "standin:m", 0)
+    chains = {cid: ChainRecord(cid, "standin:m", 0, 0, f"{RUN}:v0", turns, 2, "compiled")}
+    other = chain_id(RUN, 1, "standin:m", 1)
+    samples = [TrainingSample(cid, 1, "standin:m", rendered, final, [-1.0] * len(final)),
+               TrainingSample(other, 1, "standin:m", rendered[:5], final[:3], [-1.0] * 3)]
+    results = [_result(cid, 1.0, "scored", None), _result(other, 0.0, "scored", None)]
+    with pytest.raises(TrainerInputError, match="turn 0's reply"):
+        build_groups(samples, results, chains=chains)
+    (group,) = build_groups(samples, results, chains=chains, history=False)
+    s = next(x for x in group.samples if x.chain_id == cid)
+    assert [(t.turn, t.start, t.length) for t in s.turns] == [(2, len(rendered), len(final))]

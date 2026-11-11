@@ -39,6 +39,7 @@ import torch
 
 from aorlta.config import REWARD_MAX, REWARD_MIN, TrainerSection
 from aorlta.ids import IdError, parse_chain_id
+from aorlta.rollout.engine_pool import MAX_LOGPROB
 from aorlta.schemas import RewardResult, TrainingSample
 
 PG_LOSSES = ("ppo_clip", "reinforce", "cispo")
@@ -220,20 +221,24 @@ def _check_sample(s: TrainingSample) -> None:
 
 
 def logprobs_usable(s: "TrainSample") -> bool:
-    """The engine log-probs line up with the response and are finite log-probabilities (the gap gate needs them)."""
+    """The engine log-probs line up with the response and are finite log-probabilities, as the rollout accepts them
+(the gap gate needs them)."""
     lp = s.engine_logprobs
     return len(lp) == len(s.response_ids) and all(
-        isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x <= 0.0 for x in lp)
+        isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x <= MAX_LOGPROB
+        for x in lp)
 
 
-def turn_spans(sample: TrainingSample, chain) -> tuple[TurnSpan, ...]:
+def turn_spans(sample: TrainingSample, chain, *, history: bool = True) -> tuple[TurnSpan, ...]:
     """Every turn's reply located in the final sequence, from the chain's TurnRecords; refuses a chain whose
-    records do not reproduce the sample's ids (Appendix C: ids_{t+1} starts with ids_t + reply_t)."""
+    records do not reproduce the sample's ids (Appendix C: ids_{t+1} starts with ids_t + reply_t). Without `history`
+    (`repair_turn_ids: rerender`, where the template drops earlier think blocks and trims earlier replies, so they
+    are not in the final sequence as sampled) only the final turn is located."""
     full = [*sample.prompt_ids, *sample.response_ids]
     if chain.chain_id != sample.chain_id or not chain.turns:
         raise TrainerInputError(f"{sample.chain_id}: chain record {chain.chain_id!r} does not match")
     spans = []
-    for tr in chain.turns:
+    for tr in (chain.turns if history else chain.turns[-1:]):
         start, reply = tr.input_len, list(tr.response_ids)
         if full[start:start + len(reply)] != reply or len(tr.response_logprobs) != len(reply):
             raise TrainerInputError(f"{sample.chain_id}: turn {tr.turn}'s reply is not at {start} in the sequence")
@@ -245,13 +250,13 @@ def turn_spans(sample: TrainingSample, chain) -> tuple[TurnSpan, ...]:
 
 
 def build_groups(samples: Iterable[TrainingSample], results: Iterable[RewardResult],
-                 *, min_scored: int = 2, chains: dict | None = None) -> list[GroupPlan]:
+                 *, min_scored: int = 2, chains: dict | None = None, history: bool = True) -> list[GroupPlan]:
     """Join samples with their reward results and form groups (key: iteration, prompt_id).
 
     Every scored result counts in its group's mean, also one whose chain has no TrainingSample (a
     `logprob_error` chain is scored but never trained, Section 6.1). A sample without a result is unscored,
-    never a default reward. `chains` (chain_id -> ChainRecord), when given, adds the turn spans. Groups come
-    back sorted by key.
+    never a default reward. `chains` (chain_id -> ChainRecord), when given, adds the turn spans (the final turn's
+    only, without `history`). Groups come back sorted by key.
     """
     if min_scored < 2:
         raise TrainerInputError("min_scored must be >= 2")
@@ -298,7 +303,7 @@ def build_groups(samples: Iterable[TrainingSample], results: Iterable[RewardResu
             trained.append(TrainSample(
                 chain_id=cid, group=key, prompt_ids=tuple(s.prompt_ids), response_ids=tuple(s.response_ids),
                 engine_logprobs=tuple(s.response_logprobs), reward=reward, advantage=reward - mean,
-                turns=turn_spans(s, chains[cid]) if chains is not None and cid in chains else (),
+                turns=turn_spans(s, chains[cid], history=history) if chains is not None and cid in chains else (),
             ))
         plans.append(GroupPlan(key, len(keys[key]), len(scored), mean, tuple(trained), None, dict(excluded)))
     return plans

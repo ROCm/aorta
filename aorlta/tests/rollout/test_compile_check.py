@@ -204,3 +204,15 @@ def test_a_missing_compiler_is_infrastructure_not_a_compile_error(tmp_path):
         HipccCompiler(tmp_path, hipcc=str(tmp_path / "no-such-hipcc"))
     with pytest.raises(ValueError):
         FakeCompiler().check("x", "../escape")
+
+
+def test_the_evidence_store_is_owner_only_even_when_its_root_already_exists(tmp_path):
+    root = tmp_path / "evidence" / "rollout"
+    root.mkdir(parents=True, mode=0o755)
+    old = os.umask(0o022)
+    try:
+        store = EvidenceStore(root)
+        digest = store.put("x.hip:1:1: error: use of undeclared identifier 'y'\n")
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700 and (root / digest[:2] / f"{digest}.txt").is_file()
