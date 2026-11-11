@@ -73,6 +73,7 @@ def test_a_complete_plan_is_usable():
     (lambda: plan(full(), selector_version="has a space"), "bad_selector_version"),
     (lambda: plan(full(), plan_id="x" * 129), "bad_plan_id"),
     (lambda: plan(full(), context=7), "bad_context"),
+    (lambda: plan(full(), context="\ud800"), "bad_context"),  # a lone surrogate: the logged hash cannot be taken
     (lambda: plan([("san.asan", entry())]), "bad_legs"),
     (lambda: plan(full(**{"san.mystery": entry()})), "unknown_leg"),
     (lambda: plan({k: v for k, v in full().items() if k != "san.asan"}), "missing_leg"),

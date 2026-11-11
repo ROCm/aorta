@@ -69,6 +69,8 @@ HAS_MAIN = re.compile(r"\bint\s+main\s*\(")
 DYNAMIC_SHARED = re.compile(r"\bextern\s+__shared__\b")
 LAUNCH_BOUNDS = re.compile(r"__launch_bounds__\s*\(\s*(\d+)")
 _ATTR = r"(?:__launch_bounds__\s*\([^()]*\)|__attribute__\s*\(\([^()]*(?:\([^()]*\)[^()]*)*\)\))"
+# `__global__` spelled through a macro, or as an attribute: GLOBAL_FN cannot see such a kernel in the text
+HIDDEN_GLOBAL = re.compile(r"^\s*#\s*define\b.*\b__global__\b|__attribute__\s*\(\(\s*_*global_*\s*\)\)", re.M)
 GLOBAL_FN = re.compile(rf"__global__\s+(?:(?:[A-Za-z_]\w*|{_ATTR})\s+)*?void\s+(?:{_ATTR}\s+)*([A-Za-z_]\w*)\s*\(")
 IDENT = re.compile(r"[A-Za-z_]\w*")
 INDEX_LIKE = re.compile(r"(?i)index|idx|offset|count|size|^i$|^int|_int$|^n$")
@@ -261,7 +263,10 @@ def find_kernels(source_path: str | Path, *, hipcc: str = "/opt/rocm/bin/hipcc",
     is none, or when one is a shape the harness cannot launch (a class member, a declaration clang and the dump's
     headers disagree on)."""
     source = Path(source_path).resolve()
-    names = declared_names(source.read_text(encoding="utf-8", errors="replace"))
+    text = source.read_text(encoding="utf-8", errors="replace")
+    if HIDDEN_GLOBAL.search(strip_comments(text)):
+        raise HarnessUnsupported("a macro or an attribute spells __global__, so the source text does not list its kernels")
+    names = declared_names(text)
     found: list[Kernel] = []
     for name in names:
         heads = [line[len("Dumping "):-1] for line in _clang_dump(run, hipcc, target, source, name, False).splitlines()

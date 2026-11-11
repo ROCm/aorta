@@ -80,6 +80,15 @@ def _number(x: Any) -> bool:
         return False
 
 
+def _utf8(text: str) -> bool:
+    """Whether `text` encodes as UTF-8, as the logged hash needs (a lone surrogate does not)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def plan_problem(plan: Any, available: Sequence[str]) -> str | None:
     """Why `plan` cannot be used for a request that offered `available`, or None if it can."""
     if not isinstance(plan, CheckPlan):
@@ -88,7 +97,7 @@ def plan_problem(plan: Any, available: Sequence[str]) -> str | None:
         value = getattr(plan, name)
         if not (isinstance(value, str) and ID_RE.fullmatch(value)):
             return f"bad_{name}"
-    if plan.context is not None and not isinstance(plan.context, str):
+    if plan.context is not None and (not isinstance(plan.context, str) or not _utf8(plan.context)):
         return "bad_context"
     if not isinstance(plan.legs, Mapping):
         return "bad_legs"

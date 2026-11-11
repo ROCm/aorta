@@ -394,3 +394,19 @@ def test_waitcheck_scans_the_instantiation_of_a_template_source(tmp_path):
                              inputs={"object": str(src.parent / "object.o")}, output_dir=str(tmp_path / "g"),
                              leg_settings={"target": "gfx950"}))
     assert r.state == "unsettled"
+
+
+@pytest.mark.parametrize("spelling", ["#define GPU __global__\n", "#define KERNEL(name) __global__ void name\n",
+                                      "__attribute__((global)) void hidden2(float* p) {}\n"])
+def test_a_kernel_the_source_text_cannot_list_makes_discovery_unsupported(tmp_path, spelling):
+    """A template spelled through a macro would be missing from the list, and the gate's object, which does not
+    instantiate it, would be checked in its place."""
+    src = tmp_path / "k.hip"
+    src.write_text("#include <hip/hip_runtime.h>\n" + spelling + "__global__ void plain(float* p) { p[0] = 1.0f; }\n"
+                   "template <typename T> GPU void hidden(T* p) { p[0] = T(1); }\n")
+
+    def clang(argv, timeout_s):
+        raise AssertionError("refused before clang is asked")
+
+    with pytest.raises(HarnessUnsupported, match="does not list its kernels"):
+        H.find_kernels(src, run=clang)
