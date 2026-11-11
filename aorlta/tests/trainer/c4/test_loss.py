@@ -12,6 +12,7 @@ from c4_helpers import RUN, _result, synthetic_iteration
 from aorlta.config import TrainerSection
 from aorlta.ids import chain_id
 from aorlta.schemas import TrainingSample
+from aorlta.trainer import batching
 from aorlta.trainer.batching import target_logprobs
 from aorlta.trainer.loss import (
     LossSettings,
@@ -291,6 +292,47 @@ def test_the_fp32_head_is_an_fp32_matmul():
     _, raw = target_logprobs(head, h, tgt, temperature=1.0, fp32=True)
     z = h.float() @ head.weight.float().t()
     assert torch.equal(raw, torch.log_softmax(z, -1).gather(-1, tgt[:, None])[:, 0])
+
+
+@pytest.mark.parametrize("weights", [torch.bfloat16, torch.float32])
+def test_a_bf16_head_on_cpu_is_an_fp32_gemm_with_the_bf16_gemms_result(weights, monkeypatch):
+    """PyTorch's bf16 GEMM on a CPU without AVX-512 is slow, so the CPU head multiplies the bf16-rounded inputs
+    in fp32 and rounds the result to bf16: the bf16 GEMM's arithmetic (fp32 accumulation), up to summation order."""
+    torch.manual_seed(2)
+    head = torch.nn.Linear(64, 4096, bias=False).to(weights)
+    h0 = torch.randn(33, 64).to(weights)
+    tgt = torch.randint(0, 4096, (33,))
+    seen = []
+
+    def spy(x, w, b=None):  # what the GEMM gets: fp32 tensors holding bf16 values
+        seen.append((x.dtype, w.dtype, all(torch.equal(t, t.bfloat16().float()) for t in (x, w))))
+        return linear(x, w, b)
+
+    linear = torch.nn.functional.linear
+    monkeypatch.setattr(batching.F, "linear", spy)
+    h = h0.clone().requires_grad_(True)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        z = batching._head_logits(head, h, False)
+        _, raw = target_logprobs(head, h, tgt, temperature=1.0)
+    assert seen and set(seen) == {(torch.float32, torch.float32, True)} and z.dtype == torch.bfloat16
+    monkeypatch.undo()
+    ref_h = h0.clone().requires_grad_(True)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        ref = head(ref_h)
+    assert (z != ref).float().mean() < 1e-3
+    torch.testing.assert_close(z.float(), ref.float(), rtol=2 ** -7, atol=1e-4)
+    want = torch.log_softmax(ref.float(), -1).gather(-1, tgt[:, None])[:, 0]
+    torch.testing.assert_close(raw, want, rtol=0, atol=2e-2)
+    grad = torch.autograd.grad(torch.log_softmax(z.float(), -1).sum(), h)[0]
+    ref_grad = torch.autograd.grad(torch.log_softmax(ref.float(), -1).sum(), ref_h)[0]
+    torch.testing.assert_close(grad.float(), ref_grad.float(), rtol=2 ** -6, atol=1e-3)
+
+
+def test_an_fp32_head_on_cpu_without_autocast_is_the_head_itself():
+    torch.manual_seed(3)
+    head = torch.nn.Linear(8, 50, bias=False)
+    h = torch.randn(5, 8)
+    assert torch.equal(batching._head_logits(head, h, False), head(h))
 
 
 # --- the gap -------------------------------------------------------------------------------------------------
