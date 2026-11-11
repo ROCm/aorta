@@ -108,14 +108,23 @@ def group_inputs(res, iteration: int, prompts: Sequence, max_new_tokens: int) ->
     return out
 
 
-def plans_of(groups: Sequence[GroupInput], min_scored: int) -> list:
+def plans_of(groups: Sequence[GroupInput], min_scored: int, *, rerendered: bool = False) -> list:
     """The trainer's GroupPlans, built exactly as `TrainerAdapter.add_group` builds them."""
     out = []
     for gi in groups:
         out.extend(build_groups([m.sample for m in gi.members if m.sample is not None],
                                 [m.result for m in gi.members if m.result is not None],
-                                min_scored=min_scored, chains=gi.chains))
+                                min_scored=min_scored, chains=gi.chains, rerendered=rerendered))
     return out
+
+
+def batch_inputs(res, iteration: int, prompts: Sequence, cfg) -> tuple[list, list[GroupInput], list]:
+    """One batch's items, groups and plans, with `rollout.repair_turn_ids: rerender` passed on as the trainer
+    passes it, so a chain whose template trimmed an earlier reply is measured on the turns it holds."""
+    rerendered = cfg.rollout.repair_turn_ids == "rerender"
+    groups = group_inputs(res, iteration, prompts, cfg.rollout.max_new_tokens)
+    return (G.chain_items(res.chains, res.samples, rerendered=rerendered), groups,
+            plans_of(groups, cfg.orchestrator.min_scored_per_group, rerendered=rerendered))
 
 
 def token_arrays(items: Sequence[G.ChainItem], modes: dict[str, list[dict]], packed: dict | None) -> dict:
@@ -348,9 +357,7 @@ def run_t10(cfg, out_dir: str | Path, plan: T10Plan, *, parts: W.Parts | None = 
                 t0 = time.monotonic()
                 res = rollout.manager.run(prompts, it, policy_version(cfg.run.run_id, n))
                 t_gen = time.monotonic() - t0
-                items = G.chain_items(res.chains, res.samples)
-                groups = group_inputs(res, it, prompts, r.max_new_tokens)
-                plans = plans_of(groups, o.min_scored_per_group)
+                items, groups, plans = batch_inputs(res, it, prompts, cfg)
                 t0 = time.monotonic()
                 modes = {"solo": G.score_items(model, items, device=device, temperature=T_control, amp=adapter.amp)}
                 secs = {"generate": t_gen, "solo": time.monotonic() - t0}

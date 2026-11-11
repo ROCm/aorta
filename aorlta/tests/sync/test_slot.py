@@ -150,3 +150,24 @@ def test_a_base_index_naming_a_shard_outside_the_model_directory_is_refused(tiny
     with pytest.raises(W.ShardNameError, match="not file names in the directory") as exc:
         W.read_base_index(base)
     assert exc.value.names == [name]
+
+
+def test_a_base_saved_as_one_file_without_an_index_is_read_from_its_header(tiny_base, tmp_path):
+    """Hugging Face saves a checkpoint small enough for one file as `model.safetensors`, with no index."""
+    import shutil
+
+    from safetensors.torch import load_file, save_file
+
+    base = tmp_path / "one"
+    shutil.copytree(tiny_base, base)
+    tensors = {}
+    for shard in sorted(set(W.read_base_index(base).values())):
+        tensors.update(load_file(str(base / shard)))
+        (base / shard).unlink()
+    (base / W.INDEX_NAME).unlink()
+    save_file(tensors, str(base / W.SINGLE_FILE), metadata={"format": "pt"})
+    assert W.read_base_index(base) == {k: W.SINGLE_FILE for k in tensors}
+    weights = {k: v for k, v in tensors.items() if k in W.target_keys(tensors)}
+    info = W.write_slot(weights, base_dir=base, sync_dir=tmp_path / "shm", run_id="r", version=0, margin=MARGIN)
+    assert W.verify_slot(info.path)["ok"]
+    assert set(W.load_base_tensors(base, list(tensors)[:3])) == set(list(tensors)[:3])
