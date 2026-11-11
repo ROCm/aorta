@@ -44,8 +44,12 @@ def test_the_lane_runs_every_test_in_one_of_its_three_parts():
     parts = {leg["part"]: (leg["workers"], leg["threads"], leg["markers"]) for leg in legs}
 
     # never more torch threads than the runner's four cores
-    assert parts == {"light": ("4", "1", "not heavy and not cpu_run"), "heavy": ("2", "2", "heavy"),
+    assert parts == {"light": ("4", "1", "not heavy and not cpu_run"), "heavy": ("2", "2", "heavy and not cpu_run"),
                      "cpu run": ("0", "4", "cpu_run")}
+    for heavy in (False, True):  # every test, whatever its markers, runs in exactly one part
+        for cpu_run in (False, True):
+            marks = {"heavy": heavy, "cpu_run": cpu_run}
+            assert sum(eval(m, {}, marks) for _, _, m in parts.values()) == 1, marks
     step = next(s for s in job["steps"] if "pytest" in str(s.get("run")))
     assert step["env"]["OMP_NUM_THREADS"] == "${{ matrix.threads }}"
     assert job["strategy"]["fail-fast"] is False
