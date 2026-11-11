@@ -42,7 +42,7 @@ def test_the_lane_runs_every_test_in_one_of_its_three_parts():
     job = _jobs()["aorlta_tests"]
     parts = {leg["part"]: (leg["workers"], leg["markers"]) for leg in job["strategy"]["matrix"]["include"]}
 
-    assert parts == {"light": ("auto", "not heavy and not cpu_run"), "heavy": ("2", "heavy"),
+    assert parts == {"light": ("4", "not heavy and not cpu_run"), "heavy": ("2", "heavy"),
                      "cpu run": ("0", "cpu_run")}
     assert job["strategy"]["fail-fast"] is False
     assert 'if [ "$rc" -eq 5 ]' in _script(job)  # a part with no test on a branch (the markers come later) passes
