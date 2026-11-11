@@ -24,7 +24,8 @@ def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, flo
     timeouts = timeouts or {}
     check_s = check_s or {}
     cfg = profile.adapters
-    hipcc = f"{tool_root('AORLTA_ROCM_ROOT')}/bin/hipcc"
+    # the compile gate's compiler, as the profile resolved it when it was loaded: every adapter's default
+    hipcc = cfg.get("standin.hipcc", {}).get("hipcc") or f"{tool_root('AORLTA_ROCM_ROOT')}/bin/hipcc"
     out: dict[str, Callable[[str], Any]] = {}
     names = {p.adapter for p in profile.pools.values()}
     pool_timeout = {p.adapter: timeouts.get(p.timeout, 120.0) for p in profile.pools.values()}
