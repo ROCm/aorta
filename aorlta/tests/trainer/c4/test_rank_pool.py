@@ -36,6 +36,8 @@ from aorlta.trainer.loss import LossSettings, build_groups, reference_loss
 from aorlta.trainer.rank_pool import RankError, RankPool, RankSpec, file_init_method
 from aorlta.trainer.ranks import LocalWorld, OptimSettings, RankTrainer, rank_agreement_cosine
 
+pytestmark = pytest.mark.heavy
+
 LOSS_REL = 1e-6  # C4.T1's loss limit
 GRAD_COS_BF16, GRAD_COS_FP32 = rank_agreement_cosine(torch.bfloat16), rank_agreement_cosine(torch.float32)
 B_STD = 0.05

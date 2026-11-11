@@ -135,3 +135,17 @@ def test_a_slot_whose_metadata_leaves_less_than_the_margin_is_not_published(tiny
     with pytest.raises(W.ShmFullError, match="once slot 0 is written"):
         W.write_slot(weights, base_dir=tiny_base, sync_dir=shm, run_id="r", version=0, margin=MARGIN)
     assert not (shm / "r" / "w0.partial").exists() and not (shm / "r" / "w0").exists()
+
+
+@pytest.mark.parametrize("name", ["/abs/model.safetensors", "../model.safetensors", "sub/model.safetensors", ".."])
+def test_a_base_index_naming_a_shard_outside_the_model_directory_is_refused(tiny_base, tmp_path, name):
+    import shutil
+
+    base = tmp_path / "base"
+    shutil.copytree(tiny_base, base)
+    index = json.loads((base / W.INDEX_NAME).read_text())
+    key = next(iter(index["weight_map"]))
+    index["weight_map"][key] = name
+    (base / W.INDEX_NAME).write_text(json.dumps(index))
+    with pytest.raises(W.SyncError, match="not file names in the directory"):
+        W.read_base_index(base)

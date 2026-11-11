@@ -94,8 +94,8 @@ def _reload_one(engine: Engine, slot: Path, expected: int, retries: int, restart
             try:
                 restart(engine)
             except Exception as exc:  # noqa: BLE001 - an engine that cannot be restarted did not take the slot
-                reply = ReloadReply(False, None, f"restart failed: {type(exc).__name__}: {exc}"[:500])
-                break
+                return ReloadResult(engine.engine_id, False, None, f"restart failed: {type(exc).__name__}: {exc}"[:500],
+                                    time.monotonic() - t0, attempts, True)
             restarted = True
         for _ in range(1 + (retries if phase == "try" else 0)):
             attempts += 1

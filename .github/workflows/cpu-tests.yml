@@ -391,12 +391,29 @@ jobs:
   # only when aorlta/ or this workflow changes (and on pushes to main), so other
   # pull requests do not wait for it. Its tests need no GPU: the ones that need
   # hipcc, a GPU, the stand-in dataset or the checker tools skip with a reason.
+  # The suite runs in three parts on three runners. This runner's CPU has no AVX-512, so the tiny models' bf16
+  # steps run several times slower than on a workstation, and the tests that hold several copies of a model
+  # (marked `heavy`) outgrow its 16 GB when four run at once; the one long CPU run (`cpu_run`, the t10
+  # measurement) runs alone, as its module fixture would otherwise compete with them for four cores.
   aorlta_tests:
-    name: pytest (AORLTA, py3.12)
+    name: pytest (AORLTA ${{ matrix.part }}, py3.12)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.aorlta == 'true'
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: light
+            workers: auto
+            markers: not heavy and not cpu_run
+          - part: heavy
+            workers: "2"
+            markers: heavy
+          - part: cpu run
+            workers: "0"
+            markers: cpu_run
     defaults:
       run:
         working-directory: aorlta
@@ -430,6 +447,8 @@ jobs:
           OMP_NUM_THREADS: "1"
           MALLOC_MMAP_THRESHOLD_: "65536"
           MALLOC_ARENA_MAX: "2"
+          PYTEST_WORKERS: ${{ matrix.workers }}
+          PYTEST_MARKERS: ${{ matrix.markers }}
         run: |
           (while :; do
              awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^SwapTotal:/{s=$2} /^SwapFree:/{f=$2} END{print t-a, s-f}' /proc/meminfo
@@ -437,8 +456,9 @@ jobs:
            done) > "$RUNNER_TEMP/memory.log" &
           sampler=$!
           rc=0
-          python -m pytest -q -n auto --timeout=900 || rc=$?
+          python -m pytest -q -n "$PYTEST_WORKERS" -m "$PYTEST_MARKERS" --timeout=900 --durations=10 || rc=$?
           kill "$sampler"
+          if [ "$rc" -eq 5 ]; then echo "no test of this part on this branch"; rc=0; fi
           awk '$1>m{m=$1} $2>s{s=$2} END{printf "peak memory in use: %.1f GiB, peak swap in use: %.1f GiB\n", m/1048576, s/1048576}' \
             "$RUNNER_TEMP/memory.log"
           exit "$rc"

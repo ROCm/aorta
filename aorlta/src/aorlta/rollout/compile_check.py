@@ -105,8 +105,9 @@ class EvidenceStore:
         digest = sha256_text(text)
         path = self.root / digest[:2] / f"{digest}.txt"
         if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.mkdir(mode=0o700, exist_ok=True)
             atomic_write_bytes(path, text.encode("utf-8"))
+            os.chmod(path, 0o600)  # the root already keeps others out; a copy of the tree keeps the files owner-only
         return digest
 
 

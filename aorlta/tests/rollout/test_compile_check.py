@@ -215,4 +215,5 @@ def test_the_evidence_store_is_owner_only_even_when_its_root_already_exists(tmp_
         digest = store.put("x.hip:1:1: error: use of undeclared identifier 'y'\n")
     finally:
         os.umask(old)
-    assert stat.S_IMODE(root.stat().st_mode) == 0o700 and (root / digest[:2] / f"{digest}.txt").is_file()
+    path = root / digest[:2] / f"{digest}.txt"
+    assert [stat.S_IMODE(p.stat().st_mode) for p in (root, path.parent, path)] == [0o700, 0o700, 0o600]

@@ -38,6 +38,8 @@ from aorlta.trainer.ranks import rank_agreement_cosine  # noqa: E402
 
 import re  # noqa: E402
 
+pytestmark = pytest.mark.heavy
+
 VOCAB = 248320  # Qwen3.5's: the byte ids (10000+) and the control ids (248044-248069) are real rows
 ENGINE_KW = {"dtype": "bfloat16", "sampling_backend": "triton", "enable_output_logprobs": True,
              "enable_prefix_caching": True}

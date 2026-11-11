@@ -70,6 +70,12 @@ def ranks_agree(cosine: float, dtype: Any) -> bool:
     return cosine >= rank_agreement_cosine(dtype)
 
 
+def engine_tensor(s, usable: bool) -> torch.Tensor:
+    """A sample's engine log-probs for the ratio, at most 0: the rollout accepts up to MAX_LOGPROB above it, from
+    rounding a probability of 1 (zeros for a sample without usable ones, which is excluded)."""
+    return torch.tensor(s.engine_logprobs if usable else [0.0] * s.n_response, dtype=torch.float32).clamp(max=0.0)
+
+
 # --- the collective -----------------------------------------------------------------------------------
 
 
@@ -397,7 +403,7 @@ class RankTrainer:
                 self.counts["excluded"] += 1
                 self.excluded_ids.append(s.chain_id)
             keep.append(k)
-            engine.append(torch.tensor(s.engine_logprobs if usable else [0.0] * s.n_response, dtype=torch.float32))
+            engine.append(engine_tensor(s, usable))
         engine_raw = torch.cat(engine).to(dev)
         # The temperature check: the loss's log-probs against log_softmax(z / T_loss) recomputed from the same
         # hidden states, on the first chunk (the same GEMM shape as the loss's own first chunk).

@@ -622,7 +622,7 @@ class TrainerAdapter:
         plans = build_groups([m.sample for m in members if m.sample is not None],
                              [m.result for m in members if m.result is not None],
                              min_scored=self.cfg.orchestrator.min_scored_per_group, chains=group.chains,
-                             history=self.cfg.rollout.repair_turn_ids != "rerender")
+                             rerendered=self.cfg.rollout.repair_turn_ids == "rerender")
         excluded = {}
         for m in members:
             if m.result is None:
