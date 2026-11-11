@@ -369,6 +369,14 @@ def test_a_waitcheck_whose_kernels_cannot_be_read_is_unsettled_not_the_gate_obje
     assert seen == []  # nothing was scanned
 
 
+def test_main_inside_a_string_literal_does_not_skip_the_template_instantiation(tmp_path, monkeypatch):
+    seen: list = []
+    _fake_aorta_waitcheck(monkeypatch, seen)
+    _, r = _waitcheck_of(tmp_path, 'constexpr const char* banner = "int main(";\n' + MIXED, "/nonexistent/hipcc")
+    assert (r.state, r.reason) == ("unsettled", "harness_unsupported: clang could not read the source (exit None)")
+    assert seen == []  # not the gate's object, which has no code for the template
+
+
 def test_a_waitcheck_of_a_source_that_defines_no_kernel_scans_the_gates_object(tmp_path, monkeypatch):
     seen: list = []
     _fake_aorta_waitcheck(monkeypatch, seen)
@@ -387,14 +395,6 @@ def test_an_adapter_that_builds_with_its_own_compiler_names_it_in_its_identity(t
     assert first == again != other
 
 
-@needs_rj
-def test_a_waitcheck_timeout_is_unsettled(tmp_path):
-    fake = script(tmp_path / "rj_waitcheck", "sleep 30\n")
-    obj = tmp_path / "o"
-    obj.write_bytes(b"\x7fELF")
-    r = StandinRjWaitcheck(fake, aorta_src=AORTA, timeout_s=1.0).run(
-        job("san.waitcheck", tmp_path, settings={"target": "gfx950"}, inputs={"object": str(obj)}))
-    assert r.state == "unsettled"
 @pytest.mark.parametrize("make", [
     lambda hipcc: StandinHipcc(hipcc),
     lambda hipcc: StandinRjWaitcheck("/nonexistent/rj_waitcheck", hipcc=hipcc),
@@ -429,6 +429,14 @@ def test_the_identity_names_the_compiler_hipcc_runs_not_only_the_driver(tmp_path
     assert make(hipcc).version != first
 
 
+@needs_rj
+def test_a_waitcheck_timeout_is_unsettled(tmp_path):
+    fake = script(tmp_path / "rj_waitcheck", "sleep 30\n")
+    obj = tmp_path / "o"
+    obj.write_bytes(b"\x7fELF")
+    r = StandinRjWaitcheck(fake, aorta_src=AORTA, timeout_s=1.0).run(
+        job("san.waitcheck", tmp_path, settings={"target": "gfx950"}, inputs={"object": str(obj)}))
+    assert r.state == "unsettled"
 
 
 # --- aorta's verdicts -------------------------------------------------------------------------------

@@ -133,6 +133,17 @@ def test_main_and_declared_names_are_read_from_code_not_comments():
     assert "in_a_comment" not in declared_names(SHAPES)
 
 
+@pytest.mark.parametrize("text, defines_main", [
+    ('constexpr const char* banner = "int main(";\n', False),  # a string literal is not code
+    ('const char* s = "a \\" int main() {";\n', False),  # an escaped quote does not end it
+    ('auto r = R"x(int main() { )x";\n', False),  # nor does a raw string
+    ("int main();\n", False),  # a declaration defines nothing
+    ('const char* u = "http://x"; char q = \'"\';\nint main(int argc, char** argv)\n{\n  return 0;\n}\n', True),
+])
+def test_main_is_a_definition_in_code_not_text_in_a_string_literal(text, defines_main):
+    assert has_main(text) is defines_main
+
+
 def test_the_launch_respects_launch_bounds_and_dynamic_shared_memory():
     assert launch_block(VECADD) == BLOCK and launch_block(HALF_BOUNDS) == 128
     k = Kernel("vecadd", (), None, "void (const float *, const float *, float *, int)")
