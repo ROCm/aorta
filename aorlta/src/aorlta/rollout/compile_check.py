@@ -37,6 +37,7 @@ from .feedback import compile_errors
 
 SOURCE_NAME = "kernel.hip"
 _CPP_BLOCK_RE = re.compile(r"```cpp[ \t]*\r?\n(.*?)```", re.S)
+_CPP_OPEN_RE = re.compile(r"```cpp[ \t]*(?:\r?\n|\Z)")
 THINK_CLOSE = "</think>"
 _TAG_RE = re.compile(r"[A-Za-z0-9_.-]+")
 
@@ -72,7 +73,8 @@ class Compiler(Protocol):
 
 
 def parse_code(text: str, thinking: str) -> str | None:
-    """Stand-in parse: the last ```cpp block, searched after the last `</think>` when thinking is on."""
+    """Stand-in parse: the last ```cpp block, searched after the last `</think>` when thinking is on. A last block
+    that never closes (a length-capped reply) is no code, also after a complete one."""
     if thinking not in ("off", "on"):
         raise ValueError(f"thinking must be 'off' or 'on', got {thinking!r}")
     if thinking == "on":
@@ -80,8 +82,10 @@ def parse_code(text: str, thinking: str) -> str | None:
         if cut < 0:
             return None
         text = text[cut + len(THINK_CLOSE):]
-    blocks = _CPP_BLOCK_RE.findall(text)
-    return blocks[-1] if blocks else None
+    blocks = list(_CPP_BLOCK_RE.finditer(text))
+    if _CPP_OPEN_RE.search(text, blocks[-1].end() if blocks else 0):
+        return None
+    return blocks[-1].group(1) if blocks else None
 
 
 def _check_tag(tag: str) -> str:
