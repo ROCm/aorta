@@ -393,6 +393,25 @@ def test_c2_t5_a_cached_reward_whose_leg_contradicts_its_findings_is_a_miss(tmp_
         rig.close()
 
 
+def test_c2_t5_a_cached_reward_whose_bracketed_leg_has_no_clean_bracket_is_a_miss(tmp_path):
+    """A bracketed leg comes from the leg cache only with a clean bracket, so from the reward cache too."""
+    rig = fake_rig(tmp_path)
+    try:
+        c = cand(0, text="```cpp\nt\n```")
+        r = rig.service.submit(c).result(timeout=60)
+        rkey, rfields = rig.service._reward_key(rig.service._cands[c.candidate_id])
+        assert r.status == "scored" and r.legs["san.consan"].bracket["clean"] is True
+        assert rig.service.cache.get_reward(rkey, rfields) is not None
+        for bracket in (None, dict(r.legs["san.consan"].bracket, clean=False)):
+            bad = dataclasses.replace(r.legs["san.consan"], bracket=bracket)
+            tampered = dataclasses.replace(r, legs=dict(r.legs, **{"san.consan": bad}))
+            assert rig.service.cache.put_reward(rkey, rfields, tampered) is False
+            rig.service.cache.rewards.put(rkey, rfields, {"result": to_dict(tampered)})  # past put_reward
+            assert rig.service.cache.get_reward(rkey, rfields) is None
+    finally:
+        rig.close()
+
+
 def test_c2_t5_a_cached_number_too_large_for_a_float_is_a_miss(tmp_path):
     rig = fake_rig(tmp_path)
     try:
