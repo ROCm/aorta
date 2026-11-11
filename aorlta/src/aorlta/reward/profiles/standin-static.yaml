@@ -23,7 +23,7 @@ leg_settings:
 # rocjitsu's rj_waitcheck, from ROCm/rocm-systems branch shared/rocjitsu/sanitizers; a libstdc++ with GLIBCXX_3.4.31 for
 # it (ld_library_path); aorta at commit d22f6116235c05395a0241a83d6f7e952a988454 (its src/).
 adapters:
-  standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc"}
+  standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", readelf: "${AORLTA_ROCM_ROOT}/llvm/bin/llvm-readelf"}
   standin.rj_waitcheck:
     binary: "${AORLTA_ROCJITSU_ROOT}/bin/rj_waitcheck"
     ld_library_path: "${AORLTA_LIBSTDCXX_SHIM}"

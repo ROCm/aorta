@@ -45,6 +45,27 @@ def test_a_site_rocm_root_reaches_every_adapter_that_compiles(monkeypatch):
                 close()
 
 
+def test_every_adapter_compiles_with_the_compiler_the_profile_resolved_when_it_was_loaded(monkeypatch):
+    """The profile's `${AORLTA_ROCM_ROOT}` is expanded when it is loaded; an adapter without its own `hipcc` takes
+    the compile gate's, also if the variable has changed since."""
+    monkeypatch.delenv("HIPCC", raising=False)  # the factories set it for aorta's ASan canary
+    monkeypatch.setenv("AORLTA_ROCM_ROOT", "/loaded/rocm")
+    profile, static = load_profile("standin-gpu"), load_profile("standin-static")
+    monkeypatch.setenv("AORLTA_ROCM_ROOT", "/later/rocm")
+    f = standin_factories(profile, Clock())
+    adapters = [f[name](f"{name}/1") for name in ("standin.hipcc", "standin.rj_waitcheck", "standin.aorta_consan")]
+    adapters.append(f["standin.aorta_asan"]("asan/1").adapter)
+    adapters.append(standin_factories(static, Clock())["standin.hipcc"]("compile/1"))
+    try:
+        assert {a.hipcc for a in adapters} == {"/loaded/rocm/bin/hipcc"}
+        assert {adapters[0].readelf, adapters[-1].readelf} == {"/loaded/rocm/llvm/bin/llvm-readelf"}
+    finally:
+        for a in adapters:
+            close = getattr(a, "close", None)
+            if close:
+                close()
+
+
 def test_aortas_asan_canary_is_given_the_compiler_the_candidates_are_built_with(monkeypatch):
     """aorta's ASan node-health canary builds with $HIPCC when it is set, else from aorta's own ROCm lookup, which a
     site's AORLTA_ROCM_ROOT does not reach. Building the factories names the candidates' compiler there; a $HIPCC
