@@ -44,7 +44,9 @@ _LOC_RE = re.compile(
 _NOLOC_RE = re.compile(r"^(?:(?P<file>[^\s:][^:]*): )?(?P<sev>fatal error|error|warning|note|remark): (?P<msg>.*)$")
 _QUOTED_RE = re.compile(r"'[^'\n]*'")
 _NAMEISH_RE = re.compile(r"[A-Za-z0-9_]")
-_PATH_RE = re.compile(r"(?<![\w<>/.])(?:/[\w.+@~-]+)+/?")
+_PART = r"[\w.+@~-]+(?::[\w.+@~-]+)*"  # a path component, which may hold a colon
+# an absolute path, or (what a space in a path leaves) a relative one
+_PATH_RE = re.compile(rf"(?<![\w<>/.])(?:/{_PART})+/?|(?<![\w<>/.:]){_PART}(?:/{_PART})+/?")
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\S")
 _LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 _CONTROL_TEXTS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "<think>", "</think>")

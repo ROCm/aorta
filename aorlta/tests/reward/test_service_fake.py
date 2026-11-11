@@ -393,6 +393,25 @@ def test_c2_t5_a_cached_reward_whose_leg_contradicts_its_findings_is_a_miss(tmp_
         rig.close()
 
 
+def test_c2_t5_a_cached_reward_whose_bracketed_leg_has_no_clean_bracket_is_a_miss(tmp_path):
+    """A bracketed leg comes from the leg cache only with a clean bracket, so from the reward cache too."""
+    rig = fake_rig(tmp_path)
+    try:
+        c = cand(0, text="```cpp\nt\n```")
+        r = rig.service.submit(c).result(timeout=60)
+        rkey, rfields = rig.service._reward_key(rig.service._cands[c.candidate_id])
+        assert r.status == "scored" and r.legs["san.consan"].bracket["clean"] is True
+        assert rig.service.cache.get_reward(rkey, rfields) is not None
+        for bracket in (None, dict(r.legs["san.consan"].bracket, clean=False)):
+            bad = dataclasses.replace(r.legs["san.consan"], bracket=bracket)
+            tampered = dataclasses.replace(r, legs=dict(r.legs, **{"san.consan": bad}))
+            assert rig.service.cache.put_reward(rkey, rfields, tampered) is False
+            rig.service.cache.rewards.put(rkey, rfields, {"result": to_dict(tampered)})  # past put_reward
+            assert rig.service.cache.get_reward(rkey, rfields) is None
+    finally:
+        rig.close()
+
+
 def test_c2_t5_a_cached_number_too_large_for_a_float_is_a_miss(tmp_path):
     rig = fake_rig(tmp_path)
     try:
@@ -437,6 +456,28 @@ def test_closing_services_leaves_no_cache_writer_running(tmp_path):
         rig.service.submit(cand(0)).result(timeout=60)
         rig.close()
     assert _cache_writers() == before
+
+
+def test_a_cache_entry_json_cannot_hold_is_not_written_and_the_writer_keeps_going(tmp_path):
+    """A finding can carry a NaN, which the JSON files do not hold: that entry stays in memory only, and the entries
+    after it are still written."""
+    cache = RewardCache(tmp_path / "cache")
+    try:
+        keyed = [(sha256_json(f), f) for f in ({"leg": "san.consan", "n": n} for n in range(2))]
+        bracket = {"before": "x", "after": "y", "clean": True}
+        nan = leg("san.consan", "finding", bracket=bracket, findings=[{"kind": "race", "offset": float("nan")}])
+        assert cache.put_leg(*keyed[0], nan, bracketed=True)
+        assert cache.put_leg(*keyed[1], leg("san.consan", "finding", bracket=bracket), bracketed=True)
+        flushed = threading.Event()
+        threading.Thread(target=lambda: (cache.flush(), flushed.set()), daemon=True).start()
+        assert flushed.wait(30) and cache._writer.thread.is_alive()
+        fresh = RewardCache(tmp_path / "cache")
+        try:
+            assert fresh.get_leg(*keyed[0]) is None and fresh.get_leg(*keyed[1]) is not None
+        finally:
+            fresh.close()
+    finally:
+        cache.close()
 
 
 def test_a_closed_cache_still_writes_and_flush_stays_usable(tmp_path):

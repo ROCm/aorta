@@ -517,7 +517,8 @@ class RewardService:
         rf = self._rewardfn_identity()
         fields = reward_key_fields(c.cand, c.leg_keys, rf, self.profile.name,
                                    reward_settings=dict(getattr(self.rewardfn, "settings", {})),
-                                   clean_repeats=self.profile.clean_repeats)
+                                   clean_repeats=self.profile.clean_repeats,
+                                   bracketed=[leg for leg, f in c.leg_fields.items() if f.get("bracketed") is True])
         return sha256_json(fields), fields
 
     def _rewardfn_identity(self) -> dict:
