@@ -61,11 +61,21 @@ class ShardNameError(SyncError):
         self.names = names
 
 
+SINGLE_FILE = "model.safetensors"  # a checkpoint small enough for one file, saved with no index
+
+
 def read_base_index(base_dir: str | Path) -> dict[str, str]:
-    """key -> shard file, from the base's `model.safetensors.index.json` (required)."""
+    """key -> shard file, from the base's `model.safetensors.index.json`, or for a checkpoint saved as one
+    `model.safetensors` without an index, from that file's header."""
     path = Path(base_dir) / INDEX_NAME
     if not path.is_file():
-        raise SyncError(f"{path}: the base checkpoint has no index; the name map needs one")
+        single = Path(base_dir) / SINGLE_FILE
+        if not single.is_file():
+            raise SyncError(f"{path}: the base has no index and no {SINGLE_FILE}; the name map needs one")
+        from safetensors import safe_open
+
+        with safe_open(str(single), framework="pt") as f:
+            return {k: SINGLE_FILE for k in f.keys()}
     data = json.loads(read_text(path))
     wm = data.get("weight_map") if isinstance(data, dict) else None
     if not isinstance(wm, dict) or not wm or not all(isinstance(k, str) and isinstance(v, str) for k, v in wm.items()):
