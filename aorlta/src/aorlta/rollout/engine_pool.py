@@ -116,14 +116,17 @@ def server_arg_problems(info: dict, expected: dict) -> list[str]:
     return [f"{k} is {info.get(k, '<missing>')!r}, expected {v!r}" for k, v in expected.items() if info.get(k) != v]
 
 
+MAX_LOGPROB = 1e-3  # an engine's log-probability of 1 can round slightly above 0; the trainer takes the same bound
+
+
 def logprobs_aligned(res: dict) -> bool:
-    """Log-probs present, one per output id, naming the same ids, all finite."""
+    """Log-probs present, one per output id, naming the same ids, all finite and at most MAX_LOGPROB."""
     ids, vals, lp_ids = res.get("output_ids"), res.get("lp_vals"), res.get("lp_ids")
     if not ids or vals is None or lp_ids is None:
         return False
     if len(vals) != len(ids) or list(lp_ids) != list(ids):
         return False
-    return all(isinstance(v, float) and math.isfinite(v) and v <= 1e-3 for v in vals)
+    return all(isinstance(v, float) and math.isfinite(v) and v <= MAX_LOGPROB for v in vals)
 
 
 def self_test_seeds(run_seed: int, i: int) -> tuple[int, int]:
