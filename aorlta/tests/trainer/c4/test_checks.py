@@ -380,3 +380,15 @@ def test_the_cosine_is_advisory():
     c = rep["checks"]["step_descends_the_gradient"]
     assert c["advisory"] and "step_descends_the_gradient" not in C.GATING_POST
     assert c["cosine_delta_vs_negative_grad"] > 0  # step 1 of Adam: always positive
+
+
+def test_an_engine_logprob_the_rollout_accepts_is_usable_for_the_gap():
+    """An engine's log-probability of 1 can round slightly above 0: the gap gate takes what the rollout accepted."""
+    from types import SimpleNamespace
+
+    from aorlta.rollout.engine_pool import MAX_LOGPROB, logprobs_aligned
+    from aorlta.trainer.loss import logprobs_usable
+
+    for v, ok in ((-0.5, True), (0.0, True), (MAX_LOGPROB / 2, True), (MAX_LOGPROB, True), (2 * MAX_LOGPROB, False)):
+        assert logprobs_usable(SimpleNamespace(engine_logprobs=[-1.0, v], response_ids=[1, 2])) is ok
+        assert logprobs_aligned({"output_ids": [1, 2], "lp_ids": [1, 2], "lp_vals": [-1.0, v]}) is ok
