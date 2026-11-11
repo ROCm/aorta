@@ -36,7 +36,8 @@ def fake_components(cfg, *, config_path: Path | None = None, commit: str | None 
     if cfg.orchestrator.mode == "score":
         from .score import Scorer
 
-        return Scorer(cfg, pool=make_pool(2 * cfg.rollout.P, source=cfg.run.source), rollout=rollout,
+        prompts = max(2 * cfg.rollout.P, cfg.orchestrator.score.prompts or 0)  # as many as the run asks to score
+        return Scorer(cfg, pool=make_pool(prompts, source=cfg.run.source), rollout=rollout,
                       reward=FakeReward(clock), model=FakeServedModel(cfg, rollout), clock=clock, spans=spans,
                       commit=commit, config_path=config_path)
     trainer = FakeTrainer(FakeTrainerConfig(min_scored=cfg.orchestrator.min_scored_per_group))

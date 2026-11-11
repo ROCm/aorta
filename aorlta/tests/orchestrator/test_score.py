@@ -363,6 +363,25 @@ def test_the_entry_point_runs_a_score_config_with_the_fakes_and_never_resumes_it
     assert again.returncode == 2 and "a score run is not resumed" in again.stderr
 
 
+def test_the_fake_components_hold_as_many_prompts_as_a_score_config_asks_for(tmp_path):
+    path = tmp_path / "score.yaml"
+    path.write_text(json.dumps(score_dict(tmp_path, score={"prompts": 16, "passes": 1})))  # P is 4
+    proc = _main("--config", str(path), "--components", "fake")
+    assert proc.returncode == 0, proc.stdout[-1500:] + proc.stderr[-1500:]
+    assert json.loads(proc.stdout.strip().splitlines()[-1])["score"]["prompts"] == 16
+
+
+def test_the_fakes_entry_point_runs_a_score_spec(tmp_path):
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec(tmp_path).to_json()))
+    env = dict(os.environ, PYTHONPATH=str(REPO / "src"), PYTHONDONTWRITEBYTECODE="1")
+    proc = subprocess.run([sys.executable, "-m", "aorlta.orchestrator.fakes", "--spec", str(path)], capture_output=True,
+                          text=True, env=env, timeout=120)
+    assert proc.returncode == 0, proc.stdout[-1500:] + proc.stderr[-1500:]
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert (out["status"], out["trainer_digest"]) == ("completed", None)  # a score run has no trainer
+
+
 def test_the_wiring_reads_no_trainer_setting_in_a_score_run_and_wants_the_self_tests_prompts(tmp_path):
     from aorlta.orchestrator import wiring
 

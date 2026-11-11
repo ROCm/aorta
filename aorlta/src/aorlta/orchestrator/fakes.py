@@ -931,7 +931,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.points_out is not None:
         args.points_out.write_text(json.dumps(seen))
     print(json.dumps({"status": result["status"], "iterations_completed": result["iterations_completed"],
-                      "trainer_digest": run.trainer.state_digest(), "stop": result.get("stop")}))
+                      "trainer_digest": run.trainer.state_digest() if run.trainer is not None else None,
+                      "stop": result.get("stop")}))
     return 0 if result["status"] == "completed" else 3
 
 
