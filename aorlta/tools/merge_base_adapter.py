@@ -605,6 +605,9 @@ def _unreadable(name: str, exc: Exception) -> str:
 
 
 def check_index(base: Path, out: Path) -> dict:
+    if not (base / INDEX_NAME).is_file():  # a base saved as one model.safetensors has no index, and nor has its merge
+        same = not (out / INDEX_NAME).exists()
+        return {"weight_map_identical": same, "pass": same}
     want = json.loads((base / INDEX_NAME).read_text())
     try:
         same = json.loads((out / INDEX_NAME).read_text()) == want
