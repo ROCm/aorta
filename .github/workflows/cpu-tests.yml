@@ -421,10 +421,27 @@ jobs:
       # One torch thread per xdist worker: the reward-service tests run on a scaled clock, and a torch test
       # taking every core in another worker would stall them past their timeouts. A test that hangs fails
       # with its stack after 15 minutes instead of holding the job to its limit.
+      # glibc's default mmap threshold grows as tensors are freed, so later tensors come from the heap and
+      # their memory is kept: each wired run left a worker about 1.5 GB larger, four workers reached 17 GiB
+      # on this 16 GB runner, and the heavy tests swapped past the job's limit. A fixed threshold and two
+      # arenas give the memory back (10 GiB peak on 4 CPUs). The step prints the job's peak memory and swap.
       - name: Run the AORLTA test suite
         env:
           OMP_NUM_THREADS: "1"
-        run: python -m pytest -q -n auto --timeout=900
+          MALLOC_MMAP_THRESHOLD_: "65536"
+          MALLOC_ARENA_MAX: "2"
+        run: |
+          (while :; do
+             awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^SwapTotal:/{s=$2} /^SwapFree:/{f=$2} END{print t-a, s-f}' /proc/meminfo
+             sleep 5
+           done) > "$RUNNER_TEMP/memory.log" &
+          sampler=$!
+          rc=0
+          python -m pytest -q -n auto --timeout=900 || rc=$?
+          kill "$sampler"
+          awk '$1>m{m=$1} $2>s{s=$2} END{printf "peak memory in use: %.1f GiB, peak swap in use: %.1f GiB\n", m/1048576, s/1048576}' \
+            "$RUNNER_TEMP/memory.log"
+          exit "$rc"
 
   # Stable required-status-check aggregator. Branch protection on `main` must
   # require THIS job ("CPU tests"), not the per-version `pytest (CPU, py3.x)`
