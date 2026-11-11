@@ -61,6 +61,7 @@ def test_group_key():
         (lambda d: d.update(state="ok"), "LegResult.state: expected one of"),
         (lambda d: d.update(repeats=True), "LegResult.repeats: expected an int"),
         (lambda d: d.update(t_queued="1.0"), "LegResult.t_queued: expected a finite number"),
+        (lambda d: d.update(t_queued=10 ** 400), "LegResult.t_queued: expected a finite number"),
         (lambda d: d.update(findings={"a": 1}), "LegResult.findings: expected a list"),
     ],
 )

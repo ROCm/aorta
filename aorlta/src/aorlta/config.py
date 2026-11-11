@@ -179,7 +179,10 @@ def strict_decode(tp: Any, value: Any, path: str = "") -> Any:
         raise ConfigError(f"{where}: expected an int, got {_describe(value)}")
     if tp is float:
         if type(value) in (int, float):
-            f = float(value)
+            try:
+                f = float(value)
+            except OverflowError:  # an int too large for a float
+                f = math.inf
             if math.isfinite(f):
                 return f
         raise ConfigError(f"{where}: expected a finite number, got {_describe(value)}")
