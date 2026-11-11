@@ -118,6 +118,12 @@ def test_each_iteration_is_divided_by_its_own_scored_count():
     assert s.median_s == 150.0 and s.mean_with_stalls_s == 150.0
 
 
+def test_an_unscored_iteration_1_is_not_reported_and_does_not_block_the_summary():
+    s = p.summarize([IterationStats(1, 10.0, 256, 0, False), IterationStats(2, 20.0, 256, 256, False)])
+    assert s.per256_s == {1: None, 2: 20.0} and s.median_s == 20.0 and s.iterations == (2,)
+    assert s.to_json()["per256_s"] == {"1": None, "2": 20.0}
+
+
 def test_a_single_reported_iteration_has_no_iqr():
     s = p.summarize([IterationStats(1, 10.0, 256, 256, False), IterationStats(2, 20.0, 256, 256, False)])
     assert (s.median_s, s.q1_s, s.q3_s, s.iqr_s) == (20.0, None, None, None)
