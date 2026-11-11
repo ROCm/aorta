@@ -402,7 +402,6 @@ class RewardAdapter:
 
         self.cfg, self.clock, self.spans = cfg, clock, spans
         self.profile = load_profile(cfg.reward.profile)
-        self.legs = tuple(self.profile.legs)
         try:
             self.rewardfn = standin_rewardfn(self.profile)
         except UnsupportedRewardFn as exc:
@@ -427,6 +426,10 @@ class RewardAdapter:
         self.plan_log = cfg.run_dir / "selector" / "plan_log.jsonl"
         self._svc = None
         self._lock = threading.Lock()
+
+    @property
+    def legs(self) -> tuple[str, ...]:
+        return tuple(self.profile.legs)
 
     def service(self):
         with self._lock:
