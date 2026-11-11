@@ -40,10 +40,14 @@ def test_the_lane_installs_the_package_with_its_pins_and_runs_its_tests():
 
 def test_the_lane_runs_every_test_in_one_of_its_three_parts():
     job = _jobs()["aorlta_tests"]
-    parts = {leg["part"]: (leg["workers"], leg["markers"]) for leg in job["strategy"]["matrix"]["include"]}
+    legs = job["strategy"]["matrix"]["include"]
+    parts = {leg["part"]: (leg["workers"], leg["threads"], leg["markers"]) for leg in legs}
 
-    assert parts == {"light": ("4", "not heavy and not cpu_run"), "heavy": ("2", "heavy"),
-                     "cpu run": ("0", "cpu_run")}
+    # never more torch threads than the runner's four cores
+    assert parts == {"light": ("4", "1", "not heavy and not cpu_run"), "heavy": ("2", "2", "heavy"),
+                     "cpu run": ("0", "4", "cpu_run")}
+    step = next(s for s in job["steps"] if "pytest" in str(s.get("run")))
+    assert step["env"]["OMP_NUM_THREADS"] == "${{ matrix.threads }}"
     assert job["strategy"]["fail-fast"] is False
     assert 'if [ "$rc" -eq 5 ]' in _script(job)  # a part with no test on a branch (the markers come later) passes
 
