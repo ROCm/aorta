@@ -12,6 +12,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -158,6 +159,35 @@ def test_chain_items_locate_every_turn_and_token_arrays_line_up():
     assert math.isclose(s["solo"]["turn0"]["tokens"]["median"], 0.05, rel_tol=1e-5)
     assert s["packed"]["all"]["tokens"]["n"] == 6 and "turn0" not in s["packed"]
     assert T.reply_ids(a).tolist() == [0] * 5 + [1] * 6
+
+
+def _rerendered_chain(k, n_reply):
+    """A two-turn chain whose template trimmed turn 0's reply (its first two tokens) when it rendered turn 1."""
+    p0 = _ids(6, seed=1)
+    r0 = _ids(4, seed=2) + [248046]
+    p1 = p0 + r0[2:] + _ids(3, seed=4)
+    r1 = _ids(n_reply, seed=5 + k) + [248046]
+    cid = f"t10test/1/standin:a/{k}"
+    rec = ChainRecord(chain_id=cid, prompt_id="standin:a", k=k, engine_id=0, policy_version="t10test:v0",
+                      turns=[_turn(0, len(p0), r0, [-0.1] * len(r0)), _turn(1, len(p1), r1, [-0.2] * len(r1))],
+                      final_turn=1, end_reason="compiled")
+    sample = TrainingSample(chain_id=cid, iteration=1, prompt_id="standin:a", prompt_ids=p1, response_ids=r1,
+                            response_logprobs=[-0.2] * len(r1))
+    return rec, sample
+
+
+def test_a_rerendered_chain_is_measured_on_the_turns_it_holds_when_the_run_rerenders():
+    (rec0, s0), (rec1, s1) = _rerendered_chain(0, 5), _rerendered_chain(1, 9)
+    res = SimpleNamespace(chains=[rec0, rec1], samples=[s0, s1])
+    cfg = SimpleNamespace(rollout=SimpleNamespace(repair_turn_ids="rerender", max_new_tokens=512),
+                          orchestrator=SimpleNamespace(min_scored_per_group=2))
+    items, groups, plans = T.batch_inputs(res, 1, [SimpleNamespace(prompt_id="standin:a")], cfg)
+    assert [[s.turn for s in it.spans] for it in items] == [[1], [1]]
+    assert [[m["turn"] for m in it.meta] for it in items] == [[1], [1]]
+    assert [len(g.members) for g in groups] == [2] and [len(p.samples) for p in plans] == [2]
+    cfg.rollout.repair_turn_ids = "append"
+    with pytest.raises(TrainerInputError, match="turn 0's reply is not at 6"):
+        T.batch_inputs(res, 1, [SimpleNamespace(prompt_id="standin:a")], cfg)
 
 
 def test_a_chain_without_a_sample_is_not_an_item():

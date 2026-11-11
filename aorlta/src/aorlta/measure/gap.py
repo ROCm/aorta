@@ -55,19 +55,21 @@ class ChainItem:
         return self.spans[-1].turn
 
 
-def chain_items(chains: Iterable, samples: Iterable) -> list[ChainItem]:
+def chain_items(chains: Iterable, samples: Iterable, *, rerendered: bool = False) -> list[ChainItem]:
     """Every chain that has a TrainingSample (so its engine log-probs line up on every turn), in chain order.
-    `turn_spans` refuses a chain whose turn records do not reproduce the sample's ids."""
+    `turn_spans` refuses a chain whose turn records do not reproduce the sample's ids; a `rerendered` chain keeps the
+    turns whose reply is in the final sequence (see `turn_spans`), and `meta` holds the same turns."""
     by_id = {s.chain_id: s for s in samples}
     out = []
     for rec in chains:
         s = by_id.get(rec.chain_id)
         if s is None:
             continue  # engine_error, quarantined, logprob_error: nothing to compare
-        spans = turn_spans(s, rec)
+        spans = turn_spans(s, rec, rerendered=rerendered)
+        kept = {sp.turn for sp in spans}
         meta = tuple({"turn": tr.turn, "input_len": tr.input_len, "n_reply": len(tr.response_ids),
                       "cached_tokens": tr.cached_tokens, "ideal_cached_tokens": tr.ideal_cached_tokens,
-                      "finish": str((tr.finish_reason or {}).get("type"))} for tr in rec.turns)
+                      "finish": str((tr.finish_reason or {}).get("type"))} for tr in rec.turns if tr.turn in kept)
         out.append(ChainItem(rec.chain_id, rec.prompt_id, rec.k, rec.end_reason,
                              tuple(s.prompt_ids) + tuple(s.response_ids), spans, meta))
     return out
