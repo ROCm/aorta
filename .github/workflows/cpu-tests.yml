@@ -406,7 +406,7 @@ jobs:
       matrix:
         include:
           - part: light
-            workers: auto
+            workers: "4"
             markers: not heavy and not cpu_run
           - part: heavy
             workers: "2"
