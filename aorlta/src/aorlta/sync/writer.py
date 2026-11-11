@@ -53,6 +53,14 @@ class ShmFullError(SyncError):
 # --- the name map (step 2) ---------------------------------------------------------------------------
 
 
+class ShardNameError(SyncError):
+    """An index whose weight map names shards that are not file names in the model directory (`names`)."""
+
+    def __init__(self, path: Path, names: list[str]):
+        super().__init__(f"{path}: weight_map names shards that are not file names in the directory: {names[:3]}")
+        self.names = names
+
+
 def read_base_index(base_dir: str | Path) -> dict[str, str]:
     """key -> shard file, from the base's `model.safetensors.index.json` (required)."""
     path = Path(base_dir) / INDEX_NAME
@@ -64,7 +72,7 @@ def read_base_index(base_dir: str | Path) -> dict[str, str]:
         raise SyncError(f"{path}: weight_map missing or malformed")
     outside = sorted({v for v in wm.values() if v in ("", ".", "..") or Path(v).name != v})
     if outside:  # `base_dir / name` must be a file of the model directory, and the merge tool writes `out / name`
-        raise SyncError(f"{path}: weight_map names shards that are not file names in the directory: {outside[:3]}")
+        raise ShardNameError(path, outside)
     return dict(wm)
 
 
