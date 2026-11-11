@@ -129,6 +129,21 @@ def test_c4_t8_an_a_permuted_while_its_b_was_zero_is_caught():
     assert exc.value.report["checks"]["every_trained_tensor_moved"]["a_moved_while_b_was_zero"] == [f"{name}.lora_A"]
 
 
+def test_an_a_with_a_first_moment_may_move_while_its_b_is_zero():
+    """AdamW moves a factor that has a first moment also at a zero gradient: with B zeroed after the steps that gave
+    A one (as a restored state could hold), A is expected to move like any other factor, not to stay unchanged."""
+    model, merged, plans, t = _setup()
+    t.train_iteration(plans)
+    t.train_iteration(plans)  # B != 0 at step 2: every A has a first moment from then on
+    with torch.no_grad():
+        for _, b in t.lora.modules.values():
+            b.zero_()
+    merged.refresh()
+    (rep,) = t.train_iteration(plans)
+    m = rep["checks"]["every_trained_tensor_moved"]
+    assert m["passed"] and m["a_expected_unchanged"] == 0 and m["unmoved"] == 0 and not m["a_moved_while_b_was_zero"]
+
+
 def test_a_base_change_before_the_forward_is_caught_by_the_gap_gate_first():
     """embed_tokens is also the (tied) LM head: changed before the forward, it moves the trainer's log-probs off
     the engine's, and the gap gate refuses the step before any weight changes."""

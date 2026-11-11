@@ -171,3 +171,18 @@ def test_a_base_saved_as_one_file_without_an_index_is_read_from_its_header(tiny_
     info = W.write_slot(weights, base_dir=base, sync_dir=tmp_path / "shm", run_id="r", version=0, margin=MARGIN)
     assert W.verify_slot(info.path)["ok"]
     assert set(W.load_base_tensors(base, list(tensors)[:3])) == set(list(tensors)[:3])
+
+
+@pytest.mark.parametrize("damage", ["index", "single"])
+def test_a_base_index_or_single_file_that_cannot_be_read_is_a_sync_error(tiny_base, tmp_path, damage):
+    import shutil
+
+    base = tmp_path / "bad"
+    shutil.copytree(tiny_base, base)
+    if damage == "index":
+        (base / W.INDEX_NAME).write_text('{"weight_map":')
+    else:
+        (base / W.INDEX_NAME).unlink()
+        (base / W.SINGLE_FILE).write_bytes(b"\x08\x00\x00\x00\x00\x00\x00\x00{broken}")
+    with pytest.raises(W.SyncError):
+        W.read_base_index(base)
