@@ -392,8 +392,9 @@ jobs:
   # pull requests do not wait for it. Its tests need no GPU: the ones that need
   # hipcc, a GPU, the stand-in dataset or the checker tools skip with a reason.
   # The suite runs in three parts on three runners: the tests that hold several copies of a model (marked
-  # `heavy`) outgrow this runner's 16 GB when four run at once, so two run, with two torch threads each; the one
-  # long CPU run (`cpu_run`, the t10 measurement) runs alone, with all four cores; the rest run four at once.
+  # `heavy`) outgrow this runner's 16 GB when four run at once, so two run, with two torch threads each; the
+  # longest CPU runs (`cpu_run`: the t10 measurement and the four-rank wired run) run one at a time, with all
+  # four cores; the rest run four at once.
   aorlta_tests:
     name: pytest (AORLTA ${{ matrix.part }}, py3.12)
     runs-on: ubuntu-latest
@@ -411,7 +412,7 @@ jobs:
           - part: heavy
             workers: "2"
             threads: "2"
-            markers: heavy
+            markers: heavy and not cpu_run
           - part: cpu run
             workers: "0"
             threads: "4"
