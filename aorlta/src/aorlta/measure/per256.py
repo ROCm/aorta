@@ -75,7 +75,7 @@ def per256(wall_s: float, scored: int) -> float:
 @dataclass(frozen=True)
 class Per256Summary:
     iterations: tuple[int, ...]  # the reported iterations, 2..N
-    per256_s: dict[int, float]  # every iteration given, 1..N
+    per256_s: dict[int, float | None]  # every iteration given, 1..N; None for an iteration 1 that scored nothing
     median_s: float
     q1_s: float | None  # None with a single reported iteration
     q3_s: float | None
@@ -121,7 +121,8 @@ def summarize(stats: Sequence[IterationStats], *, last: int | None = None) -> Pe
     reported = [by_it[n] for n in range(FIRST_REPORTED, n_last + 1)]
     if not reported:
         raise Per256Error(f"no iterations from {FIRST_REPORTED} on: the metric leaves out iteration 1")
-    values = {n: per256(by_it[n].wall_s, by_it[n].scored) for n in range(1, n_last + 1)}
+    values = {n: None if n < FIRST_REPORTED and by_it[n].scored == 0 else per256(by_it[n].wall_s, by_it[n].scored)
+              for n in range(1, n_last + 1)}  # an unreported iteration may have scored nothing
     xs = [values[s.iteration] for s in reported]
     calm = [values[s.iteration] for s in reported if not s.stalled]
     q1 = q3 = None

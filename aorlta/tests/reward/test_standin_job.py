@@ -4,8 +4,11 @@ the variables it passes (`-e`)."""
 
 from __future__ import annotations
 
+import os
 import re
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 JOB = (Path(__file__).resolve().parents[2] / "jobs" / "aorlta-reward-standin.sbatch").read_text()
@@ -62,3 +65,54 @@ def test_the_job_removes_its_own_temporary_directory_and_nothing_else_when_the_p
     job_tmp = wt / "scratch space" / "aorlta-reward-standin-123"
     assert (tmp_path / "out" / "tmp").read_text() == f"{job_tmp}\n"  # pytest ran with the job's own TMPDIR in place
     assert not job_tmp.exists()
+
+
+def test_a_stopped_job_hands_back_and_removes_its_temporary_directory_and_nothing_else(tmp_path):
+    """scancel while the test runs: the trap runs at once, not when the container ends, and the container's files in
+    the job's temporary directory are given back by one more container and removed with it."""
+    wt, scratch = tmp_path / "wt", tmp_path / "scratch"
+    (scratch / "aorlta-reward-standin-1234").mkdir(parents=True)  # another job's, whose name extends this one's
+    stub, py = tmp_path / "bin" / "docker", tmp_path / "venv" / "bin" / "python"
+    # The test's container writes into its TMPDIR and is still running; `rm -f` stops it as Docker would (`timeout`
+    # gives it a process group of its own).
+    rm = '  rm) shift; [ "$1" = -f ] && shift; printf \'removed %s\\n\' "$@" >> "$DOCKER_LOG" ;;'
+    assert rm in DOCKER
+    docker = DOCKER.replace(rm, rm[:-3] + '\n    for n in "$@"; do [ -f "$DOCKER_LOG.$n" ] && kill -- "-$(ps -o pgid= -p "$(cat "$DOCKER_LOG.$n")" | tr -d " ")"; done ;;'
+                            ).replace('  run) shift; envs=()', '  run) shift; envs=()\n    a=("$@"); for i in "${!a[@]}"; do '
+                                      '[ "${a[i]}" = --name ] && echo $$ > "$DOCKER_LOG.${a[i+1]}"; done', 1)
+    for path, body in ((stub, docker), (py, '#!/bin/bash\necho x > "$TMPDIR/left"; touch "$AORLTA_T11_OUT/started"\n'
+                                          'exec sleep 60\n')):
+        path.parent.mkdir(parents=True)
+        path.write_text(body)
+        path.chmod(0o755)
+    for d in ("asan", "cwd", "wt"):
+        (tmp_path / d).mkdir(exist_ok=True)
+    log, out = tmp_path / "docker.log", tmp_path / "out"
+    env = {"PATH": f"{stub.parent}:/usr/bin:/bin", "HOME": str(tmp_path), "DOCKER_LOG": str(log),
+           "SLURM_JOB_ID": "123", "SLURM_SUBMIT_DIR": str(wt), "AORLTA_OUT": str(out),
+           "AORLTA_VENV": str(tmp_path / "venv"), "AORLTA_ASAN_LIB": str(tmp_path / "asan"), "AORLTA_TMPDIR": str(scratch)}
+    job = subprocess.Popen(["bash", "-c", JOB], env=env, cwd=tmp_path / "cwd", stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 30
+        while not (out / "started").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert (scratch / "aorlta-reward-standin-123" / "left").exists()
+        t0 = time.monotonic()
+        job.terminate()
+        assert job.wait(timeout=20) == 143 and time.monotonic() - t0 < 20
+    finally:
+        job.kill()
+        left = []
+        for f in tmp_path.glob("docker.log.*"):
+            try:
+                os.killpg(os.getpgid(int(f.read_text())), signal.SIGKILL)
+                left.append(f.name)
+            except ProcessLookupError:
+                pass
+    assert not left  # the test's container was stopped by the job's own cleanup
+    assert not (scratch / "aorlta-reward-standin-123").exists()
+    assert (scratch / "aorlta-reward-standin-1234").is_dir()
+    calls = log.read_text().splitlines()
+    assert any(c.startswith("run --rm --name aorlta-reward-standin-123-cleanup --network none") and "chown -R" in c
+               for c in calls)

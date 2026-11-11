@@ -159,16 +159,22 @@ class PreStep:
     """What the post-step checks compare against: taken after the final gradient, right before the step."""
 
     digests: dict[str, tuple[str, tuple[int, ...], str]]
-    b_zero: dict[str, bool]  # module -> its B was exactly zero
+    b_zero: dict[str, bool]  # module -> its B was exactly zero and its A had no first moment: A cannot move
     audit: dict[str, torch.Tensor]
     audit_grad: dict[str, torch.Tensor]
     w_eff_version: Any
 
     @classmethod
-    def take(cls, lora: LoraTensors, merged, n_audit: int = 8) -> "PreStep":
+    def take(cls, lora: LoraTensors, merged, n_audit: int = 8, *, optimizer=None) -> "PreStep":
         named = lora.named()
         digests = {n: digest(p) for n, p in named.items()}
-        b_zero = {m: not bool(b.detach().ne(0).any()) for m, (_, b) in lora.modules.items()}
+        state = getattr(optimizer, "state", {})
+
+        def still(a) -> bool:  # AdamW moves A at a zero gradient while its first moment is not zero
+            m = state.get(a, {}).get("exp_avg") if hasattr(state, "get") else None
+            return m is None or not bool(m.ne(0).any())
+
+        b_zero = {m: not bool(b.detach().ne(0).any()) and still(a) for m, (a, b) in lora.modules.items()}
         names = sorted(named)
         pick = names[:: max(1, len(names) // n_audit)][:n_audit]
         audit = {n: named[n].detach().clone() for n in pick}

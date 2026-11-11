@@ -20,7 +20,7 @@ import pytest
 
 from aorlta.config import RewardSection
 from aorlta.ids import sha256_text
-from aorlta.reward.adapters import aorta_import, standin_harness, standin_hipcc
+from aorlta.reward.adapters import aorta_import, standin_harness, standin_hipcc, toolchain
 from aorlta.reward.adapters.base import ProcessRunner, map_aorta_check
 from aorlta.reward.adapters.standin_aorta import AortaAsan, AortaConsan
 from aorlta.reward.adapters.standin_hipcc import StandinHipcc, error_classes
@@ -369,6 +369,14 @@ def test_a_waitcheck_whose_kernels_cannot_be_read_is_unsettled_not_the_gate_obje
     assert seen == []  # nothing was scanned
 
 
+def test_main_inside_a_string_literal_does_not_skip_the_template_instantiation(tmp_path, monkeypatch):
+    seen: list = []
+    _fake_aorta_waitcheck(monkeypatch, seen)
+    _, r = _waitcheck_of(tmp_path, 'constexpr const char* banner = "int main(";\n' + MIXED, "/nonexistent/hipcc")
+    assert (r.state, r.reason) == ("unsettled", "harness_unsupported: clang could not read the source (exit None)")
+    assert seen == []  # not the gate's object, which has no code for the template
+
+
 def test_a_waitcheck_of_a_source_that_defines_no_kernel_scans_the_gates_object(tmp_path, monkeypatch):
     seen: list = []
     _fake_aorta_waitcheck(monkeypatch, seen)
@@ -385,6 +393,40 @@ def test_an_adapter_that_builds_with_its_own_compiler_names_it_in_its_identity(t
     a, b = script(tmp_path / "hipcc-a", "exit 0\n"), script(tmp_path / "hipcc-b", "exit 1\n")
     first, again, other = (make(h).version for h in (a, a, b))
     assert first == again != other
+
+
+@pytest.mark.parametrize("make", [
+    lambda hipcc: StandinHipcc(hipcc),
+    lambda hipcc: StandinRjWaitcheck("/nonexistent/rj_waitcheck", hipcc=hipcc),
+    lambda hipcc: AortaConsan(hook="/nonexistent", aorta_src="/nonexistent", hipcc=hipcc),
+    lambda hipcc: AortaAsan(aorta_src="/nonexistent", hipcc=hipcc),
+], ids=["hipcc", "rj_waitcheck", "aorta_consan", "aorta_asan"])
+def test_the_identity_names_the_compiler_hipcc_runs_not_only_the_driver(tmp_path, monkeypatch, make):
+    """The same hipcc runs another clang under HIP_CLANG_PATH, or adds flags from HIPCC_COMPILE_FLAGS_APPEND: either
+    is another compiler, and a cache entry of the first must not be reused for it."""
+    for k in toolchain.HIPCC_ENV:
+        monkeypatch.delenv(k, raising=False)
+    (tmp_path / "rocm" / "bin").mkdir(parents=True)
+    hipcc = script(tmp_path / "rocm" / "bin" / "hipcc", "exit 0\n")
+    llvm, other = tmp_path / "rocm" / "lib" / "llvm" / "bin", tmp_path / "other-llvm"
+    for d, body in ((llvm, b"clang one"), (other, b"clang two")):
+        d.mkdir(parents=True)
+        (d / "clang").write_bytes(body)
+    (llvm / "clang++.cfg").write_text("")
+    first = make(hipcc).version
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "3")  # a worker's GPU is not the compiler
+    assert make(hipcc).version == first
+    monkeypatch.setenv("HIP_CLANG_PATH", str(other))
+    assert make(hipcc).version != first
+    monkeypatch.delenv("HIP_CLANG_PATH")
+    monkeypatch.setenv("HIPCC_COMPILE_FLAGS_APPEND", "-O3")
+    assert make(hipcc).version != first
+    monkeypatch.delenv("HIPCC_COMPILE_FLAGS_APPEND")
+    (llvm / "clang").write_bytes(b"clang one, rebuilt")
+    assert make(hipcc).version != first
+    (llvm / "clang").write_bytes(b"clang one")
+    (llvm / "clang++.cfg").write_text("-fno-gpu-rdc\n")
+    assert make(hipcc).version != first
 
 
 @needs_rj

@@ -556,7 +556,7 @@ class RankTrainer:
             n = p.numel()
             p.grad = flat[offset:offset + n].view_as(p).to(p.dtype).clone()
             offset += n
-        pre = C.PreStep.take(self.lora, self.merged)
+        pre = C.PreStep.take(self.lora, self.merged, optimizer=self.optimizer)
         t0 = time.monotonic()
         self.optimizer.step()
         merge = self.merged.refresh()

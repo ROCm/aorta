@@ -57,6 +57,7 @@ from . import aorta_import
 from .base import ProcessRunner, aorta_findings, make_result, map_aorta_check, run_dir, unsettled
 from .standin_harness import (HARNESS_VERSION, GLOBAL_FN, HarnessUnsupported, has_main, plan, strip_comments,
                               write_harness)
+from .toolchain import toolchain_identity
 
 
 def _sha256(path: str) -> str:
@@ -326,7 +327,7 @@ class AortaConsan(_AortaGpu):
     def __init__(self, *, hook: str, **kw):
         super().__init__(**kw)
         self.hook = hook
-        self.version = (f"2+target-{self.target}+harness-{HARNESS_VERSION}+hipcc-{_identity(self.hipcc)}"
+        self.version = (f"3+target-{self.target}+harness-{HARNESS_VERSION}+hipcc-{toolchain_identity(self.hipcc)}"
                         f"+hook-{_identity(hook)}+aorta-{aorta_import.commit(self.aorta_src)[:12]}")
 
     def build_flags(self) -> list[str]:
@@ -355,7 +356,7 @@ class AortaAsan(_AortaGpu):
     def __init__(self, **kw):
         super().__init__(**kw)
         lib = os.environ.get("AORTA_ASAN_ROCM_LIB", "")
-        self.version = (f"2+target-{self.target}+harness-{HARNESS_VERSION}+hipcc-{_identity(self.hipcc)}"
+        self.version = (f"3+target-{self.target}+harness-{HARNESS_VERSION}+hipcc-{toolchain_identity(self.hipcc)}"
                         f"+asanlib-{sha256_text(lib)[:12]}+aorta-{aorta_import.commit(self.aorta_src)[:12]}")
 
     def build_flags(self) -> list[str]:

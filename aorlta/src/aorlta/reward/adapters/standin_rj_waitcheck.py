@@ -30,6 +30,7 @@ from . import aorta_import
 from .base import ProcessRunner, aorta_findings, make_result, map_aorta_check, run_dir, unsettled
 from .standin_harness import (HARNESS_VERSION, HarnessUnsupported, NoKernel, find_kernels, has_main, plan,
                               write_harness)
+from .toolchain import toolchain_identity
 
 
 def _sha256(path: str) -> str:
@@ -61,7 +62,7 @@ class StandinRjWaitcheck:
         self.timeout_s = timeout_s
         self._clock = clock
         self.runner = ProcessRunner()
-        self.version = (f"2+harness-{HARNESS_VERSION}+hipcc-{_identity(hipcc)}+rj_waitcheck-{_identity(binary)}"
+        self.version = (f"3+harness-{HARNESS_VERSION}+hipcc-{toolchain_identity(hipcc)}+rj_waitcheck-{_identity(binary)}"
                         f"+aorta-{aorta_import.commit(aorta_src)[:12]}")
 
     def _execute(self, argv, *, timeout_seconds, env=None):

@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..atomic import PARTIAL_SUFFIX, atomic_write_bytes, atomic_write_json, read_text
+from ..atomic import PARTIAL_SUFFIX, _fsync_dir, atomic_write_bytes, atomic_write_json, read_text
 from ..ids import canonical_json
 from ..spans import Span
 from .schema import EpisodeError, validate_episode, validate_summary
@@ -149,6 +149,7 @@ class AppendLedger:
     def __init__(self, path: Path):
         self.path = Path(path)
         self._lock = threading.Lock()
+        self._dir_synced = False
 
     def append(self, records: Sequence[dict]) -> None:
         if not records:
@@ -163,6 +164,11 @@ class AppendLedger:
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
+            # The file's own entry in its directory, without which a power loss can drop it. Once per ledger
+            # object, not only on creation: a process that died before this line left an entry never synced.
+            if not self._dir_synced:
+                _fsync_dir(self.path.parent)
+                self._dir_synced = True
 
     def read(self) -> list[dict]:
         if not self.path.exists():

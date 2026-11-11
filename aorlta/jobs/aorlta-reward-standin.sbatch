@@ -21,7 +21,7 @@
 #   AORLTA_ASAN_LIB        no default. The ROCm 7.0.2 ASan runtime libraries (lib/asan of ROCm's *-asan packages),
 #                          which aorta gets as AORTA_ASAN_ROCM_LIB
 #   AORLTA_TMPDIR          default $TMPDIR, else /tmp. Temporary files (TMPDIR); the test's go in a per-job directory
-#                          under it, removed at the end
+#                          under it, removed at the end, also when the job is stopped
 #   AORLTA_DOCKER_CONFIG   default $DOCKER_CONFIG, else $HOME/.docker. The docker client's configuration directory,
 #                          which holds the registry credentials for the pull
 #   AORLTA_MOUNTS          default none. More host directories, space-separated, mounted read-only into the container
@@ -68,7 +68,8 @@ PY_BASE=${PY_BASE%/bin}
 case "$PY_BASE" in /usr|/usr/*) PY_BASE= ;; esac
 IMG=rocm/dev-ubuntu-24.04:7.0.2
 CNAME=aorlta-reward-standin-$SLURM_JOB_ID
-mkdir -p "$OUT"
+JOBTMP=$AORLTA_TMPDIR/aorlta-reward-standin-$SLURM_JOB_ID
+mkdir -p "$OUT" "$JOBTMP"
 PULLED=0
 stamp() { echo "=== [$(date -u +%FT%TZ)] $*"; }
 add_mounts() {  # add_mounts ARRAY rw|ro DIR...: `-v DIR:DIR[:ro]` for each DIR that exists and is not inside a
@@ -88,6 +89,16 @@ add_mounts() {  # add_mounts ARRAY rw|ro DIR...: `-v DIR:DIR[:ro]` for each DIR 
 }
 cleanup() {
   docker rm -f "$CNAME" >/dev/null 2>&1
+  # The test's container gives its files back and removes its temporary directory as its last step. Stopped before
+  # that (a TERM, or the timeout), it leaves the directory with root-owned files in it: one more container hands them
+  # back, and only this job's temporary directory goes.
+  if [ -n "${JOBTMP:-}" ] && [ -d "$JOBTMP" ]; then
+    local mounts=(-v "$JOBTMP:$JOBTMP")
+    [ -d "${OUT:-}" ] && mounts+=(-v "$OUT:$OUT")
+    docker image inspect "$IMG" >/dev/null 2>&1 && docker run --rm --name "$CNAME-cleanup" --network none \
+      "${mounts[@]}" --entrypoint bash "$IMG" -c "chown -R $(id -u):$(id -g) '$JOBTMP' ${OUT:+'$OUT'}" >/dev/null 2>&1
+    rm -rf "$JOBTMP"
+  fi
   if [ "$PULLED" = 1 ]; then docker rmi "$IMG" >/dev/null 2>&1 && echo "removed $IMG (pulled by this job)"; fi
 }
 trap cleanup EXIT
@@ -103,17 +114,20 @@ MOUNTS=()
 add_mounts MOUNTS rw "$WT" "$OUT" "$AORLTA_TMPDIR"
 add_mounts MOUNTS ro "$AORLTA_VENV" "$PY_BASE" "$AORLTA_AORTA_ROOT" "$AORLTA_ROCJITSU_ROOT" "$AORLTA_LIBSTDCXX_SHIM" \
   "$AORLTA_ASAN_LIB" "${EXTRA_MOUNTS[@]}"
+# In the background with `wait`, so a TERM (scancel) runs the trap at once: bash defers a trap while a foreground
+# command runs.
 timeout 2400 docker run --rm --name "$CNAME" --network=host --device=/dev/kfd --device=/dev/dri \
   --group-add video --ipc=host --security-opt seccomp=unconfined "${MOUNTS[@]}" \
   -e SLURM_JOB_ID -e AORLTA_STANDIN_GPU=1 -e AORLTA_T11_OUT="$OUT" -e AORLTA_AORTA_ROOT="$AORLTA_AORTA_ROOT" \
   -e AORLTA_ROCJITSU_ROOT="$AORLTA_ROCJITSU_ROOT" -e AORLTA_RJ_WAITCHECK="$AORLTA_ROCJITSU_ROOT/bin/rj_waitcheck" \
   -e AORLTA_LIBSTDCXX_SHIM="$AORLTA_LIBSTDCXX_SHIM" \
-  -e PYTHONDONTWRITEBYTECODE=1 -e TMPDIR="$AORLTA_TMPDIR/aorlta-reward-standin-$SLURM_JOB_ID" \
+  -e PYTHONDONTWRITEBYTECODE=1 -e TMPDIR="$JOBTMP" \
   -e AORTA_ASAN_ROCM_LIB="$AORLTA_ASAN_LIB" \
   --entrypoint bash "$IMG" -c "export PATH=/opt/rocm/bin:\$PATH; mkdir -p \"\$TMPDIR\"; cd '$WT'; \
     ldd --version | head -1; echo rocm \$(cat /opt/rocm/.info/version); \
     '$PY' -m pytest -q -rA tests/reward/test_c2_t11_gpu.py 2>&1 | tail -40; \
-    rc=\${PIPESTATUS[0]}; chown -R $(id -u):$(id -g) '$OUT' \"\$TMPDIR\"; rm -rf \"\$TMPDIR\"; exit \$rc"
+    rc=\${PIPESTATUS[0]}; chown -R $(id -u):$(id -g) '$OUT' \"\$TMPDIR\"; rm -rf \"\$TMPDIR\"; exit \$rc" &
+wait $!
 rc=$?
 stamp "pytest rc=$rc"
 [ -f "$OUT/t11-evidence.json" ] && "$PY" -c "

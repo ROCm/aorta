@@ -260,11 +260,15 @@ def test_bundles_are_checked_on_load(tmp_path):
     with pytest.raises(CompareError, match="unscored by reason sums to 1, not 6"):
         cmp.load_bundle(good)
     raw = plain(a)
-    raw["iterations"][0]["scored"] = 0
+    raw["iterations"][1]["scored"] = 0
     good.write_text(json.dumps(raw))
     cmp.load_bundle(good)  # loads; the metric then refuses it
     with pytest.raises(per256.Per256Error, match="no scored samples"):
         cmp.compare(_protocol(), cmp.load_bundle(good), _pair()[1])
+    raw = plain(a)
+    raw["iterations"][0]["scored"] = 0  # iteration 1 is not reported, so it may score nothing
+    good.write_text(json.dumps(raw))
+    cmp.compare(_protocol(), cmp.load_bundle(good), _pair()[1])
 
 
 # --- AORLTA's bundle from spans and episodes -----------------------------------------------------------
