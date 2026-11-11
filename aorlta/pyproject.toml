@@ -28,3 +28,7 @@ minversion = "9.0"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = ["--import-mode=importlib", "-p", "no:cacheprovider"]
+markers = [
+    "heavy: holds several copies of a model; CI runs these on a runner of their own, two at a time",
+    "cpu_run: one long CPU run in a module fixture; CI runs it on a runner of its own",
+]
