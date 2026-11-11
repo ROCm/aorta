@@ -33,6 +33,8 @@ from aorlta.schemas import ChainRecord, TrainingSample, TurnRecord  # noqa: E402
 from aorlta.trainer.batching import raw_logprobs_at  # noqa: E402
 from aorlta.trainer.loss import TrainerInputError, sample_gap  # noqa: E402
 
+pytestmark = pytest.mark.cpu_run
+
 tiny_base = E.tiny_base  # module-scoped fixtures of the wiring test, reused
 dataset = E.dataset
 
