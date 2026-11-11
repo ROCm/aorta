@@ -1018,14 +1018,16 @@ class ServedModel:
 
     def prepare(self, recorded: dict[str, str]) -> dict:
         """`recorded`: the run plan's sha256 of the model's files, by `base/<name>` and `adapter/<name>`."""
-        from ..sync.writer import INDEX_NAME, read_base_index
+        from ..sync.writer import INDEX_NAME, ShardNameError, read_base_index
         from .score import files_digest
 
         m = self.cfg.model
         if (Path(m.base_dir) / INDEX_NAME).is_file():
-            nested = sorted({f for f in read_base_index(m.base_dir).values() if Path(f).name != f})
-            if nested:
-                raise RunStopped("model_shards_not_top_level", {"base_dir": m.base_dir, "shards": nested[:10]})
+            try:
+                read_base_index(m.base_dir)
+            except ShardNameError as exc:
+                detail = {"base_dir": m.base_dir, "shards": exc.names[:10]}
+                raise RunStopped("model_shards_not_top_level", detail) from None
         base = _top_level(recorded, "base")
         if m.adapter_dir is None:
             self.identity = {"kind": "merged_dir", "dir": str(self.dir), "files": base}

@@ -26,6 +26,8 @@ from aorlta.rollout.engine_proc import InProcessEngine  # noqa: E402
 from aorlta.sync.merge import is_target_key  # noqa: E402
 from aorlta.sync.writer import load_base_tensors, read_base_index, target_keys  # noqa: E402
 
+pytestmark = pytest.mark.heavy
+
 tiny_base, dataset = E.tiny_base, E.dataset  # module-scoped fixtures
 TARGETS = ["in_proj_qkv", "out_proj", "in_proj_z", "down_proj", "o_proj", "in_proj_a", "v_proj", "in_proj_b", "q_proj",
            "gate_proj", "up_proj", "k_proj"]
