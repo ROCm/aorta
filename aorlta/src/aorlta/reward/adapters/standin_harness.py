@@ -65,7 +65,10 @@ DYNAMIC_LDS_BYTES = 16 << 10
 HARNESS_NAME = "aorlta_harness.hip"
 AST_TIMEOUT_S = 120
 
-HAS_MAIN = re.compile(r"\bint\s+main\s*\(")
+HAS_MAIN = re.compile(r"\bint\s+main\s*\([^;{}]*\)\s*\{")  # a definition, not a declaration
+# Comments and string or character literals, left to right, so that one cannot hide the start of another
+_NOT_CODE = re.compile(r'//[^\n]*|/\*.*?\*/|\bR"([^()\\\s]{0,16})\(.*?\)\1"|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'',
+                       re.S)
 DYNAMIC_SHARED = re.compile(r"\bextern\s+__shared__\b")
 LAUNCH_BOUNDS = re.compile(r"__launch_bounds__\s*\(\s*(\d+)")
 _ATTR = r"(?:__launch_bounds__\s*\([^()]*\)|__attribute__\s*\(\([^()]*(?:\([^()]*\)[^()]*)*\)\))"
@@ -94,7 +97,13 @@ class NoKernel(HarnessUnsupported):
 
 
 def has_main(source_text: str) -> bool:
-    return HAS_MAIN.search(strip_comments(source_text)) is not None
+    """The source defines `main`: text in a comment or a string literal does not count."""
+    return HAS_MAIN.search(code_text(source_text)) is not None
+
+
+def code_text(text: str) -> str:
+    """The text without its comments, and with every string or character literal emptied."""
+    return _NOT_CODE.sub(lambda m: " " if m.group(0)[0] == "/" else '""', text)
 
 
 def strip_comments(text: str) -> str:
