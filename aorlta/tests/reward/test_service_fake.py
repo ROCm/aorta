@@ -341,6 +341,40 @@ def test_c2_t5_a_cached_leg_without_the_clean_bracket_its_key_requires_is_a_miss
         rig.close()
 
 
+def test_c2_t5_a_cached_leg_whose_state_contradicts_its_findings_is_a_miss(tmp_path):
+    """A clean leg that carries a finding (or a finding with none) is refused from an adapter, so from the cache too."""
+    rig = fake_rig(tmp_path)
+    try:
+        c = cand(0, text="```cpp\nz\n```")
+        r = rig.service.submit(c).result(timeout=60)
+        key, fields = rig.service._cands[c.candidate_id].leg_keys["san.asan"], \
+            rig.service._cands[c.candidate_id].leg_fields["san.asan"]
+        assert r.legs["san.asan"].state == "clean" and rig.service.cache.get_leg(key, fields) is not None
+        for state, findings in (("clean", [{"kind": "heap-buffer-overflow"}]), ("finding", [])):
+            bad = dataclasses.replace(r.legs["san.asan"], state=state, findings=findings, cache_hit=False)
+            rig.service.cache.legs.put(key, fields, {"result": to_dict(bad), "artifacts": {}})  # past put_leg
+            assert rig.service.cache.get_leg(key, fields) is None
+    finally:
+        rig.close()
+
+
+def test_c2_t5_a_scored_result_with_an_unsettled_leg_is_not_cached_as_a_reward(tmp_path):
+    """A finding can score a candidate while another leg timed out: that leg must run again for the next one."""
+    rig = fake_rig(tmp_path)
+    try:
+        c = cand(0, text="```cpp\nw\n```")
+        r = rig.service.submit(c).result(timeout=60)
+        assert r.status == "scored"
+        timed_out = dataclasses.replace(r.legs["san.asan"], state="unsettled", reason="timeout")
+        partial = dataclasses.replace(r, legs=dict(r.legs, **{"san.asan": timed_out}))
+        rkey, rfields = rig.service._reward_key(rig.service._cands[c.candidate_id])
+        assert rig.service.cache.put_reward(rkey, rfields, partial) is False
+        rig.service.cache.rewards.put(rkey, rfields, {"result": to_dict(partial)})  # past put_reward
+        assert rig.service.cache.get_reward(rkey, rfields) is None
+    finally:
+        rig.close()
+
+
 def test_c2_t5_an_entry_under_the_earlier_key_layout_is_never_found(tmp_path):
     """Leg keys once had only the source, task, leg, settings and checker: an entry stored that way, here a finding,
     is not what a lookup now finds."""

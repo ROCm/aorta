@@ -34,6 +34,7 @@ from typing import Any
 from ..atomic import atomic_write_json, read_text
 from ..ids import sha256_json
 from ..schemas import SETTLED_STATES, Candidate, LegResult, RewardResult, SchemaError, from_dict, to_dict
+from .adapters.base import inconsistency
 
 log = logging.getLogger(__name__)
 
@@ -60,12 +61,17 @@ def reward_key_fields(cand: Candidate, leg_keys: dict[str, str], reward_fn: dict
 
 
 def cacheable_leg(result: LegResult, *, bracketed: bool) -> bool:
-    """Settled, and with a clean bracket if the leg is bracketed."""
-    if result.state not in SETTLED_STATES:
+    """Settled, its state consistent with its findings (as an adapter's result must be), and with a clean bracket
+    if the leg is bracketed."""
+    if result.state not in SETTLED_STATES or inconsistency(result) is not None:
         return False
     if bracketed:
         return isinstance(result.bracket, dict) and result.bracket.get("clean") is True
     return True
+
+
+def _any_unsettled(result: RewardResult) -> bool:
+    return any(getattr(leg, "state", None) == "unsettled" for leg in (result.legs or {}).values())
 
 
 class _Writer:
@@ -249,13 +255,15 @@ class RewardCache:
         except SchemaError as exc:
             log.warning("cache: reward entry %s fails its schema (%s): a miss", key[:12], exc)
             return None
-        if result.reward is None or result.status != "scored":
+        if result.reward is None or result.status != "scored" or _any_unsettled(result):
             return None
         return result
 
     def put_reward(self, key: str, fields: dict, result: RewardResult) -> bool:
-        """Only scored results are cached; an unscored one is always recomputed."""
-        if not self.enabled or result.reward is None or result.status != "scored" or not result.full_check:
+        """Only scored results are cached, and none with an unsettled leg: a finding can score a candidate while
+        another leg timed out, and that leg must run again for the next identical candidate."""
+        if (not self.enabled or result.reward is None or result.status != "scored" or not result.full_check
+                or _any_unsettled(result)):
             return False
         self.rewards.put(key, fields, {"result": to_dict(result)})
         return True
