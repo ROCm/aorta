@@ -28,6 +28,7 @@ import logging
 import queue
 import threading
 from collections import OrderedDict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -54,10 +55,10 @@ def leg_key(**fields: Any) -> str:
 
 
 def reward_key_fields(cand: Candidate, leg_keys: dict[str, str], reward_fn: dict, profile: str, *,
-                      reward_settings: dict, clean_repeats: int) -> dict:
+                      reward_settings: dict, clean_repeats: int, bracketed: Iterable[str]) -> dict:
     return {"profile": profile, "clean_repeats": clean_repeats, "legs": dict(sorted(leg_keys.items())),
-            "reward_fn": dict(reward_fn), "reward_settings": dict(reward_settings), "task": to_dict(cand.task),
-            "response_tokens": cand.response_tokens, "max_new_tokens": cand.max_new_tokens}
+            "bracketed": sorted(bracketed), "reward_fn": dict(reward_fn), "reward_settings": dict(reward_settings),
+            "task": to_dict(cand.task), "response_tokens": cand.response_tokens, "max_new_tokens": cand.max_new_tokens}
 
 
 def cacheable_leg(result: LegResult, *, bracketed: bool) -> bool:
@@ -74,8 +75,16 @@ def _any_unsettled(result: RewardResult) -> bool:
     return any(getattr(leg, "state", None) == "unsettled" for leg in (result.legs or {}).values())
 
 
-def _any_inconsistent(result: RewardResult) -> bool:
-    return any(not isinstance(leg, LegResult) or inconsistency(leg) is not None for leg in (result.legs or {}).values())
+def _legs_acceptable(result: RewardResult, fields: dict) -> bool:
+    """Every leg as the leg cache would take it: consistent with its findings, and a settled bracketed leg with a
+    clean bracket (a reward hit does not pass through get_leg)."""
+    bracketed = set(fields.get("bracketed") or ())
+    for name, leg in (result.legs or {}).items():
+        if not isinstance(leg, LegResult) or inconsistency(leg) is not None:
+            return False
+        if name in bracketed and leg.state in SETTLED_STATES and not cacheable_leg(leg, bracketed=True):
+            return False
+    return True
 
 
 class _Writer:
@@ -103,7 +112,7 @@ class _Writer:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_json(path, entry)
-        except OSError as exc:
+        except (OSError, ValueError, TypeError) as exc:  # a full disk, or what JSON cannot hold (a NaN in a finding)
             log.warning("cache: could not write %s (%s)", path.name, type(exc).__name__)
 
     def put(self, path: Path, entry: dict) -> None:
@@ -261,7 +270,7 @@ class RewardCache:
             return None
         if result.reward is None or result.status != "scored" or _any_unsettled(result):
             return None
-        if _any_inconsistent(result):  # a reward hit does not pass through get_leg's checks
+        if not _legs_acceptable(result, fields):
             with self.rewards.lock:
                 self.rewards.stats["corrupt"] += 1
             return None
@@ -271,7 +280,7 @@ class RewardCache:
         """Only scored results are cached, and none with an unsettled leg: a finding can score a candidate while
         another leg timed out, and that leg must run again for the next identical candidate."""
         if (not self.enabled or result.reward is None or result.status != "scored" or not result.full_check
-                or _any_unsettled(result) or _any_inconsistent(result)):
+                or _any_unsettled(result) or not _legs_acceptable(result, fields)):
             return False
         self.rewards.put(key, fields, {"result": to_dict(result)})
         return True

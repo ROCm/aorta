@@ -93,6 +93,10 @@ def test_error_class_replaces_quoted_names_keeps_punctuation_and_drops_paths():
     assert error_class("cannot initialize a variable of type 'int *' with an lvalue of type 'float *'") == \
         "cannot initialize a variable of type <name> with an lvalue of type <name>"
     assert error_class("no such file or directory: /scratch/x/kernel.hip") == "no such file or directory: <path>"
+    assert error_class("no such file or directory: /tmp/build:private/kernel.hip: x") == \
+        "no such file or directory: <path>: x"
+    assert error_class("no such file or directory: /tmp/private build/kernel.hip") == \
+        "no such file or directory: <path> <path>"
     assert error_class("bad '<|im_end|>' and <think>") == "bad <name> and <name>"
 
 
