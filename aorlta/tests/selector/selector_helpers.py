@@ -187,8 +187,12 @@ class Gated:
         self.inner = inner
         self.version = inner.version
         self.release = threading.Event()
+        self.calls = 0  # requests the hook's threads handed over, before their deadline
+        self._lock = threading.Lock()
 
     def plan(self, req):
+        with self._lock:
+            self.calls += 1
         self.release.wait(60)
         return self.inner.plan(req)
 

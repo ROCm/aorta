@@ -27,6 +27,8 @@ def test_parse_takes_the_last_cpp_block():
     assert parse_code(text, "off") == "int b;\n"
     assert parse_code("```c++\nint a;\n```", "off") is None  # the stand-in reads ```cpp only
     assert parse_code("```cpp\nint a;\n", "off") is None  # unclosed (a length-capped reply)
+    for cut in ("```cpp\nint final", "```cpp"):  # a draft, then a corrected block the length cap cut off
+        assert parse_code("```cpp\nint draft;\n```\nA fix:\n" + cut, "off") is None
     assert parse_code("no code here", "off") is None
 
 

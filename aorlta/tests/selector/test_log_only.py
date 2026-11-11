@@ -146,9 +146,10 @@ def test_log_only_does_not_wait_for_the_plan_but_logs_every_plan_that_answers_in
 
 def test_a_late_plan_is_plan_unavailable_timeout_and_the_result_does_not_wait_for_it(tmp_path):
     """The planner answers only after every result is out: the results were released at the plan
-    deadline, and the late answers are counted and change nothing."""
+    deadline, and the late answers are counted and change nothing. The 100 s deadline is 0.2 s of real time; a
+    request still queued at its deadline is dropped by the hook's threads, so only those the planner took answer."""
     gated = Gated(SkipEverything())
-    h = hook(planner=gated, plan_timeout_s=5.0)
+    h = hook(planner=gated, plan_timeout_s=100.0)
     cands = [cand(i) for i in range(8)]
     r = rig(tmp_path, selector=h)
     try:
@@ -160,9 +161,9 @@ def test_a_late_plan_is_plan_unavailable_timeout_and_the_result_does_not_wait_fo
             assert res.plan["answered_after_s"] is None
         gated.release.set()
         deadline = time.monotonic() + 30
-        while h.stats().get("late_answers", 0) < len(cands) and time.monotonic() < deadline:
+        while h.stats().get("late_answers", 0) < gated.calls and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert h.stats()["late_answers"] == len(cands)
+        assert 1 <= gated.calls <= len(cands) and h.stats()["late_answers"] == gated.calls
         assert len(h.log_lines()) == len(cands)  # nothing logged twice, nothing rewritten
         assert all(line["result"]["plan"]["status"] == "plan_unavailable" for line in h.log_lines())
     finally:

@@ -375,6 +375,41 @@ def test_c2_t5_a_scored_result_with_an_unsettled_leg_is_not_cached_as_a_reward(t
         rig.close()
 
 
+def test_c2_t5_a_cached_reward_whose_leg_contradicts_its_findings_is_a_miss(tmp_path):
+    """A reward hit does not go through the leg cache, so the reward cache refuses an inconsistent leg itself."""
+    rig = fake_rig(tmp_path)
+    try:
+        c = cand(0, text="```cpp\nv\n```")
+        r = rig.service.submit(c).result(timeout=60)
+        rkey, rfields = rig.service._reward_key(rig.service._cands[c.candidate_id])
+        assert r.status == "scored" and r.legs["san.asan"].state == "clean"
+        assert rig.service.cache.get_reward(rkey, rfields) is not None
+        bad = dataclasses.replace(r.legs["san.asan"], findings=[{"kind": "heap-buffer-overflow"}])
+        tampered = dataclasses.replace(r, legs=dict(r.legs, **{"san.asan": bad}))
+        assert rig.service.cache.put_reward(rkey, rfields, tampered) is False
+        rig.service.cache.rewards.put(rkey, rfields, {"result": to_dict(tampered)})  # past put_reward
+        assert rig.service.cache.get_reward(rkey, rfields) is None
+    finally:
+        rig.close()
+
+
+def test_c2_t5_a_cached_number_too_large_for_a_float_is_a_miss(tmp_path):
+    rig = fake_rig(tmp_path)
+    try:
+        c = cand(0, text="```cpp\nu\n```")
+        r = rig.service.submit(c).result(timeout=60)
+        state = rig.service._cands[c.candidate_id]
+        rkey, rfields = rig.service._reward_key(state)
+        rig.service.cache.rewards.put(rkey, rfields, {"result": dict(to_dict(r), reward=10 ** 400)})
+        assert rig.service.cache.get_reward(rkey, rfields) is None
+        key, fields = state.leg_keys["san.asan"], state.leg_fields["san.asan"]
+        rig.service.cache.legs.put(key, fields, {"result": dict(to_dict(r.legs["san.asan"]), t_queued=10 ** 400),
+                                                 "artifacts": {}})
+        assert rig.service.cache.get_leg(key, fields) is None
+    finally:
+        rig.close()
+
+
 def test_c2_t5_an_entry_under_the_earlier_key_layout_is_never_found(tmp_path):
     """Leg keys once had only the source, task, leg, settings and checker: an entry stored that way, here a finding,
     is not what a lookup now finds."""
