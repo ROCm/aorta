@@ -3,6 +3,29 @@
 Code paths are relative to `src/aorlta/`; commands and the `configs/`, `examples/` and `tests/` paths are relative to
 `aorlta/`, and the commands assume the environment from the README.
 
+## Pick your vertical: a checklist
+
+1. **The task in one sentence.** What does the model get, and what must it produce?
+2. **Is it automatically checkable?** A program must score every answer with no human in the loop: a compiler and
+   a reference run, a reference answer (exact or normalised match, or a judge command), or another tool's verdict.
+   If the check cannot always decide, it must say so: an answer it cannot settle is unscored, and **an unscored
+   sample is never counted clean**. Too many unscored samples stop a training iteration
+   (`orchestrator.min_scored_fraction`).
+3. **Where the prompts come from,** and a held-out set kept out of training to evaluate on. Training takes
+   `rollout.P` prompts per iteration, so have many more than `P`.
+4. **Single-turn or a repair loop?** The episode is the model's answer, then up to `rollout.max_repair_turns` turns
+   of feedback: compiler errors, or a message your parse gives a rejected answer. Anything else (tool calls, an
+   environment the model acts in) is not supported yet.
+5. **The reward.** Give each failure you can name its own value, so the answers to one prompt get different rewards
+   (GRPO learns only from those differences); keep it in [-1.55, 1.0] with the parts `base`, `broke_healthy` and
+   `length`. If the base model already gets nearly everything right, or nothing, there is nothing to learn: score
+   it first.
+6. **The compute budget.** One node; see "How many GPUs" in GETTING-STARTED.md. A short check (a string match) costs
+   nothing; a GPU run of every answer needs GPUs of its own and its own time limit.
+7. **Score the base model** on the held-out set (`orchestrator.mode: score`), **train**, then **score the trained
+   adapter** on the same set and compare.
+8. **Write your two-line summary:** what the model is post-trained on, and how its answers are checked.
+
 ## Your own task, as a plugin
 
 A task of your own (its prompts, how an answer is read, its repair turns, its checks and its reward) does not need
@@ -36,7 +59,34 @@ The module is imported before the rest of the config is checked, so every name a
 | a profile pool's `adapter` | `register_check_adapter(name, factory)` | `factory(ctx)` returns a `CheckAdapter` for one worker; `ctx` (`plugins.CheckContext`) holds its profile settings, worker id, clock, timeout and the run's pool paths |
 
 A built-in component may be mixed in by name (`standin.parse`, `standin.hipcc` and `standin` are the stand-in
-parse, compile and feedback). A component's `name` must be the name it is registered under. The landing check and
+parse, compile and feedback). Nothing in a profile is required: a task whose answers are not code sets
+`rollout.compile_adapter: none` (every parsed answer ends its chain) and gives its profile only its own checks, with
+no compile gate and no sanitizer. Three shapes, each tested from a package outside `aorlta/`
+(`tests/test_plugins_out_of_tree.py`):
+
+| shape | rollout | the profile's legs |
+|---|---|---|
+| code, rewarded by compiling and matching a reference | a compile check (`standin.hipcc`) and its repair turns | the parse and compile gates, then your reference check (`examples/hip-kernels/`) |
+| a question with a reference answer | `compile_adapter: none`; your parse may give a reply with no answer a repair turn | one leg comparing the answer, exactly or normalised, with an optional judge command (`examples/qa/`) |
+| a verdict from an external tool or service | `compile_adapter: none` | one leg that calls the tool and reads its verdict; no verdict is unsettled |
+
+### Keeping your task in your own package
+
+The recommended route for a task that is private or not yet released: keep its module, prompts, profile and checks
+in a package of your own, outside this repository, and declare an entry point:
+
+```toml
+# your package's pyproject.toml
+[project.entry-points."aorlta.plugins"]
+my-task = "my_package.aorlta_plugin"
+```
+
+`plugins: [my-task]` then loads it wherever the package is installed (`pip install` into your venv, or your own
+image). The run job's containers run the image's Python, which does not see your venv, so for the job name the
+module instead, `plugins: [my_package.aorlta_plugin]`, and put the package on the containers' import path and mount
+it: `AORLTA_PYTHONPATH=/path/to/my-package/src AORLTA_MOUNTS=/path/to/my-package`. Either way nothing is copied into
+this repository, and the run plan records the plugin file's sha256.
+ A component's `name` must be the name it is registered under. The landing check and
 the trainer's warm-up read `sync.probes` chats: the task's `probe_messages(pool_dir)`, or the first records' own
 messages, which must then share one system message. Each engine's start-up self-test samples 4 chats twice with
 different seeds and needs at least 3 of the 4 pairs to differ, so for a plugin task it uses fixed open-ended chats
