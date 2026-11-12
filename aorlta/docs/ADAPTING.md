@@ -41,7 +41,9 @@ the trainer's warm-up read `sync.probes` chats: the task's `probe_messages(pool_
 messages, which must then share one system message. Each engine's start-up self-test samples 4 chats twice with
 different seeds and needs at least 3 of the 4 pairs to differ, so for a plugin task it uses fixed open-ended chats
 (`SELF_TEST_CHATS` in `orchestrator/wiring.py`), not the task's own prompts, whose answers may be near-unique;
-`Task(selftest_messages=...)` gives others. The run plan records each plugin's file and its sha256.
+`Task(selftest_messages=...)` gives others. For the same reason, a task with near-unique answers and few prompts may
+need `rollout.identical_groups_stop` raised: by default an iteration stops when more than 5% of its groups have all
+`K` answers identical, and with 8 prompts one such group is 12.5%. The run plan records each plugin's file and its sha256.
 
 Limits of a plugin: its data is handled as the stand-in source's (public; text may appear in logs and tracebacks);
 its reward stays within the stand-in range and parts (below); the episode is the compile-repair chain (a parse may
