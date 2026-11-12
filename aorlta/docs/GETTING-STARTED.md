@@ -116,7 +116,7 @@ cache, if it is still there).
   ```
 - TensorBoard: `pip install tensorboard` (not a dependency), then `tensorboard --logdir <run_dir>/tb`.
 - Checkpoints (`ckpt/iter-<n>/trainer/trainer.pt`) hold the fp32 LoRA, the optimizer state and the RNG states; the
-  last 2 are kept. A run does not yet export a PEFT adapter or a merged model.
+  last 2 are kept. The README's "Run outputs" says how to use a trained LoRA outside the run.
 
 ## 6. The settings you will change
 
