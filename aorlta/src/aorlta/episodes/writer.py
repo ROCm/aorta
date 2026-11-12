@@ -234,6 +234,7 @@ class EvidenceStore:
         self.blobs = self.root / "blobs"
         self.manifest = AppendLedger(self.root / "MANIFEST.jsonl")
         self._lock = threading.Lock()
+        self._synced_shards: set[str] = set()
         old = os.umask(0o077)
         try:
             self.blobs.mkdir(parents=True, exist_ok=True)
@@ -261,6 +262,12 @@ class EvidenceStore:
                     atomic_write_bytes(path, bytes(data))
                 finally:
                     os.umask(old)
+            # The shard's entry in `blobs/` and the blob's in the shard, before a manifest can name the blob. Once per
+            # shard per store object, not only on creation: a process that died before this left them unsynced.
+            if path.parent.name not in self._synced_shards:
+                _fsync_dir(path.parent)
+                _fsync_dir(self.blobs)
+                self._synced_shards.add(path.parent.name)
             # listed on every put, stored once: a resume keeps a blob while a committed iteration lists it
             self.manifest.append([{"iteration": iteration, "sha256": sha, "size": len(data), "kind": kind}])
         return sha

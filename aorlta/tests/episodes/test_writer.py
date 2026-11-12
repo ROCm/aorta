@@ -179,6 +179,32 @@ def test_a_new_ledger_syncs_its_directory_so_a_power_loss_cannot_drop_the_file(t
     assert synced == [tmp_path / "evidence"] * 2
 
 
+def test_a_new_evidence_shard_is_synced_with_its_parent_before_the_manifest_names_it(tmp_path, monkeypatch):
+    from aorlta.episodes import writer
+
+    events = []
+    monkeypatch.setattr(writer, "_fsync_dir", lambda d: events.append(("sync", Path(d))))
+    store = EvidenceStore(tmp_path / "evidence")
+    real_append = store.manifest.append
+    monkeypatch.setattr(store.manifest, "append", lambda recs: (events.append(("list", None)), real_append(recs)))
+    blobs = tmp_path / "evidence" / "blobs"
+
+    def synced_before_listing():
+        return {d for kind, d in events[:events.index(("list", None))]}
+
+    sha = store.put(b"one", kind="stderr", iteration=1)
+    shard = store.path_of(sha).parent
+    assert synced_before_listing() == {shard, blobs}
+    events.clear()
+    store.put(b"one", kind="stderr", iteration=2)  # the same shard again in this process: no new sync
+    assert synced_before_listing() == set()
+    resumed = EvidenceStore(tmp_path / "evidence")  # a resumed run reusing the blob: the entry may never have been synced
+    monkeypatch.setattr(resumed.manifest, "append", lambda recs: (events.append(("list", None)), real_append(recs)))
+    events.clear()
+    resumed.put(b"one", kind="stderr", iteration=3)
+    assert synced_before_listing() == {shard, blobs}
+
+
 def test_the_evidence_store_is_content_addressed_owner_only_and_verifiable(tmp_path):
     store = EvidenceStore(tmp_path / "evidence")
     sha = store.put(b"raw clang stderr", kind="stderr", iteration=1)
