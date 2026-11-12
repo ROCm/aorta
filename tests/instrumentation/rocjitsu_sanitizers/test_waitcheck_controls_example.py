@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
+from aorta.instrumentation.rocjitsu_sanitizers.models import KernelCheckResult, aggregate_diagnostic_summaries
 from aorta.instrumentation.rocjitsu_sanitizers.recipe import load_sanitizer_recipe, _resolve_observations
 from aorta.instrumentation.rocjitsu_sanitizers.report import build_report, write_report
 from aorta.instrumentation.rocjitsu_sanitizers.selection import select_kernels
@@ -154,6 +155,69 @@ def test_inconsistent_report_rejected(completed, mutation):
     path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError):
         helper.verify(output)
+
+
+@pytest.mark.parametrize("foreign", ["object", "target", "image"])
+def test_foreign_diagnostic_identity_rejected_even_when_report_and_log_agree(completed, foreign):
+    output = completed[0]
+    path = output / "missing/sanitizer_report.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    check = data["checks"][0]
+    identity = check["kernel_results"][0]["identity"]
+    original = check["findings"][0]["message"]
+    prefix = f"{identity['code_object']}:{identity['target']}[{identity['code_object_index']}]:"
+    replacements = {
+        "object": f"{identity['code_object']}-foreign:{identity['target']}[{identity['code_object_index']}]:",
+        "target": f"{identity['code_object']}:gfx999[{identity['code_object_index']}]:",
+        "image": f"{identity['code_object']}:{identity['target']}[{identity['code_object_index'] + 1}]:",
+    }
+    changed = original.replace(prefix, replacements[foreign], 1)
+    assert changed != original
+    check["findings"][0]["message"] = changed
+    check["kernel_results"][0]["findings"][0]["message"] = changed
+    log = output / "missing/waitcheck/waitcheck-0.log"
+    log.write_text(log.read_text(encoding="utf-8").replace(original, changed), encoding="utf-8")
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError):
+        helper.verify(output)
+
+
+@pytest.mark.parametrize("label,updates", [
+    ("corrected", {"reported_count": 9}),
+    ("missing", {"reported_count": 9, "emitted_records": 9}),
+    ("missing", {"requested_limit": 1}),
+    ("corrected", {"count_meaning": "exact", "details": "complete", "native_analysis": "complete"}),
+    ("missing", {"count_meaning": "exact"}),
+    ("mismatch", {"reported_count": 9}),
+])
+def test_coherently_declared_metadata_must_agree_with_raw_control_evidence(completed, label, updates):
+    output = completed[0]
+    path = output / label / "sanitizer_report.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    check = data["checks"][0]
+    entry = check["kernel_results"][0]
+    entry["diagnostic_summary"].update(updates)
+    # Keep check aggregation valid so the regression reaches the control verifier.
+    check["diagnostic_summary"] = aggregate_diagnostic_summaries((KernelCheckResult.from_dict(entry),)).to_dict()
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="diagnostic"):
+        helper.verify(output)
+
+
+@pytest.mark.parametrize("nullable", [False, True])
+def test_legacy_controls_allow_absent_or_null_optional_diagnostic_summary(completed, nullable):
+    output = completed[0]
+    for label in helper.LABELS:
+        path = output / label / "sanitizer_report.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        check = data["checks"][0]
+        for item in (check, check["kernel_results"][0]):
+            if nullable:
+                item["diagnostic_summary"] = None
+            else:
+                item.pop("diagnostic_summary", None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    assert "expected result verified" in helper.verify(output)
 
 
 def test_changed_recipe_refused_before_process(prepared, monkeypatch, tmp_path):

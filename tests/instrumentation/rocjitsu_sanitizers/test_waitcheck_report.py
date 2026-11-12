@@ -433,3 +433,119 @@ def test_saved_text_derivatives_keep_the_real_omission_signal(tmp_path, cap, rec
     assert '"native_returncode": 4' in summary
     if cap == 1:
         assert 'Supported raw signal: omitted 2 diagnostic(s) after limit' in summary
+
+
+@pytest.mark.parametrize('kind', ['warn', 'cap'])
+@pytest.mark.parametrize('metadata', ['absent', 'empty'])
+def test_report_only_hazard_exit_requires_retained_findings(evidence, kind, metadata):
+    report, _ = evidence(kind)
+    data = json.loads(report.read_text())
+    for item in (data['checks'][0], data['checks'][0]['kernel_results'][0]):
+        item['findings'] = []
+        if metadata == 'empty':
+            item['diagnostic_summary'] = {}
+        else:
+            item.pop('diagnostic_summary', None)
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report)
+    assert code == 2
+    assert 'native hazard exit has no retained findings' in summary
+    assert '"native_returncode": 4' in summary
+    assert '"entry_verdict": "warn"' in summary
+
+
+@pytest.mark.parametrize('check_present,entry_present', [(False, False), (True, False), (False, True), (True, True)])
+def test_legacy_truncation_presence_is_not_a_false_claim(evidence, check_present, entry_present):
+    report, log = evidence('cap')
+    data = json.loads(report.read_text())
+    for item, present in ((data['checks'][0], check_present),
+                          (data['checks'][0]['kernel_results'][0], entry_present)):
+        if not present:
+            item.pop('diagnostics_truncated')
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report, log)
+    assert code == 0
+    assert 'Raw summary agrees' in summary
+    assert 'diagnostics=at least 1' in summary
+    assert '"diagnostics_truncated": ' + ('true' if check_present else 'null') in summary
+    assert '"entry_diagnostics_truncated": ' + ('true' if entry_present else 'null') in summary
+
+
+@pytest.mark.parametrize('location', ['check', 'entry'])
+def test_explicit_false_truncation_claim_still_conflicts_with_raw(evidence, location):
+    report, log = evidence('cap')
+    data = json.loads(report.read_text())
+    check, entry = data['checks'][0], data['checks'][0]['kernel_results'][0]
+    check.pop('diagnostics_truncated')
+    entry.pop('diagnostics_truncated')
+    (check if location == 'check' else entry)['diagnostics_truncated'] = False
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report, log)
+    assert code == 2
+    assert 'truncation differs' in summary
+
+
+@pytest.mark.parametrize('location', ['check', 'entry'])
+def test_explicit_true_truncation_claim_still_conflicts_with_raw(evidence, location):
+    report, log = evidence('clean')
+    data = json.loads(report.read_text())
+    check, entry = data['checks'][0], data['checks'][0]['kernel_results'][0]
+    check.pop('diagnostics_truncated')
+    entry.pop('diagnostics_truncated')
+    (check if location == 'check' else entry)['diagnostics_truncated'] = True
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report, log)
+    assert code == 2
+    assert 'truncation differs' in summary
+
+
+@pytest.mark.parametrize('check_null,entry_null', [(True, False), (False, True), (True, True)])
+@pytest.mark.parametrize('with_log', [False, True])
+def test_supported_nullable_diagnostic_summary_is_missing_evidence(evidence, check_null, entry_null, with_log):
+    report, log = evidence('warn')
+    data = json.loads(report.read_text())
+    for item, include in ((data['checks'][0], check_null),
+                          (data['checks'][0]['kernel_results'][0], entry_null)):
+        if include:
+            item['diagnostic_summary'] = None
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report, log if with_log else None)
+    assert code == 0
+    assert '"entry_diagnostic_summary_reported": null' in summary
+    assert '"check_diagnostic_summary_reported": null' in summary
+    assert '"native_returncode": 4' in summary
+
+
+@pytest.mark.parametrize('location', ['root', 'check', 'entry', 'identity'])
+def test_unknown_null_fields_are_not_accepted_as_nullable_metadata(evidence, location):
+    report, _ = evidence()
+    data = json.loads(report.read_text())
+    target = {'root': data, 'check': data['checks'][0],
+              'entry': data['checks'][0]['kernel_results'][0],
+              'identity': data['checks'][0]['kernel_results'][0]['identity']}[location]
+    target['unsupported_null_field'] = None
+    report.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match='unsupported fields'):
+        helper.summarize(report)
+
+
+@pytest.mark.parametrize('location', ['root', 'identity'])
+def test_nullable_summary_is_not_allowed_at_unmodeled_locations(evidence, location):
+    report, _ = evidence()
+    data = json.loads(report.read_text())
+    target = data if location == 'root' else data['checks'][0]['kernel_results'][0]['identity']
+    target['diagnostic_summary'] = None
+    report.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match='unsupported fields'):
+        helper.summarize(report)
+
+
+def test_early_stop_summary_preserves_all_lower_bound_counters(evidence):
+    report, log = evidence('cap')
+    text = log.read_text().replace('instructions=4', 'instructions=>=4').replace('memory-events=2', 'memory-events=>=2')
+    text += 'analysis stopped early; additional diagnostics may exist\n'
+    rewrite_evidence(report, log, text, include_metadata=True, requested_limit=1)
+    summary, code = helper.summarize(report, log)
+    assert code == 0
+    assert 'instructions=at least 4, memory-events=at least 2, diagnostics=at least 1' in summary
+    assert 'native analysis=incomplete' in summary

@@ -251,8 +251,26 @@ def run(args):
         save(root / "run.json", manifest)
 
 
+def verify_diagnostic_metadata(declared, observed, label):
+    """Validate optional claims without requiring metadata on legacy reports."""
+    if declared is None:
+        return
+    for key in ("reported_count", "emitted_records"):
+        value = getattr(declared, key)
+        require(value is None or value == getattr(observed, key),
+                f"{label}: diagnostic {key} contradicts observed evidence")
+    for key in ("count_meaning", "details", "native_analysis"):
+        value = getattr(declared, key).value
+        require(value == "unknown" or value == getattr(observed, key).value,
+                f"{label}: diagnostic {key} is unsupported by observed evidence")
+    require(declared.requested_limit is None or declared.requested_limit == 64,
+            f"{label}: diagnostic limit contradicts the control recipe")
+
+
 def verify(root):
+    from aorta.instrumentation.rocjitsu_sanitizers.models import DiagnosticSummary
     from aorta.instrumentation.rocjitsu_sanitizers.report import read_report
+    from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import parse_waitcheck_text
     manifest = load(contained(root, "run.json"))
     require(manifest["schema"] == "waitcheck-controls-run/1" and manifest["status"] in ("captured", "verified"),
             "run capture incomplete or failed")
@@ -317,9 +335,14 @@ def verify(root):
             require(result.reason == "code_object_digest_mismatch" and check.reason == "worklist_not_fully_checked"
                     and not result.findings and not log_path.exists() and not log_path.is_symlink(),
                     "mismatch: expected refusal before native scanner launch")
+            observed = DiagnosticSummary()
         else:
             require(result.reason is None and check.reason is None, f"{label}: unexpected reason")
             log = text(contained(root, f"{label}/waitcheck/waitcheck-0.log"))
+            parsed = parse_waitcheck_text(log, expected=result.identity)
+            require(parsed.findings == result.findings, f"{label}: raw diagnostic findings differ from report")
+            require(parsed.diagnostic_summary is not None, f"{label}: raw diagnostic evidence is unavailable")
+            observed = parsed.diagnostic_summary
             counts = (3, 2, 1) if label == "missing" else (4, 2, 0)
             pattern = (r"rj_waitcheck: " + re.escape(expected["code_object"]) + r":gfx1250\[" +
                        str(expected["code_object_index"]) + r"\]:kernel=\.text\+0x" +
@@ -343,6 +366,8 @@ def verify(root):
                         and "s_mov_b32 s5, s4" in context.get("context_2", "")
                         and all(context[key] in log for key in ("context_1", "context_2")),
                         "missing: producer/consumer evidence absent")
+        for declared in (check.diagnostic_summary, result.diagnostic_summary):
+            verify_diagnostic_metadata(declared, observed, label)
         lines.append(f"{label}: CLI={cli_exit}, native={native_exit}, state={state}, verdict={verdict}; expected result verified.")
     lines += ["AORTA CLI exit 0 on the missing-wait case is a warning, not a clean scan.",
               "The mismatch case was refused; it was not sanitized. The route remains draft pending its other qualification gates."]

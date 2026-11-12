@@ -9,6 +9,7 @@ Argument usage errors also exit 2, before writing any summary.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -57,7 +58,7 @@ def unique_object(pairs):
     return result
 
 
-def raw_comparison(log, identity, result):
+def raw_comparison(log, identity, result, *, truncation_claims=None):
     """Compare native records before deduplication, keeping unknown semantics."""
     from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import parse_waitcheck_text
     parsed = parse_waitcheck_text(log, expected=identity)
@@ -73,7 +74,10 @@ def raw_comparison(log, identity, result):
     require(evidence.emitted_records is not None, "raw diagnostic-record count is unavailable")
     require(int(match['count']) >= evidence.emitted_records, "raw count is smaller than emitted diagnostic records")
     require(parsed.findings == result.findings, "raw findings differ from reported per-entry findings")
-    require(parsed.diagnostics_truncated == result.diagnostics_truncated, "raw truncation differs from report")
+    if truncation_claims is None:
+        truncation_claims = (result.diagnostics_truncated,)
+    require(all(claim is None or parsed.diagnostics_truncated == claim for claim in truncation_claims),
+            "raw truncation differs from report")
     declared = result.diagnostic_summary
     if declared is not None:
         for key in ('reported_count', 'emitted_records'):
@@ -96,8 +100,10 @@ def raw_comparison(log, identity, result):
     require(all(line in allowed for line in lines), "raw contains unrecognized lines; completion/coverage is uncertain")
     require(result.returncode == (4 if parsed.findings else 0), "native exit contradicts raw finding result")
     require(result.verdict.value == ("warn" if parsed.findings else "pass"), "reported verdict contradicts raw findings")
-    description = (f"Raw summary agrees with the reported entry and findings: instructions={match['instructions']}, "
-                   f"memory-events={match['events']}, diagnostics={'at least ' if match['cap'] else ''}{match['count']}; "
+    description = (f"Raw summary agrees with the reported entry and findings: "
+                   f"instructions={'at least ' if match['instruction_cap'] else ''}{match['instructions']}, "
+                   f"memory-events={'at least ' if match['event_cap'] else ''}{match['events']}, "
+                   f"diagnostics={'at least ' if match['cap'] else ''}{match['count']}; "
                    f"emitted records={evidence.emitted_records}, retained unique findings={len(parsed.findings)}. "
                    f"Count meaning={evidence.count_meaning.value}; details={evidence.details.value}; "
                    f"native analysis={evidence.native_analysis.value}.")
@@ -120,13 +126,31 @@ def summarize(report_path, log_path=None):
     from aorta.instrumentation.rocjitsu_sanitizers.report import read_report
     report_bytes = bounded(report_path)
     raw = json.loads(report_bytes.decode("utf-8-sig"), object_pairs_hook=unique_object)
+    model_input = deepcopy(raw)
+    # A missing aggregate flag is not an explicit false claim. Supply only the
+    # official model's aggregate default from explicit entry flags; retain raw
+    # presence for all comparisons and output below.
+    if isinstance(model_input, dict) and isinstance(model_input.get('checks'), list):
+        for item in model_input['checks']:
+            if isinstance(item, dict) and 'diagnostics_truncated' not in item:
+                entries = item.get('kernel_results', [])
+                if isinstance(entries, list):
+                    item['diagnostics_truncated'] = any(
+                        isinstance(entry, dict) and entry.get('diagnostics_truncated') is True for entry in entries)
     # The official path-based reader gets a bounded captured copy, not a second
     # unbounded read of a source that could grow while it is being inspected.
     with tempfile.TemporaryDirectory(prefix="waitcheck-report-") as directory:
         snapshot = Path(directory) / "report.json"
-        snapshot.write_bytes(report_bytes.removeprefix(b"\xef\xbb\xbf"))
+        snapshot.write_text(json.dumps(model_input), encoding='utf-8')
         report = read_report(snapshot)
-    unknown_fields(raw, report.to_dict())
+    known = report.to_dict()
+    # Serialization omits supported nullable summaries. Restore their allowed
+    # shape only at the modeled check/entry locations, not other unknown keys.
+    for item in known['checks']:
+        item.setdefault('diagnostic_summary', None)
+        for entry in item['kernel_results']:
+            entry.setdefault('diagnostic_summary', None)
+    unknown_fields(raw, known)
     require(len(report.checks) == 1 and len(report.worklist.kernels) == 1,
             "only one check and one selected kernel are supported")
     check = report.checks[0]
@@ -135,10 +159,15 @@ def summarize(report_path, log_path=None):
     require(identity.exact and identity.code_object_index is not None, "explicit object/hash/image/entry identity required")
     require(len(check.kernel_results) <= 1, "multiple per-kernel results are unsupported")
     result = check.kernel_results[0] if check.kernel_results else None
+    raw_check = raw['checks'][0]
+    raw_result = raw_check['kernel_results'][0] if result else {}
+    check_truncation = raw_check.get('diagnostics_truncated')
+    entry_truncation = raw_result.get('diagnostics_truncated')
     if result:
         require(result.identity == identity, "worklist and result identities disagree")
         require(result.findings == check.findings, "check and per-entry findings disagree")
-        require(result.diagnostics_truncated == check.diagnostics_truncated, "check and entry truncation disagree")
+        require(check_truncation is None or entry_truncation is None or check_truncation == entry_truncation,
+                "check and entry truncation disagree")
     require(check.state.value != "ran" or result is not None, "ran check has no per-entry result")
     issues = []
     if result:
@@ -150,6 +179,8 @@ def summarize(report_path, log_path=None):
             expected_exit = {"pass": 0, "warn": 4}.get(result.verdict.value)
             if result.returncode is None or (expected_exit is not None and result.returncode != expected_exit):
                 issues.append("native exit is missing or contradicts the reported completed Waitcheck verdict")
+            if result.returncode == 4 and not result.findings:
+                issues.append("native hazard exit has no retained findings")
             metadata = result.diagnostic_summary
             if metadata is not None:
                 count, records = metadata.reported_count, metadata.emitted_records
@@ -167,9 +198,8 @@ def summarize(report_path, log_path=None):
              "The intended user artifact, current on-disk bytes, tool/version, recipe, command and authorization were not verified.",
              "AORTA CLI exit is not recorded in this report; this reader's exit is not the scanner or AORTA exit.",
              "Even matching evidence covers only supported checks on this selected compiled entry; it does not establish general correctness or qualify the route."]
-    raw_check = raw['checks'][0]
     if 'diagnostics_truncated' not in raw_check or (result and 'diagnostics_truncated' not in raw_check['kernel_results'][0]):
-        notes.append("Legacy report omits a truncation field: its default false is not independent proof of a complete diagnostic count.")
+        notes.append("Legacy report omits a truncation field: its omitted claim remains unknown, not false or proof of complete details.")
     if check.diagnostics_truncated:
         notes.append("The historical >= marker records a lower bound on native diagnostics; it does not count distinct bugs or establish native completion.")
     notes.append("AORTA execution_status complete describes adapter execution, not exhaustive native analysis. "
@@ -193,7 +223,8 @@ def summarize(report_path, log_path=None):
         log = log_bytes.decode("utf-8-sig")
         if completed:
             try:
-                raw_status, raw_summary, gap = raw_comparison(log, identity, result)
+                raw_status, raw_summary, gap = raw_comparison(
+                    log, identity, result, truncation_claims=(check_truncation, entry_truncation))
                 if gap:
                     code = 2
                     notes.append("Preserve the warning and both counts. Do not silently rescan, raise limits or change scope. "
@@ -209,7 +240,8 @@ def summarize(report_path, log_path=None):
         "check_reason": check.reason, "check_returncode": check.returncode,
         "entry_state": result.state.value if result else None, "entry_verdict": result.verdict.value if result else None,
         "entry_reason": result.reason if result else None, "native_returncode": result.returncode if result else None,
-        "finding_count": len(check.findings), "diagnostics_truncated": check.diagnostics_truncated,
+        "finding_count": len(check.findings), "diagnostics_truncated": check_truncation,
+        "entry_diagnostics_truncated": entry_truncation,
         "entry_diagnostic_summary_reported": result.diagnostic_summary.to_dict() if result and result.diagnostic_summary else None,
         "check_diagnostic_summary_reported": check.diagnostic_summary.to_dict() if check.diagnostic_summary else None,
         "diagnostic_summary_raw": raw_summary.to_dict() if raw_summary else None,
