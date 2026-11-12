@@ -1,0 +1,43 @@
+# The `fake` check profile: a full checker's stage layout (gates, compile, reference and sanitizer legs, ASan
+# batched) with every leg run by a fake adapter. Used for every orchestration test; never a training result.
+name: fake
+reward_fn: standin.v11
+clean_repeats: 1
+materialize: false
+pools:
+  gates: {resource: local_cpu, adapter: fake, timeout: gate, workers: 8}
+  compile: {resource: local_cpu, adapter: fake, timeout: compile, workers: 8}
+  sim: {resource: sim_cpu, adapter: fake, timeout: sim_run, controls: true}   # workers: reward.sim_workers
+  asan: {resource: external_gpu, adapter: fake-asan, timeout: asan_request, controls: true, batched: true}
+stages:
+  - name: S0
+    pool: gates
+    parallel: true
+    legs: [gate.parse, gate.contract, gate.static, gate.reference, gate.no_artifact, gate.spec_invalid,
+           gate.static_reject, gate.no_change_on_failing_parent]
+  - name: S1
+    pool: compile
+    legs: [gate.compile]
+  - name: S2
+    pool: sim
+    parallel: speculative
+    legs: [ref.native, ref.edge, san.consan, san.waitcheck]
+  - name: S3
+    pool: asan
+    legs: [san.asan]
+requires:
+  gate.contract: [gate.parse]
+  gate.static: [gate.parse]
+  gate.reference: [gate.parse]
+  gate.no_artifact: [gate.parse]
+  gate.spec_invalid: [gate.parse]
+  gate.static_reject: [gate.parse]
+  gate.no_change_on_failing_parent: [gate.parse]
+  gate.compile: [gate.parse]
+  ref.native: [gate.compile]
+  ref.edge: [gate.compile]
+  san.consan: [gate.compile]
+  san.waitcheck: [gate.compile]
+  san.asan: [gate.compile]
+leg_settings:
+  gate.compile: {command: "hipcc --offload-arch=gfx950 -c -O1"}

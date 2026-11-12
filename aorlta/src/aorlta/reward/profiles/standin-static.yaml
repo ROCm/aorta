@@ -1,0 +1,30 @@
+# `standin-static`: gates -> compile -> waitcheck, on CPU. A mechanics-only reward: it must never be reported as a
+# training result. Under standin.v11 ConSan and ASan are not_run here, so a candidate whose legs are all clean is
+# unscored (sanitizer_not_settled); compile errors, gate failures and waitcheck findings are scored.
+name: standin-static
+reward_fn: standin.v11
+clean_repeats: 1
+materialize: true
+pools:
+  gates: {resource: local_cpu, adapter: standin.parse, timeout: gate, workers: 4}
+  compile: {resource: local_cpu, adapter: standin.hipcc, timeout: compile, workers: 16}
+  static: {resource: local_cpu, adapter: standin.rj_waitcheck, timeout: sim_run, workers: 16}
+stages:
+  - {name: S0, pool: gates, legs: [gate.parse]}
+  - {name: S1, pool: compile, legs: [gate.compile]}
+  - {name: S2, pool: static, legs: [san.waitcheck]}
+requires:
+  gate.compile: [gate.parse]
+  san.waitcheck: [gate.compile]
+leg_settings:
+  gate.compile: {offload_arch: gfx950, flags: ["-c", "-O1"]}
+  san.waitcheck: {target: gfx950, max_diagnostics: 32}
+# Where the tools are: `${NAME}` is the environment variable NAME, or its default under /opt (profiles.TOOL_ROOTS).
+# rocjitsu's rj_waitcheck, from ROCm/rocm-systems branch shared/rocjitsu/sanitizers; a libstdc++ with GLIBCXX_3.4.31 for
+# it (ld_library_path); aorta at commit d22f6116235c05395a0241a83d6f7e952a988454 (its src/).
+adapters:
+  standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", readelf: "${AORLTA_ROCM_ROOT}/llvm/bin/llvm-readelf"}
+  standin.rj_waitcheck:
+    binary: "${AORLTA_ROCJITSU_ROOT}/bin/rj_waitcheck"
+    ld_library_path: "${AORLTA_LIBSTDCXX_SHIM}"
+    aorta_src: "${AORLTA_AORTA_ROOT}/src"
