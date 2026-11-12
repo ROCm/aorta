@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "expected ';' at end of declaration",
+   "line": 4,
+   "col": 48,
+   "token": null
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. expected ';' at end of declaration at line 4, column 48",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 4,
+   "col": 40,
+   "token": "gain"
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. use of undeclared identifier <name> at line 4, column 40: `gain`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

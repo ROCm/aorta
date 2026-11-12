@@ -1,0 +1,82 @@
+In file included from kernel.hip:3:
+In file included from /opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/hip_runtime.h:57:
+In file included from /opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_hip_runtime.h:101:
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:115:3: error: 'float' cannot be signed or unsigned
+  115 |   unsigned int luidDeviceNodeMask;  ///< LUID node mask
+      |   ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:218:3: error: 'float' cannot be signed or unsigned
+  218 |   unsigned int gpuDirectRDMAFlushWritesOptions;  ///< Bitmask to be interpreted according to
+      |   ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:221:3: error: 'float' cannot be signed or unsigned
+  221 |   unsigned int
+      |   ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:238:3: error: 'float' cannot be signed or unsigned
+  238 |   unsigned int* hdpMemFlushCntl;                ///< Addres of HDP_MEM_COHERENCY_FLUSH_CNTL register
+      |   ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:239:3: error: 'float' cannot be signed or unsigned
+  239 |   unsigned int* hdpRegFlushCntl;                ///< Addres of HDP_REG_COHERENCY_FLUSH_CNTL register
+      |   ^
+In file included from kernel.hip:3:
+In file included from /opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/hip_runtime.h:57:
+In file included from /opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_hip_runtime.h:101:
+In file included from /opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:636:
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:40:9: error: 'float' cannot be signed or unsigned
+   40 | typedef unsigned int uint32_t;
+      |         ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:44:9: error: 'float' cannot be signed or unsigned
+   44 | typedef signed int int32_t;
+      |         ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:49:9: error: 'float' cannot be signed or unsigned
+   49 | typedef unsigned long size_t;
+      |         ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:49:18: error: 'long float' is invalid
+   49 | typedef unsigned long size_t;
+      |                  ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:85:32: error: 'float' cannot be signed or unsigned
+   85 | template <> struct is_integral<unsigned int> : public true_type {};
+      |                                ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:85:20: error: redefinition of 'is_integral<float>'
+   85 | template <> struct is_integral<unsigned int> : public true_type {};
+      |                    ^~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:84:20: note: previous definition is here
+   84 | template <> struct is_integral<int> : public true_type {};
+      |                    ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:100:34: error: 'float' cannot be signed or unsigned
+  100 | template <> struct is_arithmetic<unsigned int> : public true_type {};
+      |                                  ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:100:20: error: redefinition of 'is_arithmetic<float>'
+  100 | template <> struct is_arithmetic<unsigned int> : public true_type {};
+      |                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:99:20: note: previous definition is here
+   99 | template <> struct is_arithmetic<int> : public true_type {};
+      |                    ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:105:20: error: redefinition of 'is_arithmetic<float>'
+  105 | template <> struct is_arithmetic<float> : public true_type {};
+      |                    ^~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:99:20: note: previous definition is here
+   99 | template <> struct is_arithmetic<int> : public true_type {};
+      |                    ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:52:26: error: a non-type template parameter cannot have type 'float' before C++20
+   52 | template <class _Tp, _Tp __v> struct integral_constant {
+      |                          ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:186:42: note: while substituting prior template arguments into non-type template parameter '__v' [with _Tp = float]
+  186 | template <class T> struct alignment_of : integral_constant<size_t, alignof(T)> {};
+      |                                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:193:21: error: a non-type template parameter cannot have type 'float' before C++20
+  193 | template <size_t... Ints> using index_sequence = integer_sequence<size_t, Ints...>;
+      |                     ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:188:28: error: a non-type template parameter cannot have type 'float' before C++20
+  188 | template <typename T, T... Ints> struct integer_sequence {
+      |                            ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:193:50: note: while substituting prior template arguments into non-type template parameter 'Ints' [with T = float]
+  193 | template <size_t... Ints> using index_sequence = integer_sequence<size_t, Ints...>;
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:195:18: error: a non-type template parameter cannot have type 'float' before C++20
+  195 | template <size_t _hip_N, size_t... Ints> struct make_index_sequence_impl
+      |                  ^
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/host_defines.h:195:36: error: a non-type template parameter cannot have type 'float' before C++20
+  195 | template <size_t _hip_N, size_t... Ints> struct make_index_sequence_impl
+      |                                    ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated when compiling for gfx950.
+failed to execute:/opt/rocm/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

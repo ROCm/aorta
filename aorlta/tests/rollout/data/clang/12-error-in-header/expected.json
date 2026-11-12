@@ -1,0 +1,45 @@
+{
+ "errors": [
+  {
+   "cls": "<name> cannot be signed or unsigned",
+   "line": null,
+   "col": null,
+   "token": null
+  },
+  {
+   "cls": "redefinition of <name>",
+   "line": null,
+   "col": null,
+   "token": null
+  },
+  {
+   "cls": "a non-type template parameter cannot have type <name> before C++20",
+   "line": null,
+   "col": null,
+   "token": null
+  },
+  {
+   "cls": "type of specialized non-type template argument depends on a template parameter of the partial specialization",
+   "line": null,
+   "col": null,
+   "token": null
+  },
+  {
+   "cls": "too many errors emitted, stopping now [-ferror-limit=]",
+   "line": null,
+   "col": null,
+   "token": null
+  }
+ ],
+ "shown": 5,
+ "total": 5,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. <name> cannot be signed or unsigned",
+  "2. redefinition of <name>",
+  "3. a non-type template parameter cannot have type <name> before C++20",
+  "4. type of specialized non-type template argument depends on a template parameter of the partial specialization",
+  "5. too many errors emitted, stopping now [-ferror-limit=]",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

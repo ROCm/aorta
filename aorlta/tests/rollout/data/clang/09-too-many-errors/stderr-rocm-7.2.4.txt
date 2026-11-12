@@ -1,0 +1,60 @@
+kernel.hip:5:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_00'
+    5 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_00;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:6:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_01'
+    6 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_01;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:7:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_02'
+    7 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_02;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:8:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_03'
+    8 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_03;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:9:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_04'
+    9 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_04;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:10:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_05'
+   10 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_05;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:11:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_06'
+   11 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_06;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:12:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_07'
+   12 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_07;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:13:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_08'
+   13 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_08;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:14:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_09'
+   14 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_09;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:15:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_10'
+   15 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_10;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:16:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_11'
+   16 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_11;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:17:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_12'
+   17 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_12;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:18:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_13'
+   18 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_13;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:19:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_14'
+   19 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_14;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:20:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_15'
+   20 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_15;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:21:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_16'
+   21 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_16;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:22:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_17'
+   22 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_17;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kernel.hip:23:11: error: use of undeclared identifier 'undeclared_value_with_a_deliberately_long_identifier_name_number_18'
+   23 |   x[i] += undeclared_value_with_a_deliberately_long_identifier_name_number_18;
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated when compiling for gfx950.
+failed to execute:/opt/rocm/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

@@ -1,0 +1,21 @@
+kernel.hip:5:20: error: use of undeclared identifier 'undefined_a'
+    5 |   float y = x[i] + undefined_a;
+      |                    ^
+kernel.hip:6:3: error: unknown type name 'half_t'
+    6 |   half_t h = 0;
+      |   ^
+kernel.hip:7:3: error: no matching function for call to '__syncthreads'
+    7 |   __syncthreads(1);
+      |   ^~~~~~~~~~~~~
+/opt/rocm-7.0.2.1/lib/llvm/bin/../../../include/hip/amd_detail/amd_device_functions.h:795:6: note: candidate function not viable: requires 0 arguments, but 1 was provided
+  795 | void __syncthreads()
+      |      ^
+kernel.hip:8:11: error: expected ';' after expression
+    8 |   x[i] = y
+      |           ^
+      |           ;
+kernel.hip:9:10: error: use of undeclared identifier 'undefined_b'
+    9 |   x[n] = undefined_b;
+      |          ^
+5 errors generated when compiling for gfx950.
+failed to execute:/opt/rocm-7.0.2.1/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

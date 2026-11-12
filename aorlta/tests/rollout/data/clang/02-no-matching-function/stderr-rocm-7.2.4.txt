@@ -1,0 +1,29 @@
+kernel.hip:7:13: error: no matching function for call to '__shfl_down'
+    7 |   float v = __shfl_down(p, 1);
+      |             ^~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_warp_functions.h:375:23: note: candidate function not viable: no known conversion from 'Pair' to 'int' for 1st argument
+  375 | __device__ inline int __shfl_down(MAYBE_UNDEF int var, unsigned int lane_delta,
+      |                       ^           ~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_warp_functions.h:382:32: note: candidate function not viable: no known conversion from 'Pair' to 'unsigned int' for 1st argument
+  382 | __device__ inline unsigned int __shfl_down(MAYBE_UNDEF unsigned int var, unsigned int lane_delta,
+      |                                ^           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_warp_functions.h:393:25: note: candidate function not viable: no known conversion from 'Pair' to 'float' for 1st argument
+  393 | __device__ inline float __shfl_down(MAYBE_UNDEF float var, unsigned int lane_delta,
+      |                         ^           ~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_warp_functions.h:404:26: note: candidate function not viable: no known conversion from 'Pair' to 'double' for 1st argument
+  404 | __device__ inline double __shfl_down(MAYBE_UNDEF double var, unsigned int lane_delta,
+      |                          ^           ~~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_warp_functions.h:420:24: note: candidate function not viable: no known conversion from 'Pair' to 'long' for 1st argument
+  420 | __device__ inline long __shfl_down(MAYBE_UNDEF long var, unsigned int lane_delta,
+      |                        ^           ~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_warp_functions.h:441:33: note: candidate function not viable: no known conversion from 'Pair' to 'unsigned long' for 1st argument
+  441 | __device__ inline unsigned long __shfl_down(MAYBE_UNDEF unsigned long var, unsigned int lane_delta,
+      |                                 ^           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_warp_functions.h:462:29: note: candidate function not viable: no known conversion from 'Pair' to 'long long' for 1st argument
+  462 | __device__ inline long long __shfl_down(MAYBE_UNDEF long long var, unsigned int lane_delta,
+      |                             ^           ~~~~~~~~~~~~~~~~~~~~~~~~~
+/opt/rocm-7.2.4/lib/llvm/bin/../../../include/hip/amd_detail/amd_warp_functions.h:476:38: note: candidate function not viable: no known conversion from 'Pair' to 'unsigned long long' for 1st argument
+  476 | __device__ inline unsigned long long __shfl_down(MAYBE_UNDEF unsigned long long var,
+      |                                      ^           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1 error generated when compiling for gfx950.
+failed to execute:/opt/rocm/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

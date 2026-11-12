@@ -1,0 +1,24 @@
+{
+ "errors": [
+  {
+   "cls": "unknown type name <name>",
+   "line": 3,
+   "col": 22,
+   "token": "vec4f"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 5,
+   "col": 21,
+   "token": "vec4f"
+  }
+ ],
+ "shown": 2,
+ "total": 2,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. unknown type name <name> at line 3, column 22: `vec4f`",
+  "2. use of undeclared identifier <name> at line 5, column 21: `vec4f`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

@@ -1,0 +1,8 @@
+kernel.hip:4:35: error: member reference base type 'float' is not a structure or union
+    4 | __device__ T twice(T v) { return v.twice(); }
+      |                                  ~^~~~~~
+kernel.hip:7:20: note: in instantiation of function template specialization 'twice<float>' requested here
+    7 |   x[threadIdx.x] = twice(x[threadIdx.x]);
+      |                    ^
+1 error generated when compiling for gfx950.
+failed to execute:/opt/rocm-7.0.2.1/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

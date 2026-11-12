@@ -1,0 +1,24 @@
+{
+ "errors": [
+  {
+   "cls": "excess elements in array initializer",
+   "line": 4,
+   "col": 31,
+   "token": "40"
+  },
+  {
+   "cls": "invalid suffix <name> on integer constant",
+   "line": 5,
+   "col": 22,
+   "token": "x"
+  }
+ ],
+ "shown": 2,
+ "total": 2,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. excess elements in array initializer at line 4, column 31: `40`",
+  "2. invalid suffix <name> on integer constant at line 5, column 22: `x`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

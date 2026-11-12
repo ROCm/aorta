@@ -1,0 +1,9 @@
+kernel.hip:5:22: error: use of undeclared identifier 'srcc'; did you mean 'src'?
+    5 |         if (i < n)      dst[i] = srcc[i];
+      |                                  ^~~~
+      |                                  src
+kernel.hip:3:47: note: 'src' declared here
+    3 | __global__ void copy(float* dst, const float* src, int n) {
+      |                                               ^
+1 error generated when compiling for gfx950.
+failed to execute:/opt/rocm-7.0.2.1/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip
