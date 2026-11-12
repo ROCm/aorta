@@ -435,6 +435,10 @@ class RolloutSection(_Section):
     # how a repair turn's ids are built: "append" (Appendix C) or "rerender" (the whole conversation through the chat
     # template again); null: "append"
     repair_turn_ids: Literal["append", "rerender"] | None = None
+    # stop when more than this share of an iteration's groups have all K answers identical (sampler suspected). A task
+    # with near-unique answers and few prompts may raise it: one such group in 8 is 12.5%. The engines' start-up
+    # self-test checks the sampler on its own.
+    identical_groups_stop: float = 0.05
 
     def _validate(self) -> None:
         _check(len(self.engines) >= 1, "engines: at least one engine GPU is needed")
@@ -449,6 +453,8 @@ class RolloutSection(_Section):
         _check(self.max_new_tokens >= 1, f"max_new_tokens: must be >= 1, got {self.max_new_tokens}")
         _check(self.max_feedback_chars >= 1, f"max_feedback_chars: must be >= 1, got {self.max_feedback_chars}")
         _check(self.request_timeout_s > 0, f"request_timeout_s: must be > 0, got {self.request_timeout_s}")
+        _check(0 <= self.identical_groups_stop <= 1,
+               f"identical_groups_stop: must be in [0, 1], got {self.identical_groups_stop}")
         _check(
             0 < self.gpu_memory_utilization <= 1,
             f"gpu_memory_utilization: must be in (0, 1], got {self.gpu_memory_utilization}",

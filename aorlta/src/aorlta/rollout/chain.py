@@ -65,7 +65,7 @@ from .templates import (
 
 SCORED_ENDS = frozenset({"compiled", "no_change", "no_code_block", "turns_exhausted", "context_limit", "logprob_error"})
 TRAINED_ENDS = frozenset({"compiled", "no_change", "no_code_block", "turns_exhausted", "context_limit"})
-IDENTICAL_GROUPS_STOP = 0.05  # above this share of groups with all K answers identical, stop (sampler suspected)
+IDENTICAL_GROUPS_STOP = 0.05  # the default of rollout.identical_groups_stop
 REPAIR_TURN_IDS = ("append", "rerender")
 
 
@@ -203,6 +203,7 @@ class RolloutSettings:
     parse_adapter: str = "standin.parse"
     feedback_template: str = "standin"
     repair_turn_ids: str = "append"  # REPAIR_TURN_IDS
+    identical_groups_stop: float = IDENTICAL_GROUPS_STOP  # above this share of all-identical groups, stop
 
     @classmethod
     def from_config(cls, cfg: RunConfig, max_model_len: int) -> RolloutSettings:
@@ -214,6 +215,7 @@ class RolloutSettings:
             temperature=r.temperature, top_p=r.top_p, top_k=r.top_k, max_new_tokens=r.max_new_tokens,
             max_feedback_chars=r.max_feedback_chars, max_model_len=max_model_len, P=r.P,
             parse_adapter=r.parse_adapter, feedback_template=r.feedback_template, repair_turn_ids=r.repair_turn_ids,
+            identical_groups_stop=r.identical_groups_stop,
         )
 
     def sampling_params(self, seed: int) -> dict:
@@ -517,7 +519,7 @@ class RolloutManager:
         chains = [o.record for o in outcomes]
         metrics = self._metrics(iteration, prompts, outcomes, assignment, estimates, seeds, t_start, t_end)
         stop: list[str] = []
-        if metrics["groups_all_identical_frac"] > IDENTICAL_GROUPS_STOP:
+        if metrics["groups_all_identical_frac"] > s.identical_groups_stop:
             stop.append(f"{metrics['groups_all_identical']} of {metrics['groups_compared']} groups have all "
                         f"{s.K} answers identical at T {s.temperature} (sampler suspected)")
         if self.pool.stop_reason:
