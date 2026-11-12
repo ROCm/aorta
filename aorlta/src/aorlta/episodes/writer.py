@@ -165,10 +165,12 @@ class AppendLedger:
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
-            # The file's own entry in its directory, without which a power loss can drop it. Once per ledger
-            # object, not only on creation: a process that died before this line left an entry never synced.
+            # The file's own entry in its directory, and the directory's in the run directory, without which a power
+            # loss can drop them. Once per ledger object, not only on creation: a process that died before this line
+            # left an entry never synced.
             if not self._dir_synced:
                 _fsync_dir(self.path.parent)
+                _fsync_dir(self.path.parent.parent)
                 self._dir_synced = True
 
     def read(self) -> list[dict]:
@@ -243,6 +245,10 @@ class EvidenceStore:
             os.umask(old)
         os.chmod(self.root, 0o700)
         os.chmod(self.blobs, 0o700)
+        # blobs/ in the root and the root in the run directory, every time: an interrupted attempt may have left them
+        # unsynced, and resume checks the blobs a manifest lists only while the root is there
+        _fsync_dir(self.root)
+        _fsync_dir(self.root.parent)
 
     def path_of(self, sha: str) -> Path:
         return self.blobs / sha[:2] / sha
