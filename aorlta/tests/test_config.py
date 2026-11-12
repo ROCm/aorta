@@ -209,7 +209,7 @@ def test_only_the_standin_source_is_known():
 @pytest.mark.parametrize("dotted", ["rollout.compile_adapter", "rollout.parse_adapter", "rollout.feedback_template",
                                     "rollout.leak_check_adapter"])
 def test_a_component_of_no_known_source_is_refused(dotted):
-    with pytest.raises(ConfigError, match="must be 'none' or start with 'standin' or 'fake'"):
+    with pytest.raises(ConfigError, match="must be 'none', start with 'standin' or 'fake', or be registered by a plugin"):
         config_from_dict(edit(standin(), dotted, "other.component"))
 
 
@@ -276,7 +276,7 @@ def test_unusable_files_are_refused(bad):
         ("rollout.gpu_memory_utilization", 0, "rollout.gpu_memory_utilization"),
         ("rollout.compile_adapter", "hipcc", "rollout.compile_adapter: component name 'hipcc'"),
         ("rollout.parse_adapter", "none", "rollout.parse_adapter: cannot be 'none'"),
-        ("reward.reward_fn", "other.v1", "reward.reward_fn: expected one of 'standin.v11'"),
+        ("reward.reward_fn", "other.v1", "reward.reward_fn: 'other.v1' is not standin.v11 or a reward function a plugin"),
         ("reward.asan.max_packages", 17, "reward.asan.max_packages"),
         ("reward.timeouts.gate", 0, "reward.timeouts.gate: must be > 0"),
         ("selector.mode", "plan", "selector.mode: 'plan' is v2"),
@@ -502,7 +502,7 @@ def test_a_standin_run_can_select_standin_gpu_with_its_checkers_remote():
     ({"socket_dir": "relative/dir", "adapters": {"standin.aorta_asan": 5}}, "absolute path"),
     ({"socket_dir": "/dev/shm/c", "adapters": {}}, "name at least one adapter"),
     ({"socket_dir": "/dev/shm/c", "adapters": {"standin.aorta_asan": -1}}, "GPU index must be >= 0"),
-    ({"socket_dir": "/dev/shm/c", "adapters": {"nobody": 1}}, "must be 'none' or start with"),
+    ({"socket_dir": "/dev/shm/c", "adapters": {"nobody": 1}}, "must be 'none', start with 'standin' or 'fake'"),
     ({"socket_dir": "/dev/shm/c", "adapters": {"standin.aorta_asan": 5}, "connect_timeout_s": 0}, "must be > 0"),
     ({"socket_dir": "/dev/shm/c", "adapters": {"standin.aorta_asan": 5}, "extra": 1}, "unknown key"),
 ])

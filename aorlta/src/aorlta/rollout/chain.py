@@ -132,22 +132,48 @@ def _check_built(kind: str, name: str, built: Sequence[str]) -> None:
         raise RolloutStop(f"{kind} {name!r} is not available; built: {', '.join(built)}")
 
 
+def _parse_adapters() -> tuple[str, ...]:
+    from .. import plugins
+
+    return PARSE_ADAPTERS + tuple(sorted(plugins.PARSE_ADAPTERS))
+
+
+def _feedback_templates() -> tuple[str, ...]:
+    from .. import plugins
+
+    return FEEDBACK_TEMPLATES + tuple(sorted(plugins.FEEDBACK_TEMPLATES))
+
+
+def _named(kind: str, obj: Any, name: str) -> Any:
+    if getattr(obj, "name", None) != name:
+        raise RolloutStop(f"the {kind} registered as {name!r} is named {getattr(obj, 'name', None)!r}")
+    return obj
+
+
 def check_adapter_names(parse_adapter: str, feedback_template: str) -> None:
-    """Refuse a configured parse or feedback component that is not built, rather than silently use the
-    stand-in in its place."""
-    _check_built("parse adapter", parse_adapter, PARSE_ADAPTERS)
-    _check_built("feedback template", feedback_template, FEEDBACK_TEMPLATES)
+    """Refuse a configured parse or feedback component that is not built or registered by a plugin, rather than
+    silently use the stand-in in its place."""
+    _check_built("parse adapter", parse_adapter, _parse_adapters())
+    _check_built("feedback template", feedback_template, _feedback_templates())
 
 
 def make_parse_adapter(name: str) -> ParseAdapter:
-    """The configured parse."""
-    _check_built("parse adapter", name, PARSE_ADAPTERS)
+    """The configured parse: the stand-in one, or one a plugin registered."""
+    from .. import plugins
+
+    _check_built("parse adapter", name, _parse_adapters())
+    if name in plugins.PARSE_ADAPTERS:
+        return _named("parse adapter", plugins.PARSE_ADAPTERS[name](), name)
     return StandinParse()
 
 
 def make_feedback_template(name: str) -> FeedbackTemplate:
-    """The configured feedback."""
-    _check_built("feedback template", name, FEEDBACK_TEMPLATES)
+    """The configured feedback: the stand-in one, or one a plugin registered."""
+    from .. import plugins
+
+    _check_built("feedback template", name, _feedback_templates())
+    if name in plugins.FEEDBACK_TEMPLATES:
+        return _named("feedback template", plugins.FEEDBACK_TEMPLATES[name](), name)
     return StandinFeedback()
 
 

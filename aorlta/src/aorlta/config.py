@@ -339,13 +339,18 @@ _COMPONENT_RE = re.compile(r"(standin|fake)(?:[.-][A-Za-z0-9_.-]+)?")
 
 
 def component_source(name: str) -> str | None:
-    """The data source a named component belongs to: standin* and fake* are stand-ins, and "none" (only allowed
-    for the leak check) belongs to none."""
+    """The data source a named component belongs to: standin* and fake* are stand-ins, and so is a component a
+    plugin registered (`plugins.py`); "none" (only allowed for the leak check) belongs to none."""
     if name == "none":
         return None
+    from . import plugins
+
+    if plugins.registered(name):
+        return "standin"
     m = _COMPONENT_RE.fullmatch(name)
     if m is None:
-        raise ConfigError(f"component name {name!r} must be 'none' or start with 'standin' or 'fake'")
+        raise ConfigError(f"component name {name!r} must be 'none', start with 'standin' or 'fake', or be registered "
+                          f"by a plugin")
     return "standin"
 
 
@@ -384,9 +389,17 @@ class ModelSection(_Section):
 class PromptPool(_Section):
     path: str
     source: Source
+    # what reads the pool's directory: "standin" (a kernel dataset's listings, rollout/templates.py) or a task a
+    # plugin registers (plugins.register_task)
+    task: str = "standin"
 
     def _validate(self) -> None:
         _absolute("path", self.path)
+        if self.task != "standin":
+            from . import plugins
+
+            _check(self.task in plugins.TASKS, f"task: {self.task!r} is not 'standin' or a task a plugin registered "
+                                               f"(registered: {', '.join(sorted(plugins.TASKS)) or 'none'})")
 
 
 @dataclass(frozen=True)
@@ -499,6 +512,20 @@ _PROFILE_REWARD_FN = {
 }
 
 
+def profile_reward_fn(profile: str) -> str:
+    """The reward function a check profile names: the built-in map, or a registered profile's `reward_fn:`."""
+    if profile in _PROFILE_REWARD_FN:
+        return _PROFILE_REWARD_FN[profile]
+    from . import plugins
+
+    if profile not in plugins.PROFILES:
+        raise ConfigError(f"profile: {profile!r} is not one of {', '.join(_PROFILE_REWARD_FN)} or a profile a plugin "
+                          f"registered (registered: {', '.join(sorted(plugins.PROFILES)) or 'none'})")
+    from .reward.profiles import load_profile
+
+    return load_profile(profile).reward_fn
+
+
 @dataclass(frozen=True)
 class RewardRemote(_Section):
     """Adapters that run in their own checker process, reached over a Unix socket (`aorlta.reward.remote`). The
@@ -536,8 +563,8 @@ class RewardRemote(_Section):
 class RewardSection(_Section):
     """Section 6.2."""
 
-    profile: Literal["standin-static", "standin-gpu", "fake"]
-    reward_fn: Literal["standin.v11"]
+    profile: str  # standin-static, standin-gpu, fake, or a profile a plugin registered
+    reward_fn: str  # standin.v11, or a reward function a plugin registered; must be the one the profile names
     cache: RewardCache = field(default_factory=RewardCache)
     sim_workers: int | None = None  # None: sized by the reward service; "sized by measurement"
     speculative_parallel: bool = True
@@ -554,7 +581,11 @@ class RewardSection(_Section):
     gpu_check_s: dict[str, float] = field(default_factory=dict)
 
     def _validate(self) -> None:
-        expected = _PROFILE_REWARD_FN[self.profile]
+        expected = profile_reward_fn(self.profile)
+        from . import plugins
+
+        _check(self.reward_fn == "standin.v11" or self.reward_fn in plugins.REWARD_FNS,
+               f"reward_fn: {self.reward_fn!r} is not standin.v11 or a reward function a plugin registered")
         _check(
             self.reward_fn == expected,
             f"reward_fn: profile {self.profile!r} is scored by {expected!r}, got {self.reward_fn!r}",
@@ -774,6 +805,9 @@ class RunConfig(_Section):
     selector: SelectorSection = field(default_factory=SelectorSection)
     trainer: TrainerSection = field(default_factory=TrainerSection)
     sync: SyncSection = field(default_factory=SyncSection)
+    # modules or .py files that register a task's components (plugins.py); config_from_dict imports them before it
+    # checks the sections
+    plugins: tuple[str, ...] = ()
 
     def _validate(self) -> None:
         if self.trainer.loss_temperature is None:
@@ -846,9 +880,20 @@ def source_mismatches(cfg: RunConfig) -> list[str]:
     return out
 
 
+def _load_plugins(entries: Any, where: str = "plugins") -> None:
+    from . import plugins
+
+    try:
+        plugins.load_plugins(entries)
+    except plugins.PluginError as exc:
+        raise ConfigError(f"{where}: {exc}") from None
+
+
 def config_from_dict(data: Any, source: str = "<config>") -> RunConfig:
     if not isinstance(data, Mapping):
         raise ConfigError(f"{source}: the config must be a mapping, got {_describe(data)}")
+    if data.get("plugins"):  # before the sections, whose names a plugin may register
+        _load_plugins(data["plugins"], f"{source}: plugins")
     return strict_decode(RunConfig, data, "")
 
 
@@ -997,6 +1042,11 @@ def write_run_plan(
         },
         "environment": {"python": sys.version.split()[0], "pyyaml": yaml.__version__},
     }
+    if cfg.plugins:
+        from . import plugins
+
+        loaded = plugins.identity()
+        plan["plugins"] = {name: loaded.get(name) for name in cfg.plugins}
     run_dir.mkdir(parents=True, exist_ok=True)
     try:
         atomic_write_json(plan_path, plan, replace=False)

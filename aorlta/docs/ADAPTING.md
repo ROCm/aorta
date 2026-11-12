@@ -3,6 +3,52 @@
 Code paths are relative to `src/aorlta/`; commands and the `configs/`, `examples/` and `tests/` paths are relative to
 `aorlta/`, and the commands assume the environment from the README.
 
+## Your own task, as a plugin
+
+A task of your own (its prompts, how an answer is read, its repair turns, its checks and its reward) does not need
+an edit to the package. Write a Python module that registers its components with `aorlta.plugins`, and list it in
+the run config:
+
+```yaml
+plugins: [examples/my-task/my_task.py]   # a .py path (relative: from aorlta/), or an importable module name
+data:
+  prompt_pools:
+    - {path: /data/my-task, source: standin, task: my-task}
+rollout:
+  parse_adapter: my-task.parse            # or the built-in standin.parse
+  feedback_template: my-task.feedback     # or the built-in standin
+  compile_adapter: standin.hipcc          # or one of yours
+reward:
+  profile: my-task-profile
+  reward_fn: my-task.v1
+```
+
+The module is imported before the rest of the config is checked, so every name above may be one it registered:
+
+| config key | register with | what it is |
+|---|---|---|
+| `data.prompt_pools[i].task` | `register_task(Task(name, records, probe_messages=None))` | `records(pool_dir, tokenizer, thinking)` returns the pool's `PromptRecord`s ("A new prompt source" below) |
+| `rollout.parse_adapter` | `register_parse_adapter(name, factory)` | a `ParseAdapter` (`rollout/chain.py`) |
+| `rollout.feedback_template` | `register_feedback_template(name, factory)` | a `FeedbackTemplate`, optionally with `build_apply` |
+| `rollout.compile_adapter` | `register_compile_adapter(name, factory)` | `factory(workdir, evidence=..., structure=...)` returns a compiler |
+| `reward.profile` | `register_profile(name, path)` | a profile YAML file ("Checks and profiles" below) |
+| `reward.reward_fn` | `register_reward_fn(name, factory)` | `factory(profile)` returns a `RewardFn` ("Your own reward function") |
+| a profile pool's `adapter` | `register_check_adapter(name, factory)` | `factory(ctx)` returns a `CheckAdapter` for one worker; `ctx` (`plugins.CheckContext`) holds its profile settings, worker id, clock, timeout and the run's pool paths |
+
+A built-in component may be mixed in by name (`standin.parse`, `standin.hipcc` and `standin` are the stand-in
+parse, compile and feedback). A component's `name` must be the name it is registered under. The landing check and
+the trainer's warm-up read `sync.probes` chats: the task's `probe_messages(pool_dir)`, or the first records' own
+messages, which must then share one system message. The run plan records each plugin's file and its sha256.
+
+Limits of a plugin: its data is handled as the stand-in source's (public; text may appear in logs and tracebacks);
+its reward stays within the stand-in range and parts (below); the episode is the compile-repair chain (a parse may
+reject an answer with a message, and the feedback template's `build_apply` turns that into a repair turn); and
+`reward.remote` and the run job's checker pre-flight serve only the stand-in sanitizers, so a plugin's GPU check
+runs in the orchestrator's process, on GPUs its own settings name. A plugin file under `aorlta/` is in the run
+job's snapshot of the committed tree; one elsewhere must be in a directory the job mounts (`AORLTA_MOUNTS`) and is
+then not part of the snapshot. `tests/test_plugins.py` and `tests/orchestrator/test_plugin_wired.py` hold a small
+plugin that registers one of each and trains on CPU through the real wiring.
+
 ## Prompts in the stand-in format
 
 The stand-in source reads one dataset directory:
@@ -40,27 +86,27 @@ The loop reads prompts through one method (`PromptPool` in `orchestrator/ports.p
 | `task` | a `TaskRef`: `contract_id`, `task_sha256` (a hash of what the checks read; part of the cache key), and `parent_id`, `parent_healthy` and `reference_kind`, which only `standin.v11`'s broke-healthy and frozen-reference terms read |
 | `source` | `"standin"`; it must equal `run.source` |
 
-`standin_records` in `rollout/templates.py` builds these for the stand-in pool. To use a new source, pass it to the
-wiring, `wiring.build(cfg, parts=wiring.Parts(pool=MyPool(...)))`, or build it inside `orchestrator/wiring.py:build`.
-Three things there assume the stand-in pool:
+`standin_records` in `rollout/templates.py` builds these for the stand-in pool. A new set of prompts is a task a
+plugin registers ("Your own task, as a plugin" above): the pool's `task` names it, and its `records` builds them.
+What the wiring still assumes:
 
 - `check_supported` accepts exactly one pool, with `source: standin`;
-- `build` still reads the stand-in dataset at `data.prompt_pools[0].path` for the landing probes and the warm-up,
-  unless `Parts.probes` is given;
+- a `standin` pool also gives the landing probes and the warm-up, from 40 of its kernels, so it needs at least 40
+  kernels of 60 to 400 instructions; a plugin task gives its own probes;
 - the answer is parsed by `rollout.parse_adapter`. `standin.parse` takes the last fenced `cpp` block of the final
   turn, and so does the reward's parse gate (`reward/adapters/standin_parse.py`); the compile checks run
   `hipcc --offload-arch=gfx950 -c -O1` on it.
 
 Another answer format is a parse adapter and a feedback template (`ParseAdapter` and `FeedbackTemplate` in
-`rollout/chain.py`, listed in `PARSE_ADAPTERS` and `FEEDBACK_TEMPLATES`), named by `rollout.parse_adapter` and
-`rollout.feedback_template`. A parse returns `edits` (the code to compile), `rejected`, or `no_change`: a reply that
+`rollout/chain.py`), registered by a plugin and named by `rollout.parse_adapter` and `rollout.feedback_template`. A parse returns `edits` (the code to compile), `rejected`, or `no_change`: a reply that
 leaves the kernel as shown ends the chain without a compile, end reason `no_change` (the stand-in parse never returns
 it). A feedback template builds the compile-feedback turn, and may give a rejected answer a repair turn of its own
 (`build_apply`). Repair turns are appended to the token ids (`rollout.repair_turn_ids: append`, the default), or
 rebuilt with `rerender`: the whole conversation rendered again with the chat template, the replies re-tokenised from
 their text (Qwen3.5's template also drops the earlier turns' think blocks and trims every turn).
 
-A data source other than `standin` is a value of `Source` (`config.py`, `schemas.py`) and `SOURCES`
+A data source other than `standin` (data whose text must stay out of logs) is still a change to the package: a
+value of `Source` (`config.py`, `schemas.py`) and `SOURCES`
 (`episodes/schema.py`, `eval/hook.py`), with a component-name prefix that `component_source` (`config.py`) maps to
 it. `tests/orchestrator/test_wiring_e2e.py` builds the real loop on CPU with its own 7-kernel dataset, a tiny model
 and in-process engines; it is the template for testing a new source without a GPU.
@@ -109,11 +155,9 @@ A clean `gate.compile` also records the launched kernels' LDS, read from their k
 "ConSan does not apply to a launch with no LDS" would read it in `not_applicable_legs`. The gate builds with the run
 image's compiler and ConSan with the checker image's, and that the two builds agree on LDS is not checked.
 
-To add a reward function, write the class; add its name to `RewardSection.reward_fn` and to the profile-to-function
-map `_PROFILE_REWARD_FN` in `config.py`, and set `reward_fn:` in the profile; build it in `standin_rewardfn`
-(`reward/rewardfn/for_profile.py`), which the wiring and the offline evaluator call; and add its name to
-`STANDIN_REWARD_FNS` in `orchestrator/wiring.py`, which `check_supported` reads. A new profile name goes in
-`PROFILE_NAMES` (`reward/profiles.py`), `CheckProfile` (`schemas.py`) and `RewardSection.profile` (`config.py`).
+To add a reward function, write the class, register it (`plugins.register_reward_fn(name, factory)`, where
+`factory(profile)` builds it), and set `reward_fn:` to its name in your profile, which you register with
+`plugins.register_profile`. The config then accepts both names and checks that they agree.
 
 ## Checks and profiles
 
@@ -156,8 +200,9 @@ To add a check:
    a quick heartbeat. `make_result` and `unsettled` build results, `ProcessRunner` runs a subprocess the watchdog
    can kill, and the job's files are `job.package`, `job.inputs` and `job.output_dir`. The compile gate,
    `adapters/standin_hipcc.py`, is a short real one.
-2. Register a factory in `standin_factories` (`reward/factories.py`): one adapter per worker, configured from the
-   profile's `adapters:` block. The checker servers build adapters through the same function.
+2. Register a factory with `plugins.register_check_adapter(name, factory)`: `factory(ctx)` builds one adapter per
+   worker, from `ctx.settings` (the profile's `adapters:` entry for it). `standin_factories` (`reward/factories.py`)
+   builds the built-in ones and the registered ones the same way.
 3. In the profile, add a pool that names the adapter, a stage for its leg, and its `requires`.
 4. List the new leg in a reward function's `legs` and read it there. The service builds each candidate's final
    record from the reward function's legs, and for a clean reward checks every profile leg in that record, so

@@ -415,7 +415,7 @@ def standin_factory(config_path: str, adapter: str) -> Callable[[str], Any]:
     cfg = load_config(config_path)
     profile = load_profile(cfg.reward.profile)
     factories = standin_factories(profile, Clock(), timeouts=dataclasses.asdict(cfg.reward.timeouts),
-                                  check_s=cfg.reward.gpu_check_s)
+                                  check_s=cfg.reward.gpu_check_s, pools=tuple(p.path for p in cfg.data.prompt_pools))
     if adapter not in factories:
         raise SystemExit(f"profile {profile.name!r} has no stand-in adapter {adapter!r}")
     return factories[adapter]

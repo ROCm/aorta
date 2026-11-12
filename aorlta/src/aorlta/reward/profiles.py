@@ -107,9 +107,11 @@ class Profile:
 
 
 def profile_problems(p: Profile) -> list[str]:
+    from .. import plugins
+
     out = []
-    if p.name not in PROFILE_NAMES:
-        out.append(f"name must be one of {PROFILE_NAMES}")
+    if p.name not in PROFILE_NAMES and p.name not in plugins.PROFILES:
+        out.append(f"name must be one of {PROFILE_NAMES} or a profile a plugin registered")
     if p.clean_repeats < 1:
         out.append("clean_repeats must be >= 1")
     if not p.stages:
@@ -164,7 +166,10 @@ def profile_from_dict(data: Mapping[str, Any], source: str = "<profile>") -> Pro
 
 
 def load_profile(name_or_path: str | Path) -> Profile:
+    """A shipped profile by name, a profile a plugin registered by name, or a profile file by path."""
+    from .. import plugins
+
     path = Path(name_or_path)
     if path.suffix not in (".yaml", ".yml"):
-        path = PROFILE_DIR / f"{name_or_path}.yaml"
+        path = plugins.profile_path(str(name_or_path)) or PROFILE_DIR / f"{name_or_path}.yaml"
     return profile_from_dict(parse_yaml(path.read_bytes(), str(path)), str(path))
