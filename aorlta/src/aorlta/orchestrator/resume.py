@@ -14,7 +14,8 @@ just before that (loop.py, step 10). `prepare_resume` is the file half of a resu
   that evaluator may still be writing;
 - a checkpoint newer than n_c is removed: it was renamed, but its iteration never committed;
 - records of iterations after n_c are cut from the append-only ledgers and the evidence manifest (a ledger with a
-  bad line before its end stops the resume before anything is removed; only a torn final line is dropped); TensorBoard
+  bad line before its end, or an evidence blob that a committed iteration lists and that is missing or cut short,
+  stops the resume before anything is removed; only a torn final line is dropped); TensorBoard
   files after n_c are removed, and a committed iteration's file that the crash prevented is written from its
   committed summary;
 - checkpoints beyond `keep_ckpts` are pruned (a crash between a commit and its prune leaves one too many).
@@ -32,8 +33,8 @@ from pathlib import Path
 
 from ..atomic import PARTIAL_SUFFIX
 from ..episodes import tensorboard as tb
-from ..episodes.writer import (EVIDENCE_DIR, LEDGERS_DIR, AppendLedger, EvidenceStore, complete_iterations,
-                               read_summary)
+from ..episodes.writer import (EVIDENCE_DIR, LEDGERS_DIR, AppendLedger, EvidenceStore, LedgerError,
+                               complete_iterations, read_summary)
 from .state import RunState, complete_checkpoints, iteration_dir_name, prune_checkpoints, verify_checkpoint
 
 
@@ -86,6 +87,11 @@ def prepare_resume(run_dir: Path, keep_ckpts: int) -> ResumePoint:
     store = EvidenceStore(run_dir / EVIDENCE_DIR) if (run_dir / EVIDENCE_DIR).is_dir() else None
     for ledger in ledgers + ([store.manifest] if store else []):
         ledger.read()  # raises LedgerError on a bad line before a ledger's end, before anything is removed
+    missing = store.missing_listed(n_c) if store else []
+    if missing:
+        raise LedgerError(f"{EVIDENCE_DIR}/MANIFEST.jsonl: iterations <= {n_c} list {len(missing)} evidence blob"
+                          f"{'s' if len(missing) > 1 else ''} that is missing or cut short, e.g. {missing[:3]}; "
+                          "refusing to resume")
     removed = remove_partials(run_dir, skip=NOT_THE_RUNS)
     for n in complete_checkpoints(ckpt_root):
         if n > n_c:
