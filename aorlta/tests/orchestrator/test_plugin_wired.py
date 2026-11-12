@@ -4,6 +4,7 @@ test_wiring_e2e's. Nothing in the package names the task."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_plugins as TP  # noqa: E402 - the toy plugin
 import test_wiring_e2e as E  # noqa: E402 - the tiny model, its twin engines and the probes
 
+from aorlta import plugins  # noqa: E402
 from aorlta.config import config_from_dict  # noqa: E402
 from aorlta.orchestrator import wiring  # noqa: E402
 from aorlta.rollout.engine_proc import InProcessEngine  # noqa: E402
@@ -52,3 +54,52 @@ def test_a_plugin_task_trains_and_lands(tmp_path, tiny_base, plugin):
     assert any(len(e["turns"]) > 1 for e in eps)  # a repair turn: toy.feedback's compile or apply turn
     plan = json.loads((cfg.run_dir / "run_plan.json").read_text())
     assert plan["plugins"][str(plugin)]["sha256"] == TP.sha256_file(plugin)
+
+
+def started_on(monkeypatch) -> list:
+    """The turn-0 ids each engine pool's self-test was started on."""
+    from aorlta.rollout import engine_pool
+
+    seen, real = [], engine_pool.EnginePool.start
+
+    def start(self, prompt_ids, *a, **kw):
+        seen.append([list(p) for p in prompt_ids])
+        return real(self, prompt_ids, *a, **kw)
+
+    monkeypatch.setattr(engine_pool.EnginePool, "start", start)
+    return seen
+
+
+def score_config(tmp_path, base, plugin_path):
+    data = TP.toy_config(tmp_path, str(plugin_path))
+    data["model"]["base_dir"] = str(base)
+    data["rollout"].update({"engines": [0, 1], "K": 4, "P": 4, "max_new_tokens": 512, "request_timeout_s": 300})
+    data["orchestrator"] = {"mode": "score", "run_seed": 3, "score": {"prompts": 4, "passes": 1}}
+    return config_from_dict(data)
+
+
+def test_a_plugin_task_self_tests_its_engines_on_open_ended_chats(tmp_path, tiny_base, plugin, monkeypatch):
+    """Not on the task's own prompts: a precise task can give two seeds the same first 128 tokens."""
+    from aorlta.rollout.templates import render_turn0
+
+    seen = started_on(monkeypatch)
+    cfg = score_config(tmp_path, tiny_base, plugin)
+    result = build(cfg, tiny_base).run()
+    assert result["status"] == "completed", result
+    tok = E.ByteTokenizer()
+    assert seen == [[render_turn0(tok, list(m), "off") for m in wiring.SELF_TEST_CHATS]]
+
+
+def test_a_task_may_give_its_own_self_test_chats(tmp_path, tiny_base, plugin, monkeypatch):
+    from aorlta.rollout.templates import render_turn0
+
+    chats = [[{"role": "user", "content": f"tell me anything at all, number {i}"}] for i in range(5)]
+    cfg = score_config(tmp_path, tiny_base, plugin)
+    toy = plugins.TASKS["toy"]
+    plugins.TASKS["toy"] = dataclasses.replace(toy, selftest_messages=lambda pool_dir: chats)
+    seen = started_on(monkeypatch)
+    assert build(cfg, tiny_base).run()["status"] == "completed"
+    assert seen == [[render_turn0(E.ByteTokenizer(), c, "off") for c in chats[:4]]]
+    plugins.TASKS["toy"] = dataclasses.replace(toy, selftest_messages=lambda pool_dir: chats[:3])
+    with pytest.raises(wiring.WiringError, match="the engine self-test needs 4 chats, got 3"):
+        build(cfg, tiny_base)

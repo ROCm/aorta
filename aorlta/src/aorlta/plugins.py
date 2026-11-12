@@ -48,11 +48,16 @@ class Task:
     `records(pool_dir, tokenizer, thinking)` returns the pool's `PromptRecord`s (`schemas.py`), each with
     `source="standin"`, a unique `prompt_id` and a `task.task_sha256` that hashes what the checks read for it.
     `probe_messages(pool_dir)`, if given, returns the chats (a system and a user message) the landing check and the
-    trainer's warm-up use; without it they are the first records' own messages."""
+    trainer's warm-up use; without it they are the first records' own messages. `selftest_messages(pool_dir)`, if
+    given, returns the 4 chats each engine's start-up self-test samples twice with different seeds; at least 3 of the
+    4 pairs must differ, so they must be open-ended requests. Without it the self-test uses
+    `orchestrator.wiring.SELF_TEST_CHATS`: a precise task (a short kernel with one obvious answer) can give the same
+    128 tokens for both seeds and fail a sound sampler."""
 
     name: str
     records: Callable[[Path, Any, str], list]
     probe_messages: Callable[[Path], list[list[dict]]] | None = None
+    selftest_messages: Callable[[Path], list[list[dict]]] | None = None
 
 
 @dataclass(frozen=True)

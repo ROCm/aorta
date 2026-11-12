@@ -48,6 +48,14 @@ LORA_R, LORA_ALPHA = 16, 32  # Section 6.4: a fresh r16/alpha32 LoRA
 PROBE_KERNELS = 40  # WP3's probes are the last `sync.probes` of these stand-in kernels
 WORKER_THREADS = 8  # CPU threads per spawned trainer rank: its CPU work is small, and the compile pool shares the node
 ENGINE_CALL_TIMEOUT_S = 600.0  # a probe, a greedy draw or a reload, as EngineProc's own reload default
+# A plugin task's engine self-test chats (plugins.Task.selftest_messages): open-ended, so two seeds' first 128 tokens
+# differ on a sound sampler whatever the task's own prompts are.
+SELF_TEST_CHATS = tuple(
+    ({"role": "system", "content": "You are an expert AMD GPU kernel engineer."}, {"role": "user", "content": q})
+    for q in ("Describe, in your own words, three different reasons a GPU kernel can run slower than expected.",
+              "Write a short story, of about a paragraph, about a GPU that is learning to schedule its own work.",
+              "List some ideas for small exercises that teach someone how GPU memory coalescing works.",
+              "Explain to a new engineer, with an example of your choosing, what a race condition in a kernel is."))
 FAKE_FAIL_RATE = 0.05  # per leg, in the fake profile: enough failures that rewards differ within a group
 STANDIN_REWARD_FNS = ("standin.v11",)
 MERGE_TOOL = Path(__file__).resolve().parents[3] / "tools" / "merge_base_adapter.py"
@@ -320,10 +328,11 @@ class RolloutAdapter:
     """C1 behind the RolloutPort."""
 
     def __init__(self, cfg: RunConfig, tokenizer, handles: Sequence[Any], *, max_len: int, spans, compiler,
-                 on_shutdown: Sequence[Callable[[], None]] = (), clock=None):
+                 on_shutdown: Sequence[Callable[[], None]] = (), clock=None, selftest_messages: Sequence | None = None):
         from ..rollout.engine_pool import EnginePool
 
         self.cfg, self.tok, self.spans, self.max_len, self.compiler = cfg, tokenizer, spans, max_len, compiler
+        self.selftest_messages = None if selftest_messages is None else list(selftest_messages)  # else the prompts
         self.clock = clock  # the orchestrator's clock: its deadlines are read on it
         self.handles = [CountedHandle(h) for h in handles]
         self.pool = EnginePool(self.handles, run_seed=cfg.orchestrator.run_seed,
@@ -336,9 +345,15 @@ class RolloutAdapter:
         from ..rollout.engine_pool import RolloutStop
         from ..rollout.templates import turn0_ids
 
+        from ..rollout.templates import render_turn0
+
         r = self.cfg.rollout
         try:
-            self.pool.start([turn0_ids(p, self.tok, r.thinking) for p in selftest_prompts])
+            if self.selftest_messages is not None:
+                ids = [render_turn0(self.tok, m, r.thinking) for m in self.selftest_messages]
+            else:
+                ids = [turn0_ids(p, self.tok, r.thinking) for p in selftest_prompts]
+            self.pool.start(ids)
         except RolloutStop as exc:
             raise RunStopped("engine_start_failed", {"error": describe_error(exc, self.cfg.run.source)}) from None
         settings = RolloutSettings.from_config(self.cfg, self.max_len)
@@ -1263,13 +1278,23 @@ def build(cfg: RunConfig, *, config_path=None, commit: str | None = None, parts:
     probes = parts.probes
     if probes is None and task is not None:
         probes = task_probes(cfg, tok, task, pool_cfg.path, records)
+    selftest = None
+    if task is not None:
+        selftest = (list(task.selftest_messages(Path(pool_cfg.path))) if task.selftest_messages is not None
+                    else list(SELF_TEST_CHATS))
+        from ..rollout.engine_pool import SELF_TEST_PROMPTS
+
+        if len(selftest) < SELF_TEST_PROMPTS:
+            raise WiringError(f"task {task.name!r}: the engine self-test needs {SELF_TEST_PROMPTS} chats, "
+                              f"got {len(selftest)}")
+        selftest = selftest[:SELF_TEST_PROMPTS]
     compiler = parts.compiler if parts.compiler is not None else rollout_compiler(cfg)
     handles = parts.handles if parts.handles is not None else engine_handles(cfg, max_len)
     if cfg.orchestrator.mode == "score":  # no trainer, no optimizer, no weight sync
         from .score import Scorer
 
         rollout = RolloutAdapter(cfg, tok, handles, max_len=max_len, spans=spans, compiler=compiler,
-                                 on_shutdown=[lambda: remove_node_dir(cfg)], clock=clock)
+                                 on_shutdown=[lambda: remove_node_dir(cfg)], clock=clock, selftest_messages=selftest)
         model = ServedModel(cfg, tok, rollout, spans=spans, dataset=dataset, probes=probes)
         reward = RewardAdapter(cfg, clock=clock, spans=spans, factories=parts.reward_factories)
         return Scorer(cfg, pool=pool, rollout=rollout, reward=reward, model=model, clock=clock, spans=spans,
@@ -1277,7 +1302,8 @@ def build(cfg: RunConfig, *, config_path=None, commit: str | None = None, parts:
     trainer = TrainerAdapter(cfg, spans=spans, load_model=parts.load_model, device=parts.trainer_device,
                              require_fast_path=parts.require_fast_path, amp=parts.amp)
     rollout = RolloutAdapter(cfg, tok, handles, max_len=max_len, spans=spans, compiler=compiler,
-                             on_shutdown=[trainer.shutdown, lambda: remove_node_dir(cfg)], clock=clock)
+                             on_shutdown=[trainer.shutdown, lambda: remove_node_dir(cfg)], clock=clock,
+                             selftest_messages=selftest)
     sync = SyncAdapter(cfg, tok, trainer, rollout, spans=spans, dataset=dataset, probes=probes)
     trainer.warmup_ids = lambda: sync.probes().ids  # the landing probes: real stand-in prompt tokens
     reward = RewardAdapter(cfg, clock=clock, spans=spans, factories=parts.reward_factories)
