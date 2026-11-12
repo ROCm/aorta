@@ -171,12 +171,25 @@ def test_a_new_ledger_syncs_its_directory_so_a_power_loss_cannot_drop_the_file(t
 
     synced = []
     monkeypatch.setattr(writer, "_fsync_dir", lambda d: synced.append(Path(d)))
-    ledger = AppendLedger(tmp_path / "evidence" / "MANIFEST.jsonl")
+    ledger = AppendLedger(tmp_path / "ledgers" / "spans.jsonl")
     ledger.append([{"iteration": 1}])
     ledger.append([{"iteration": 2}])
-    assert synced == [tmp_path / "evidence"] and [r["iteration"] for r in ledger.read()] == [1, 2]
-    AppendLedger(ledger.path).append([{"iteration": 3}])  # a resumed run: the entry may never have been synced
-    assert synced == [tmp_path / "evidence"] * 2
+    # the file's entry in ledgers/, and ledgers/'s in the run directory
+    assert synced == [tmp_path / "ledgers", tmp_path] and [r["iteration"] for r in ledger.read()] == [1, 2]
+    AppendLedger(ledger.path).append([{"iteration": 3}])  # a resumed run: the entries may never have been synced
+    assert synced == [tmp_path / "ledgers", tmp_path] * 2
+
+
+def test_the_evidence_store_syncs_its_root_and_the_run_directory_also_when_they_already_exist(tmp_path, monkeypatch):
+    from aorlta.episodes import writer
+
+    synced = []
+    monkeypatch.setattr(writer, "_fsync_dir", lambda d: synced.append(Path(d)))
+    EvidenceStore(tmp_path / "evidence")
+    assert synced == [tmp_path / "evidence", tmp_path]  # blobs/ in evidence/, and evidence/ in the run directory
+    synced.clear()
+    EvidenceStore(tmp_path / "evidence")  # evidence/ exists: an interrupted attempt may not have synced it
+    assert synced == [tmp_path / "evidence", tmp_path]
 
 
 def test_the_run_directory_is_synced_before_an_iteration_commits_also_when_iterations_already_exists(
@@ -201,6 +214,7 @@ def test_a_new_evidence_shard_is_synced_with_its_parent_before_the_manifest_name
     real_append = store.manifest.append
     monkeypatch.setattr(store.manifest, "append", lambda recs: (events.append(("list", None)), real_append(recs)))
     blobs = tmp_path / "evidence" / "blobs"
+    events.clear()  # the store's own syncs on opening are tested above
 
     def synced_before_listing():
         return {d for kind, d in events[:events.index(("list", None))]}
