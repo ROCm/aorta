@@ -428,7 +428,7 @@ class RolloutSection(_Section):
     max_feedback_chars: int = 2000
     request_timeout_s: float = 1800.0
     gpu_memory_utilization: float = 0.45
-    compile_adapter: str = "standin.hipcc"
+    compile_adapter: str = "standin.hipcc"  # "none": no compile step; a parsed answer ends its chain
     parse_adapter: str = "standin.parse"
     leak_check_adapter: str = "none"  # the stand-in prompts need none (Section 6.1, Leak check)
     feedback_template: str = "standin"
@@ -461,7 +461,7 @@ class RolloutSection(_Section):
         )
         for name in ("compile_adapter", "parse_adapter", "feedback_template", "leak_check_adapter"):
             value = getattr(self, name)
-            _check(value != "none" or name == "leak_check_adapter", f"{name}: cannot be 'none'")
+            _check(value != "none" or name in ("leak_check_adapter", "compile_adapter"), f"{name}: cannot be 'none'")
             try:
                 component_source(value)
             except ConfigError as exc:
