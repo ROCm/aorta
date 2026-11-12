@@ -98,6 +98,8 @@ def raw_comparison(log, identity, result, *, truncation_claims=None):
         allowed.add(finding.message)
         allowed.update(value for key, value in finding.metadata if key.startswith("context_"))
     require(all(line in allowed for line in lines), "raw contains unrecognized lines; completion/coverage is uncertain")
+    require(not (result.returncode == 0 and evidence.reported_count is not None and evidence.reported_count > 0),
+            "native clean exit contradicts positive raw diagnostic count")
     require(result.returncode == (4 if parsed.findings else 0), "native exit contradicts raw finding result")
     require(result.verdict.value == ("warn" if parsed.findings else "pass"), "reported verdict contradicts raw findings")
     description = (f"Raw summary agrees with the reported entry and findings: "
@@ -181,6 +183,8 @@ def summarize(report_path, log_path=None):
                 issues.append("native exit is missing or contradicts the reported completed Waitcheck verdict")
             if result.returncode == 4 and not result.findings:
                 issues.append("native hazard exit has no retained findings")
+            if result.returncode == 0 and result.findings:
+                issues.append("native clean exit has retained findings")
             metadata = result.diagnostic_summary
             if metadata is not None:
                 count, records = metadata.reported_count, metadata.emitted_records

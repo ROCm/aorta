@@ -549,3 +549,46 @@ def test_early_stop_summary_preserves_all_lower_bound_counters(evidence):
     assert code == 0
     assert 'instructions=at least 4, memory-events=at least 2, diagnostics=at least 1' in summary
     assert 'native analysis=incomplete' in summary
+
+
+@pytest.mark.parametrize('nullable', [False, True])
+@pytest.mark.parametrize('early_stop', [False, True])
+def test_legacy_clean_exit_rejects_positive_raw_count_with_all_details_omitted(evidence, nullable, early_stop):
+    report, log = evidence('clean')
+    data = json.loads(report.read_text())
+    for item in (data['checks'][0], data['checks'][0]['kernel_results'][0]):
+        item.pop('diagnostics_truncated')
+        if nullable:
+            item['diagnostic_summary'] = None
+    report.write_text(json.dumps(data))
+    raw = log.read_text().replace('diagnostics=0', 'diagnostics=3')
+    if early_stop:
+        raw = raw.replace('instructions=4', 'instructions=>=4').replace('memory-events=2', 'memory-events=>=2')
+        raw = raw.replace('diagnostics=3', 'diagnostics=>=3')
+    raw += f'omitted {"at least " if early_stop else ""}3 diagnostic(s) after limit\n'
+    log.write_text(raw)
+    summary, code = helper.summarize(report, log)
+    assert code == 2
+    assert 'INCONSISTENT OR UNSUPPORTED RAW EVIDENCE' in summary
+    assert 'native clean exit contradicts positive raw diagnostic count' in summary
+    assert 'Raw summary agrees' not in summary
+    assert '"entry_verdict": "pass"' in summary  # Preserve the supplied status.
+
+
+@pytest.mark.parametrize('nullable', [False, True])
+def test_report_only_native_zero_rejects_retained_findings_without_metadata(evidence, nullable):
+    report, _ = evidence('warn')
+    data = json.loads(report.read_text())
+    check = data['checks'][0]
+    entry = check['kernel_results'][0]
+    # PASS/findings is already rejected by the model; FAIL is schema-valid and
+    # must still honor Waitcheck's native exit/diagnostic contract.
+    data['overall_verdict'] = check['verdict'] = entry['verdict'] = 'fail'
+    entry['returncode'] = 0
+    if nullable:
+        check['diagnostic_summary'] = entry['diagnostic_summary'] = None
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report)
+    assert code == 2
+    assert 'native clean exit has retained findings' in summary
+    assert '"entry_verdict": "fail"' in summary
