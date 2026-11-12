@@ -35,8 +35,9 @@ Not there yet:
 - No trained model worth sharing: only 3-iteration stand-in runs. The stand-in prompts show a kernel's original
   disassembly, with no bug planted, and ask for a HIP source, so they exercise the loop, not the task.
 - The stand-in checks are cheap, so the times above say little about a run with heavier checks.
-- One prompt format, the stand-in one, and one node layout are wired; [docs/ADAPTING.md](docs/ADAPTING.md) says how
-  to add a prompt source, a reward function or a check.
+- One node layout is wired. A task of your own (prompts, answer parsing, checks and reward) is a plugin, with no
+  edit to the package: [docs/ADAPTING.md](docs/ADAPTING.md) has the contract, and [docs/TUTORIAL.md](docs/TUTORIAL.md)
+  walks through `examples/hip-kernels/`, a kernel-writing task whose reward runs the kernel and checks its output.
 
 ## Layout
 
@@ -58,7 +59,8 @@ and `configs/dev-standin.yaml` (one trainer rank and the CPU checks of `standin-
 compile and waitcheck failures, so a candidate that passes them stays unscored); `jobs/aorlta-run.sbatch` (a run),
 `jobs/aorlta-reward-standin.sbatch` (a test of the stand-in GPU checks) and two scripts the run job calls; `docker/`
 the trainer image; `tests/` the CPU suite; `tools/merge_base_adapter.py`, which merges a PEFT adapter into its base
-checkpoint; `examples/standin-pool/`, a synthetic prompt pool; `docs/ADAPTING.md`. Code comments cite sections and
+checkpoint; `examples/standin-pool/`, a synthetic prompt pool; `examples/hip-kernels/` with `configs/hipk-score.yaml`
+and `configs/hipk-train.yaml`, the worked example of a task as a plugin; `docs/ADAPTING.md` and `docs/TUTORIAL.md`. Code comments cite sections and
 labels (Section 6.x, C1-C9, D7, ...) of our internal design notes, which are not included.
 
 ## Requirements
