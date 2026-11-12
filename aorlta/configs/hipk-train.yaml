@@ -27,6 +27,9 @@ rollout:
   compile_adapter: standin.hipcc
   parse_adapter: hipk.parse
   feedback_template: hipk.feedback
+  # a short kernel can have one obvious answer: 8 identical answers to one prompt is not a broken sampler here
+  # (the engines' self-test checks that), and with 8 prompts one such group is 12.5% of them
+  identical_groups_stop: 0.5
 reward:
   profile: hipk-gpu
   reward_fn: hipk.v1

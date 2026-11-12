@@ -59,6 +59,10 @@ reward:
   answers early only when no pending leg could change the answer. The service recomputes and checks all of this,
   and a reward that breaks it is unscored and raises an alarm.
 - **The check's GPUs** are its own setting (`hipk.run.gpus` in the profile): keep them off `rollout.engines`.
+- **Precise tasks.** An iteration stops when more than `rollout.identical_groups_stop` (5% by default) of its groups
+  have all `K` answers identical, which is how a broken sampler shows. A short kernel can have one obvious answer,
+  and with 8 prompts one such group is 12.5%, so the example's configs set it to 0.5; the engines' start-up
+  self-test still checks the sampler, on open-ended chats of its own.
 
 ## 1. Check the tasks
 
