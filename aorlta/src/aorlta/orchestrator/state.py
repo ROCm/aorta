@@ -187,6 +187,7 @@ def write_checkpoint(ckpt_root: Path, state: RunState, save_trainer: Callable[[P
     if final.exists():
         raise CheckpointError(f"{final} already exists: iteration {state.iteration} is already committed")
     ckpt_root.mkdir(parents=True, exist_ok=True)
+    _fsync_path(ckpt_root.parent)  # every time: the root may be left unsynced by an interrupted attempt
     tmp.mkdir()  # FileExistsError on a leftover: resume must have removed it
     (tmp / TRAINER_DIR).mkdir()
     save_trainer(tmp / TRAINER_DIR)

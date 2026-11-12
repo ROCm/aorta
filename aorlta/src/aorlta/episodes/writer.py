@@ -67,6 +67,7 @@ class IterationOutputs:
         if self.final.exists():
             raise FileExistsError(f"{self.final} exists: iteration {n} is already committed")
         self.root.mkdir(parents=True, exist_ok=True)
+        _fsync_dir(self.root.parent)  # every time: the root may be left unsynced by an interrupted attempt
         self.partial.mkdir()
         self.committed = False
 
