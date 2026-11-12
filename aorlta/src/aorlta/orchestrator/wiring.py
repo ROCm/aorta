@@ -49,6 +49,9 @@ WORKER_THREADS = 8  # CPU threads per spawned trainer rank: its CPU work is smal
 ENGINE_CALL_TIMEOUT_S = 600.0  # a probe, a greedy draw or a reload, as EngineProc's own reload default
 FAKE_FAIL_RATE = 0.05  # per leg, in the fake profile: enough failures that rewards differ within a group
 STANDIN_REWARD_FNS = ("standin.v11",)
+MERGE_TOOL = Path(__file__).resolve().parents[3] / "tools" / "merge_base_adapter.py"
+MERGE_MANIFEST = "merge-manifest.json"  # what the merge tool writes beside its output
+MERGE_TIMEOUT_S = 3600.0
 
 
 class WiringError(RuntimeError):
@@ -65,11 +68,14 @@ def check_supported(cfg: RunConfig) -> None:
     if cfg.run.source != "standin":
         problems.append(f"run.source is {cfg.run.source!r}: only stand-in runs are wired")
     t = cfg.trainer
-    problems += layout_problems(cfg)
-    if not t.streaming_accumulation:
-        problems.append("trainer.streaming_accumulation is false: only the streamed step is wired")
-    if t.steps_per_iteration != 1:
-        problems.append(f"trainer.steps_per_iteration is {t.steps_per_iteration}: streaming takes one step")
+    if cfg.orchestrator.mode == "score":
+        problems += score_problems(cfg)  # no trainer is built: its settings and layout are not read
+    else:
+        problems += layout_problems(cfg)
+        if not t.streaming_accumulation:
+            problems.append("trainer.streaming_accumulation is false: only the streamed step is wired")
+        if t.steps_per_iteration != 1:
+            problems.append(f"trainer.steps_per_iteration is {t.steps_per_iteration}: streaming takes one step")
     if cfg.orchestrator.eval_every is not None:
         problems.append("orchestrator.eval_every is set: there is no eval exporter yet")
     pools = cfg.data.prompt_pools
@@ -91,6 +97,27 @@ def check_supported(cfg: RunConfig) -> None:
             problems.append(f"reward.remote names {stray}, which profile {cfg.reward.profile!r} does not use")
     if problems:
         raise WiringError("; ".join(problems))
+
+
+def score_problems(cfg: RunConfig) -> list[str]:
+    """What a score run needs besides what every run does: the first batch holds the engines' self-test prompts, and
+    an adapter needs the merge tool beside the package."""
+    out = []
+    limit = cfg.orchestrator.score.prompts
+    first = cfg.rollout.P if limit is None else min(cfg.rollout.P, limit)
+    if first < SELF_TEST_PROMPTS:
+        out.append(f"the first batch of the score run has {first} prompts (rollout.P {cfg.rollout.P}, "
+                   f"orchestrator.score.prompts {limit}): the engines' start-up self-test runs on them and needs "
+                   f"{SELF_TEST_PROMPTS}")
+    if cfg.model.adapter_dir is not None and not MERGE_TOOL.is_file():
+        out.append(f"model.adapter_dir is set and the merge tool is not at {MERGE_TOOL}")
+    return out
+
+
+def served_model_dir(cfg: RunConfig) -> Path:
+    """The directory the engines load: `model.base_dir`, or, with `model.adapter_dir` (a score run), the merge of the
+    two that tools/merge_base_adapter.py writes into the run's node-local directory."""
+    return Path(cfg.model.base_dir) if cfg.model.adapter_dir is None else node_dir(cfg) / "model"
 
 
 def trainer_gpus(cfg: RunConfig) -> tuple[int, ...]:
@@ -211,12 +238,12 @@ def rollout_max_len(cfg: RunConfig, tokenizer, records: Sequence) -> int:
 
 
 def engine_handles(cfg: RunConfig, max_len: int) -> list:
-    """One TokenSpeed engine process per configured GPU, as WP2's harness starts them."""
+    """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`."""
     from ..rollout.engine_pool import engine_kwargs, engine_port
     from ..rollout.engine_proc import EngineProc
 
     r = cfg.rollout
-    kw = engine_kwargs(model_dir=cfg.model.base_dir, dtype="bfloat16", P=r.P, K=r.K, n_engines=len(r.engines),
+    kw = engine_kwargs(model_dir=str(served_model_dir(cfg)), dtype="bfloat16", P=r.P, K=r.K, n_engines=len(r.engines),
                        max_len=max_len, gpu_memory_utilization=r.gpu_memory_utilization,
                        run_seed=cfg.orchestrator.run_seed)
     return [EngineProc(i, str(g), dict(kw, port=engine_port(i))) for i, g in enumerate(r.engines)]
@@ -257,7 +284,10 @@ class RolloutAdapter:
             self.pool.start([turn0_ids(p, self.tok, r.thinking) for p in selftest_prompts])
         except RolloutStop as exc:
             raise RunStopped("engine_start_failed", {"error": describe_error(exc, self.cfg.run.source)}) from None
-        self.manager = RolloutManager(RolloutSettings.from_config(self.cfg, self.max_len), self.pool, self.tok,
+        settings = RolloutSettings.from_config(self.cfg, self.max_len)
+        if self.cfg.orchestrator.mode == "score":  # a pass's last batch may hold fewer than P prompts
+            settings = dataclasses.replace(settings, P=None)
+        self.manager = RolloutManager(settings, self.pool, self.tok,
                                       self.compiler, leak_check=make_leak_check(r.leak_check_adapter),
                                       spans=self.spans, compile_workers=min(96, os.cpu_count() or 8))
         return {"engines": len(self.handles), "max_model_len": self.max_len, "self_tests": self.pool.self_tests}
@@ -397,6 +427,10 @@ class RewardAdapter:
         self._svc = None
         self._lock = threading.Lock()
 
+    @property
+    def legs(self) -> tuple[str, ...]:
+        return tuple(self.profile.legs)
+
     def service(self):
         with self._lock:
             if self._svc is None:
@@ -425,6 +459,21 @@ class RewardAdapter:
         svc = self.service()
         self._write_plan_log()
         return svc.stats()
+
+    def claims_clean(self, result) -> bool:
+        """A score run's clean: a scored result whose reward function claims the clean reward."""
+        return result.status == "scored" and bool(self.rewardfn.claims_clean(result.reward, result.parts))
+
+    def not_applicable(self, result, candidate) -> tuple[str, ...]:
+        """The legs the reward function did not need for this record (for example ConSan on a launch with no
+        LDS), for the score report's counts."""
+        rule = getattr(self.rewardfn, "not_applicable_legs", None)
+        if rule is None or candidate is None:
+            return ()
+        try:
+            return tuple(sorted(rule(result.legs, candidate)))
+        except Exception:  # noqa: BLE001 - nothing is counted not applicable then; the score stands
+            return ()
 
     def _write_plan_log(self) -> None:
         hook = self._svc.selector if self._svc is not None else None
@@ -753,6 +802,17 @@ class TrainerAdapter:
 # --- C5 ------------------------------------------------------------------------------------------
 
 
+def standin_probes(cfg: RunConfig, tokenizer, dataset):
+    """The landing probes: the last `sync.probes` of the stand-in kernels picked from the dataset, each with the fixed
+    reply."""
+    from ..rollout.templates import STANDIN_SYSTEM, pick_standin_kernels, standin_messages
+    from ..sync.landing import build_probes
+
+    kernels = pick_standin_kernels(PROBE_KERNELS, dataset)[-cfg.sync.probes:]
+    texts = [standin_messages(k)[1]["content"] for k in kernels]
+    return build_probes(tokenizer.tok, texts, system=STANDIN_SYSTEM, tokens=cfg.sync.probe_tokens)
+
+
 class SyncAdapter:
     """C5 behind the SyncPort: publish the merged weights, reload every engine, check that they landed."""
 
@@ -779,12 +839,7 @@ class SyncAdapter:
 
     def probes(self):
         if self._probes is None:
-            from ..rollout.templates import STANDIN_SYSTEM, pick_standin_kernels, standin_messages
-            from ..sync.landing import build_probes
-
-            kernels = pick_standin_kernels(PROBE_KERNELS, self.dataset)[-self.cfg.sync.probes:]
-            texts = [standin_messages(k)[1]["content"] for k in kernels]
-            self._probes = build_probes(self.tok.tok, texts, system=STANDIN_SYSTEM, tokens=self.cfg.sync.probe_tokens)
+            self._probes = standin_probes(self.cfg, self.tok, self.dataset)
         return self._probes
 
     def _write(self, weights, version: int):
@@ -900,6 +955,203 @@ class SyncAdapter:
         return self._held
 
 
+# --- a score run's model -------------------------------------------------------------------------
+
+
+def top_files(directory: str | Path) -> dict[str, str]:
+    """sha256 of each top-level, not hidden file of a model directory, by name, without the merge manifest: the
+    files an engine loads."""
+    from ..ids import sha256_file
+
+    return {p.name: sha256_file(p) for p in sorted(Path(directory).iterdir())
+            if p.is_file() and not p.name.startswith(".") and p.name != MERGE_MANIFEST}
+
+
+def _top_level(recorded: dict[str, str], prefix: str) -> dict[str, str]:
+    """The run plan's hashes of one directory's top-level files (`<prefix>/<name>`), as `top_files` names them."""
+    out = {}
+    for key, sha in recorded.items():
+        head, _, name = key.partition("/")
+        if head == prefix and "/" not in name and name != MERGE_MANIFEST:
+            out[name] = sha
+    return out
+
+
+class ServedModel:
+    """What a score run serves (`orchestrator.mode: score`), and the start-up landing check on it.
+
+    `prepare` takes `model.base_dir` as it is, or merges `model.adapter_dir` into it with tools/merge_base_adapter.py,
+    the trainer's and the sync's merge formula, into the run's node-local directory. The tool checks what it wrote and
+    records the sha256 of every file in its merge manifest; a merge whose base or adapter is not the one the run plan
+    hashed is refused. So is a base whose index names a shard below its top level: TokenSpeed loads the top-level
+    shards the index names, as a Hugging Face checkpoint lays them out, and only top-level files are confirmed.
+
+    `confirm` runs once the engines have started on that directory:
+      1. its files are hashed again and must be the ones prepared (the run plan's, or the merge manifest's);
+      2. every one of its tensors is written to weight slot w0, whatever `sync.partial` says: a partial slot would
+         leave the engines' own copies of the other tensors, from whatever they loaded at start, unchecked. The slot's
+         xxh64 manifest is checked against the slot's own files (`sync.writer.verify_slot`);
+      3. the start-up round trip (`sync.roundtrip`): each engine's draws on what it loaded at start, then on a
+         synthetic perturbation (every draw must change, so a reload lands), then on slot w0 (every draw must be the
+         first one again). PROVEN means the engines serve exactly those tensors, and served the same at start.
+    The engines then hold slot w0 for the whole run; nothing is reloaded after it. The tensors are read, perturbed and
+    written on the CPU: a score run has no trainer on a GPU."""
+
+    def __init__(self, cfg: RunConfig, tokenizer, rollout: RolloutAdapter, *, spans, dataset: str | Path | None,
+                 probes=None, merge_tool: Path = MERGE_TOOL, python: str | None = None):
+        import sys
+
+        if dataset is None and probes is None:
+            raise WiringError("the landing probes need the stand-in dataset or a given probe set")
+        self.cfg, self.tok, self.rollout, self.spans = cfg, tokenizer, rollout, spans
+        self.dataset = None if dataset is None else Path(dataset)
+        self.dir = served_model_dir(cfg)
+        self.merge_tool, self.python = Path(merge_tool), python or sys.executable
+        self._probes = probes
+        self.identity: dict | None = None
+
+    def probes(self):
+        if self._probes is None:
+            self._probes = standin_probes(self.cfg, self.tok, self.dataset)
+        return self._probes
+
+    def _safe(self, text: str) -> str:
+        from ..ids import sha256_text
+
+        return str(text)[:500] if self.cfg.run.source == "standin" else f"sha256:{sha256_text(str(text))[:16]}"
+
+    def prepare(self, recorded: dict[str, str]) -> dict:
+        """`recorded`: the run plan's sha256 of the model's files, by `base/<name>` and `adapter/<name>`."""
+        from ..sync.writer import INDEX_NAME, ShardNameError, read_base_index
+        from .score import files_digest
+
+        m = self.cfg.model
+        if (Path(m.base_dir) / INDEX_NAME).is_file():
+            try:
+                read_base_index(m.base_dir)
+            except ShardNameError as exc:
+                detail = {"base_dir": m.base_dir, "shards": exc.names[:10]}
+                raise RunStopped("model_shards_not_top_level", detail) from None
+        base = _top_level(recorded, "base")
+        if m.adapter_dir is None:
+            self.identity = {"kind": "merged_dir", "dir": str(self.dir), "files": base}
+        else:
+            self.identity = self._merge(base, _top_level(recorded, "adapter"))
+        self.identity["files_sha256"] = files_digest(self.identity["files"])
+        return self.identity
+
+    def _merge(self, base: dict[str, str], adapter: dict[str, str]) -> dict:
+        import subprocess
+        import time
+
+        from ..atomic import read_text
+        from ..ids import sha256_file
+
+        out, m = self.dir, self.cfg.model
+        if out.exists() or out.with_name(out.name + ".partial").exists():
+            raise RunStopped("merge_output_exists", {"dir": str(out)})
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [self.python, str(self.merge_tool), "merge", "--base", m.base_dir, "--adapter", m.adapter_dir,
+               "--out", str(out)]
+        t0 = time.monotonic()
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=MERGE_TIMEOUT_S,
+                                  env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        except subprocess.TimeoutExpired:
+            raise RunStopped("model_merge_failed", {"rc": None, "why": f"no result in {MERGE_TIMEOUT_S:g} s"}) from None
+        if proc.returncode != 0:
+            raise RunStopped("model_merge_failed", {"rc": proc.returncode,
+                                                    "stderr": self._safe(proc.stderr.strip()[-500:])})
+        manifest = json.loads(read_text(out / MERGE_MANIFEST))
+        problems = []
+        if manifest.get("pass") is not True:
+            problems.append("the merge manifest does not record a pass")
+        made_from = {n: f["sha256"] for n, f in manifest["base"]["files"].items()
+                     if not n.startswith(".") and n != MERGE_MANIFEST}
+        if made_from != base:
+            problems.append("the merged base is not the base the run plan hashed")
+        ad = manifest["adapter"]
+        if (adapter.get("adapter_model.safetensors"), adapter.get("adapter_config.json")) != (
+                ad["weights_sha256"], ad["config_sha256"]):
+            problems.append("the merged adapter is not the adapter the run plan hashed")
+        # The tool hashes the base before it reads and copies it, and checks the output against the base as it is
+        # after, so a base file changed in between passes its checks. The bytes each copy read must be the files
+        # the plan hashed, the copies must still be them, and the base must still be them once the merge is done.
+        read = manifest["base"].get("read_sha256")
+        if not isinstance(read, dict):
+            problems.append("the merge manifest does not record the bytes the tool read")
+            read = made_from
+        read = {n: h for n, h in read.items() if not n.startswith(".") and n != MERGE_MANIFEST}
+        shards = {t["file"] for t in manifest["output"]["tensors"].values()}
+        copies = sorted(n for n, f in manifest["output"]["files"].items()
+                        if n in made_from and n not in shards and f["sha256"] != made_from[n])
+        now = top_files(m.base_dir)
+        changed = sorted(set(copies) | {n for seen in (read, now) for n in set(seen) | set(made_from)
+                                        if seen.get(n) != made_from.get(n)})
+        if changed:
+            problems.append(f"the base changed while it was merged: {', '.join(changed[:5])}")
+        if problems:
+            raise RunStopped("model_merge_unverified", {"problems": problems})
+        checks = manifest["checks"]["bytes"]
+        return {"kind": "base_plus_adapter", "dir": str(out), "base_dir": m.base_dir, "adapter_dir": m.adapter_dir,
+                "files": {n: f["sha256"] for n, f in manifest["output"]["files"].items()
+                          if not n.startswith(".") and n != MERGE_MANIFEST},
+                "merge": {"tool": "tools/merge_base_adapter.py", "manifest_sha256": sha256_file(out / MERGE_MANIFEST),
+                          "rank": ad["rank"], "lora_alpha": ad["lora_alpha"], "modules": ad["modules"],
+                          "targets": checks["targets"], "targets_changed": checks["targets_changed"],
+                          "tensor_digest": manifest["output"]["tensor_digest"],
+                          "target_digest": manifest["output"]["target_digest"], "seconds": time.monotonic() - t0}}
+
+    def confirm(self) -> dict:
+        import time
+
+        from ..sync.roundtrip import round_trip, synthetic_perturbation
+        from ..sync.writer import (delete_slot, expected_count, load_base_tensors, read_base_index, target_keys,
+                                   verify_slot, write_slot)
+        from .score import files_digest
+
+        if self.identity is None:
+            raise RuntimeError("confirm before prepare")
+        cfg, s = self.cfg, self.cfg.sync
+        secs: dict[str, float] = {}
+        t = time.monotonic()
+        now = top_files(self.dir)
+        secs["hash"] = time.monotonic() - t
+        if now != self.identity["files"]:
+            changed = sorted(n for n in set(now) | set(self.identity["files"])
+                             if now.get(n) != self.identity["files"].get(n))
+            raise RunStopped("served_model_changed", {"dir": str(self.dir), "files": changed[:10]})
+        t = time.monotonic()
+        keys = list(read_base_index(self.dir))
+        targets = sorted(target_keys(keys))
+        weights = load_base_tensors(self.dir, targets)
+        others = load_base_tensors(self.dir, [k for k in keys if k not in set(targets)])
+        expected = expected_count(keys, partial=False)
+        secs["read"] = time.monotonic() - t
+        t = time.monotonic()
+        common = dict(base_dir=self.dir, sync_dir=s.dir, run_id=cfg.run.run_id, slots=s.slots, partial=False,
+                      others=others)
+        restore = write_slot(weights, version=0, **common)
+        held = verify_slot(restore.path)
+        if not held["ok"]:
+            raise RunStopped("served_slot_mismatch", {"slot": str(restore.path), "problems": held["problems"]})
+        perturbed = write_slot(synthetic_perturbation(weights), version=1, **common)
+        del weights, others, common
+        secs["slots"] = time.monotonic() - t
+        engines = [SyncEngine(self.rollout.pool, i) for i in range(len(self.rollout.handles))]
+        try:
+            with self.spans.span("sync.round_trip", 0):
+                res = round_trip(engines, self.probes(), perturbed_slot=perturbed.path, restore_slot=restore.path,
+                                 expected=expected, in_flight=self.rollout.in_flight)
+        finally:
+            delete_slot(perturbed.path)
+        secs["round_trip"] = res.seconds
+        return {"verdict": res.verdict, "engines": len(engines), "files_checked": len(now),
+                "files_sha256": files_digest(now), "slot": str(restore.path), "slot_tensors": restore.tensors,
+                "slot_manifest_sha256": restore.manifest_sha256, "partial": False, "tensors_read": expected,
+                "round_trip": res.as_dict(), "seconds": secs}
+
+
 # --- the whole -----------------------------------------------------------------------------------
 
 
@@ -943,6 +1195,15 @@ def build(cfg: RunConfig, *, config_path=None, commit: str | None = None, parts:
         raise WiringError(f"stand-in prompts: {exc}") from None
     compiler = parts.compiler if parts.compiler is not None else rollout_compiler(cfg)
     handles = parts.handles if parts.handles is not None else engine_handles(cfg, max_len)
+    if cfg.orchestrator.mode == "score":  # no trainer, no optimizer, no weight sync
+        from .score import Scorer
+
+        rollout = RolloutAdapter(cfg, tok, handles, max_len=max_len, spans=spans, compiler=compiler,
+                                 on_shutdown=[lambda: remove_node_dir(cfg)], clock=clock)
+        model = ServedModel(cfg, tok, rollout, spans=spans, dataset=dataset, probes=parts.probes)
+        reward = RewardAdapter(cfg, clock=clock, spans=spans, factories=parts.reward_factories)
+        return Scorer(cfg, pool=pool, rollout=rollout, reward=reward, model=model, clock=clock, spans=spans,
+                      commit=commit, config_path=config_path)
     trainer = TrainerAdapter(cfg, spans=spans, load_model=parts.load_model, device=parts.trainer_device,
                              require_fast_path=parts.require_fast_path, amp=parts.amp)
     rollout = RolloutAdapter(cfg, tok, handles, max_len=max_len, spans=spans, compiler=compiler,

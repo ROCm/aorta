@@ -32,7 +32,8 @@ END_REASONS = ("compiled", "no_change", "no_code_block", "turns_exhausted", "con
 LEG_STATES = ("clean", "finding", "fail", "unsettled", "skipped_by_plan", "not_run")
 LEAK_CHECKS = ("pass", "fail", "not_run")
 EXCLUDED_REASONS = ("quarantined", "engine_error", "unscored", "logprob_error", "no_sample", "group_dropped",
-                    "gap_gate", "no_step")
+                    "gap_gate", "no_step", "score_only")
+SCORE_ONLY = "score_only"  # a score run's episode (orchestrator.mode: score): never trained, sampled from v0
 EPISODE_KEYS = frozenset({
     "schema", "source", "run_id", "iteration", "chain_id", "prompt_id", "k", "adapter_version", "engine_id", "turns",
     "final_turn", "end_reason", "candidate_sha256", "reward", "status", "unscored_reason", "reward_version",
@@ -213,8 +214,10 @@ def validate_episode(rec: Any) -> None:
         _fail(where, str(exc))
     if (key.run_id, key.iteration, key.prompt_id, key.k) != (rec["run_id"], rec["iteration"], rec["prompt_id"], rec["k"]):
         _fail(where, "run_id, iteration, prompt_id and k must be the chain id's")
-    if run_id != rec["run_id"] or version != rec["iteration"] - 1:
-        _fail(where, f"adapter_version {rec['adapter_version']!r}: iteration n samples from v(n-1) of the same run")
+    sampled_from = 0 if rec["excluded_reason"] == SCORE_ONLY else rec["iteration"] - 1
+    if run_id != rec["run_id"] or version != sampled_from:
+        _fail(where, f"adapter_version {rec['adapter_version']!r}: iteration n samples from v(n-1) of the same run, "
+                     f"and every batch of a score run from v0")
     if not (_is_int(rec["engine_id"]) and rec["engine_id"] >= 0):
         _fail(where, f"engine_id must be an int >= 0, got {rec['engine_id']!r}")
     end = rec["end_reason"]

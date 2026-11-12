@@ -11,8 +11,9 @@ import json
 import sys
 
 MODULES = (
-    "aorlta.orchestrator.run", "aorlta.orchestrator.wiring", "aorlta.reward.service", "aorlta.reward.remote",
-    "aorlta.reward.factories", "aorlta.sync.writer", "aorlta.sync.landing", "aorlta.sync.merge",
+    "aorlta.orchestrator.run", "aorlta.orchestrator.wiring", "aorlta.orchestrator.score", "aorlta.reward.service",
+    "aorlta.reward.remote", "aorlta.reward.factories", "aorlta.sync.writer", "aorlta.sync.landing",
+    "aorlta.sync.merge", "aorlta.sync.roundtrip",
     "aorlta.trainer.ranks", "aorlta.trainer.rank_pool", "aorlta.trainer.batching", "aorlta.trainer.kernels",
     "aorlta.measure.timeline",
     "xxhash", "safetensors", "yaml", "click", "peft", "accelerate", "transformers", "fla", "causal_conv1d",

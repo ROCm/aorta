@@ -11,9 +11,11 @@ cover (DoRA, rsLoRA, rank or alpha patterns, modules_to_save, ...).
 
 The output keeps the base's layout byte for byte. Every base file is copied, and only the target tensors' data ranges
 inside the shards are rewritten, so the shard names, the safetensors headers, the tensor offsets and the index are
-the base's. The result is then checked twice: byte ranges against the base (everything but the targets identical,
-each target equal to the merge), and an independent safetensors read. `merge-manifest.json` records the inputs'
-hashes, the recipe, the timings, the checks and the sha256 of every output file and tensor. With --sensitivity it
+the base's. Each copy is hashed from the bytes it reads (`base.read_sha256`), and a target's copied bytes must be
+the tensor the merge read. The result is then checked twice: byte ranges against the base (everything but the
+targets identical, each target equal to the merge), and an independent safetensors read. `merge-manifest.json`
+records the inputs' hashes, the recipe, the timings, the checks and the sha256 of every output file and tensor. With
+--sensitivity it
 also counts the bf16 elements that a different fp32 summation order could flip, and checks that the CPU merge does
 not depend on the thread count.
 
@@ -34,7 +36,6 @@ import mmap
 import os
 import platform
 import re
-import shutil
 import struct
 import subprocess
 import sys
@@ -477,13 +478,23 @@ def merge_in_memory(base: Path, adapter: Adapter, *, expect_scale: float | None,
                   {"load_base_targets": load_s, "merge": res.stats.seconds})
 
 
-def write_output(base: Path, out: Path, merged: Merged) -> list[str]:
-    """Copy every base file into `out` (which must not exist), then rewrite the target ranges in the shards."""
+def copy_hashed(src: Path, dst: Path) -> str:
+    """Copy `src` to a new `dst`; the sha256 of the bytes copied, from the same read."""
+    h = hashlib.sha256()
+    with open(src, "rb") as fi, open(dst, "xb") as fo:
+        for block in iter(lambda: fi.read(HASH_CHUNK), b""):
+            h.update(block)
+            fo.write(block)
+    return h.hexdigest()
+
+
+def write_output(base: Path, out: Path, merged: Merged) -> dict[str, str]:
+    """Copy every base file into `out` (which must not exist), then rewrite the target ranges in the shards. Returns
+    the sha256 of the bytes each copy read."""
     shards = shard_files(base)
     names = base_files(base)
     out.mkdir()
-    for name in names:
-        shutil.copyfile(base / name, out / name)
+    read = {name: copy_hashed(base / name, out / name) for name in names}
     for fn, keys in sorted(shards.items()):
         n, entries = read_header(base / fn)
         with open(out / fn, "r+b") as f:
@@ -492,11 +503,16 @@ def write_output(base: Path, out: Path, merged: Merged) -> list[str]:
                 data = tensor_bytes(t)
                 if e["dtype"] != "BF16" or e["shape"] != list(t.shape) or len(data) != e["end"] - e["begin"]:
                     raise CheckFailed(f"{fn}:{key}: header {e} does not fit the merged {t.dtype} {tuple(t.shape)}")
+                # The merge read the targets before the copy: what it merged must be what was copied and hashed.
+                f.seek(8 + n + e["begin"])
+                if f.read(len(data)) != tensor_bytes(merged.base_targets[key]):
+                    raise CheckFailed(f"{fn}:{key}: the copy is not the tensor the merge read; "
+                                      "the base changed while it was merged")
                 f.seek(8 + n + e["begin"])
                 f.write(data)
             f.flush()
             os.fsync(f.fileno())
-    return names
+    return read
 
 
 # --- the checks -----------------------------------------------------------------------------------------------
@@ -740,7 +756,7 @@ def cmd_merge(args) -> int:
         sens = sensitivity(merged.base_targets, merged.factors, merged.weights, args.threads)
         seconds["sensitivity"] = time.monotonic() - t
     t = time.monotonic()
-    write_output(base, partial, merged)
+    read = write_output(base, partial, merged)
     seconds["write"] = time.monotonic() - t
     checks = run_checks(base, partial, merged)
     seconds["check_bytes"], seconds["check_reread"] = checks.pop("bytes_seconds"), checks.pop("reread_seconds")
@@ -753,8 +769,8 @@ def cmd_merge(args) -> int:
         "schema": SCHEMA, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "pass": ok,
         "tool": {"path": "tools/merge_base_adapter.py", **_git_state(), "argv": sys.argv[1:]},
         "versions": _versions(), "torch_threads": args.threads,
-        "base": {"dir": str(base), "revision": revision, "files": files, "keys": len(merged.base_keys),
-                 "targets": len(merged.targets), "pins": pins},
+        "base": {"dir": str(base), "revision": revision, "files": files, "read_sha256": read,
+                 "keys": len(merged.base_keys), "targets": len(merged.targets), "pins": pins},
         "adapter": _adapter_record(adapter), "cross_check": xcheck,
         "recipe": {"formula": "W' = bf16(W.float() + (lora_alpha / r) * (B.float() @ A.float()))",
                    "scale": adapter.scale, "device": "cpu", "accumulation": "float32",

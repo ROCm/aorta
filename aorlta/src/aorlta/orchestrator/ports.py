@@ -94,6 +94,8 @@ class RolloutPort(Protocol):
 
 
 class RewardPort(Protocol):
+    legs: tuple[str, ...]  # every leg a result can carry (the profile's): the score report counts each
+
     def submit(self, cand: Candidate) -> Future:
         ...
 
