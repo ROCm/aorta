@@ -179,6 +179,19 @@ def test_a_new_ledger_syncs_its_directory_so_a_power_loss_cannot_drop_the_file(t
     assert synced == [tmp_path / "evidence"] * 2
 
 
+def test_the_run_directory_is_synced_before_an_iteration_commits_also_when_iterations_already_exists(
+        tmp_path, monkeypatch):
+    from aorlta.episodes import writer
+
+    synced = []
+    monkeypatch.setattr(writer, "_fsync_dir", lambda d: synced.append(Path(d)))
+    IterationOutputs(tmp_path, 1).commit()
+    assert synced[0] == tmp_path  # the new iterations/ entry, before anything in it is committed
+    synced.clear()
+    IterationOutputs(tmp_path, 2)  # iterations/ exists: an interrupted attempt may not have synced it
+    assert synced == [tmp_path]
+
+
 def test_a_new_evidence_shard_is_synced_with_its_parent_before_the_manifest_names_it(tmp_path, monkeypatch):
     from aorlta.episodes import writer
 

@@ -5,6 +5,7 @@ import json
 import os
 import random
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -164,6 +165,20 @@ def test_a_checkpoint_commits_on_a_filesystem_without_directory_fsync(tmp_path, 
     _fail_dir_fsync(monkeypatch, code)
     write_checkpoint(root, _state(1), _save(b"a")).commit()
     assert complete_checkpoints(root) == [1] and verify_checkpoint(root / "iter-000001").iteration == 1
+
+
+def test_the_run_directory_is_synced_before_a_checkpoint_commits_also_when_ckpt_already_exists(tmp_path, monkeypatch):
+    from aorlta.orchestrator import state as state_mod
+
+    root = tmp_path / "ckpt"
+    synced, real = [], state_mod._fsync_path
+    monkeypatch.setattr(state_mod, "_fsync_path", lambda p: (synced.append(Path(p)), real(p)))
+    pending = write_checkpoint(root, _state(1), _save(b"a"))
+    assert tmp_path in synced  # the new ckpt/ entry, before the commit can make the checkpoint visible
+    pending.commit()
+    synced.clear()
+    write_checkpoint(root, _state(2), _save(b"b")).commit()  # ckpt/ exists: an interrupted attempt may not have synced it
+    assert tmp_path in synced
 
 
 def test_only_a_directory_may_refuse_fsync(tmp_path, monkeypatch):
