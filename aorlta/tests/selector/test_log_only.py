@@ -242,7 +242,8 @@ def test_the_plan_is_requested_after_s1_and_not_for_a_candidate_decided_before(t
     cands = [cand(i) for i in range(12)]
     overrides = {(cands[0].candidate_id, "gate.static"): FakeOutcome("fail", "static"),
                  (cands[1].candidate_id, "gate.compile"): FakeOutcome("fail", "compile_error")}
-    results, _, _ = selector_run(tmp_path, hook(planner=SkipNothing()), FakeAdapterConfig(overrides=overrides), cands)
+    results, _, _ = selector_run(tmp_path, hook(planner=SkipNothing(), plan_timeout_s=PLAN_TIMEOUT_S),
+                                 FakeAdapterConfig(overrides=overrides), cands, scale=SCALE)
     assert results[0].reward == -1.0 + -0.05 * (cands[0].response_tokens / 4096)
     for res in results[:2]:
         assert (res.plan["status"], res.plan["reason"], res.plan["requested_at"]) == ("not_requested",
@@ -257,7 +258,8 @@ def test_the_plan_is_requested_after_s1_and_not_for_a_candidate_decided_before(t
 def test_a_reward_cache_hit_carries_its_own_coin_and_no_plan(tmp_path):
     text = "```cpp\n// the same kernel\n```"
     cands = [cand(i, text=text, tokens=500) for i in range(40)]
-    r = rig(tmp_path, selector=hook(planner=SkipEverything(), audit_fraction=0.5))
+    r = rig(tmp_path, selector=hook(planner=SkipEverything(), audit_fraction=0.5, plan_timeout_s=PLAN_TIMEOUT_S),
+            scale=SCALE)
     try:
         first = r.service.submit(cands[0]).result(timeout=60)  # fills the reward cache
         rest = r.run(cands[1:])
@@ -281,8 +283,9 @@ def test_the_plan_log_carries_ids_and_numbers_never_text(tmp_path):
                          f"{canary_ctx} {req.kernel_features['response_text']}")
 
     cands = [cand(i, text=f"```cpp\n// {canary_src} {i}\n```") for i in range(8)]
-    h = hook(planner=Answers(make))
-    results, _, _ = selector_run(tmp_path, h, FakeAdapterConfig(), cands)
+    h = hook(planner=Answers(make), plan_timeout_s=PLAN_TIMEOUT_S)
+    results, _, _ = selector_run(tmp_path, h, FakeAdapterConfig(), cands, scale=SCALE)
+    assert [r.plan["status"] for r in results] == ["ok"] * len(cands), [r.plan for r in results]
     assert all(canary_src in seen[c.candidate_id] for c in cands)  # the planner reads the source
     path = h.write_plan_log(tmp_path / "plan-log.jsonl")
     text = path.read_text()
@@ -324,7 +327,7 @@ def test_the_drain_deadline_and_close_never_leave_a_plan_or_a_result_waiting(tmp
 def test_the_leg_costs_the_planner_sees_are_running_medians_of_settled_runs(tmp_path):
     rec = Recording(SkipNothing())
     lat = FakeAdapterConfig(per_leg={"ref.native": FakeLegProfile(latency_s=4.0), "san.consan": FakeLegProfile(latency_s=9.0)})
-    h = hook(planner=rec)
+    h = hook(planner=rec, plan_timeout_s=PLAN_TIMEOUT_S)
     rec.hook = h
     r = rig(tmp_path, selector=h, adapter=lat, scale=SCALE)
     try:
