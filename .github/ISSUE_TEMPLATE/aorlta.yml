@@ -1,0 +1,54 @@
+name: AORLTA problem or question
+description: Something in aorlta/ (the GRPO training loop) failed, was confusing, or is missing.
+title: "aorlta: "
+labels: [aorlta]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying AORLTA. For a docs problem, start the title with `docs:`.
+        Please remove anything private from logs and configs (paths, hostnames, data) before posting.
+  - type: textarea
+    id: what
+    attributes:
+      label: What you were doing
+      description: The task or vertical, and what you expected to happen.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: "`git rev-parse HEAD` of your aorta checkout."
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: e.g. Qwen/Qwen3.5-4B at revision 851bf6e8..., or your own checkpoint.
+  - type: input
+    id: gpus
+    attributes:
+      label: GPUs
+      description: How many, and which (e.g. 8x MI350X), or CPU only.
+  - type: textarea
+    id: command
+    attributes:
+      label: The full command, and the config
+      description: The exact command you ran, and the run config (or the keys you changed from a shipped one).
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: The end of the log
+      description: The last 50 lines of `runs/job-<id>.out` or the command's output, and `run_result.json` if the run stopped.
+      render: text
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+    validations:
+      required: true

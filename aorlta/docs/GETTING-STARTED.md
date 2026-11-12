@@ -140,6 +140,60 @@ Code comments and some config comments cite labels of the internal design notes 
 ones you meet in configs are D7 (the minimum scored fraction), D9 (`rollout.thinking`), D10 (the GPU layout) and
 D11 (`sync.partial`).
 
+## How many GPUs
+
+AORLTA runs on one node; it does not span nodes. On that node, the config says which GPU does what:
+
+| key | what it places |
+|---|---|
+| `rollout.engines` | one TokenSpeed engine per GPU index listed |
+| `trainer.ranks`, `trainer.devices` | LoRA trainer ranks: with `devices` null, rank r shares engine r's GPU (it gets what the engine leaves, `1 - gpu_memory_utilization`); a list gives the ranks GPUs of their own |
+| the check profile, `reward.remote.adapters` | where GPU checks run (the stand-in sanitizers: their own GPUs; a plugin's check: its own settings) |
+
+| GPUs | layout | runs |
+|---|---|---|
+| 1 | `engines: [0]`, `ranks: 1` (beside the engine), CPU checks | the Q&A example (`configs/qa-*.yaml`, `configs/arith-*.yaml`); measured below |
+| 2 | `engines: [0, 1]`, `ranks: 1` or 2 | any task without GPU checks; untested |
+| 4 | `engines: [0, 1, 2, 3]`, `ranks: 1` to 4 | `configs/dev-standin.yaml`; with GPU checks, put them on GPUs the engines leave (`hipk.run.gpus`) |
+| 8 | 4 engines and ranks, the other 4 for GPU checks | `configs/standin.yaml`, `configs/hipk-*.yaml` |
+
+Memory, measured from the job's `vram.tsv` (peak per GPU, MI350X, 288 GiB), with Qwen3.5-4B:
+
+| what | peak |
+|---|---|
+| a TokenSpeed engine at `gpu_memory_utilization: 0.45` | 131 GiB: an engine reserves its share for its KV cache, whatever the model's size, so lower the share on a GPU someone else uses |
+| an engine plus a colocated rank, 512-token replies (`configs/arith-train.yaml`) | 187 GiB |
+| an engine plus a colocated rank, 4096-token replies, `micro_batch_tokens: 20480` (`configs/dev-standin.yaml`) | 266 GiB |
+
+Estimates, not measured: a rank holds the bf16 base (2 bytes per parameter), a bf16 copy of the merged target
+weights it publishes, the small fp32 LoRA and its optimizer state, and activations that grow with
+`micro_batch_tokens`. So a 4B model needs roughly 20 GB before activations, and a 27B model roughly 110 GB, which
+still fits beside an engine only with `gpu_memory_utilization` lowered. An engine runs the whole model on one GPU
+(no tensor parallelism here), so a model whose bf16 weights do not fit in an engine's share (about 60B parameters
+at 0.45 of 288 GiB) does not fit at all.
+
+On a node other people use: give the run the GPU indices that are free (`rocm-smi` shows them), lower
+`rollout.gpu_memory_utilization`, and keep to one AORLTA job per node. Engines listen on fixed host ports (20000 +
+2000 x engine index), and the job removes any `aorlta-run-*` container it finds when it starts, taking it for one a
+cancelled job left behind. The job asks Slurm for the whole node (`--exclusive`).
+
+## Models, checkpoints and adapters
+
+- **The model** is `model.base_dir`: a Hugging Face snapshot directory (weights, config and tokenizer), read
+  offline. To switch, download the model (`hf download <repo> --revision <rev>`) and point `model.base_dir` at its
+  snapshot. Today that must be a Qwen3.5-family model (another size, or a fine-tune of one): the turn templates use
+  Qwen3.5's control-token ids, the trainer checks for Qwen3.5's linear-attention kernels
+  (`trainer.require_fast_path`), and the weight sync and the merge tool expect Qwen3.5's checkpoint layout
+  (`model.language_model.layers.N...`). A Qwen3 model such as Qwen3-0.6B needs those three generalised first; it is
+  the most requested change.
+- **Checkpoints** are written to `<run.root>/<run.source>/<run.run_id>/ckpt/iter-<n>/` after every iteration, and the
+  last `orchestrator.keep_ckpts` (2) are kept; older ones are deleted by the run. Each holds the fp32 LoRA, the Adam
+  state and the RNG states (a few hundred MB for Qwen3.5-4B, an estimate from its 130 MB fp32 LoRA). Delete a
+  finished run's directory, or its `ckpt/`, when you no longer need to resume it.
+- **Adapters and merged models**: the README's "Run outputs" says how to turn a checkpoint into a PEFT adapter, how
+  to merge an adapter into its base (`tools/merge_base_adapter.py`), and how to score it: a score run with
+  `model.adapter_dir` set to the adapter serves the base plus the adapter.
+
 ## When things go wrong
 
 The job's exit status says where it stopped; its log says why.

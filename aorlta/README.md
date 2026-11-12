@@ -258,6 +258,13 @@ TensorBoard reads `tb/` (checked with 2.21; it is not a dependency). The checkpo
 named `<module>.lora_A` and `<module>.lora_B`. The engines' weight slots are in `/dev/shm` and are removed when the
 run ends; a run has no export to a merged Hugging Face model or a PEFT adapter directory yet.
 
+## Getting help
+
+Open an issue on this repository with the **AORLTA problem or question** template (label `aorlta`): what you ran,
+the commit, the model, the GPUs, the full command and the end of the log. Vivek Khandelwal (@vivekkhandelwal1)
+maintains AORLTA and reads them. Feedback on these docs is as welcome as a bug report: open an issue titled
+`docs: ...` for anything that was unclear, wrong or missing.
+
 ## Known limits
 
 - No eval exporter (`orchestrator.eval_every` must stay null), so no evaluation during a run.
