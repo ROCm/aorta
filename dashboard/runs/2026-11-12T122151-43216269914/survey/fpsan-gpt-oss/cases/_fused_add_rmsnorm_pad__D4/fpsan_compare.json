@@ -1,0 +1,155 @@
+{
+  "kernel": "_fused_add_rmsnorm_pad",
+  "scenario": "D4",
+  "reference": {
+    "kernel": "_fused_add_rmsnorm_pad",
+    "changes": [
+      "num_stages 2 -> 1"
+    ]
+  },
+  "sides": {
+    "reference": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd",
+      "tensors": [
+        {
+          "name": "arg0",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            2880
+          ],
+          "sha256": "72a9a2637e4e4157bb37427fba5ff30f76e29fada8a532901bddb7be02c67beb"
+        },
+        {
+          "name": "arg1",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            2880
+          ],
+          "sha256": "2ea1d1bb2f9353baf07e03ad1c15d79ee1cbc60cbbc675f053e0c3b171ac4de7"
+        },
+        {
+          "name": "arg2",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            3072
+          ],
+          "sha256": "d7463c6d2312b2affea0d57f12f0df58dc604aa0a104b135a678e4440ed57786"
+        },
+        {
+          "name": "arg3",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            2880
+          ],
+          "sha256": "69f06fd2419a5c1d984a6b8f49e7b8ca9dfbc6bfa4414c1a5c6d24445b793f6c"
+        },
+        {
+          "name": "arg4",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            2880
+          ],
+          "sha256": "f20103aa925da3502e95f691b0392ee8c076b6ee637faf74b4edc18746be18fa"
+        }
+      ],
+      "kernel": "_fused_add_rmsnorm_pad",
+      "seconds": 2.3,
+      "cache": {
+        "objects": [
+          {
+            "object": "_fused_add_rmsnorm_pad.hsaco",
+            "name": "_fused_add_rmsnorm_pad",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 14,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    },
+    "candidate": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd",
+      "tensors": [
+        {
+          "name": "arg0",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            2880
+          ],
+          "sha256": "72a9a2637e4e4157bb37427fba5ff30f76e29fada8a532901bddb7be02c67beb"
+        },
+        {
+          "name": "arg1",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            2880
+          ],
+          "sha256": "2ea1d1bb2f9353baf07e03ad1c15d79ee1cbc60cbbc675f053e0c3b171ac4de7"
+        },
+        {
+          "name": "arg2",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            3072
+          ],
+          "sha256": "d7463c6d2312b2affea0d57f12f0df58dc604aa0a104b135a678e4440ed57786"
+        },
+        {
+          "name": "arg3",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            128,
+            2880
+          ],
+          "sha256": "69f06fd2419a5c1d984a6b8f49e7b8ca9dfbc6bfa4414c1a5c6d24445b793f6c"
+        },
+        {
+          "name": "arg4",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            2880
+          ],
+          "sha256": "f20103aa925da3502e95f691b0392ee8c076b6ee637faf74b4edc18746be18fa"
+        }
+      ],
+      "kernel": "_fused_add_rmsnorm_pad",
+      "seconds": 2.3,
+      "cache": {
+        "objects": [
+          {
+            "object": "_fused_add_rmsnorm_pad.hsaco",
+            "name": "_fused_add_rmsnorm_pad",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 14,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    }
+  },
+  "differing_tensors": [],
+  "result": {
+    "reference_digest": "2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd",
+    "candidate_digest": "2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd",
+    "reference_instrumented": true,
+    "candidate_instrumented": true,
+    "target": "gfx950"
+  },
+  "seconds": 4.6
+}
