@@ -14,6 +14,9 @@ This directory is a self-contained Python package, `aorlta`, inside the aorta re
 import it, and the stand-in checks use aorta's sanitizer backends from a separate checkout. It is the framework, not
 a model: so far it has run only on stand-ins, the public Qwen3.5-4B, our own prompts and our own cheap checks.
 
+New to it? [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) is the order to do things in: what you need, the CPU
+tests, the first GPU run, reading the outputs, the settings, and what the job's exit codes mean.
+
 ## Status
 
 On stand-ins the loop runs end to end on one node. The last stand-in training run (`configs/standin.yaml`'s settings,
@@ -75,7 +78,11 @@ labels (Section 6.x, C1-C9, D7, ...) of our internal design notes, which are not
   job mounts from the host, needs ROCm 7.0.2). On a node without the TokenSpeed image the job builds it (about
   12 min) from a source tree of that commit, `TS_SRC`.
 - The base model `Qwen/Qwen3.5-4B` at revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`, already in the Hugging
-  Face cache: the job runs offline.
+  Face cache: the job runs offline. Only the Qwen3.5 family works as it stands (the turn templates use its
+  control-token ids, and the trainer its linear-attention fast path).
+- A stand-in prompt pool: a kernel dataset in the format of `examples/standin-pool/`, with at least 40 kernels of
+  60 to 400 instructions (the landing check picks 40). The dataset the stand-in runs used is not published, and the
+  example pool is too small to run on.
 - What the stand-in checks call: aorta at `d22f6116235c05395a0241a83d6f7e952a988454` (a commit of this repository),
   for its sanitizer backends and test kernels; rocjitsu's `rj_waitcheck` and `librocjitsu_dbi_hooks.so`, from
   ROCm/rocm-systems branch `shared/rocjitsu/sanitizers`; the ROCm 7.0.2 ASan runtime libraries; a libstdc++ recent
@@ -110,8 +117,14 @@ data: {prompt_pools: [/data/aorlta/standin-pool]}
 cd aorlta                  # from the root of the aorta checkout, in a Python 3.12 venv
 pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt
 pip install -e . --no-deps
-python -m pytest -q -n auto
+export OMP_NUM_THREADS=1 MALLOC_MMAP_THRESHOLD_=65536 MALLOC_ARENA_MAX=2
+python -m pytest -q -n 8 -m "not heavy and not cpu_run"
+OMP_NUM_THREADS=2 python -m pytest -q -n 2 -m "heavy and not cpu_run"
+OMP_NUM_THREADS=4 python -m pytest -q -m cpu_run
 ```
+
+These are CI's three parts. Keep the worker counts small: `-n auto` on a machine with many cores runs out of memory,
+since a worker can grow by about 1.5 GB for each wired test it runs.
 
 Run them in a git checkout: a run records its code commit. Tests that need hipcc, a GPU, the base model's tokenizer
 (read from `HF_HOME`), a full stand-in dataset (`AORLTA_STANDIN_DATASET`), aorta's fixtures or the checker tools skip
@@ -134,7 +147,8 @@ python -m aorlta.orchestrator.run --config "$SCRATCH/dev.yaml" --components fake
 ```
 
 It prints `{"status": "completed", "iterations_completed": 3, ...}` and writes a run directory (see "Run outputs")
-under `$SCRATCH/runs/standin/`.
+under `$SCRATCH/runs/standin/`. The fakes bring their own prompts and checks: this checks the config and the loop,
+not the prompt pool or the checks the config names.
 
 ## A stand-in run on GPUs
 
