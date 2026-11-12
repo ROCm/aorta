@@ -1,0 +1,41 @@
+# AORLTA trainer image: the TokenSpeed image plus the kernels transformers 5.12 needs for Qwen3.5's
+# linear-attention fast path on gfx950 (fla-core for the gated-delta rule and the fused gated norm,
+# causal-conv1d built from source for gfx950), PEFT for the LoRA, and xxhash for the weight-slot manifests
+# (aorlta.sync).
+# Build context: this directory. Base: aorlta-tokenspeed:3b684074, TokenSpeed at commit 3b684074 built from its
+# docker/Dockerfile.amd (jobs/aorlta-run.sbatch builds it on a node that lacks it).
+FROM aorlta-tokenspeed:3b684074
+
+USER root
+LABEL aorlta.image="trainer"
+
+ARG MAX_JOBS=64
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+WORKDIR /opt/aorlta-build
+
+# Exact versions and hashes, --no-deps: nothing already in the TokenSpeed image is upgraded or replaced.
+RUN printf '%s\n' \
+      'fla-core==0.6.0 --hash=sha256:b0708b70e0b119cd58a0a5146ea56cb175cef6ed969d8ac60267e3e077ce3ebd' \
+      'einops==0.8.2 --hash=sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193' \
+      'peft==0.21.2 --hash=sha256:106ab6077ff72c54d21577f9af5970e34bac7582cb14209f7b2b511e322a4eae' \
+      'accelerate==1.15.0 --hash=sha256:97eacca0b73e45cb867dbf8c5d5d4dc32219544300e0c8992c7334dc2ef33cec' \
+      'xxhash==4.0.2 --hash=sha256:7c7c95dba490be3b4e5a2fa5595b4d4f088fe7b8726e5998b8c1d83b1f9eb3e4' \
+      > wheels.txt && \
+    python3 -m pip install --no-cache-dir --no-deps --require-hashes --only-binary=:all: -r wheels.txt
+
+# causal-conv1d has no ROCm wheel: build the pinned sdist for gfx950 against the image's torch. Its setup.py
+# passes -std=c++17 on the HIP path, and torch 2.14's headers refuse anything below C++20.
+ARG CC1D_URL=https://files.pythonhosted.org/packages/f4/d1/eba27735f31bd5527d39a3c7f693e6ded7b844cab275db719a15ad37b6cd/causal_conv1d-1.7.0.tar.gz
+RUN python3 -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], 'causal_conv1d-1.7.0.tar.gz')" "$CC1D_URL" && \
+    echo "3202758494eaa7b597ce1c282dfa188889506bfcb92cad3c407d26736bfcd32b  causal_conv1d-1.7.0.tar.gz" | sha256sum -c - && \
+    tar xzf causal_conv1d-1.7.0.tar.gz && cd causal_conv1d-1.7.0 && \
+    sed -i 's/-std=c++17/-std=c++20/g' setup.py && [ "$(grep -c -- '-std=c++20' setup.py)" = 2 ] && \
+    CAUSAL_CONV1D_FORCE_BUILD=TRUE HIP_ARCHITECTURES=gfx950 PYTORCH_ROCM_ARCH=gfx950 MAX_JOBS=${MAX_JOBS} \
+    python3 -m pip install --no-cache-dir --no-deps --no-build-isolation -v . && \
+    cd .. && rm -rf causal_conv1d-1.7.0 causal_conv1d-1.7.0.tar.gz && \
+    python3 -c "import torch, causal_conv1d_cuda, importlib.metadata as m; \
+print({d: m.version(d) for d in ('fla-core', 'causal-conv1d', 'peft', 'accelerate', 'einops', 'xxhash', 'transformers', 'torch')})"
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

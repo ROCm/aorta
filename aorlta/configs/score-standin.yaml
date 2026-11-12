@@ -1,0 +1,53 @@
+# A score run (orchestrator.mode: score; orchestrator/score.py): the public Qwen3.5-4B on 16 stand-in prompts, 4
+# samples each, one pass. No trainer, no optimizer, no weight sync. The layout is configs/standin.yaml's without the
+# trainer ranks: one engine on each of GPUs 0-3, ConSan on GPUs 4 and 6, ASan on 5 and 7, and its rollout and reward
+# sections (standin.v11, the 30 s ConSan limit). Mechanics only: the stand-in prompts show a kernel's original
+# disassembly and ask for a HIP source, so the scores say little about the model. For a base and a PEFT adapter, add
+# `adapter_dir: /path/to/the/adapter` under `model:`.
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir,
+# data.prompt_pools[0].path and reward.remote.socket_dir (which must be under /dev/shm for jobs/aorlta-run.sbatch).
+run:
+  run_id: score-standin
+  source: standin
+  root: /scratch/aorlta/runs
+model:
+  base_dir: /data/hf/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  source: standin
+data:
+  prompt_pools:
+    - path: /data/aorlta/standin-pool
+      source: standin
+rollout:
+  engines: [0, 1, 2, 3]
+  K: 4
+  P: 16
+  max_repair_turns: 2
+  thinking: "off"
+  temperature: 0.7
+  top_p: 0.95
+  top_k: -1
+  max_new_tokens: 4096
+  max_feedback_chars: 2000
+  request_timeout_s: 1800
+  gpu_memory_utilization: 0.45
+  compile_adapter: standin.hipcc
+  parse_adapter: standin.parse
+  leak_check_adapter: none
+  feedback_template: standin
+reward:
+  profile: standin-gpu
+  reward_fn: standin.v11
+  remote:
+    socket_dir: /dev/shm/aorlta-checkers/score-standin
+    adapters:
+      standin.aorta_consan: [4, 6]
+      standin.aorta_asan: [5, 7]
+  gpu_check_s:
+    san.consan: 30.0
+orchestrator:
+  mode: score
+  run_seed: 20261103
+  prompts_per_iteration: 16
+  score:
+    prompts: 16  # the first 16 of the pool in run_seed's order: a training run's iteration 1 with this seed
+    passes: 1
