@@ -404,6 +404,96 @@ sys.exit(tool.main())
         assert {f"base/{n}": h for n, h in wiring.top_files(base).items()}.items() <= recorded.items()
 
 
+@pytest.mark.parametrize("window", ["after_the_hash_until_the_checks_are_done", "only_while_the_targets_are_read"])
+def test_a_shard_that_changes_while_it_is_merged_and_changes_back_is_refused(tmp_path, tiny_base, dataset,
+                                                                             tiny_adapter, window):
+    """The tool hashes the base, reads the target tensors, then copies the shards. A shard changed after the hash
+    and changed back once the tool's checks are done gives a copy nobody recorded; a target tensor changed only
+    while the targets are read gives a merge of weights nobody recorded, with a copy that is the plan's."""
+    base = tmp_path / "shared-base"
+    shutil.copytree(tiny_base, base)
+    shard = sorted(set(read_base_index(base).values()))[0]
+    recorded = {f"base/{n}": h for n, h in wiring.top_files(base).items()}
+    recorded.update({f"adapter/{n}": sha256_file(tiny_adapter / n)
+                     for n in ("adapter_model.safetensors", "adapter_config.json")})
+    target = window == "only_while_the_targets_are_read"
+    racing = tmp_path / "racing_tool.py"
+    racing.write_text(f"""import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("merge_tool", {str(wiring.MERGE_TOOL)!r})
+tool = sys.modules["merge_tool"] = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+from aorlta.sync import writer
+from aorlta.sync.merge import is_target_key
+shard = pathlib.Path({str(base)!r}) / {shard!r}
+original = shard.read_bytes()
+n, entries = tool.read_header(shard)
+key = sorted(k for k in entries if is_target_key(k) == {target!r})[0]
+a, z = 8 + n + entries[key]["begin"], 8 + n + entries[key]["end"]
+changed = bytearray(original)
+changed[a + 1:z:2] = bytes(b ^ 0x80 for b in original[a + 1:z:2])  # every bf16 element of one tensor negated
+if {target!r}:
+    load = writer.load_base_tensors
+    def load_base_tensors(*args, **kwargs):
+        shard.write_bytes(changed)
+        try:
+            return load(*args, **kwargs)
+        finally:
+            shard.write_bytes(original)
+    writer.load_base_tensors = load_base_tensors
+else:
+    hashed = tool.sha256_path
+    def sha256_path(path):
+        digest = hashed(path)
+        if path == shard:
+            shard.write_bytes(changed)
+        return digest
+    tool.sha256_path = sha256_path
+    checks = tool.run_checks
+    def run_checks(base, out, merged):
+        result = checks(base, out, merged)
+        shard.write_bytes(original)
+        return result
+    tool.run_checks = run_checks
+sys.exit(tool.main())
+""")
+    cfg = score_config(tmp_path, base, dataset, run_id="raced-shard", adapter=tiny_adapter)
+    model = wiring.ServedModel(cfg, None, None, spans=None, dataset=None, probes=E.PROBES, merge_tool=racing)
+    with pytest.raises(RunStopped) as stop:
+        model.prepare(recorded)
+    assert {f"base/{n}": h for n, h in wiring.top_files(base).items()}.items() <= recorded.items()
+    if target:  # the copy is the plan's: only the tool, which holds the bytes it merged, can see it
+        assert stop.value.reason == "model_merge_failed" and stop.value.detail["rc"] == 1, stop.value.detail
+        assert "the base changed while it was merged" in stop.value.detail["stderr"]
+    else:
+        assert stop.value.reason == "model_merge_unverified", stop.value.detail
+        assert stop.value.detail["problems"] == [f"the base changed while it was merged: {shard}"]
+
+
+def test_a_merge_manifest_that_does_not_record_the_bytes_the_tool_read_is_refused(tmp_path, tiny_base, dataset,
+                                                                                  tiny_adapter):
+    recorded = {f"base/{n}": h for n, h in wiring.top_files(tiny_base).items()}
+    recorded.update({f"adapter/{n}": sha256_file(tiny_adapter / n)
+                     for n in ("adapter_model.safetensors", "adapter_config.json")})
+    older = tmp_path / "older_tool.py"
+    older.write_text(f"""import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("merge_tool", {str(wiring.MERGE_TOOL)!r})
+tool = sys.modules["merge_tool"] = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+rc = tool.main()
+manifest = pathlib.Path(sys.argv[sys.argv.index("--out") + 1]) / tool.MANIFEST_NAME
+doc = json.loads(manifest.read_text())
+del doc["base"]["read_sha256"]
+manifest.write_text(json.dumps(doc))
+sys.exit(rc)
+""")
+    cfg = score_config(tmp_path, tiny_base, dataset, run_id="older", adapter=tiny_adapter)
+    model = wiring.ServedModel(cfg, None, None, spans=None, dataset=None, probes=E.PROBES, merge_tool=older)
+    with pytest.raises(RunStopped) as stop:
+        model.prepare(recorded)
+    assert stop.value.reason == "model_merge_unverified"
+    assert stop.value.detail["problems"] == ["the merge manifest does not record the bytes the tool read"]
+
+
 def test_a_weight_slot_whose_files_are_not_its_manifest_stops_the_score_run(tmp_path, tiny_base, dataset,
                                                                              monkeypatch):
     from aorlta.sync import writer

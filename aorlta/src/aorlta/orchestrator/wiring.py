@@ -1075,13 +1075,19 @@ class ServedModel:
                 ad["weights_sha256"], ad["config_sha256"]):
             problems.append("the merged adapter is not the adapter the run plan hashed")
         # The tool hashes the base before it reads and copies it, and checks the output against the base as it is
-        # after, so a base file changed in between passes its checks. The copies must be the files it hashed, and
-        # the base must still be them once the merge is done.
+        # after, so a base file changed in between passes its checks. The bytes each copy read must be the files
+        # the plan hashed, the copies must still be them, and the base must still be them once the merge is done.
+        read = manifest["base"].get("read_sha256")
+        if not isinstance(read, dict):
+            problems.append("the merge manifest does not record the bytes the tool read")
+            read = made_from
+        read = {n: h for n, h in read.items() if not n.startswith(".") and n != MERGE_MANIFEST}
         shards = {t["file"] for t in manifest["output"]["tensors"].values()}
         copies = sorted(n for n, f in manifest["output"]["files"].items()
                         if n in made_from and n not in shards and f["sha256"] != made_from[n])
         now = top_files(m.base_dir)
-        changed = sorted(set(copies) | {n for n in set(now) | set(made_from) if now.get(n) != made_from.get(n)})
+        changed = sorted(set(copies) | {n for seen in (read, now) for n in set(seen) | set(made_from)
+                                        if seen.get(n) != made_from.get(n)})
         if changed:
             problems.append(f"the base changed while it was merged: {', '.join(changed[:5])}")
         if problems:
