@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Render a sanitizer-nightly dashboard from ``aorta.sanitizer_report/0.1`` output.
 
-Consumes the three daily recipe reports and the committed verdict baselines and
+Consumes the gated daily recipe reports and the committed verdict baselines and
 emits, into ``--out-dir``:
 
-* ``index.html`` -- a self-contained (no CDN / no external JS) status page with two
+* ``index.html`` -- a self-contained (no CDN / no external JS) status page with three
   tabs (a pure CSS ``:checked`` radio toggle -- switching needs no network):
   **Nightly gate** -- the baseline-checked regression gate: a Healthy or Failed
   pill beside the title, latest per-recipe table, **per-kernel detail** (code
@@ -20,7 +20,11 @@ emits, into ``--out-dir``:
   card footer links its **run area** -- the published case *directory*, which also
   carries the sanitizer logs, the recipe as it ran and a REPRODUCE.md, so the
   reproduce command on the card is actionable (#384). Each case also carries a
-  one-line observation summary.
+  one-line observation summary. **FpSan** holds the ``fpsan-<group>``
+  survey cases, kept off Workload survey: one row per (kernel, scenario) pair
+  with its FpSan verdict and the reference and candidate digests. They are
+  read, published and retained exactly like the other survey cases
+  (``runs/<id>/survey/fpsan-<group>/``) and split out only to render.
 * ``summary.md`` -- a GitHub Actions job-summary fragment (append to
   ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail.
 * ``data.json`` -- the aggregated structure for any richer consumer.
@@ -31,23 +35,25 @@ When ``--status`` points at an unhealthy manifest, an error-colored "stale" bann
 rendered at the top of both ``index.html`` and ``summary.md`` so a failed nightly
 never leaves the previous healthy page looking current.
 
-The published page has a third tab, **Manual runs**, that this nightly never
+The published page has a fourth tab, **Manual runs**, that this nightly never
 renders: ASan has no nightly lane, so Pages adds it at deploy time from
 committed results (``add_asan_tab`` / ``scripts/sanitizers/add_asan_tab.py``).
-The radio id stays ``tab-asan``. ``add_asan_tab`` splices onto ``tab-survey``
-first, then ``tab-guardrails``. The header's run-details icon describes this
-nightly run, so it is hidden while Manual runs is selected.
+The radio id stays ``tab-asan``. ``add_asan_tab`` splices after ``tab-fpsan``
+first, then ``tab-survey``, then ``tab-guardrails``. The header's run-details
+icon describes this nightly run, so it is hidden while Manual runs is selected.
 
 Three input shapes are supported:
 
 * ``--results-dir DIR`` -- a single run laid out as
-  ``DIR/{waitcheck,consan-clean,consan-racy}/sanitizer_report.json`` (the same
+  ``DIR/<case>/sanitizer_report.json`` for each case dir in ``CASES`` (the same
   layout ``compare_verdict_baselines.py`` consumes). This is the CI shape.
 * ``--runs-root DIR`` -- a directory of ``run_*`` folders, each with an
   ``out/<case>/sanitizer_report.json``; used locally to render a history/trend.
 * ``--history-root DIR`` -- the PUBLISHED data-branch layout
   ``DIR/<id>/<case>/sanitizer_report.json`` plus a per-run ``DIR/<id>/meta.json``
-  (keys: commit, date, gpu, run_url, gate). ``<id>`` is
+  (keys: commit, date, gpu, run_url, gate, and ``cases``: the gated controls the
+  run required, ``LEGACY_CASES`` when absent, every case when it names
+  anything that is not a case dir). ``<id>`` is
   ``<YYYY-MM-DD>T<HHMMSS>-<run_id>`` (sortable to the second, unique; runs
   published before the time was added keep their date-only names and are never
   renamed), enumerated newest-first and capped by ``--keep N``
@@ -95,7 +101,12 @@ CASES: tuple[tuple[str, str, str, str], ...] = (
     ("waitcheck", "waitcheck_gemm", "daily-waitcheck-gemm", "waitcheck (static)"),
     ("consan-clean", "consan_clean", "daily-consan-clean", "consan (dynamic)"),
     ("consan-racy", "consan_racy", "daily-consan-racy", "consan (dynamic)"),
+    ("fpsan-match", "fpsan_match", "daily-fpsan-match", "fpsan (digest)"),
+    ("fpsan-mismatch", "fpsan_mismatch", "daily-fpsan-mismatch", "fpsan (digest)"),
 )
+# The controls a published run required when its meta.json names no ``cases``:
+# every run published before the manifest recorded them ran exactly these.
+LEGACY_CASES: tuple[str, ...] = ("waitcheck", "consan-clean", "consan-racy")
 
 _DASH = "\u2014"  # em dash; kept as a name so it can sit inside f-string braces (py3.11)
 
@@ -197,17 +208,20 @@ _CSS = """
     transition:color .15s ease, background .15s ease; }
   .tabbar label:hover { color:var(--text-2); }
   #tab-guardrails:checked ~ .tabs .tabbar label[for="tab-guardrails"],
-  #tab-survey:checked ~ .tabs .tabbar label[for="tab-survey"] {
+  #tab-survey:checked ~ .tabs .tabbar label[for="tab-survey"],
+  #tab-fpsan:checked ~ .tabs .tabbar label[for="tab-fpsan"] {
     color:var(--text-1); background:var(--panel);
     border-color:var(--border); border-bottom:1px solid var(--panel); }
   /* The radios are visually hidden (opacity:0) so they show no native focus ring;
      mirror :focus-visible onto the label so keyboard users can see the focused tab. */
   #tab-guardrails:focus-visible ~ .tabs .tabbar label[for="tab-guardrails"],
-  #tab-survey:focus-visible ~ .tabs .tabbar label[for="tab-survey"] {
+  #tab-survey:focus-visible ~ .tabs .tabbar label[for="tab-survey"],
+  #tab-fpsan:focus-visible ~ .tabs .tabbar label[for="tab-fpsan"] {
     outline:2px solid var(--blue); outline-offset:-2px; }
   .tabpanel { display:none; }
   #tab-guardrails:checked ~ .tabs #panel-guardrails { display:block; }
   #tab-survey:checked ~ .tabs #panel-survey { display:block; }
+  #tab-fpsan:checked ~ .tabs #panel-fpsan { display:block; }
   /* The nightly run id, commit, date, and target do not describe a manual ASan run. */
   #tab-asan:checked ~ .navrow .rundetails { display:none; }
 
@@ -261,6 +275,7 @@ _CSS = """
     border:1px solid transparent; }
   .match.pass { color:#BBF7D0; background:rgba(34,197,94,.18); border-color:rgba(34,197,94,.45); }
   .match.fail { color:#FECACA; background:rgba(239,68,68,.16); border-color:rgba(239,68,68,.45); }
+  .match.neutral { color:var(--text-3); border-color:var(--border-hover); }
 
   .kcard { background:var(--inset); border:1px solid var(--border); border-radius:var(--radius-sm);
     margin-bottom:10px; overflow:hidden; }
@@ -404,6 +419,12 @@ _INFO_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
                 "Finds data races and concurrency issues while a kernel runs.",
             ),
             (
+                "FpSan",
+                "Runs a reference and a candidate Triton kernel under FpSan and "
+                "compares the digests of their outputs. Different digests mean the "
+                "two kernels do not compute the same thing.",
+            ),
+            (
                 "AddressSanitizer",
                 "Reports memory errors. These runs are committed by hand.",
             ),
@@ -415,12 +436,17 @@ _INFO_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             (
                 "Nightly gate",
                 "Unmatched fails the nightly. A matched fail on daily-consan-racy "
-                "is the expected control.",
+                "or daily-fpsan-mismatch is an expected control.",
             ),
             (
                 "Workload survey",
                 "Observed only. A fail here does not change the nightly, and a "
                 "missing scan is marked report missing.",
+            ),
+            (
+                "FpSan",
+                "Open-source kernel pairs compared under FpSan. Observed only, so a digest "
+                "mismatch here does not change the nightly.",
             ),
             (
                 "Manual runs",
@@ -518,6 +544,7 @@ def _gate_count_line(rows: dict[str, dict[str, Any]], summary: dict[str, Any]) -
     match has no unmatched row, so the line keeps that check's own detail.
     Classification stays in ``_gate_summary``; this only shortens the words.
     """
+    rows = _required_rows(rows)
     total = len(rows)
     matched = sum(1 for row in rows.values() if row["match"])
     mismatches = sum(1 for row in rows.values() if row["present"] and not row["match"])
@@ -1125,6 +1152,156 @@ def _observation_text(
     return "; ".join(parts)
 
 
+_FPSAN_MISMATCH_CODE = "fpsan_digest_mismatch"
+_FPSAN_DIGEST_KEYS = (
+    "reference_digest",
+    "candidate_digest",
+    "reference_instrumented",
+    "candidate_instrumented",
+)
+
+
+def _fpsan_digests(value: Any) -> dict[str, str]:
+    """The digest fields of one FpSan backend or finding-metadata mapping (pure)."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key]
+        for key in _FPSAN_DIGEST_KEYS
+        if isinstance(value.get(key), str) and value[key]
+    }
+
+
+_FPSAN_PAIR_VERDICT = ".verdict"
+
+
+def _fpsan_row(name: str, verdict: Any, reason: Any, digests: Mapping[str, str]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "verdict": verdict or _DASH,
+        "reason": _clean_msg(str(reason), None) if reason else "",
+        **{key: digests.get(key, "") for key in _FPSAN_DIGEST_KEYS},
+    }
+
+
+def _fpsan_merged_pairs(check: dict[str, Any], backend: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Rows of a model-survey FpSan report, which keys each pair as ``<kernel>/<scenario>``.
+
+    ``model_survey.merge_fpsan`` records ``<label>.verdict``, ``<label>.reason``
+    and the two digests per pair in the merged check's backend, since one
+    worklist kernel can be compared under several scenarios and a kernel result
+    cannot say which. A report merged before ``.reason`` was recorded falls back
+    to the reason every kernel result for that kernel with that verdict agrees on.
+    """
+    labels = sorted(
+        key[: -len(_FPSAN_PAIR_VERDICT)]
+        for key, value in backend.items()
+        if key.endswith(_FPSAN_PAIR_VERDICT) and isinstance(value, str)
+    )
+    raw_results = check.get("kernel_results")
+    results = [
+        kr for kr in (raw_results if isinstance(raw_results, list) else [])
+        if isinstance(kr, dict) and isinstance(kr.get("identity"), dict)
+    ]
+    rows = []
+    for label in labels:
+        verdict = backend[f"{label}{_FPSAN_PAIR_VERDICT}"]
+        reason = backend.get(f"{label}.reason")
+        if not isinstance(reason, str) or not reason:
+            kernel = label.split("/", 1)[0]
+            reasons = {
+                kr.get("reason")
+                for kr in results
+                if kr["identity"].get("name") == kernel and kr.get("verdict") == verdict
+            }
+            reason = next(iter(reasons)) if len(reasons) == 1 else None
+        digests = {
+            key: backend[f"{label}.{key}"]
+            for key in _FPSAN_DIGEST_KEYS
+            if isinstance(backend.get(f"{label}.{key}"), str)
+        }
+        rows.append(_fpsan_row(label, verdict, reason, digests))
+    return rows
+
+
+def fpsan_pairs(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """One row per kernel pair an FpSan check compared, with both digests (pure).
+
+    A model-survey report names its pairs in the check backend (see
+    ``_fpsan_merged_pairs``). Any other report, such as a gated control, is one
+    row per worklist kernel. That row's verdict and reason are the kernel's own
+    result; a check with no per-kernel results, or a report that selected only
+    this kernel, speaks for the row instead. Its digests come from the check's
+    ``backend`` when that names exactly this kernel in ``selected_kernels`` (or
+    this is the only kernel), else from an ``fpsan_digest_mismatch`` finding
+    naming it, so a row neither describes shows no digests rather than another
+    pair's.
+    """
+    if not isinstance(report, dict):
+        return []
+    checks = report.get("checks")
+    check = next(
+        (
+            c for c in (checks if isinstance(checks, list) else [])
+            if isinstance(c, dict) and c.get("sanitizer") == "fpsan"
+        ),
+        None,
+    )
+    if check is None:
+        return []
+    backend = check.get("backend") if isinstance(check.get("backend"), dict) else {}
+    merged = _fpsan_merged_pairs(check, backend)
+    if merged:
+        return merged
+    worklist = report.get("worklist")
+    entries = worklist.get("kernels") if isinstance(worklist, dict) else None
+    identities = [
+        entry["identity"]
+        for entry in (entries if isinstance(entries, list) else [])
+        if isinstance(entry, dict)
+        and isinstance(entry.get("identity"), dict)
+        and isinstance(entry["identity"].get("name"), str)
+    ]
+    lone = len(identities) == 1
+    raw_results = check.get("kernel_results")
+    results = [
+        kr for kr in (raw_results if isinstance(raw_results, list) else [])
+        if isinstance(kr, dict) and isinstance(kr.get("identity"), dict)
+    ]
+    by_key = {_identity_key(kr["identity"]): kr for kr in results}
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for kr in results:
+        by_name.setdefault(str(kr["identity"].get("name")), []).append(kr)
+    scoped = str(backend.get("selected_kernels") or "")
+    mismatches: dict[str, dict[str, str]] = {}
+    findings = check.get("findings")
+    for finding in findings if isinstance(findings, list) else []:
+        if not isinstance(finding, dict) or finding.get("code") != _FPSAN_MISMATCH_CODE:
+            continue
+        named = finding.get("kernel_name")
+        if not isinstance(named, str) and lone:
+            named = identities[0]["name"]
+        if isinstance(named, str):
+            mismatches.setdefault(named, _fpsan_digests(finding.get("metadata")))
+    rows: list[dict[str, Any]] = []
+    for identity in identities:
+        name = identity["name"]
+        result = by_key.get(_identity_key(identity))
+        if result is None and len(by_name.get(name, ())) == 1:
+            result = by_name[name][0]
+        if result is not None:
+            verdict, reason = result.get("verdict"), result.get("reason")
+        elif lone or not results:
+            verdict, reason = check.get("verdict"), check.get("reason")
+        else:
+            verdict, reason = None, None
+        digests = _fpsan_digests(backend) if lone or scoped == name else {}
+        if not digests:
+            digests = mismatches.get(name, {})
+        rows.append(_fpsan_row(name, verdict, reason, digests))
+    return rows
+
+
 def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[str, Any]:
     """Reduce one report to the fields the dashboard renders (pure).
 
@@ -1427,7 +1604,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     observation = _observation_text(
         primary, findings_total, finding_groups, kernel_reasons=kernel_reasons
     )
-    return {
+    summary = {
         "present": True, "verdict": verdict, "execution": report.get("execution_status"),
         "findings": findings_total, "coverage": coverage, "backend": backend,
         "expected": expected, "match": (expected is None) or (verdict == expected),
@@ -1440,6 +1617,22 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         "primary": primary, "observation": observation,
         "kernel_reasons": kernel_reasons,
     }
+    pairs = fpsan_pairs(report)
+    if pairs:
+        summary["fpsan_pairs"] = pairs
+    return summary
+
+
+def not_run_row(expected: str | None) -> dict[str, Any]:
+    """A gated control the run predates: shown as not run and kept out of its gate."""
+    return {
+        **summarize_case(None, expected), "required": False, "match": True,
+        "execution": "not run", "observation": "not run: this control was added after this run",
+    }
+
+
+def _required_rows(rows: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {case: row for case, row in rows.items() if row.get("required") is not False}
 
 
 def _run_record(
@@ -1513,7 +1706,7 @@ def runs_from_runs_root(runs_root: Path, baselines: dict) -> list[dict[str, Any]
 
 
 def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
-    """Read a published run's ``meta.json`` (commit, date, gpu, run_url, gate).
+    """Read a published run's ``meta.json`` (commit, date, gpu, run_url, gate, cases).
 
     The run id (see ``_RUN_ID_RE``) is authoritative from the directory
     name; ``meta.json`` supplies the rest. A missing/corrupt manifest degrades to
@@ -1538,6 +1731,20 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
         gate = data.get("gate")
         if gate is not None:
             meta["gate"] = gate
+        # Only case directories count. A list naming anything else -- a baseline
+        # key such as ``fpsan_match``, a typo -- would mark every real control
+        # "not run" and leave a HEALTHY 0/0 gate, so it is dropped and the run
+        # requires all of them. Every published run ran the legacy controls, so
+        # a list cannot release those.
+        cases = data.get("cases", LEGACY_CASES)
+        known = [case for case, _k, _l, _b in CASES]
+        if (
+            isinstance(cases, (list, tuple))
+            and cases
+            and all(isinstance(c, str) and c in known for c in cases)
+        ):
+            listed = {*cases, *LEGACY_CASES}
+            meta["cases"] = [case for case in known if case in listed]
     return meta
 
 
@@ -1607,17 +1814,22 @@ def runs_from_history_root(
     runs: list[dict[str, Any]] = []
     for run_dir in run_dirs[: max(keep, 0)]:
         rel = f"runs/{run_dir.name}"
+        meta = _run_meta_from_history(run_dir)
+        # No readable manifest, or a malformed ``cases``, requires every control.
+        required = set(meta.get("cases") or (c for c, _k, _l, _b in CASES))
         rows: dict[str, dict[str, Any]] = {}
         for case, key, _label, _backend in CASES:
-            row = summarize_case(
-                _load(run_dir / case / "sanitizer_report.json"),
-                baselines.get(key, {}).get("overall_verdict"),
-            )
+            report = _load(run_dir / case / "sanitizer_report.json")
+            expected = baselines.get(key, {}).get("overall_verdict")
+            if report is None and case not in required:
+                row = not_run_row(expected)
+            else:
+                row = summarize_case(report, expected)
             # Only link reports that are actually present, so the page never
             # points at a 404. Relative to the dashboard root (runs/<id>/...).
             row["report_rel"] = f"{rel}/{case}/sanitizer_report.json" if row["present"] else None
             rows[case] = row
-        runs.append(_run_record(_run_meta_from_history(run_dir), rows, rel=rel))
+        runs.append(_run_record(meta, rows, rel=rel))
     return runs
 
 
@@ -1829,16 +2041,23 @@ _SURVEY_RECIPE: dict[str, str] = {
     "waitcheck-gemm": "daily-waitcheck-gemm-object",
 }
 
-# Open-source model workloads surveyed by scripts/sanitizers/model_survey.py. Both
-# sanitizer cases of a model come from one inventory, recipes/sanitizers/models/
+# Open-source model workloads surveyed by scripts/sanitizers/model_survey.py. Every
+# sanitizer case of a model comes from one inventory, recipes/sanitizers/models/
 # <model>.yaml, rather than from a daily-* aorta recipe.
 _MODEL_SURVEY_GROUPS: tuple[str, ...] = ("gpt-oss", "qwen3")
+
+# FpSan runs in its own survey job, so its reproduce line selects only that wave.
+# ``{inventory}`` is the inventory path from the repo root.
+_FPSAN_SURVEY_COMMAND = (
+    "python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan "
+    "--inventory {inventory} --out results"
+)
 
 
 def _survey_recipe_for(name: str) -> str:
     """The recipe filename stem that produces survey case ``name``'s report."""
-    group, _sanitizer = _split_survey_case(name)
-    if group in _MODEL_SURVEY_GROUPS:
+    group, sanitizer = _split_survey_case(name)
+    if group in _MODEL_SURVEY_GROUPS or sanitizer == "fpsan":
         return f"models/{group}"
     return _SURVEY_RECIPE.get(name, f"daily-{name}")
 
@@ -1846,7 +2065,9 @@ def _survey_recipe_for(name: str) -> str:
 def _survey_command_for(name: str) -> str:
     """The copy-paste command that reproduces survey case ``name``'s report."""
     stem = _survey_recipe_for(name)
-    group, _sanitizer = _split_survey_case(name)
+    group, sanitizer = _split_survey_case(name)
+    if sanitizer == "fpsan":
+        return _FPSAN_SURVEY_COMMAND.format(inventory=f"recipes/sanitizers/{stem}.yaml")
     if group in _MODEL_SURVEY_GROUPS:
         return (
             "python scripts/sanitizers/model_survey.py run "
@@ -1864,8 +2085,9 @@ def _split_survey_case(name: str) -> tuple[str, str | None]:
     with a sanitizer sub-block each. A name without a recognized sanitizer prefix is
     its own group with an unknown sanitizer (the report's primary sanitizer is used
     for display). This parse is purely structural -- no customer/NDA identifiers.
+    ``fpsan-<group>`` cases render on the FpSan tab, not under Tab 2.
     """
-    for prefix, san in (("consan-", "consan"), ("waitcheck-", "waitcheck")):
+    for prefix, san in (("consan-", "consan"), ("waitcheck-", "waitcheck"), ("fpsan-", "fpsan")):
         if name.startswith(prefix):
             return name[len(prefix):], san
     return name, None
@@ -2318,48 +2540,55 @@ _NOT_PUBLISHED_ID = "artifacts-not-published"
 # The env a reproduction needs, as data, so a consumer of
 # ``aorta.sanitizer_run_area/0.1`` can read the variables instead of parsing them
 # out of a sentence. ``set_by`` says whether the operator must export it or
-# ``aorta`` derives it from the recipe's policy block.
-# ``consan_only`` keeps the manifest honest per case: the prose has always said
-# the ``consan_only`` entries are what "ConSan additionally requires", so listing
-# them for a waitcheck reproduction would have the machine-readable field
-# contradict it. Phrased by the flag rather than by a count, so adding a variable
-# does not silently make this comment wrong.
+# ``aorta`` derives it from the recipe. ``value`` is present only where one value
+# is the only correct one.
+# ``sanitizers`` keeps the manifest honest per case: a variable is listed only for
+# a case that ran one of those sanitizers, so a waitcheck reproduction does not
+# claim ConSan's hook variables and an FpSan one claims neither the rocjitsu
+# bundle nor the hook. It is internal and never published.
 _REQUIRED_ENV: tuple[dict[str, Any], ...] = (
     {
         "var": "ROCJITSU_PREBUILT",
         "set_by": "operator",
         "purpose": "unpacked rocjitsu bundle supplying rj_waitcheck and the ConSan hook",
-        "consan_only": False,
+        "sanitizers": ("waitcheck", "consan"),
     },
     {
         "var": "HSA_TOOLS_LIB",
         "set_by": "aorta",
         "purpose": "ConSan hook to load",
-        "consan_only": True,
+        "sanitizers": ("consan",),
     },
     {
         "var": "HSA_TOOLS_DISABLE_REGISTER",
         "set_by": "aorta",
         "purpose": "must be 1 so the hook is not double-registered",
-        "consan_only": True,
+        "sanitizers": ("consan",),
     },
     {
         "var": "RJ_CONSAN_MODE",
         "set_by": "aorta",
         "purpose": "ConSan detection mode",
-        "consan_only": True,
+        "sanitizers": ("consan",),
     },
     {
         "var": "RJ_CONSAN_PRESET",
         "set_by": "aorta",
         "purpose": "max default-detector preset for deterministic guardrail coverage",
-        "consan_only": True,
+        "sanitizers": ("consan",),
     },
     {
         "var": "RJ_CONSAN_POLICY",
         "set_by": "aorta",
         "purpose": "ConSan reporting policy",
-        "consan_only": True,
+        "sanitizers": ("consan",),
+    },
+    {
+        "var": "TRITON_INSTRUMENTATION_MODE",
+        "value": "fpsan",
+        "set_by": "aorta",
+        "purpose": "compiles the reference and the candidate kernel under Triton FpSan",
+        "sanitizers": ("fpsan",),
     },
 )
 
@@ -2367,11 +2596,12 @@ _REQUIRED_ENV: tuple[dict[str, Any], ...] = (
 def required_env_for(*, case: str, report: dict[str, Any] | None) -> list[dict[str, Any]]:
     """The env a *this* case's reproduction needs (pure).
 
-    The ConSan-only variables are dropped for a waitcheck-only case, so the
-    machine-readable list cannot claim more than the prose does. Whether ConSan
+    Each variable is listed only when a sanitizer that needs it ran, so the
+    machine-readable list cannot claim more than the prose does. Which sanitizers
     ran is taken from the report's own check/finding sanitizers where possible,
     falling back to the case name -- the naming convention every guardrail and
-    survey case follows (``consan-*`` / ``*-consan``).
+    survey case follows (``consan-*`` / ``fpsan-*`` / ``*-consan``), where a name
+    naming neither is a waitcheck case.
     """
     names: set[str] = set()
     checks = (report or {}).get("checks")
@@ -2383,15 +2613,13 @@ def required_env_for(*, case: str, report: dict[str, Any] | None) -> list[dict[s
         for finding in check.get("findings") or []:
             if isinstance(finding, dict) and isinstance(finding.get("sanitizer"), str):
                 names.add(finding["sanitizer"].lower())
-    consan = (
-        any("consan" in name for name in names)
-        if names
-        else "consan" in case.lower()
-    )
+    if not names:
+        lowered = case.lower()
+        names = {san for san in ("consan", "fpsan") if san in lowered} or {"waitcheck"}
     return [
-        {key: value for key, value in item.items() if key != "consan_only"}
+        {key: value for key, value in item.items() if key != "sanitizers"}
         for item in _REQUIRED_ENV
-        if consan or not item["consan_only"]
+        if any(san in name for san in item["sanitizers"] for name in names)
     ]
 
 def required_env_note(required_env: list[dict[str, Any]]) -> str:
@@ -2412,10 +2640,11 @@ def required_env_note(required_env: list[dict[str, Any]]) -> str:
             else f"Set `{item['var']}` before running."
         )
     if derived:
-        names = ", ".join(f"`{item['var']}`" for item in derived)
-        parts.append(
-            f"`aorta` sets {names} for you from the recipe's policy block."
+        names = ", ".join(
+            f"`{item['var']}={item['value']}`" if item.get("value") else f"`{item['var']}`"
+            for item in derived
         )
+        parts.append(f"`aorta` sets {names} for you from the recipe.")
     return " ".join(parts)
 
 
@@ -3499,6 +3728,8 @@ def _baseline_cue(row: dict[str, Any]) -> tuple[str, str]:
     (``daily-consan-racy``). A present disagreement is ``unmatched``. An absent
     report stays its own word so it is not called a verdict mismatch.
     """
+    if row.get("required") is False:
+        return "not run", "neutral"
     if not row["present"]:
         return "report missing", "fail"
     if row["match"]:
@@ -3532,7 +3763,7 @@ def _baseline_status_html(row: dict[str, Any]) -> str:
     fail, which is the observed verdict in an earlier column.
     """
     word, cue = _baseline_cue(row)
-    tone = "pass" if cue == "pass" else "fail"
+    tone = cue if cue in ("pass", "neutral") else "fail"
     return f'<span class="match {tone}">{_esc(word)}</span>'
 
 
@@ -3605,6 +3836,7 @@ def _gate_summary(
     reduced row matches its baseline -- otherwise a comparator-failed run would
     render ``HEALTHY``.
     """
+    rows = _required_rows(rows)
     total = len(rows)
     matched = sum(1 for r in rows.values() if r["match"])
     mismatches = sum(1 for r in rows.values() if r["present"] and not r["match"])
@@ -3745,8 +3977,13 @@ def _kernel_tables_html(
 
     Numeric columns right-align the ``th`` as well as the ``td`` so each value
     sits directly under its own header rather than drifting to the far edge.
+
+    An FpSan case has no dispatch, code object or per-kernel findings to show,
+    so its rows (``fpsan_pairs``) render as the kernel-pairs table instead.
     """
     link = _report_link_html(_safe_report_rel(report_rel))
+    if row.get("fpsan_pairs"):
+        return _fpsan_pairs_html(row["fpsan_pairs"], link=link) + _findings_table_html(row)
     krows = (
         "".join(
             f"<tr><td class=mono>{_esc(str(k['name']))}</td>"
@@ -3761,6 +3998,16 @@ def _kernel_tables_html(
         )
         or '<tr><td class=empty colspan=8>no kernels selected</td></tr>'
     )
+    return (
+        '<p class="cap">Kernels</p><div class="table-wrap"><table>'
+        "<thead><tr><th>Kernel</th><th class=num>Dispatch</th>"
+        "<th>Observed</th><th class=num>Findings</th>"
+        f"<th>Code object</th><th>SHA-256</th><th>Detail</th><th>Report</th></tr></thead>"
+        f"<tbody>{krows}</tbody></table></div>"
+    ) + _findings_table_html(row)
+
+
+def _findings_table_html(row: dict[str, Any]) -> str:
     frows = (
         "".join(
             f"<tr><td>{_esc(str(g['sanitizer']))}</td><td class=mono>{_esc(str(g['code']))}</td>"
@@ -3771,15 +4018,102 @@ def _kernel_tables_html(
         or '<tr><td class=empty colspan=5>no findings</td></tr>'
     )
     return (
-        '<p class="cap">Kernels</p><div class="table-wrap"><table>'
-        "<thead><tr><th>Kernel</th><th class=num>Dispatch</th>"
-        "<th>Observed</th><th class=num>Findings</th>"
-        f"<th>Code object</th><th>SHA-256</th><th>Detail</th><th>Report</th></tr></thead>"
-        f"<tbody>{krows}</tbody></table></div>"
         '<p class="cap">Findings</p><div class="table-wrap"><table>'
         "<thead><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th class=num>Count</th>"
         f"<th>Example</th></tr></thead><tbody>{frows}</tbody></table></div>"
     )
+
+
+# A digest is a 64-hex SHA-256; the table shows the prefix the FpSan mismatch
+# message quotes, so the two can be matched by eye.
+_FPSAN_DIGEST_SHOWN = 16
+
+
+def _fpsan_instrumented(pair: dict[str, Any]) -> str:
+    """Which side compiled under FpSan, in words (pure)."""
+    reference, candidate = pair.get("reference_instrumented"), pair.get("candidate_instrumented")
+    if not reference and not candidate:
+        return _DASH
+    return {
+        (True, True): "both",
+        (True, False): "reference only",
+        (False, True): "candidate only",
+        (False, False): "neither",
+    }[(reference == "true", candidate == "true")]
+
+
+def _fpsan_digest_text(digest: Any) -> str:
+    text = str(digest or "")
+    if len(text) <= _FPSAN_DIGEST_SHOWN:
+        return text
+    return text[:_FPSAN_DIGEST_SHOWN] + "\u2026"
+
+
+def _fpsan_records_instrumented(pairs: list[dict[str, Any]]) -> bool:
+    """Whether any pair recorded its instrumentation flags (pure).
+
+    A model-survey report records only the digests per pair, so its column
+    would be all dashes.
+    """
+    return any(
+        pair.get("reference_instrumented") or pair.get("candidate_instrumented")
+        for pair in pairs
+    )
+
+
+def _fpsan_pairs_html(pairs: list[dict[str, Any]], *, link: str) -> str:
+    """The kernel-pairs table: one row per (kernel, scenario) FpSan compared (pure).
+
+    The full digest is in the cell's ``title``, so a reader can copy it while
+    the column stays narrow.
+    """
+
+    def digest(value: Any) -> str:
+        if not value:
+            return '<span class="dash">&mdash;</span>'
+        return f'<span title="{_esc(str(value))}">{_esc(_fpsan_digest_text(value))}</span>'
+
+    instrumented = _fpsan_records_instrumented(pairs)
+    rows = "".join(
+        f"<tr><td class=mono>{_esc(str(pair['name']))}</td>"
+        f"<td>{_verdict_html(pair['verdict'])}</td>"
+        f"<td class=mono>{digest(pair.get('reference_digest'))}</td>"
+        f"<td class=mono>{digest(pair.get('candidate_digest'))}</td>"
+        + (f"<td>{_esc(_fpsan_instrumented(pair))}</td>" if instrumented else "")
+        + f"<td class='mono wrap-any'>{_esc(pair.get('reason') or '') or '&mdash;'}</td>"
+        f"<td>{link}</td></tr>"
+        for pair in pairs
+    )
+    return (
+        '<p class="cap">Kernel pairs</p><div class="table-wrap"><table>'
+        "<thead><tr><th>Kernel pair</th><th>Observed</th><th>Reference digest</th>"
+        "<th>Candidate digest</th>"
+        + ("<th>Instrumented</th>" if instrumented else "")
+        + "<th>Detail</th><th>Report</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table></div>"
+    )
+
+
+def _fpsan_pairs_md(pairs: list[dict[str, Any]]) -> list[str]:
+    """Markdown twin of ``_fpsan_pairs_html``."""
+    instrumented = _fpsan_records_instrumented(pairs)
+    lines = [
+        "| Kernel pair | Observed | Reference digest | Candidate digest | "
+        + ("Instrumented | " if instrumented else "")
+        + "Detail |",
+        "|---|---|---|---|" + ("---|" if instrumented else "") + "---|",
+    ]
+    for pair in pairs:
+        detail = _clean_msg(str(pair.get("reason") or ""), _MSG_LIMIT).replace("|", "\\|")
+        reference = _fpsan_digest_text(pair.get("reference_digest")) or _DASH
+        candidate = _fpsan_digest_text(pair.get("candidate_digest")) or _DASH
+        lines.append(
+            f"| `{pair['name']}` | {_verdict_md(pair['verdict'])} | `{reference}` "
+            f"| `{candidate}` | "
+            + (f"{_fpsan_instrumented(pair)} | " if instrumented else "")
+            + f"{detail or _DASH} |"
+        )
+    return lines
 
 
 def _raw_link_html(report_rel: str | None, *, staged: bool = True) -> str:
@@ -3877,7 +4211,7 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
         )
         tone = _tone_for(row["verdict"])
         if not row["present"]:
-            body = _observation_html(row, tone="fail")
+            body = _observation_html(row, tone="" if row.get("required") is False else "fail")
         else:
             body = (
                 _facts_html(
@@ -3905,6 +4239,8 @@ def _sanitizer_name(entry: dict[str, Any]) -> str:
         return "WaitCheck"
     if san == "consan":
         return "ConSan"
+    if san == "fpsan":
+        return "FpSan"
     return str(entry.get("label") or san or "sanitizer")
 
 
@@ -3915,6 +4251,8 @@ def _sanitizer_kind(entry: dict[str, Any]) -> str:
         return "static wait-count scan"
     if san == "consan":
         return "dynamic data-race check"
+    if san == "fpsan":
+        return "reference/candidate digest check"
     return ""
 
 
@@ -4032,7 +4370,7 @@ def _survey_message_html(row: dict[str, Any]) -> str:
     )
 
 
-_SANITIZER_RANK = {"waitcheck": 0, "consan": 1}
+_SANITIZER_RANK = {"waitcheck": 0, "consan": 1, "fpsan": 2}
 
 
 def _group_survey_entries(
@@ -4378,6 +4716,190 @@ def _survey_detail_html(survey: list[dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
+_FPSAN_TAB_LABEL = "FpSan"
+
+
+def is_fpsan_entry(entry: dict[str, Any]) -> bool:
+    """Whether a survey entry belongs on the FpSan tab rather than Tab 2 (pure).
+
+    An entry rebuilt from a published run area carries only its case name, so the
+    ``fpsan-`` case prefix counts as well as the sanitizer field.
+    """
+    sanitizer = str(entry.get("sanitizer") or "").strip().lower()
+    return sanitizer == "fpsan" or str(entry.get("name") or "").startswith("fpsan-")
+
+
+def split_fpsan_entries(
+    entries: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(survey, fpsan)``, each keeping input order (pure)."""
+    return (
+        [entry for entry in entries if not is_fpsan_entry(entry)],
+        [entry for entry in entries if is_fpsan_entry(entry)],
+    )
+
+
+def _fpsan_entry_pairs(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    row = entry.get("summary") or {}
+    return list(row.get("fpsan_pairs") or []) if row.get("present") else []
+
+
+def _fpsan_stats(groups: list[tuple[str, list[dict[str, Any]]]]) -> dict[str, Any]:
+    """Kernel-pair roll-up counts; ``verdicts`` sums exactly to ``pairs`` (pure)."""
+    verdicts = dict.fromkeys(_SURVEY_VERDICT_BUCKETS, 0)
+    pairs = 0
+    for _key, entries in groups:
+        for entry in entries:
+            for pair in _fpsan_entry_pairs(entry):
+                pairs += 1
+                verdicts[_survey_verdict_bucket(pair)] += 1
+    return {"workloads": len(groups), "pairs": pairs, "verdicts": verdicts}
+
+
+def _fpsan_lead(stats: dict[str, Any], *, bold: Callable[[str], str]) -> str:
+    pairs, workloads = int(stats["pairs"]), int(stats["workloads"])
+    return (
+        f"Compared {bold(f'{pairs} kernel pair' + ('' if pairs == 1 else 's'))} across "
+        f"{bold(f'{workloads} workload' + ('' if workloads == 1 else 's'))}"
+    )
+
+
+def _fpsan_headline(stats: dict[str, Any]) -> str:
+    """Markdown twin of ``_fpsan_headline_html``."""
+    parts = [
+        f"{_MD_DOT.get(_VERDICT_CUE.get(bucket, 'neutral'), _MD_DOT['neutral'])} {n} {bucket}"
+        for bucket in _SURVEY_VERDICT_BUCKETS
+        if (n := stats["verdicts"].get(bucket, 0))
+    ]
+    breakdown = " \u00b7 ".join(parts) if parts else "no kernel pairs compared"
+    return f"{_fpsan_lead(stats, bold=lambda text: text)} \u2014 {breakdown}"
+
+
+def _fpsan_headline_html(stats: dict[str, Any]) -> str:
+    lead = _fpsan_lead(stats, bold=lambda text: f"<b>{_esc(text)}</b>")
+    badges = "".join(
+        _status_html(f"{n} {bucket}", _VERDICT_CUE.get(bucket, "neutral"))
+        for bucket in _SURVEY_VERDICT_BUCKETS
+        if (n := stats["verdicts"].get(bucket, 0))
+    )
+    return (
+        f'<span class="lead">{lead}</span>'
+        + (badges or _status_html("no kernel pairs compared", "neutral"))
+    )
+
+
+def _fpsan_mismatches(entries: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for entry in entries
+        for pair in _fpsan_entry_pairs(entry)
+        if str(pair.get("verdict") or "").strip().lower() == "fail"
+    )
+
+
+def _fpsan_pair_count(entries: list[dict[str, Any]]) -> int:
+    return sum(len(_fpsan_entry_pairs(entry)) for entry in entries)
+
+
+def _fpsan_summary_table_html(groups: list[tuple[str, list[dict[str, Any]]]]) -> str:
+    """The FpSan tab roll-up: a headline plus one row per workload (pure)."""
+    rows: list[str] = []
+    for key, entries in groups:
+        note = _survey_group_note(entries)
+        note_html = f"<td class=mono>{_esc(note)}</td>" if note else '<td class="dash">&mdash;</td>'
+        rows.append(
+            f"<tr><td class=mono>{_esc(_survey_group_label(key, entries))}</td>"
+            f"<td class=num>{_fpsan_pair_count(entries)}</td>"
+            f"<td>{_survey_summary_cell_html(entries[0])}</td>"
+            f"<td class=num>{_fpsan_mismatches(entries)}</td>"
+            f"{note_html}</tr>"
+        )
+    return (
+        '<section class="panel survey-summary"><h2>FpSan summary</h2>'
+        f'<div class="statline">{_fpsan_headline_html(_fpsan_stats(groups))}</div>'
+        '<div class="table-wrap"><table><thead>'
+        "<tr><th>Workload</th><th class=num>Pairs</th><th>Observed</th>"
+        "<th class=num>Mismatches</th><th>Note</th></tr></thead>"
+        f'<tbody>{"".join(rows)}</tbody></table></div></section>'
+    )
+
+
+def _fpsan_detail_html(fpsan: list[dict[str, Any]]) -> str:
+    """The FpSan tab: FpSan over survey workloads, observed only (pure).
+
+    One panel per workload, holding its FpSan card. The card's table has one row
+    per (kernel, scenario) pair with both digests. How to read the tab lives in
+    the page info panel, not in this panel.
+    """
+    if not fpsan:
+        return '<p class="survey-empty">No FpSan kernel pairs in this run.</p>'
+    grouped = _group_survey_entries(fpsan)
+    blocks: list[str] = [_fpsan_summary_table_html(grouped)]
+    for key, entries in grouped:
+        pairs = _fpsan_pair_count(entries)
+        cards = "".join(
+            _survey_case_html(entry, heading=_sanitizer_name(entry), kind=_sanitizer_kind(entry))
+            for entry in entries
+        )
+        blocks.append(
+            '<section class="panel"><h2 class="kgroup-title">'
+            f'<span class="kname">{_esc(_survey_group_label(key, entries))}</span>'
+            f'<span class="count">{pairs} kernel pair{"" if pairs == 1 else "s"}</span>'
+            f"</h2>{cards}</section>"
+        )
+    return "".join(blocks)
+
+
+def _fpsan_section_md(fpsan: list[dict[str, Any]]) -> list[str]:
+    """FpSan tab mirror for the GitHub job summary: observed only."""
+    lines = [
+        f"## {_FPSAN_TAB_LABEL}",
+        "",
+        "**FpSan** (reference/candidate digest check) runs a reference and a candidate "
+        "Triton kernel under FpSan and compares the digests of their outputs; different "
+        "digests mean the two kernels do not compute the same thing. Observed only, so "
+        "a mismatch here does not change the nightly. Each case lists a copy-paste "
+        "command to reproduce the run.",
+        "",
+    ]
+    if not fpsan:
+        lines += ["No FpSan kernel pairs in this run.", ""]
+        return lines
+    grouped = _group_survey_entries(fpsan)
+    lines += [
+        _fpsan_headline(_fpsan_stats(grouped)),
+        "",
+        "| Workload | Pairs | Observed | Mismatches | Note |",
+        "|---|--:|---|--:|---|",
+    ]
+    for key, entries in grouped:
+        row = entries[0].get("summary") or {}
+        observed = _verdict_md(row.get("verdict")) if row.get("present") else _DASH
+        note = _clean_msg(_survey_group_note(entries), _MSG_LIMIT).replace("|", "\\|")
+        lines.append(
+            f"| {_survey_group_label(key, entries)} | {_fpsan_pair_count(entries)} "
+            f"| {observed} | {_fpsan_mismatches(entries)} | {note or _DASH} |"
+        )
+    lines.append("")
+    for entry in fpsan:
+        r = entry["summary"]
+        lines += [
+            f"<details><summary><b>{entry['label']}</b> \u2014 observed "
+            f"{_verdict_md(r['verdict'])}</summary>",
+            "",
+            f"Observation: {r.get('observation', '')}",
+        ]
+        message = _survey_message_md(r)
+        if message:
+            lines += ["", message]
+        if entry.get("command"):
+            lines += ["", f"Reproduce: `{entry['command']}`"]
+        if r["present"] and r.get("fpsan_pairs"):
+            lines += [""] + _fpsan_pairs_md(r["fpsan_pairs"])
+        lines += ["", "</details>", ""]
+    return lines
+
+
 def build_html(
     runs: list[dict[str, Any]],
     *,
@@ -4441,6 +4963,7 @@ def build_html(
     run_count = len(runs)
     gate_word, gate_cue = ("healthy", "pass") if latest["gate"] else ("failed", "fail")
     hist_gate = f"latest: {_status_html(gate_word, gate_cue)}"
+    survey_only, fpsan = split_fpsan_entries(survey or [])
 
     return f"""<!doctype html>
 <html lang=en><head><meta charset=utf-8>
@@ -4450,6 +4973,7 @@ def build_html(
 <body><div class=wrap>
   <input type=radio name=santab id=tab-guardrails class=tabradio checked>
   <input type=radio name=santab id=tab-survey class=tabradio>
+  <input type=radio name=santab id=tab-fpsan class=tabradio>
   <div class=navrow>
     <a href="../">&larr; back to CI dashboard</a>
     {tools}
@@ -4461,6 +4985,7 @@ def build_html(
   <div class=tabbar>
     <label for="tab-guardrails">Nightly gate</label>
     <label for="tab-survey">Workload survey</label>
+    <label for="tab-fpsan">{_esc(_FPSAN_TAB_LABEL)}</label>
   </div>
 
   <section class=tabpanel id=panel-guardrails>
@@ -4492,7 +5017,11 @@ def build_html(
   </section>
 
   <section class=tabpanel id=panel-survey>
-  {_survey_detail_html(survey or [])}
+  {_survey_detail_html(survey_only)}
+  </section>
+
+  <section class=tabpanel id=panel-fpsan>
+  {_fpsan_detail_html(fpsan)}
   </section>
   </div>
 </div></body></html>
@@ -4753,11 +5282,16 @@ def asan_panel_html(runs: list[dict[str, Any]]) -> str:
     return "".join(_asan_run_html(run) for run in runs)
 
 
-# The ASan tab goes after the last nightly tab. That is the survey tab on a page
-# this generator renders, and the guardrails tab on a page rendered while the
-# survey tab was dropped (#570) -- which Pages keeps serving until the next
-# nightly publish replaces it, so both shapes must be joinable.
+# The ASan tab goes after the last nightly tab. That is the FpSan tab on a
+# page this generator renders, the survey tab on a page rendered before that tab
+# existed, and the guardrails tab on a page rendered while the survey tab was
+# dropped (#570). Pages keeps serving an older page until the next nightly
+# publish replaces it, so every shape must be joinable. Last tab first.
 _TAB_ANCHORS = (
+    (
+        re.compile(r"<input type=radio name=santab id=tab-fpsan class=tabradio>"),
+        re.compile(r'<label for="tab-fpsan">[^<]*</label>'),
+    ),
     (
         re.compile(r"<input type=radio name=santab id=tab-survey class=tabradio>"),
         re.compile(r'<label for="tab-survey">[^<]*</label>'),
@@ -4772,23 +5306,26 @@ _PAGE_END = "</div></body></html>"
 
 
 def add_asan_tab(page: str, runs: list[dict[str, Any]]) -> str:
-    """``page`` with an ASan tab beside the nightly's two (pure).
+    """``page`` with an ASan tab after the nightly's own tabs (pure).
 
     ``page`` is what ``build_html`` renders: the tabbed page, or the no-runs page,
     which has no tabs to join and so gets the results as a section of its own.
     Raises ``ValueError`` rather than guess where the tab belongs when the markup it
-    joins is not there, or when the page already has one.
+    joins is not there, when a nightly tab has a radio without its label (or the
+    reverse), or when the page already has one.
     """
     if "id=tab-asan" in page or "id=panel-asan" in page:
         raise ValueError("page already has an ASan tab")
     if page.count("</head>") != 1:
         raise ValueError("page has no single </head> to add the tab's style to")
     panel = asan_panel_html(runs)
-    radio = label = None
-    for radio_re, label_re in _TAB_ANCHORS:
-        radio, label = radio_re.search(page), label_re.search(page)
-        if radio or label:
-            break
+    anchors = [(radio_re.search(page), label_re.search(page)) for radio_re, label_re in _TAB_ANCHORS]
+    if any(bool(found_radio) != bool(found_label) for found_radio, found_label in anchors):
+        raise ValueError("page has a nightly tab radio without its label, or the reverse")
+    radio, label = next(
+        ((found_radio, found_label) for found_radio, found_label in anchors if found_radio),
+        (None, None),
+    )
     if radio and label:
         end = _TABS_END_RE.search(page)
         if end is None or not radio.end() <= label.start() < label.end() <= end.start():
@@ -4815,10 +5352,15 @@ def add_asan_tab(page: str, runs: list[dict[str, Any]]) -> str:
     return page.replace("</head>", f"<style>{_ASAN_TAB_CSS}</style></head>", 1)
 
 
-def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
+def _run_index_survey_html(
+    survey: list[dict[str, Any]] | None, *, heading: str = "Workload survey"
+) -> str:
     """The run landing page's workload-survey table (pure).
 
-    Without this the page lists only the three gated guardrail recipes, so the
+    ``heading`` names the dashboard tab the entries render on: the FpSan
+    cases are published under the same ``survey/<case>/`` areas.
+
+    Without this the page lists only the gated guardrail recipes, so the
     top-nav "raw reports" link never mentions the survey cases published
     alongside them under ``survey/<case>/`` (#384). For a past run the entries
     come from ``survey_entries_from_published``, whose recorded verdict can be
@@ -4855,7 +5397,7 @@ def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
         for entry in survey
     )
     return (
-        '<section class="panel"><h2>Workload survey '
+        f'<section class="panel"><h2>{_esc(heading)} '
         f'<span class=count>{len(survey)} observed-only</span></h2>'
         '<div class="table-wrap"><table>\n'
         "<thead><tr><th>Case</th><th>Observed</th><th>Reproduce</th><th>Files</th></tr></thead>\n"
@@ -4907,10 +5449,12 @@ def build_run_index_html(
     Lives at ``runs/<id>/index.html`` alongside the run's raw reports, so the
     report links are case-local (``<case>/sanitizer_report.json``) rather than
     dashboard-root-relative. ``survey`` adds the observed-only cases published
-    under ``survey/<case>/`` for this run, so the page covers both tabs.
+    under ``survey/<case>/`` for this run, so the page covers every nightly tab;
+    FpSan cases get their own table, as they get their own dashboard tab.
     """
     meta = run["meta"]
     rows = run["rows"]
+    survey_only, fpsan = split_fpsan_entries(survey or [])
     # Reuse the shared aggregate classifier so a missing report reads as
     # INCOMPLETE rather than a misleading "verdict mismatch" (mirrors build_html).
     summary = _gate_summary(rows, recorded_gate=run["meta"].get("gate"))
@@ -4928,7 +5472,8 @@ def build_run_index_html(
 
     def _cell(case: str, present: bool) -> str:
         if not present:
-            return '<span class="dash">report missing</span>'
+            word = "not run" if rows[case].get("required") is False else "report missing"
+            return f'<span class="dash">{word}</span>'
         href = _esc(f"{case}/sanitizer_report.json")
         return f'<a href="{href}">sanitizer_report.json</a>'
 
@@ -4963,7 +5508,8 @@ def build_run_index_html(
         "<th>Files</th><th>Baseline</th></tr></thead>\n"
         f"<tbody>{report_rows}</tbody>\n"
         "</table></div></section>\n"
-        f"{_run_index_survey_html(survey)}"
+        f"{_run_index_survey_html(survey_only)}"
+        f"{_run_index_survey_html(fpsan, heading=_FPSAN_TAB_LABEL)}"
         "</div></body></html>\n"
     )
 
@@ -5108,8 +5654,8 @@ def build_summary_md(
 
     lines += [
         "",
-        "Two views below: **Nightly gate** (baseline-checked, the gate) "
-        "and **Workload survey** (observed only, non-gating).",
+        "Three views below: **Nightly gate** (baseline-checked, the gate), "
+        f"**Workload survey** and **{_FPSAN_TAB_LABEL}** (both observed only, non-gating).",
         "",
         "## Nightly gate \u00b7 Kernel details",
         "",
@@ -5144,20 +5690,23 @@ def build_summary_md(
             + f" \u00b7 selection `{wl['requirement']}` top-{wl['top_n']} "
             f"\u00b7 {wl['kernel_count']} kernel(s) \u00b7 execution {_execution_md(r['execution'])}"
         )
-        lines += [
-            "",
-            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object "
-            "| SHA-256 | Detail |",
-            "|---|--:|---|--:|---|---|---|",
-        ]
-        for k in r["kernels"]:
-            code_object = k["code_object"] or _DASH
-            sha = k["sha"] or _DASH
-            detail = (k.get("detail") or "").replace("|", "\\|")
-            lines.append(
-                f"| `{k['name']}` | {k['dispatch']} | {_verdict_md(k['verdict'])} | {k['findings']} | "
-                f"`{code_object}` | `{sha}` | {detail or _DASH} |"
-            )
+        if r.get("fpsan_pairs"):
+            lines += [""] + _fpsan_pairs_md(r["fpsan_pairs"])
+        else:
+            lines += [
+                "",
+                "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object "
+                "| SHA-256 | Detail |",
+                "|---|--:|---|--:|---|---|---|",
+            ]
+            for k in r["kernels"]:
+                code_object = k["code_object"] or _DASH
+                sha = k["sha"] or _DASH
+                detail = (k.get("detail") or "").replace("|", "\\|")
+                lines.append(
+                    f"| `{k['name']}` | {k['dispatch']} | {_verdict_md(k['verdict'])} "
+                    f"| {k['findings']} | `{code_object}` | `{sha}` | {detail or _DASH} |"
+                )
         if r["finding_groups"]:
             lines += [
                 "",
@@ -5171,7 +5720,9 @@ def build_summary_md(
                 )
         lines += ["", "</details>", ""]
 
-    lines += _survey_section_md(survey or [])
+    survey_only, fpsan = split_fpsan_entries(survey or [])
+    lines += _survey_section_md(survey_only)
+    lines += _fpsan_section_md(fpsan)
 
     lines += [
         "## History / trend",
@@ -5187,6 +5738,10 @@ def build_summary_md(
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def _attach_survey(run: dict[str, Any], entries: list[dict[str, Any]]) -> None:
+    run["survey"], run["fpsan"] = split_fpsan_entries(entries)
 
 
 def main() -> int:
@@ -5327,10 +5882,12 @@ def main() -> int:
             rel=current_rel,
         )
         survey += informational_survey
-    # Mirror the two-class split into data.json: attach the survey list to the run
-    # this job produced (additive; existing per-run keys are untouched).
+    # Mirror the tab split into data.json: attach the survey and kernel-pair lists
+    # to the run this job produced (additive; existing per-run keys are untouched).
+    # FpSan cases stay in ``survey`` until here: they are published, retained and
+    # rebuilt as survey areas, and only render on a tab of their own.
     if current_index is not None:
-        runs[current_index]["survey"] = survey
+        _attach_survey(runs[current_index], survey)
     # What the dashboard page and the job summary show on Tab 2. Both take their
     # guardrail data from runs[0], so the survey rendered beside it has to describe
     # that same run -- and the run this job staged is not always the newest one (see
@@ -5354,7 +5911,7 @@ def main() -> int:
             args.history_root / str(runs[0]["meta"].get("run", "")) / "survey",
             rel=runs[0].get("rel"),
         )
-        runs[0]["survey"] = displayed_survey
+        _attach_survey(runs[0], displayed_survey)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(

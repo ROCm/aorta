@@ -1,0 +1,8 @@
+kernel.hip:4:31: error: excess elements in array initializer
+    4 |   int table[3] = {10, 20, 30, 40};
+      |                               ^~
+kernel.hip:5:22: error: invalid suffix 'x' on integer constant
+    5 |   x[threadIdx.x] = 12x + table[0];
+      |                      ^
+2 errors generated when compiling for gfx950.
+failed to execute:/opt/rocm-7.0.2.1/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

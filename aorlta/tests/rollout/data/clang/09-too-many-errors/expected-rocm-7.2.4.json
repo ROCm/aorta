@@ -1,0 +1,146 @@
+{
+ "errors": [
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 5,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_00"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 6,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_01"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 7,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_02"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 8,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_03"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 9,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_04"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 10,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_05"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 11,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_06"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 12,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_07"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 13,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_08"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 14,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_09"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 15,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_10"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 16,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_11"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 17,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_12"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 18,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_13"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 19,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_14"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 20,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_15"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 21,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_16"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 22,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_17"
+  },
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 23,
+   "col": 11,
+   "token": "undeclared_value_with_a_deliberately_long_identifier_name_number_18"
+  },
+  {
+   "cls": "too many errors emitted, stopping now [-ferror-limit=]",
+   "line": null,
+   "col": null,
+   "token": null
+  }
+ ],
+ "shown": 15,
+ "total": 20,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. use of undeclared identifier <name> at line 5, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_00`",
+  "2. use of undeclared identifier <name> at line 6, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_01`",
+  "3. use of undeclared identifier <name> at line 7, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_02`",
+  "4. use of undeclared identifier <name> at line 8, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_03`",
+  "5. use of undeclared identifier <name> at line 9, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_04`",
+  "6. use of undeclared identifier <name> at line 10, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_05`",
+  "7. use of undeclared identifier <name> at line 11, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_06`",
+  "8. use of undeclared identifier <name> at line 12, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_07`",
+  "9. use of undeclared identifier <name> at line 13, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_08`",
+  "10. use of undeclared identifier <name> at line 14, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_09`",
+  "11. use of undeclared identifier <name> at line 15, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_10`",
+  "12. use of undeclared identifier <name> at line 16, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_11`",
+  "13. use of undeclared identifier <name> at line 17, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_12`",
+  "14. use of undeclared identifier <name> at line 18, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_13`",
+  "15. use of undeclared identifier <name> at line 19, column 11: `undeclared_value_with_a_deliberately_long_identifier_name_number_14`",
+  "(5 more errors not shown)",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

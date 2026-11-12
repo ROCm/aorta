@@ -1,0 +1,19 @@
+kernel.hip:3:22: error: unknown type name 'vec4f'
+    3 | __global__ void fill(vec4f* x, int n) {
+      |                      ^
+kernel.hip:5:26: error: expected ';' after expression
+    5 |   if (i < n) x[i] = vec4f{0, 0, 0, 0};
+      |                          ^
+      |                          ;
+kernel.hip:5:21: error: use of undeclared identifier 'vec4f'
+    5 |   if (i < n) x[i] = vec4f{0, 0, 0, 0};
+      |                     ^
+kernel.hip:5:37: error: expected ';' after expression
+    5 |   if (i < n) x[i] = vec4f{0, 0, 0, 0};
+      |                                     ^
+      |                                     ;
+kernel.hip:5:27: warning: left operand of comma operator has no effect [-Wunused-value]
+    5 |   if (i < n) x[i] = vec4f{0, 0, 0, 0};
+      |                           ^
+1 warning and 4 errors generated when compiling for gfx950.
+failed to execute:/opt/rocm-7.0.2.1/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
+# Usage: launch_rocm.sh [CONFIG] [extra train.py args, e.g. --override key=value ...]
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 
 CONFIG=${1:-${REPO_ROOT}/config/default.yaml}
+if [ $# -gt 0 ]; then
+  shift
+fi
 
 GPU_COUNT=$(python - <<'PY'
 import os
@@ -50,4 +54,5 @@ torchrun \
   --standalone \
   "${REPO_ROOT}/train.py" \
   --config "${CONFIG}" \
-  --enable-rocm-metrics
+  --enable-rocm-metrics \
+  "$@"

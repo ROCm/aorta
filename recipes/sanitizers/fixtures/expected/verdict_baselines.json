@@ -25,5 +25,22 @@
     "finding_shape": {
       "consan": "ConSan conflict"
     }
+  },
+  "fpsan_match": {
+    "overall_verdict": "pass",
+    "execution_status": "complete",
+    "checks": {
+      "fpsan": "pass"
+    }
+  },
+  "fpsan_mismatch": {
+    "overall_verdict": "fail",
+    "execution_status": "complete",
+    "checks": {
+      "fpsan": "fail"
+    },
+    "finding_shape": {
+      "fpsan": "reference and candidate kernels disagree under FpSan"
+    }
   }
 }

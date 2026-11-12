@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "use of undeclared identifier <name>",
+   "line": 7,
+   "col": 20,
+   "token": "missing_symbol"
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. use of undeclared identifier <name> at line 7, column 20: `missing_symbol`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

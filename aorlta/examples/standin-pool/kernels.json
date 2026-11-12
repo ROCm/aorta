@@ -1,0 +1,29 @@
+{
+  "example_block_sum": {
+    "kid": "example_block_sum",
+    "symbol": "_Z17example_block_sumPKfPfi",
+    "demangled": "example_block_sum(float const*, float*, int)",
+    "family": "reduction",
+    "library": "aorlta-examples",
+    "n_insns": 113,
+    "heldout": false
+  },
+  "example_transpose": {
+    "kid": "example_transpose",
+    "symbol": "_Z17example_transposePKfPfii",
+    "demangled": "example_transpose(float const*, float*, int, int)",
+    "family": "transpose",
+    "library": "aorlta-examples",
+    "n_insns": 126,
+    "heldout": true
+  },
+  "example_vector_add": {
+    "kid": "example_vector_add",
+    "symbol": "_Z18example_vector_addPKfS0_Pfi",
+    "demangled": "example_vector_add(float const*, float const*, float*, int)",
+    "family": "elementwise",
+    "library": "aorlta-examples",
+    "n_insns": 111,
+    "heldout": false
+  }
+}

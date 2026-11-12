@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "cannot initialize a variable of type <name> with an lvalue of type <name>",
+   "line": 4,
+   "col": 8,
+   "token": "p"
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. cannot initialize a variable of type <name> with an lvalue of type <name> at line 4, column 8: `p`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

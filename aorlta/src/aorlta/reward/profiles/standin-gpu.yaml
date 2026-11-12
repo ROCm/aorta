@@ -1,0 +1,48 @@
+# `standin-gpu`: standin-static plus aorta's ConSan (RocJITsu DBI hook) and device ASan on a real GPU, inside a
+# Slurm job only: aorta's sanitizer fixtures (jobs/aorlta-reward-standin.sbatch) and stand-in runs
+# (jobs/aorlta-run.sbatch, which serves the two GPU adapters from their own process, reward.remote).
+# A candidate is run as a program: one without its own `main` gets the stand-in launch harness
+# (adapters/standin_harness.py). The installed hook needs glibc >= 2.38, so the GPU legs run in
+# rocm/dev-ubuntu-24.04:7.0.2. ConSan's NOT_CHECKED (a kernel with no LDS, barrier, atomic or fence site) stays
+# unsettled, so such a candidate is unscored unless a finding is confirmed.
+name: standin-gpu
+reward_fn: standin.v11
+clean_repeats: 1
+materialize: true
+pools:
+  gates: {resource: local_cpu, adapter: standin.parse, timeout: gate, workers: 2}
+  compile: {resource: local_cpu, adapter: standin.hipcc, timeout: compile, workers: 4}
+  static: {resource: local_cpu, adapter: standin.rj_waitcheck, timeout: sim_run, workers: 2}
+  consan: {resource: own_gpu, adapter: standin.aorta_consan, timeout: sim_run, workers: 1, controls: true}
+  asan: {resource: own_gpu, adapter: standin.aorta_asan, timeout: asan_request, controls: true, batched: true}
+stages:
+  - {name: S0, pool: gates, legs: [gate.parse]}
+  - {name: S1, pool: compile, legs: [gate.compile]}
+  - {name: S2, pool: static, legs: [san.waitcheck]}
+  - {name: S2g, pool: consan, legs: [san.consan]}
+  - {name: S3, pool: asan, legs: [san.asan]}
+requires:
+  gate.compile: [gate.parse]
+  san.waitcheck: [gate.compile]
+  san.consan: [gate.compile]
+  san.asan: [gate.compile]
+leg_settings:
+  gate.compile: {offload_arch: gfx950, flags: ["-c", "-O1"]}
+  san.waitcheck: {target: gfx950, max_diagnostics: 32}
+# Where the tools are: `${NAME}` is the environment variable NAME, or its default under /opt (profiles.TOOL_ROOTS).
+# aorta at commit d22f6116235c05395a0241a83d6f7e952a988454 (its src/ and its sanitizer fixtures); rocjitsu's
+# rj_waitcheck and librocjitsu_dbi_hooks.so, from ROCm/rocm-systems branch shared/rocjitsu/sanitizers; a libstdc++ with
+# GLIBCXX_3.4.31 for rj_waitcheck (ld_library_path).
+adapters:
+  standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", readelf: "${AORLTA_ROCM_ROOT}/llvm/bin/llvm-readelf"}
+  standin.rj_waitcheck:
+    binary: "${AORLTA_ROCJITSU_ROOT}/bin/rj_waitcheck"
+    ld_library_path: "${AORLTA_LIBSTDCXX_SHIM}"
+    aorta_src: "${AORLTA_AORTA_ROOT}/src"
+  standin.aorta_consan:
+    hook: "${AORLTA_ROCJITSU_ROOT}/lib/librocjitsu_dbi_hooks.so"
+    aorta_src: "${AORLTA_AORTA_ROOT}/src"
+    control_source: "${AORLTA_AORTA_ROOT}/recipes/sanitizers/fixtures/repro/consan_lds_race.hip"
+  standin.aorta_asan:
+    aorta_src: "${AORLTA_AORTA_ROOT}/src"
+    control_source: "${AORLTA_AORTA_ROOT}/recipes/sanitizers/fixtures/repro/asan_heap_overflow.hip"

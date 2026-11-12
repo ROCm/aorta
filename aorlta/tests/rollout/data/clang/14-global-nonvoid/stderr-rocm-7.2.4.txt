@@ -1,0 +1,6 @@
+kernel.hip:3:12: error: kernel function type 'int (float *)' must have void return type
+    3 | __global__ int bad(float* x) {
+      |            ^~~
+      |            void
+1 error generated when compiling for gfx950.
+failed to execute:/opt/rocm/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

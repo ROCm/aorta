@@ -1,0 +1,8 @@
+kernel.hip:3:2: warning: "this kernel is a stand-in" [-W#warnings]
+    3 | #warning "this kernel is a stand-in"
+      |  ^
+kernel.hip:7:20: error: use of undeclared identifier 'missing_symbol'
+    7 |   x[threadIdx.x] = missing_symbol;
+      |                    ^
+1 warning and 1 error generated when compiling for gfx950.
+failed to execute:/opt/rocm-7.0.2.1/lib/llvm/bin/clang++  --offload-arch=gfx950  -c -O1 -o "kernel.o" -x hip kernel.hip

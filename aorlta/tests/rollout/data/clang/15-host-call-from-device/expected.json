@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "no matching function for call to <name>",
+   "line": 6,
+   "col": 20,
+   "token": "host_only"
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. no matching function for call to <name> at line 6, column 20: `host_only`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}

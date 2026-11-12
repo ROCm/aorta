@@ -1,0 +1,17 @@
+{
+ "errors": [
+  {
+   "cls": "member reference base type <name> is not a structure or union",
+   "line": 4,
+   "col": 35,
+   "token": "."
+  }
+ ],
+ "shown": 1,
+ "total": 1,
+ "feedback": [
+  "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:",
+  "1. member reference base type <name> is not a structure or union at line 4, column 35: `.`",
+  "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
+ ]
+}
