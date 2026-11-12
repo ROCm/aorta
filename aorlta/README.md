@@ -242,7 +242,18 @@ for n in complete_iterations(sys.argv[1]):
 TensorBoard reads `tb/` (checked with 2.21; it is not a dependency). The checkpoint is a plain `torch.save` dict:
 `torch.load(path, map_location="cpu", weights_only=True)["lora"]` gives the 496 fp32 LoRA tensors (r 16, alpha 32),
 named `<module>.lora_A` and `<module>.lora_B`. The engines' weight slots are in `/dev/shm` and are removed when the
-run ends; a run has no export to a merged Hugging Face model or a PEFT adapter directory yet.
+run ends. To use a trained LoRA elsewhere, export a checkpoint as a PEFT adapter directory, then score it, merge it,
+or load it with peft:
+
+```bash
+python tools/export_adapter.py --ckpt RUN_DIR/ckpt/iter-000003 --out /path/to/adapter
+# score it: model.adapter_dir: /path/to/adapter in a score run's config, on the run's base
+python tools/merge_base_adapter.py merge --base BASE_DIR --adapter /path/to/adapter --out /path/to/merged
+```
+
+The export checks the checkpoint against its manifest and reads its output back bit for bit; merged with
+`merge_base_adapter.py`, it gives exactly the weights the engines served at that iteration, unless the run used
+`sync.stochastic_rounding`.
 
 ## Known limits
 
@@ -253,5 +264,5 @@ run ends; a run has no export to a merged Hugging Face model or a PEFT adapter d
   unscored. In the last stand-in training run 152 of 768 samples stayed unscored, all with `sanitizer_not_settled`;
   that is why `standin.yaml` sets the scored fraction to 0.75, which iteration 3 met exactly (192 of 256).
 - A hung candidate kernel costs its ASan check the full 45 s limit (ConSan's limit is 30 s in `standin.yaml`).
-- Score runs: an adapter's merge has run only in the CPU tests, `rollout.K` must be at least 2, and a pass whose groups
+- Score runs: an adapter's merge (and so a scored export of a trained checkpoint) has run only in the CPU tests, `rollout.K` must be at least 2, and a pass whose groups
   give K identical answers too often stops, as a training iteration does.
