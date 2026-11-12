@@ -59,6 +59,8 @@ def test_the_export_merged_is_what_the_engines_served(trained, tiny_base, tmp_pa
     cfg, ckpt, served = trained
     out = tmp_path / "adapter"
     assert X.main(["--ckpt", str(ckpt), "--out", str(out)]) == 0
+    modes = {(out / n).stat().st_mode & 0o777 for n in (X.ADAPTER_WEIGHTS, X.ADAPTER_CONFIG)}
+    assert len(modes) == 1  # the weights as readable as the config: the umask's, not owner-only
     manifest = json.loads((out / X.MANIFEST_NAME).read_text())
     assert manifest["pass"] and manifest["checkpoint"]["state"]["iteration"] == 1
     assert manifest["run_plan_base_dir"] == str(tiny_base)

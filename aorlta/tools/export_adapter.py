@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -125,6 +126,9 @@ def export(ckpt: Path, out: Path, base_model: str | None = None) -> dict:
         raise Refused(f"{tmp} exists")
     tmp.mkdir(parents=True)
     save_file(tensors, str(tmp / ADAPTER_WEIGHTS), metadata={"format": "pt"})
+    umask = os.umask(0)
+    os.umask(umask)
+    os.chmod(tmp / ADAPTER_WEIGHTS, 0o666 & ~umask)  # safetensors writes it owner-only; an adapter is for sharing
     (tmp / ADAPTER_CONFIG).write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     back = load_file(str(tmp / ADAPTER_WEIGHTS))
     same = sorted(back) == sorted(tensors) and all(
