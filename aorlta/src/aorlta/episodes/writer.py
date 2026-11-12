@@ -289,6 +289,16 @@ class EvidenceStore:
                 removed.append(p.name)
         return removed
 
+    def missing_listed(self, upto: int) -> list[str]:
+        """The blobs that a record of an iteration <= `upto` lists and that are not on disk at the size it records."""
+        missing = set()
+        for r in self.manifest.read():
+            if r["iteration"] <= upto:
+                path = self.path_of(r["sha256"])
+                if not path.is_file() or path.stat().st_size != r["size"]:
+                    missing.add(r["sha256"])
+        return sorted(missing)
+
     def verify(self) -> list[str]:
         problems = []
         listed = {r["sha256"]: r for r in self.manifest.read()}

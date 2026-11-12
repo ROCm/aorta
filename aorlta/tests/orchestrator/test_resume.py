@@ -128,6 +128,30 @@ def test_a_record_that_names_no_iteration_stops_the_resume_before_anything_is_re
     assert _files(done_run) == before
 
 
+@pytest.mark.parametrize("damage", ["deleted", "cut_short"])
+def test_a_committed_iteration_whose_evidence_blob_is_gone_stops_the_resume_before_anything_is_removed(done_run,
+                                                                                                      damage):
+    """A power loss can keep a manifest line and lose the blob it names. The prune would keep the line's blob and
+    the resume would go on with a hole in committed evidence; a blob of an iteration the resume cuts may be gone."""
+    from aorlta.episodes.writer import EvidenceStore
+
+    shutil.rmtree(done_run / "iterations" / "iter-000003")
+    (done_run / "ckpt" / "iter-000003.partial").mkdir()
+    store = EvidenceStore(done_run / "evidence")
+    kept = store.put(b"iteration 2's stderr", kind="stderr", iteration=2)
+    store.put(b"iteration 1's stderr", kind="stderr", iteration=1)
+    cut = store.put(b"iteration 3's stderr", kind="stderr", iteration=3)
+    store.path_of(cut).unlink()  # an iteration the resume cuts: no problem
+    if damage == "deleted":
+        store.path_of(kept).unlink()
+    else:
+        store.path_of(kept).write_bytes(b"iteration 2")
+    before = _files(done_run)
+    with pytest.raises(LedgerError, match=f"iterations <= 2 list 1 evidence blob that is missing.*{kept[:12]}"):
+        prepare_resume(done_run, keep_ckpts=3)
+    assert _files(done_run) == before and (done_run / "ckpt" / "iter-000003.partial").is_dir()
+
+
 def test_truncate_after_drops_a_torn_final_line_and_refuses_a_bad_line_anywhere_else(tmp_path):
     path = tmp_path / "l.jsonl"
     path.write_bytes(b'{"iteration": 1}\n{"iteration": 2}\n{"iterat')
