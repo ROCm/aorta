@@ -21,9 +21,10 @@ is no trained model.
 
 The short version:
 
-- **The RL loop does not belong in aorta.** AORTA is a benchmarking and triage
-  harness. Its job here is to stand up, validate and measure the rollout engine.
-  The trainer belongs in a separate effort built on verl or slime.
+- **The RL loop is not part of aorta's own package.** AORTA is a benchmarking and
+  triage harness. Its job here is to stand up, validate and measure the rollout
+  engine. The trainer is a separate package: AORLTA, a minimal GRPO loop on
+  TokenSpeed, lives in its own subproject under [`aorlta/`](../aorlta/README.md).
 - **TokenSpeed has the hard part designed, and no weight transport is yet
   proven.** It ships an RL online weight-sync control plane —
   `/init_weight_transfer_engine`, `/start_weight_update`, `/update_weights`,

@@ -1,0 +1,10 @@
+# The repository's top-level .gitignore drops *.json and *.jsonl as run output; this package's test data,
+# examples and profiles' sidecars are JSON and must be tracked.
+!*.json
+!*.jsonl
+build/
+runs/
+__pycache__/
+*.pyc
+.hypothesis/
+.venv/

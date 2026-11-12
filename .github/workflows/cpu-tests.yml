@@ -68,6 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       cpu: ${{ steps.filter.outputs.cpu }}
+      aorlta: ${{ steps.aorlta.outputs.aorlta }}
     steps:
       - name: Decide whether the CPU suite applies
         id: filter
@@ -162,8 +163,13 @@ jobs:
           # is inert for CPU tests -- no test imports or reads anything under it
           # -- with one exception: a change to this workflow itself must re-run
           # it, so cpu-tests.yml is special-cased as relevant below.
+          #
+          # `aorlta/*` is a separate package (AORLTA) with its own tests, run by the
+          # `aorlta_tests` job below: pytest.ini's `testpaths = tests` keeps them out
+          # of this suite, and nothing under src/ or tests/ imports or reads aorlta/.
           ignore=(
             '.github/*'
+            'aorlta/*'
           )
 
           cpu=false
@@ -201,6 +207,61 @@ jobs:
             echo "required check is satisfied without running the matrix."
           fi
           echo "cpu=$cpu" >> "$GITHUB_OUTPUT"
+
+      # The same question for AORLTA's lane, which an allow-list decides: aorlta/
+      # or this workflow. It fails open the same way, on any retrieval problem or
+      # a truncated file list.
+      - name: Decide whether the AORLTA suite applies
+        id: aorlta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "aorlta=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! changed_files="$(gh api \
+                  "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+                  --jq '.changed_files' 2>&1)" \
+             || ! resp="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                  --paginate 2>&1)" \
+             || ! paths="$(printf '%s' "$resp" \
+                  | jq -r '.[] | .filename, (.previous_filename // empty)' 2>&1)"; then
+            echo "::warning::Could not list the PR's files; running the AORLTA suite."
+            echo "aorlta=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$changed_files" in
+            ''|*[!0-9]*)
+              echo "::warning::PR changed_files was not a number; running the AORLTA suite."
+              echo "aorlta=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          record_count="$(printf '%s' "$resp" | jq -r '.[].filename' 2>/dev/null \
+                            | grep -c . || true)"
+          if [ -z "$paths" ] || [ "${record_count:-0}" -lt "$changed_files" ]; then
+            echo "::warning::The PR file list is empty or truncated; running the AORLTA suite."
+            echo "aorlta=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          aorlta=false
+          while read -r file; do
+            case "$file" in
+              aorlta/*|.github/workflows/cpu-tests.yml)
+                echo "AORLTA-relevant change: $file"
+                aorlta=true
+                break
+                ;;
+            esac
+          done <<< "$paths"
+          echo "aorlta=$aorlta" >> "$GITHUB_OUTPUT"
 
   tests:
     name: pytest (CPU, py${{ matrix.python-version }})
@@ -325,6 +386,86 @@ jobs:
       - name: Run the CIA test suite
         run: pytest tests/cia -m "not gpu and not rocm" -n auto
 
+  # AORLTA (aorlta/) is its own package, with its own pins and Python (3.12, the
+  # version of its run images), so it gets its own lane, as CIA does. It runs
+  # only when aorlta/ or this workflow changes (and on pushes to main), so other
+  # pull requests do not wait for it. Its tests need no GPU: the ones that need
+  # hipcc, a GPU, the stand-in dataset or the checker tools skip with a reason.
+  # The suite runs in three parts on three runners: the tests that hold several copies of a model (marked
+  # `heavy`) outgrow this runner's 16 GB when four run at once, so two run, with two torch threads each; the
+  # longest CPU runs (`cpu_run`: the t10 measurement and the four-rank wired run) run one at a time, with all
+  # four cores; the rest run four at once.
+  aorlta_tests:
+    name: pytest (AORLTA ${{ matrix.part }}, py3.12)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.aorlta == 'true'
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: light
+            workers: "4"
+            threads: "1"
+            markers: not heavy and not cpu_run
+          - part: heavy
+            workers: "2"
+            threads: "2"
+            markers: heavy and not cpu_run
+          - part: cpu run
+            workers: "0"
+            threads: "4"
+            markers: cpu_run
+    defaults:
+      run:
+        working-directory: aorlta
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: aorlta/requirements-dev.txt
+
+      # The pins include torch's CPU wheel, which only the PyTorch index has.
+      - name: Install AORLTA and its test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt
+          pip install -e . --no-deps
+
+      # Never more torch threads than cores: the reward-service tests run on a scaled clock, and a torch test
+      # taking every core in another worker would stall them past their timeouts. A test that hangs fails
+      # with its stack after 15 minutes instead of holding the job to its limit.
+      # glibc's default mmap threshold grows as tensors are freed, so later tensors come from the heap and
+      # their memory is kept: each wired run left a worker about 1.5 GB larger, four workers reached 17 GiB
+      # on this 16 GB runner, and the heavy tests swapped past the job's limit. A fixed threshold and two
+      # arenas give the memory back (10 GiB peak on 4 CPUs). The step prints the job's peak memory and swap.
+      - name: Run the AORLTA test suite
+        env:
+          OMP_NUM_THREADS: ${{ matrix.threads }}
+          MALLOC_MMAP_THRESHOLD_: "65536"
+          MALLOC_ARENA_MAX: "2"
+          PYTEST_WORKERS: ${{ matrix.workers }}
+          PYTEST_MARKERS: ${{ matrix.markers }}
+        run: |
+          (while :; do
+             awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^SwapTotal:/{s=$2} /^SwapFree:/{f=$2} END{print t-a, s-f}' /proc/meminfo
+             sleep 5
+           done) > "$RUNNER_TEMP/memory.log" &
+          sampler=$!
+          rc=0
+          python -m pytest -q -n "$PYTEST_WORKERS" -m "$PYTEST_MARKERS" --timeout=900 --durations=10 || rc=$?
+          kill "$sampler"
+          if [ "$rc" -eq 5 ]; then echo "no test of this part on this branch"; rc=0; fi
+          awk '$1>m{m=$1} $2>s{s=$2} END{printf "peak memory in use: %.1f GiB, peak swap in use: %.1f GiB\n", m/1048576, s/1048576}' \
+            "$RUNNER_TEMP/memory.log"
+          exit "$rc"
+
   # Stable required-status-check aggregator. Branch protection on `main` must
   # require THIS job ("CPU tests"), not the per-version `pytest (CPU, py3.x)`
   # legs: a matrix skipped by a job-level `if` never emits those contexts, so a
@@ -336,7 +477,7 @@ jobs:
   required:
     name: CPU tests
     runs-on: ubuntu-latest
-    needs: [changes, tests, cia_tests]
+    needs: [changes, tests, cia_tests, aorlta_tests]
     if: always()
     steps:
       - name: Collapse the CPU matrix result into one required check
@@ -344,9 +485,11 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
           CIA_TESTS_RESULT: ${{ needs.cia_tests.result }}
+          AORLTA_TESTS_RESULT: ${{ needs.aorlta_tests.result }}
         run: |
           set -euo pipefail
-          echo "changes=${CHANGES_RESULT} tests=${TESTS_RESULT} cia=${CIA_TESTS_RESULT}"
+          echo "changes=${CHANGES_RESULT} tests=${TESTS_RESULT} cia=${CIA_TESTS_RESULT}" \
+               "aorlta=${AORLTA_TESTS_RESULT}"
 
           # The relevance gate must have completed; a broken gate is not a pass.
           if [ "$CHANGES_RESULT" != "success" ]; then
@@ -366,4 +509,10 @@ jobs:
             success)  echo "CIA matrix passed." ;;
             skipped)  echo "CIA matrix skipped (no CPU-relevant change)." ;;
             *)        echo "CIA matrix did not pass (${CIA_TESTS_RESULT})."; exit 1 ;;
+          esac
+
+          case "$AORLTA_TESTS_RESULT" in
+            success)  echo "AORLTA suite passed." ;;
+            skipped)  echo "AORLTA suite skipped (no AORLTA-relevant change)." ;;
+            *)        echo "AORLTA suite did not pass (${AORLTA_TESTS_RESULT})."; exit 1 ;;
           esac
