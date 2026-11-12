@@ -210,6 +210,10 @@ The Monarch controller starts one Monarch worker process on each machine, and th
 - **RCCL or NCCL network settings for your cluster.** For example, `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` name the network interface, and `NCCL_IB_HCA` lists the RDMA devices. On ROCm, RCCL warns at startup unless `HSA_NO_SCRATCH_RECLAIM=1` is set.
 - **A free worker port.** Monarch workers listen on `MONARCH_PORT`, which defaults to 22222. After a run, that port can stay open for about 20 seconds. Wait that long before the next run, or set a different `MONARCH_PORT`.
 
+## Debugging a mesh
+
+When code inside an actor endpoint calls `breakpoint()`, Monarch stops that rank and serves its pdb session from the controller's machine, not from the worker's terminal. Run `monarch debug` in a second terminal on that machine to list the stopped ranks, attach to one, step it, and send one command to several ranks at once. [`examples/monarch-debug`](../examples/monarch-debug/README.md) walks through this in three steps: eight CPU workers on one machine, eight GPUs on one node, and sixteen GPUs on two nodes, each with one planted bug to find.
+
 ## Troubleshooting
 
 | What you see | Cause and fix |

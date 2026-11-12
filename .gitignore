@@ -152,3 +152,7 @@ buck-out/
 # regenerated with the permissive defaults.
 /chainlit.md
 /.files/
+
+# Default stop-file directory of examples/monarch-debug/run-spur.sh. It holds
+# per-run files the Spur workers poll for, never source.
+/examples/monarch-debug/shared/
