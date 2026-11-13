@@ -14,7 +14,7 @@ Paths are relative to `aorlta/`. The commands assume the environment from the RE
 |---|---|---|
 | the prompts | `examples/hip-kernels/tasks.json`, and `records()` in `hip_kernels.py` | one prompt record per task: the chat, its prompt id, and a hash of what the checks read for it |
 | how an answer is read | `HipkParse` and `HipkFeedback` | the last ```cpp block is the answer; no block, or no definition of the kernel asked for, gets a repair turn that says so; a compile error gets one with the compiler's errors |
-| the checks | `HipkRun` and `examples/hip-kernels/hipk-gpu.yaml` | the stand-in parse and compile gates, then `ref.native`: build the answer with a generated host program, run it on a GPU, compare |
+| the checks | `HipkGate`, `HipkRun` and `examples/hip-kernels/hipk-gpu.yaml` | a parse gate with the rollout's own rule and the stand-in compile gate, then `ref.native`: compile the answer alone into a code object, run its kernel on a GPU from a harness built from the task, compare |
 | the reward | `HipkV1` | -1.0 no parsable answer, -0.9 compile error, -0.8 wrong signature, -0.6 crash or hang, -0.5 wrong output, +1.0 correct, minus 0.05 x the share of the token budget used |
 
 The module registers each part under a name (`register()` at its end):
@@ -25,6 +25,7 @@ plugins.register_parse_adapter("hipk.parse", HipkParse)
 plugins.register_feedback_template("hipk.feedback", HipkFeedback)
 plugins.register_profile("hipk-gpu", HERE / "hipk-gpu.yaml")
 plugins.register_check_adapter("hipk.run", HipkRun)
+plugins.register_check_adapter("hipk.gate", HipkGate)
 plugins.register_reward_fn("hipk.v1", HipkV1)
 ```
 
@@ -54,11 +55,15 @@ reward:
 - **A check never guesses.** Anything it cannot settle (no GPU, a tool missing, output it cannot read) is
   `unsettled`, never `clean`; only the check may blame the candidate for a timeout. `verdict()` in the example is
   the whole mapping, and `tests/examples/test_hip_kernels.py` tests every row of it on CPU.
+- **The candidate is not trusted.** Its verdict must come from code it cannot change: the example never runs the
+  answer's host code and reads only the harness's own record file. A check's `version` must change whenever its
+  verdict could (the example's names its compiler and its own file), because cached legs are keyed by it.
 - **The reward's parts.** `compute` returns `(reward, {"base", "broke_healthy", "length"})`, which add up to the
   reward, within [-1.55, 1.0]; an unscored sample is `(None, {"reason": ...})` and is never counted clean. `decide`
   answers early only when no pending leg could change the answer. The service recomputes and checks all of this,
   and a reward that breaks it is unscored and raises an alarm.
-- **The check's GPUs** are its own setting (`hipk.run.gpus` in the profile): keep them off `rollout.engines`.
+- **The check's GPUs** are its own setting (`hipk.run.gpus` in the profile): keep them off `rollout.engines`. Each
+  live worker holds one of them, and a worker the service replaces takes the GPU its predecessor gave back.
 - **Precise tasks.** An iteration stops when more than `rollout.identical_groups_stop` (5% by default) of its groups
   have all `K` answers identical, which is how a broken sampler shows. A short kernel can have one obvious answer,
   and with 8 prompts one such group is 12.5%, so the example's configs set it to 0.5; the engines' start-up
@@ -79,9 +84,12 @@ and run them on one GPU (one line per task, all `"pass": true`; on a cluster, in
 python examples/hip-kernels/hip_kernels.py selfcheck --hipcc /opt/rocm/bin/hipcc --gpu 0
 ```
 
-The harness is the candidate's source followed by a host `main` that fills the inputs from a fixed seed, runs the
-kernel once with the launch the prompt states, and compares every output element with the task's `reference` loop
-(host C++), within `atol + rtol * |want|`. Output elements start as a sentinel, so an element the kernel never
+The candidate is compiled on its own into a device code object (`hipcc --genco`), so none of its host code is built
+or run. The harness is a host program built from the task alone: it loads that code object, fills the inputs from a
+fixed seed, runs the task's kernel once with the launch the prompt states, and compares every output element with
+the task's `reference` loop (host C++), within `atol + rtol * |want|`. It writes its verdict to a file the reward
+reads; nothing the candidate prints is read, and a failure before the launch (an allocation, the first copy) leaves
+the check unsettled rather than blaming the candidate. Output elements start as a sentinel, so an element the kernel never
 writes is a mismatch, and every array has a guard region past its end, so a write past the end is caught too.
 
 ## 2. Run the tests
@@ -125,8 +133,9 @@ export AORLTA_SITE=/path/to/site.yaml AORLTA_VENV=/path/to/venv TS_SRC=/path/to/
 mkdir -p runs && CONFIG=configs/hipk-score.yaml sbatch jobs/aorlta-run.sbatch
 ```
 
-This task needs none of the stand-in sanitizer tools (rocjitsu, aorta's sanitizer backends, the ASan runtime): only
-the TokenSpeed image the job builds, whose hipcc builds and runs the kernels. The job prints `score/summary.txt` at
+This task needs none of the stand-in sanitizer tools (rocjitsu, aorta's sanitizer backends, the ASan runtime) and no
+aorta checkout: the job's import pre-flight loads aorta's backends only for a profile that uses one (#611). It needs
+only the TokenSpeed image the job builds, whose hipcc builds and runs the kernels. The job prints `score/summary.txt` at
 the end; `score/report.jsonl` has one row per prompt.
 
 ## 5. Train

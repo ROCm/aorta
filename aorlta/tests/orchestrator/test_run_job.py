@@ -88,3 +88,58 @@ def test_an_adapter_inside_the_hugging_face_cache_is_mounted_read_only(tmp_path)
     out = subprocess.run(["bash", "-c", f"{funcs}{state}{mounting}printf '%s\\n' \"${{ORCH_MOUNTS[@]}}\""],
                          capture_output=True, text=True, check=True, timeout=60).stdout.split()
     assert f"{hf}:{hf}" in out and f"{adapter}:{adapter}:ro" in out
+
+
+def _aorta_modules_snippet() -> str:
+    """The Python the job runs on the host to pick the aorta modules of the import pre-flight."""
+    block = JOB[JOB.index("AORTA_MODULES=$("):]
+    return block[block.index('-c "') + 4:block.index('") ||')]
+
+
+def test_the_import_pre_flight_loads_aorta_only_for_a_profile_that_uses_it(tmp_path, monkeypatch):
+    """A task whose profile names no aorta adapter starts without an aorta checkout; a stand-in profile still has
+    its waitcheck backend imported in the run image, and a missing checkout still stops it there."""
+    import json
+    import sys
+
+    sys.path.insert(0, str(PKG / "tests"))
+    import test_plugins as TP
+
+    from aorlta import plugins
+    from aorlta.reward.profiles import aorta_preflight_modules, load_profile
+
+    assert aorta_preflight_modules(load_profile("standin-static")) == ("models", "waitcheck")
+    assert aorta_preflight_modules(load_profile("standin-gpu")) == ("models", "waitcheck")
+    assert aorta_preflight_modules(load_profile("fake")) == ()
+    saved = {id(t): dict(t) for t in plugins._TABLES}
+    try:
+        for t in plugins._TABLES:
+            t.clear()
+        plugins.LOADED.clear()
+        d = tmp_path / "toyplugin"
+        d.mkdir()
+        (d / "toy_plugin.py").write_text(TP.PLUGIN)
+        (d / "toy-profile.yaml").write_text(TP.PROFILE)
+        (tmp_path / "pool").mkdir()
+        toy = TP.toy_config(tmp_path, str(d / "toy_plugin.py"))
+        standin = TP.toy_config(tmp_path, str(d / "toy_plugin.py"))
+        standin["reward"] = {"profile": "standin-static", "reward_fn": "standin.v11"}
+        picked = {}
+        for name, data in (("toy", toy), ("standin", standin)):
+            (tmp_path / f"{name}.yaml").write_text(json.dumps(data))
+            code = _aorta_modules_snippet().replace("$CODE/$CONFIG", str(tmp_path / f"{name}.yaml"))
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env={"PYTHONPATH": str(PKG / "src"), "PATH": "/usr/bin:/bin"})
+            assert out.returncode == 0, out.stderr
+            picked[name] = out.stdout.split()
+        assert picked == {"toy": [], "standin": ["models", "waitcheck"]}
+    finally:
+        for t in plugins._TABLES:
+            t.clear()
+            t.update(saved[id(t)])
+    check = [sys.executable, str(PKG / "jobs" / "aorlta-imports-check.py"), str(tmp_path / "no-aorta" / "src")]
+    env = {"PYTHONPATH": str(PKG / "src"), "PATH": "/usr/bin:/bin"}
+    for extra, aorta in (([], []), (["models", "waitcheck"], ["aorta.models", "aorta.waitcheck"])):
+        report = json.loads(subprocess.run(check + extra, capture_output=True, text=True, env=env).stdout)
+        assert report["aorta"] == extra
+        assert sorted(k for k in report["failed"] if k.startswith("aorta.")) == aorta

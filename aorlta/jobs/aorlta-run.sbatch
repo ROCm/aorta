@@ -33,7 +33,8 @@
 #   TS_SRC                 no default. TokenSpeed's source tree at commit 3b684074, needed only on a node without the
 #                          image aorlta-tokenspeed:3b684074, which is then built from its docker/Dockerfile.amd
 #   AORLTA_AORTA_ROOT      default /opt/aorta. aorta at commit d22f6116235c05395a0241a83d6f7e952a988454: its src/ for
-#                          the checkers and the import check, its recipes/sanitizers/fixtures for the pre-flight
+#                          the checkers and the import check, its recipes/sanitizers/fixtures for the pre-flight; needed
+#                          only when the check profile uses an aorta adapter (reward.profiles.AORTA_ADAPTERS)
 #   AORLTA_ROCJITSU_ROOT   default /opt/rocjitsu. rocjitsu's bin/rj_waitcheck and lib/librocjitsu_dbi_hooks.so
 #   AORLTA_LIBSTDCXX_SHIM  default /opt/libstdcxx-shim. A libstdc++ with GLIBCXX_3.4.31, for rj_waitcheck
 #                          (these three are also where the check profiles look for the tools; the job passes them into
@@ -341,12 +342,17 @@ if [ "$IMG" != "$BASE" ]; then
 fi
 echo "$IMG $(docker image inspect --format '{{.Id}}' "$IMG")" | tee -a "$OUT/image.txt"
 if [ "$COMPONENTS" = real ]; then  # every module the run imports, in its image, before any engine starts
+  # aorta's backends only when the profile uses an aorta adapter: a task with checks of its own needs no checkout
+  AORTA_MODULES=$(PYTHONPATH="$CODE/src$XPATH" "$PY" -c "
+from aorlta.config import load_config; from aorlta.reward.profiles import aorta_preflight_modules, load_profile
+print(' '.join(aorta_preflight_modules(load_profile(load_config('$CODE/$CONFIG').reward.profile))))") || {
+    echo "[guard] cannot read the check profile of $CONFIG" >&2; exit 94; }
   IMPORT_MOUNTS=()
   add_mounts IMPORT_MOUNTS rw "$P"
   add_mounts IMPORT_MOUNTS ro "$AORLTA_AORTA_ROOT"
   docker run --rm --name "$CNAME-imports" --network none --ulimit core=0 "${IMPORT_MOUNTS[@]}" \
     -e PYTHONPATH="$CODE/src$XPATH" -e PYTHONDONTWRITEBYTECODE=1 -w "$CODE" --entrypoint python3 "$IMG" \
-    jobs/aorlta-imports-check.py "$AORLTA_AORTA_ROOT/src" > "$OUT/imports.log" 2>&1 &
+    jobs/aorlta-imports-check.py "$AORLTA_AORTA_ROOT/src" $AORTA_MODULES > "$OUT/imports.log" 2>&1 &
   wait $!
   rc=$?
   stamp "IMPORTS rc=$rc"; tail -3 "$OUT/imports.log" | cut -c1-2000
