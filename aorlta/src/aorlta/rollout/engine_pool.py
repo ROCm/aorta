@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..ids import seed
+from .templates import STOP_TOKEN_IDS
 
 SELF_TEST_PROMPTS = 4
 SELF_TEST_TOKENS = 128
@@ -148,7 +149,8 @@ class SelfTest:
                 "requests": self.requests, "seconds": round(self.seconds, 3), "errors": self.errors}
 
 
-def run_self_test(engine: Any, prompts: Sequence[Sequence[int]], run_seed: int, timeout_s: float) -> SelfTest:
+def run_self_test(engine: Any, prompts: Sequence[Sequence[int]], run_seed: int, timeout_s: float,
+                  stop_token_ids: Sequence[int] = STOP_TOKEN_IDS) -> SelfTest:
     if len(prompts) < SELF_TEST_PROMPTS:
         raise ValueError(f"the self-test needs {SELF_TEST_PROMPTS} prompts, got {len(prompts)}")
     t0 = time.monotonic()
@@ -158,7 +160,7 @@ def run_self_test(engine: Any, prompts: Sequence[Sequence[int]], run_seed: int, 
         outs = []
         for s in self_test_seeds(run_seed, i):  # one at a time
             sp = {"temperature": SELF_TEST_TEMPERATURE, "top_p": SELF_TEST_TOP_P, "top_k": -1,
-                  "max_new_tokens": SELF_TEST_TOKENS, "seed": s, "stop_token_ids": [248046]}
+                  "max_new_tokens": SELF_TEST_TOKENS, "seed": s, "stop_token_ids": list(stop_token_ids)}
             res = engine.generate(list(ids), sp, timeout_s=timeout_s)
             requests += 1
             if "error" in res:
@@ -246,6 +248,7 @@ class EnginePool:
         on_restart: Callable[[int], bool] | None = None,
         make_handle: Callable[[int], Any] | None = None,
         clock: Callable[[], float] = time.time,
+        stop_token_ids: Sequence[int] = STOP_TOKEN_IDS,  # the model's (templates.chat_format); Qwen3.5's by default
     ):
         if not handles:
             raise ValueError("an engine pool needs at least one engine")
@@ -257,6 +260,7 @@ class EnginePool:
         self.on_restart = on_restart
         self.make_handle = make_handle
         self.clock = clock
+        self.stop_token_ids = tuple(stop_token_ids)
         self.prefix = [PrefixIndex() for _ in self.handles]
         self.available = [False] * len(self.handles)
         self.self_tests: list[dict] = []
@@ -281,7 +285,7 @@ class EnginePool:
         if problems:
             handle.stop()
             raise RolloutStop(f"engine {i} refused: " + "; ".join(problems))
-        test = run_self_test(handle, selftest_prompts, self.run_seed, self.self_test_timeout_s)
+        test = run_self_test(handle, selftest_prompts, self.run_seed, self.self_test_timeout_s, self.stop_token_ids)
         with self._lock:
             self.self_tests.append(test.to_dict())
         if not test.passed:

@@ -123,13 +123,16 @@ def file_init_method(directory) -> str:
 
 
 def load_policy_model(base_dir: str, device: str):
-    """The bf16 base as WP4 loads it, with the log watcher that `prepare_model` reads."""
-    from transformers import AutoModelForImageTextToText
+    """The bf16 base as WP4 loads it, with the log watcher that `prepare_model` reads. The transformers class is the
+    checkpoint's family's (`model_family`): AutoModelForImageTextToText for Qwen3.5, AutoModelForCausalLM for Qwen3."""
+    import transformers
 
+    from aorlta.model_family import read_family
     from aorlta.trainer.kernels import FallbackLogWatcher
 
+    auto = getattr(transformers, read_family(base_dir).auto_class)
     with FallbackLogWatcher() as watcher:
-        model = AutoModelForImageTextToText.from_pretrained(base_dir, dtype=torch.bfloat16, local_files_only=True)
+        model = auto.from_pretrained(base_dir, dtype=torch.bfloat16, local_files_only=True)
         model.to(device)
     return model, watcher
 
