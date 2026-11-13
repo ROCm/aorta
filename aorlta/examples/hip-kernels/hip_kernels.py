@@ -733,17 +733,26 @@ class HipkTime:
         self.name, self.ctx = ctx.name, ctx
         s = ctx.settings
         self.hipcc = s.get("hipcc") or "/opt/rocm/bin/hipcc"
-        self.version = f"2+{toolchain_identity(self.hipcc)}+{hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]}"
-        gpus = [int(g) for g in (s.get("gpus") or [0])]
-        tail = ctx.worker_id.rsplit("/", 1)[-1]
-        seq = int(tail) if tail.isdigit() else 1
-        self.gpu = lease_gpu(gpus, gpus[(seq - 1) % len(gpus)])
-        self._leased = True
         self.tasks = {}
         for pool in ctx.pools:
             if (Path(pool) / "tasks.json").is_file():
                 for task in load_tasks(pool):
                     self.tasks[task_sha256(task)] = (task, Path(pool) / "reference" / f"{task['id']}.hip")
+        # cached legs are keyed by the version: the compiler, this file, the timing judge and every reference kernel
+        from aorlta.reward import timing
+
+        refs = hashlib.sha256()
+        for key in sorted(self.tasks):
+            ref = self.tasks[key][1]
+            refs.update(key.encode() + b"\0" + (ref.read_bytes() if ref.is_file() else b"missing") + b"\0")
+        self.version = (f"3+{toolchain_identity(self.hipcc)}+{hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]}"
+                        f"+timing-{hashlib.sha256(Path(timing.__file__).read_bytes()).hexdigest()[:16]}"
+                        f"+refs-{refs.hexdigest()[:16]}")
+        gpus = [int(g) for g in (s.get("gpus") or [0])]
+        tail = ctx.worker_id.rsplit("/", 1)[-1]
+        seq = int(tail) if tail.isdigit() else 1
+        self.gpu = lease_gpu(gpus, gpus[(seq - 1) % len(gpus)])
+        self._leased = True
         self.runner = ProcessRunner()
         self._work: Path | None = None
         self._built: dict[tuple, Path] = {}
@@ -959,13 +968,15 @@ def timecheck(argv=None) -> int:
     for kv in args.set:
         key, value = kv.split("=", 1)
         settings[key] = json.loads(value)
-    task = next(t for t in load_tasks(args.pool) if t["id"] == args.task)
-    candidate = args.candidate or str(Path(args.pool) / "reference" / f"{task['id']}.hip")
+    pool = str(Path(args.pool).resolve())  # the check runs hipcc from a directory of its own
+    task = next(t for t in load_tasks(pool) if t["id"] == args.task)
+    candidate = str(Path(args.candidate).resolve()) if args.candidate else str(Path(pool) / "reference" /
+                                                                                f"{task['id']}.hip")
     work = Path(tempfile.mkdtemp(prefix="hipk-timecheck-"))
     try:
         ctx = plugins.CheckContext(name="hipk.time", worker_id="time/1",
                                    settings={"hipcc": args.hipcc, "gpus": [args.gpu]},
-                                   clock=time.time, timeout_s=args.timeout, pools=(args.pool,))
+                                   clock=time.time, timeout_s=args.timeout, pools=(pool,))
         adapter = HipkTime(ctx)
         job = LegJob(job_id="timecheck", leg="ref.speedup", candidate_id="timecheck", control_id=None,
                      source_sha256="0" * 64, task_sha256=task_sha256(task), leg_settings=settings,

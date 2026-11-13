@@ -578,6 +578,59 @@ def test_each_timing_outcome_has_one_leg_state(hipk, tmp_path, case, run, record
     assert env["HIP_VISIBLE_DEVICES"] == "7"
 
 
+def test_the_timing_checkers_version_covers_the_references_and_the_judge(hipk, tmp_path, monkeypatch):
+    """Cached ref.speedup legs are keyed by the checker's version: a changed reference kernel, or a changed timing
+    judge, is a new version."""
+    import shutil
+
+    from aorlta.reward import timing
+
+    pool = tmp_path / "pool"
+    shutil.copytree(EXAMPLE, pool, ignore=shutil.ignore_patterns("__pycache__"))
+
+    def version():
+        ctx = plugins.CheckContext(name="hipk.time", worker_id="time/1", settings={"hipcc": "/x/bin/hipcc", "gpus": [7]},
+                                   clock=lambda: 0.0, timeout_s=30.0, pools=(str(pool),))
+        a = plugins.CHECK_ADAPTERS["hipk.time"](ctx)
+        a.close()
+        return a.version
+
+    first = version()
+    assert version() == first
+    (pool / "reference" / "saxpy.hip").write_text((pool / "reference" / "saxpy.hip").read_text() + "// edited\n")
+    second = version()
+    judge = tmp_path / "timing.py"
+    judge.write_text(Path(timing.__file__).read_text() + "# edited\n")
+    monkeypatch.setattr(timing, "__file__", str(judge))
+    assert len({first, second, version()}) == 3
+
+
+def test_timecheck_resolves_a_relative_candidate_and_pool(hipk, tmp_path, monkeypatch):
+    """The check runs hipcc from its own directory, so the paths it is given must not be relative."""
+    seen = []
+
+    class Recording:
+        def __init__(self, ctx):
+            seen.append(ctx.pools)
+            self.ctx = ctx
+
+        def run(self, job):
+            seen.append(job.inputs["source"])
+            from aorlta.reward.adapters.base import unsettled
+
+            return unsettled(job, "adapter_error", t_start=0.0, t_end=0.0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hipk, "HipkTime", Recording)
+    (tmp_path / "mine.hip").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    rel_pool = os.path.relpath(EXAMPLE, tmp_path)
+    assert hipk.timecheck(["--task", "saxpy", "--candidate", "mine.hip", "--pool", rel_pool]) == 0
+    assert seen == [(str(EXAMPLE),), str(tmp_path / "mine.hip")]
+
+
 def test_the_reference_and_the_harness_are_built_once_per_worker(hipk, tmp_path):
     """The candidate is compiled for every job; the reference's code object and the harness, per task and settings."""
     from aorlta.reward.adapters.base import checked_result
