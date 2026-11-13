@@ -592,3 +592,70 @@ def test_report_only_native_zero_rejects_retained_findings_without_metadata(evid
     assert code == 2
     assert 'native clean exit has retained findings' in summary
     assert '"entry_verdict": "fail"' in summary
+
+
+@pytest.mark.parametrize('native_exit', [2, -9])
+def test_completed_fail_rejects_unsupported_native_exit_without_raw(evidence, native_exit):
+    report, _ = evidence('warn')
+    data = json.loads(report.read_text())
+    check = data['checks'][0]
+    entry = check['kernel_results'][0]
+    data['overall_verdict'] = check['verdict'] = entry['verdict'] = 'fail'
+    check['returncode'] = entry['returncode'] = native_exit
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report)
+    assert code == 2
+    assert 'native exit is missing or contradicts' in summary
+    assert '"entry_verdict": "fail"' in summary
+    assert f'"native_returncode": {native_exit}' in summary
+
+
+@pytest.mark.parametrize('kind,native_exit', [('clean', 0), ('warn', 4)])
+def test_completed_fail_keeps_supported_policy_native_exit(evidence, kind, native_exit):
+    report, _ = evidence(kind)
+    data = json.loads(report.read_text())
+    check = data['checks'][0]
+    entry = check['kernel_results'][0]
+    data['overall_verdict'] = check['verdict'] = entry['verdict'] = 'fail'
+    check['returncode'] = entry['returncode'] = native_exit
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report)
+    assert code == 0
+    assert '"entry_verdict": "fail"' in summary
+
+
+@pytest.mark.parametrize('records,limit,expected_exit', [
+    (3, 1, 2), (1, 1, 0), (1, 3, 0), (3, None, 0), (None, 1, 0),
+])
+def test_report_only_checks_entry_record_limit(evidence, records, limit, expected_exit):
+    report, _ = evidence('warn')
+    data = json.loads(report.read_text())
+    check = data['checks'][0]
+    entry = check['kernel_results'][0]
+    metadata = {'reported_count': 3, 'count_meaning': 'exact',
+                'emitted_records': records, 'requested_limit': limit}
+    check['diagnostic_summary'] = entry['diagnostic_summary'] = metadata
+    report.write_text(json.dumps(data))
+    summary, code = helper.summarize(report)
+    assert code == expected_exit
+    if expected_exit:
+        assert 'reported emitted records exceed requested limit' in summary
+    else:
+        assert 'Report consistency: INCONSISTENT' not in summary
+    assert '"entry_verdict": "warn"' in summary
+    assert '"finding_count": 1' in summary
+
+
+def test_report_only_rejects_exact_aggregate_with_omitted_entry_truncation(evidence):
+    report, _ = evidence('warn')
+    data = json.loads(report.read_text())
+    check = data['checks'][0]
+    entry = check['kernel_results'][0]
+    check['diagnostics_truncated'] = True
+    entry.pop('diagnostics_truncated')
+    metadata = {'reported_count': 1, 'count_meaning': 'exact', 'emitted_records': 1,
+                'requested_limit': 64}
+    check['diagnostic_summary'] = entry['diagnostic_summary'] = metadata
+    report.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match='lower-bound marker contradicts exact count'):
+        helper.summarize(report)

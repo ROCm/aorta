@@ -148,3 +148,38 @@ def test_one_whole_object_result_covers_selected_aliases_without_double_counting
                                            for item in (identity, replace(identity, name="alias"))))
     report = SanitizerReport(target="gfx1250", worklist=worklist, checks=(check,))
     assert report.checks[0].diagnostic_summary.reported_count == 3
+
+
+@pytest.mark.parametrize('entry_flag', ['omitted', False])
+def test_check_rejects_exact_summary_with_aggregate_lower_bound(entry_flag):
+    result = entry(EXACT)
+    data = CheckResult('waitcheck', ExecutionState.RAN, Verdict.WARN,
+                       kernel_results=(result,), diagnostic_summary=EXACT).to_dict()
+    data['diagnostics_truncated'] = True
+    if entry_flag == 'omitted':
+        data['kernel_results'][0].pop('diagnostics_truncated')
+    with pytest.raises(ValueError, match='lower-bound marker contradicts exact count'):
+        CheckResult.from_dict(data)
+
+
+@pytest.mark.parametrize('summary', [None, DiagnosticSummary(),
+                                   DiagnosticSummary(reported_count=3, count_meaning=CountMeaning.LOWER_BOUND)])
+def test_check_keeps_legacy_truncation_with_nonexact_or_absent_summary(summary):
+    result = entry(summary)
+    aggregate = aggregate_diagnostic_summaries((result,))
+    check = CheckResult('waitcheck', ExecutionState.RAN, Verdict.WARN,
+                        kernel_results=(result,), diagnostic_summary=aggregate,
+                        diagnostics_truncated=True)
+    assert CheckResult.from_dict(check.to_dict()) == check
+
+
+def test_multi_entry_check_can_exceed_the_per_invocation_limit():
+    first = entry(EXACT)
+    second = replace(first, identity=KernelIdentity(name='second', target='gfx1250'))
+    results = (first, second)
+    aggregate = aggregate_diagnostic_summaries(results)
+    check = CheckResult('waitcheck', ExecutionState.RAN, Verdict.WARN,
+                        kernel_results=results, diagnostic_summary=aggregate)
+    assert check.diagnostic_summary.emitted_records == 2
+    assert check.diagnostic_summary.requested_limit == 1
+    assert CheckResult.from_dict(check.to_dict()) == check

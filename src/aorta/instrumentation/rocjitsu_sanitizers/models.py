@@ -666,6 +666,9 @@ class CheckResult:
         if self.diagnostic_summary is not None:
             if not isinstance(self.diagnostic_summary, DiagnosticSummary):
                 raise TypeError("diagnostic_summary must be DiagnosticSummary or null")
+            if (self.diagnostics_truncated
+                    and self.diagnostic_summary.count_meaning is CountMeaning.EXACT):
+                raise ValueError("historical lower-bound marker contradicts exact count")
             if self.diagnostic_summary != aggregate_diagnostic_summaries(self.kernel_results):
                 raise ValueError("check diagnostic_summary contradicts per-entry evidence")
 

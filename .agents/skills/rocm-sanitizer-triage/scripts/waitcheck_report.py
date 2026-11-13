@@ -179,7 +179,7 @@ def summarize(report_path, log_path=None):
             issues.append("reported aggregate returncode differs from native entry returncode")
         if result.state.value == "ran":
             expected_exit = {"pass": 0, "warn": 4}.get(result.verdict.value)
-            if result.returncode is None or (expected_exit is not None and result.returncode != expected_exit):
+            if result.returncode not in {0, 4} or (expected_exit is not None and result.returncode != expected_exit):
                 issues.append("native exit is missing or contradicts the reported completed Waitcheck verdict")
             if result.returncode == 4 and not result.findings:
                 issues.append("native hazard exit has no retained findings")
@@ -188,6 +188,8 @@ def summarize(report_path, log_path=None):
             metadata = result.diagnostic_summary
             if metadata is not None:
                 count, records = metadata.reported_count, metadata.emitted_records
+                if records is not None and metadata.requested_limit is not None and records > metadata.requested_limit:
+                    issues.append("reported emitted records exceed requested limit")
                 if count is not None and records is not None and count < records:
                     issues.append("reported diagnostic count is smaller than emitted records")
                 if count is not None and count < len(result.findings):
