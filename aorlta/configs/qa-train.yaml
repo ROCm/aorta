@@ -1,0 +1,42 @@
+# Train on the Q&A example of docs/TUTORIAL.md: 16 GPU-programming questions, 8 samples each, 3 iterations.
+# One GPU: one TokenSpeed engine on GPU 0 and, for training, one LoRA rank beside it; the answer check runs on the CPU.
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir (and
+# model.adapter_dir to score a trained adapter) and data.prompt_pools[0].path, which is this checkout's
+# aorlta/examples/qa/gpu-facts/train.
+plugins: [examples/qa/qa_task.py]
+run:
+  run_id: qa-train
+  source: standin
+  root: /scratch/aorlta/runs
+model:
+  base_dir: /data/hf/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  source: standin
+data:
+  prompt_pools:
+    - path: /opt/aorlta/examples/qa/gpu-facts/train
+      source: standin
+      task: qa
+rollout:
+  engines: [0]
+  K: 8
+  P: 8
+  max_repair_turns: 1
+  thinking: "off"
+  temperature: 1.0
+  max_new_tokens: 512
+  compile_adapter: none
+  parse_adapter: qa.parse
+  feedback_template: qa.feedback
+  # a question with one short answer can get K identical replies: that is not a broken sampler here (the engines'
+  # start-up self-test checks that), so only stop when most groups are
+  identical_groups_stop: 0.75
+reward:
+  profile: qa-match
+  reward_fn: qa.v1
+orchestrator:
+  iterations: 3
+  run_seed: 20261113
+trainer:
+  ranks: 1
+  micro_batch_tokens: 20480
+  lr: 2.0e-5
