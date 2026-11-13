@@ -24,6 +24,7 @@ One training iteration, as `orchestrator/loop.py` runs it (the numbers are its s
 weight sync `sync/`. Every red box stops the run; the reason is in `run_result.json`.
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
 flowchart TD
     subgraph setup["Start of a run, once"]
         plan["run plan: the resolved config, the code commit, file hashes"] --> estart["engines start: settings read back,<br/>sampling self-test (different seeds must differ)"]
@@ -77,6 +78,7 @@ run plan hashed, and runs the same rollouts and checks over the pool, with no tr
 sample is still never clean. A trained checkpoint holds a LoRA latent; to score it, export it as a PEFT adapter:
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
 flowchart LR
     ckpt["ckpt/iter-n/trainer/trainer.pt:<br/>fp32 LoRA latent, Adam state, RNG states"] -- "tools/export_adapter.py" --> peft["PEFT adapter directory"]
     base["model.base_dir: a Hugging Face checkpoint"] --> served
@@ -96,6 +98,7 @@ Where it runs, in `configs/standin.yaml` (the worked examples' one-GPU configs p
 and run their checks on the CPU):
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
 flowchart TB
     subgraph node["One 8-GPU MI350X node"]
         subgraph orch["orchestrator container"]
