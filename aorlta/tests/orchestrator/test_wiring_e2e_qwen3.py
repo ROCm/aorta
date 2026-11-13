@@ -141,7 +141,13 @@ def run_config(tmp_path, base, ds, *, partial: bool, thinking: str):
 
 @pytest.mark.parametrize("partial,thinking", [(True, "off"), (False, "on")])
 def test_two_wired_iterations_on_a_tiny_qwen3_train_publish_and_land(tmp_path, tiny_qwen3, dataset, partial,
-                                                                      thinking):
+                                                                      thinking, monkeypatch):
+    if thinking == "on":  # Qwen3's thinking-on prompt leaves the think block to the model: a reply opens and closes it
+        from aorlta.rollout.fake_engine import FakeEngine
+
+        answer = FakeEngine._answer_text
+        monkeypatch.setattr(FakeEngine, "_answer_text",
+                            lambda self, rng: "<think>\nshort\n</think>\n\n" + answer(self, rng))
     cfg = run_config(tmp_path, tiny_qwen3, dataset, partial=partial, thinking=thinking)
     engines = [RecordingTwin(tiny_qwen3, E.FAKE, i, loader=load_engine_model) for i in range(2)]
     handles = [InProcessEngine(i, e) for i, e in enumerate(engines)]
