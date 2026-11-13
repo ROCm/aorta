@@ -6,8 +6,9 @@
 # (scancel) runs the trap at once: bash defers traps while a foreground command runs, and a killed docker client
 # leaves its container running.
 #
-# Two runs on one node. The job asks for the whole node (#SBATCH --exclusive); a command-line option overrides the
-# directive, so `sbatch --exclusive=user -w <node> ...` lets your own jobs share a node. Their configs must name
+# Two runs on one node. The job asks for the whole node (the --exclusive directive below); a command-line option
+# overrides it, so `sbatch --exclusive=user -w <node> ...` lets your own jobs share a node, on a partition that allows
+# it (one with OverSubscribe=EXCLUSIVE never puts two jobs on a node). Their configs must name
 # disjoint GPUs (rollout.engines, trainer.devices, reward.remote's GPUs, and any GPUs a task's own checks use), and
 # each its own run id and reward.remote.socket_dir. The job claims the GPUs and its two /dev/shm directories
 # (<sync.dir>/<run id> and the socket directory) in files under /dev/shm/aorlta-claims, and ends with exit 89 when a
