@@ -268,6 +268,44 @@ def test_an_isa_tool_that_times_out_or_is_retired_leaves_nothing_running(load, t
         check.close()
 
 
+def test_a_triage_verdict_whose_rationale_quotes_a_brace_is_read(load):
+    mod = load(TRIAGE)
+    want = {"category": "no_issue", "rationale": "The report contains } but no finding."}
+    reply = 'An earlier draft: {"category": "race"}\nFinal:\n```json\n' + json.dumps(want) + "\n```"
+    assert mod.final_verdict(reply) == want and mod.verdict_problem(want) is None
+    assert mod.final_verdict('{"rationale": "a { and an escaped \\" quote", "category": "memory"}')["category"] == "memory"
+    assert mod.final_verdict("no object { here") is None
+
+
+def test_the_isa_prompt_states_the_immediates_the_check_accepts(load):
+    """The check's six-digit limit on an immediate is in the model's prompt, not only in the checker."""
+    mod = load(ISA)
+    assert "at most six digits, which may be negative" in mod.USER
+    row = {"min_lines": 2, "max_lines": 4, "must_use": ["ADD"]}
+    for imm, ok in (("#999999", True), ("#-999999", True), ("#1000000", False)):
+        problem = mod.program_problem(f"MOV r1, {imm}\nADD r2, r1, r1\n", row)
+        assert (problem is None) == ok, (imm, problem)
+
+
+def test_a_tool_found_through_path_is_part_of_the_checkers_identity(load, tmp_path, monkeypatch):
+    """A bare command name is resolved as PATH finds it: replacing that executable, or which one PATH selects, is a new
+    checker version."""
+    load(ISA)
+    bins = [tmp_path / "a", tmp_path / "b"]
+    for d in bins:
+        d.mkdir()
+        (d / "my-checker").write_text("#!/bin/bash\necho '{\"verdict\": \"pass\"}'\n")
+        (d / "my-checker").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bins[0]}:/usr/bin:/bin")
+    first = adapter(ISA, {"tool": ["my-checker"]}).version
+    assert adapter(ISA, {"tool": ["my-checker"]}).version == first
+    (bins[0] / "my-checker").write_text("#!/bin/bash\necho '{\"verdict\": \"fail\"}'\n")
+    second = adapter(ISA, {"tool": ["my-checker"]}).version
+    monkeypatch.setenv("PATH", f"{bins[1]}:/usr/bin:/bin")
+    third = adapter(ISA, {"tool": ["my-checker"]}).version
+    assert len({first, second, third}) == 3
+
+
 @BY_NAME
 def test_the_reward_keeps_the_services_invariants_and_leaves_the_unsettled_unscored(load, v):
     from aorlta.reward.service import REWARD_MAX, REWARD_MIN
@@ -307,8 +345,8 @@ def test_each_package_stands_alone_and_its_readme_is_short(v):
     assert files == {v.module, f"{v.name}.yaml", "score.yaml", "train.yaml", "pool", "README.md"}
     text = (d / v.module).read_text()
     imports = re.findall(r"^\s*(?:from|import)\s+([\w.]+)", text, re.MULTILINE)
-    assert all(m.split(".")[0] in {"__future__", "hashlib", "json", "re", "subprocess", "unicodedata", "pathlib",
-                                   "aorlta"} for m in imports), imports
+    assert all(m.split(".")[0] in {"__future__", "hashlib", "json", "os", "re", "shutil", "subprocess", "unicodedata",
+                                   "pathlib", "aorlta"} for m in imports), imports
     assert "TODO" in text and "PLACEHOLDER" in text
     readme = (d / "README.md").read_text()
     assert len(readme.splitlines()) < 30

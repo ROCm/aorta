@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -28,7 +30,8 @@ SYSTEM = "You write short test programs in the toy-asm format."
 USER = ("Goal: {goal}\n\n"
         "Write a toy-asm program of {min_lines} to {max_lines} lines. toy-asm has one instruction per line: NOP; "
         "MOV rD, rS or MOV rD, #imm; or OP rD, rA, rB or OP rD, rA, #imm with OP one of ADD, SUB, MUL, AND, OR, XOR. "
-        "Registers are r0 to r7; an immediate is # and a whole number. Give the program in one fenced code block.")
+        "Registers are r0 to r7; an immediate is # and a whole number of at most six digits, which may be negative. "
+        "Give the program in one fenced code block.")
 BLOCK_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
 REG, IMM = r"r[0-7]", r"#-?\d{1,6}"
 LINE_RE = re.compile(rf"NOP|MOV\s+{REG}\s*,\s*(?:{REG}|{IMM})"
@@ -151,6 +154,9 @@ class IsaCheck:
         self.version = "1"  # cached legs are keyed by it: the tool, which decides what the format passes, is part of it
         if self.tool:
             files = {a: file_identity(a) for a in self.tool if isinstance(a, str) and Path(a).is_file()}
+            exe = shutil.which(self.tool[0]) if isinstance(self.tool[0], str) else None  # as PATH finds it, if bare
+            if exe:
+                files[f"exe:{self.tool[0]}"] = f"{os.path.realpath(exe)}:{file_identity(exe)}"
             ident = json.dumps({"tool": list(self.tool), "timeout_s": self.tool_timeout_s, "files": files},
                                sort_keys=True)
             self.version = f"1+tool-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"

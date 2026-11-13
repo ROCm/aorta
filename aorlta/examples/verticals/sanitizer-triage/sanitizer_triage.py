@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -29,7 +28,6 @@ MAX_RATIONALE_CHARS = 400
 SYSTEM = "You triage reports from a checking tool."
 USER = ("Report:\n{report}\n\nReply with one JSON object with exactly the keys \"category\" and \"rationale\": the "
         "category is one of " + ", ".join(CATEGORIES) + ", and the rationale is one or two sentences.")
-OBJECT_RE = re.compile(r"\{.*?\}", re.DOTALL)
 
 
 def load_rows(pool_dir) -> list[dict]:
@@ -46,15 +44,19 @@ def row_sha256(row: dict) -> str:
 
 
 def final_verdict(reply: str) -> dict | None:
-    """The last JSON object in the reply that parses (no nesting: a verdict is flat), or None."""
-    for text in reversed(OBJECT_RE.findall(reply)):
+    """The last JSON object in the reply that parses, or None. Objects are found by the JSON decoder, so a brace inside
+    a string (a rationale that quotes `}`) does not end one."""
+    dec, last, i = json.JSONDecoder(), None, 0
+    while (i := reply.find("{", i)) != -1:
         try:
-            obj = json.loads(text)
+            obj, end = dec.raw_decode(reply, i)
         except ValueError:
+            i += 1
             continue
         if isinstance(obj, dict):
-            return obj
-    return None
+            last = obj
+        i = end
+    return last
 
 
 def verdict_problem(verdict: dict) -> str | None:
