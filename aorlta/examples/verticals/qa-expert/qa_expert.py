@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 # PLACEHOLDER: the prompt. A domain expert usually wants a system message that names the domain.
 SYSTEM = "You are a helpful assistant."
 USER = "{question}\n\nEnd your reply with a line of the form 'Answer: <your answer>'."
-ANSWER_RE = re.compile(r"^\s*\**\s*answer\s*\**\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+ANSWER_RE = re.compile(r"^[ \t]*\**[ \t]*answer[ \t]*\**[ \t]*:[ \t]*(.*?)[ \t]*$", re.IGNORECASE)  # one line
 
 
 def load_rows(pool_dir) -> list[dict]:
@@ -49,8 +49,8 @@ def normalise(text: str) -> str:
 
 def final_answer(reply: str) -> str | None:
     """The last `Answer:` line's answer, or None."""
-    found = ANSWER_RE.findall(reply)
-    return found[-1] if found else None
+    found = [m.group(1) for line in reply.splitlines() if (m := ANSWER_RE.match(line))]
+    return (found[-1] or None) if found else None  # the last marker decides, an empty one included
 
 
 def messages(row: dict) -> list[dict]:

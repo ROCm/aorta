@@ -277,6 +277,15 @@ def test_a_triage_verdict_whose_rationale_quotes_a_brace_is_read(load):
     assert mod.final_verdict("no object { here") is None
 
 
+def test_the_qa_answer_is_the_last_answer_lines_own_value(load):
+    """Each line is matched alone: an empty marker does not take the next line's text, and an empty last marker is no
+    answer rather than an earlier one."""
+    mod = load(QA)
+    assert mod.final_answer("Answer:\nAnswer: 5") == "5"
+    assert mod.final_answer("Answer: 5\nAnswer:") is None
+    assert mod.final_answer("Answer: 4\nthinking...\nAnswer: 5") == "5" and mod.final_answer("no marker") is None
+
+
 def test_the_isa_prompt_states_the_immediates_the_check_accepts(load):
     """The check's six-digit limit on an immediate is in the model's prompt, not only in the checker."""
     mod = load(ISA)
