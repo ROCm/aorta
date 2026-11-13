@@ -17,6 +17,110 @@ a model: so far it has run only on stand-ins, the public Qwen3.5-4B, our own pro
 New to it? [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) is the order to do things in: what you need, the CPU
 tests, the first GPU run, reading the outputs, the settings, and what the job's exit codes mean.
 
+## How it works
+
+One training iteration, as `orchestrator/loop.py` runs it (the numbers are its steps). The rollout chain is
+`rollout/chain.py`, the checks `reward/service.py` with the stages of the run's profile, the trainer `trainer/`, the
+weight sync `sync/`. Every red box stops the run; the reason is in `run_result.json`.
+
+```mermaid
+flowchart TD
+    subgraph setup["Start of a run, once"]
+        plan["run plan: the resolved config, the code commit, file hashes"] --> estart["engines start: settings read back,<br/>sampling self-test (different seeds must differ)"]
+        estart --> rt["round trip: a perturbation must change every probe's log-probs,<br/>restoring the base must bring them back bit for bit"]
+        rt --> warm["trainer warm-up; on resume, the checkpoint is restored and must land"]
+    end
+    warm --> select
+
+    select["1 select P prompts from the pool: seeded, resume-safe"] --> turn
+    subgraph rollout["2-3 generate: TokenSpeed engines at policy v(n-1), K chains per prompt"]
+        turn["one request per chain and turn, with its own seed"] --> parse{"parse the reply<br/>rollout.parse_adapter"}
+        parse -- "an answer" --> compile{"compile check<br/>rollout.compile_adapter (none: skipped)"}
+        parse -- "rejected, a turn left" --> feedback["repair turn<br/>rollout.feedback_template"]
+        compile -- "errors, a turn left" --> feedback
+        feedback --> turn
+        parse -- "no change, or rejected on the last turn" --> cand
+        compile -- "compiled, or errors on the last turn" --> cand["the chain ends: its final answer is a candidate"]
+    end
+    cand -- "handed over as each chain ends" --> stages
+    subgraph reward["reward service: staged checks behind a cache, reward.profile"]
+        stages["stages run in order while the reward function needs more:<br/>parse gate, compile gate, waitcheck, ConSan, ASan in the stand-in profiles;<br/>a task's own profile names only its own checks"] --> rfn["reward function, reward.reward_fn:<br/>a reward in -1.55..1.0, or unscored (an unsettled check is never clean)"]
+    end
+    rfn --> group["4 a group whose K results are final: GRPO advantages within it,<br/>its gradient accumulated at once (streaming)"]
+    group --> barrier["5 generation barrier: engines idle; 6 wait for scoring, to its deadline"]
+    barrier --> frac{"7 scored fraction at least<br/>orchestrator.min_scored_fraction?"}
+    frac -- "no, after re-checking unsettled legs once" --> stopped(["stop: the iteration is not trained"])
+    frac -- "yes" --> gap
+    subgraph trainer["8 LoRA trainer ranks, GRPO"]
+        gap{"gap gate: trainer vs engine log-probs of the sampled tokens,<br/>per sample, against trainer.max_generation_gap"} -- "over the limit: left out" --> offp{"more than<br/>max_off_policy_fraction left out?"}
+        gap -- "within the limit" --> opt
+        offp -- "no" --> opt["one optimizer step, then the step checks:<br/>finite, non-zero gradient; LoRA moved; frozen weights did not; ranks agree"]
+    end
+    offp -- "yes" --> stopped2(["stop: nothing is published"])
+    opt -- "a check fails" --> stopped2
+    opt -- "checks pass" --> merge
+    subgraph sync["9 weight sync"]
+        merge["merge the LoRA into bf16 weights"] --> slot["write a weight slot in sync.dir (/dev/shm by default)"]
+        slot --> reload["reload every engine (none may hold a request)"]
+        reload --> land{"landing check on every engine:<br/>probe log-probs changed, and agree with the trainer's"}
+    end
+    land -- "NOT_LANDED or MISMATCH" --> stopped3(["stop: the weights did not land"])
+    land -- "LANDED, or NOOP (5 in a row stop)" --> record["10 record: episodes, summary, TensorBoard,<br/>checkpoint ckpt/iter-n; the iteration directory's rename commits it"]
+    record -- "next iteration: the engines hold v(n)" --> select
+
+    classDef stop fill:#fdd,stroke:#c00,color:#600
+    class stopped,stopped2,stopped3 stop
+```
+
+A score run (`orchestrator.mode: score`, `orchestrator/score.py`) serves a model, checks it is exactly the one the
+run plan hashed, and runs the same rollouts and checks over the pool, with no trainer and no weight sync; an unscored
+sample is still never clean. A trained checkpoint holds a LoRA latent; to score it, export it as a PEFT adapter:
+
+```mermaid
+flowchart LR
+    ckpt["ckpt/iter-n/trainer/trainer.pt:<br/>fp32 LoRA latent, Adam state, RNG states"] -- "tools/export_adapter.py" --> peft["PEFT adapter directory"]
+    base["model.base_dir: a Hugging Face checkpoint"] --> served
+    peft -- "model.adapter_dir" --> merged["tools/merge_base_adapter.py:<br/>base plus adapter, merged in the run"]
+    base --> merged
+    merged --> served{"served model: files hash as recorded,<br/>slot matches its manifest, round trip PROVEN"}
+    served -- "yes" --> score["score: P prompts at a time, K samples each,<br/>orchestrator.score.passes passes"]
+    served -- "no" --> refused(["nothing is scored"])
+    score --> report["score/report.jsonl, summary.txt, model.json"]
+    report -- "tools/eval_compare.py, base vs trained" --> compare["pass rate, mean reward, per-prompt deltas"]
+
+    classDef stop fill:#fdd,stroke:#c00,color:#600
+    class refused stop
+```
+
+Where it runs, in `configs/standin.yaml` (the worked examples' one-GPU configs put one engine and one rank on GPU 0,
+and run their checks on the CPU):
+
+```mermaid
+flowchart TB
+    subgraph node["One 8-GPU MI350X node"]
+        subgraph orch["orchestrator container"]
+            loop["the loop, the reward service and its CPU check pools<br/>(parse and compile gates, waitcheck), the checks' cache, the weight sync"]
+            subgraph gpus["GPUs 0-3: on each, one TokenSpeed engine (45% of its memory) and one LoRA trainer rank;<br/>the 4 ranks all-reduce their gradients once per step"]
+                g0["GPU 0<br/>engine 0, rank 0"]
+                g1["GPU 1<br/>engine 1, rank 1"]
+                g2["GPU 2<br/>engine 2, rank 2"]
+                g3["GPU 3<br/>engine 3, rank 3"]
+            end
+        end
+        subgraph chk["checker container, reward.remote: one server per check and GPU"]
+            c4["GPU 4: ConSan"]
+            a5["GPU 5: ASan"]
+            c6["GPU 6: ConSan"]
+            a7["GPU 7: ASan"]
+        end
+        shm[("/dev/shm: weight slots, checker sockets")]
+    end
+    loop -- "requests and replies; complete groups to train" --> gpus
+    loop -- "ConSan and ASan legs, over Unix sockets" --> chk
+    loop -- "merged weights" --> shm
+    shm -- "reload" --> gpus
+```
+
 ## Status
 
 On stand-ins the loop runs end to end on one node. The last stand-in training run (`configs/standin.yaml`'s settings,
