@@ -111,11 +111,14 @@ exit 1
 """
 DOCKER2 = r"""#!/bin/bash
 # docker ps -a [--filter ancestor=IMG] --format ...: $CONTAINERS, or the containers $USERS_OF_IMAGE names for IMG;
-# docker rmi / rm: logged; docker run ... -c CMD: CMD run here (the cleanup's file work); docker image inspect: found
+# docker rmi / rm: logged; docker run ... -c CMD: CMD run here (the cleanup's file work); docker image inspect: found,
+# or with $IMAGES_DIR set, found while a file of the image's name is there (rmi removes it)
 echo "$*" >> "$DOCKER_LOG"
 case "$1" in
   ps) if [ "$3" = --filter ]; then printf '%s\n' $USERS_OF_IMAGE; else printf '%s\n' $CONTAINERS; fi ;;
-  rm|rmi) shift; [ "$1" = -f ] && shift; printf '%s %s\n' "removed" "$*" >> "$DOCKER_LOG" ;;
+  rm|rmi) shift; [ "$1" = -f ] && shift; printf '%s %s\n' "removed" "$*" >> "$DOCKER_LOG"
+     [ -n "${IMAGES_DIR:-}" ] && rm -f "$IMAGES_DIR/$(printf %s "$*" | tr '/:' '__')" ;;
+  image) [ -z "${IMAGES_DIR:-}" ] || [ -e "$IMAGES_DIR/$(printf %s "$3" | tr '/:' '__')" ]; exit ;;
   run) while [ "$#" -gt 0 ] && [ "$1" != -c ]; do shift; done; [ "$1" = -c ] && bash -c "$2" ;;
 esac
 exit 0
@@ -179,9 +182,9 @@ def test_only_the_containers_of_jobs_slurm_no_longer_runs_are_stale(tmp_path):
 
 
 def test_the_job_removes_stale_containers_after_its_claims_and_before_its_first_container():
-    assert JOB.index('claim "directory $SYNC_DIR/$RUN_ID"') < JOB.index("stale=$(stale_containers)") < JOB.index(
+    assert JOB.index('claim_dir "$SYNC_DIR/$RUN_ID"') < JOB.index("stale=$(stale_containers)") < JOB.index(
         '--name "$CNAME-canary"')
-    assert JOB.index("trap cleanup EXIT") < JOB.index('claim "directory $SYNC_DIR/$RUN_ID"')
+    assert JOB.index("trap cleanup EXIT") < JOB.index('claim_dir "$SYNC_DIR/$RUN_ID"')
     assert "aorlta-run-[0-9]+(-[a-z]+)?')\n" not in JOB[JOB.index("stale=$(stale_containers)"):]  # no blanket removal
 
 
@@ -203,7 +206,8 @@ def test_an_image_this_job_built_is_removed_only_when_no_other_job_may_use_it(tm
 
 
 def _claim_script(tmp_path, body: str) -> str:
-    return (f"{_functions('stamp', 'job_ended', 'claim', 'dir_key')}CLAIMS={tmp_path}/claims\nCLAIMED=()\n{body}\n"
+    return (f"{_functions('stamp', 'job_ended', 'claim', 'canon_dir', 'dir_key', 'claim_dir')}CLAIMS={tmp_path}/claims\n"
+            f"CLAIMED=()\n{body}\n"
             "echo \"claimed ${#CLAIMED[@]}\"")
 
 
@@ -223,19 +227,42 @@ def test_a_claim_is_taken_kept_by_a_running_job_and_taken_over_from_an_ended_one
 
 
 def test_a_directory_claim_key_is_one_per_path(tmp_path):
-    out = _bash(tmp_path, f"{_functions('dir_key')}dir_key /dev/shm/aorlta/a; dir_key /dev/shm/aorlta/b; "
-                          "dir_key /dev/shm/aorlta/a")
-    a, b, a2 = out.stdout.split()
-    assert a == a2 != b and a.startswith("dir-") and len(a) == 20
+    real = tmp_path / "shm" / "a"
+    real.mkdir(parents=True)
+    (tmp_path / "alias").symlink_to(tmp_path / "shm")
+    spellings = [real, f"{real}/", f"{tmp_path}/shm/./a", f"{tmp_path}/shm/b/../a", tmp_path / "alias" / "a"]
+    out = _bash(tmp_path, f"{_functions('canon_dir', 'dir_key')}" + "".join(f"dir_key '{p}'; " for p in spellings)
+                + f"dir_key '{tmp_path}/shm/b'; dir_key '{tmp_path}/shm/not-yet/c/'; dir_key '{tmp_path}/shm/not-yet/c'")
+    keys = out.stdout.split()
+    assert len(set(keys[:5])) == 1 and keys[5] != keys[0] and keys[6] == keys[7], out.stderr
+    assert keys[0].startswith("dir-") and len(keys[0]) == 20
 
 
-def _cleanup(tmp_path, own: int, **env) -> subprocess.CompletedProcess:
-    funcs = _functions("add_mounts", "clean_img", "other_jobs", "remove_image", "cleanup")
-    state = (f"CNAME=aorlta-run-123 VRAM_PID= OUT={tmp_path}/out RUN_ROOT={tmp_path}/runs SYNC_DIR={tmp_path}/shm "
-             f"RUN_ID=r SOCK_DIR={tmp_path}/shm/sockets RUN_DIR={tmp_path}/runs/r BUILT_TRAINER=1 BUILT_BASE=0 "
-             f"PULLED_CHK=0 BASE=b CHK_IMG=c IMG=trainer:1 OWN_DIRS={own}\n"
-             f"CLAIMED=({tmp_path}/claims/gpu0 {tmp_path}/claims/gpu1)\n")
-    return _bash(tmp_path, f"{funcs}{state}cleanup", **env)
+@pytest.mark.parametrize("mine, clash", [("/x/shm/checkers", True), ("/x/shm/checkers/", True),
+                                         ("/x/shm/checkers/run-b", True), ("/x/shm", True),
+                                         ("/x/shm/checkers2", False), ("/x/shm/check", False)])
+def test_a_directory_inside_or_around_a_live_jobs_directory_is_refused(tmp_path, mine, clash):
+    claims = tmp_path / "claims"
+    claims.mkdir()
+    (claims / "dir-0123456789abcdef").write_text("456 directory /x/shm/checkers\n")
+    out = _bash(tmp_path, _claim_script(tmp_path, f'claim_dir "{mine}"'), SLURM_JOB_ID="789", JOBS="456:RUNNING")
+    assert out.returncode == (89 if clash else 0), out.stdout + out.stderr
+    if clash:
+        assert "job 456" in out.stderr and "overlaps" in out.stderr
+    ended = _bash(tmp_path, _claim_script(tmp_path, f'claim_dir "{mine}"'), SLURM_JOB_ID="789", JOBS="456:COMPLETED")
+    assert ended.returncode == 0, ended.stderr
+    own = _bash(tmp_path, _claim_script(tmp_path, f'claim_dir "{mine}"'), SLURM_JOB_ID="456", JOBS="456:RUNNING")
+    assert own.returncode == 0, own.stderr  # a job's own claims never stop it
+
+
+def _cleanup(tmp_path, own: int, built: int = 1, calls: str = "cleanup", **env) -> subprocess.CompletedProcess:
+    funcs = _functions("add_mounts", "clean_img", "other_jobs", "remove_image", "retry_kept_images")
+    funcs += re.search(r"^CLEANED=0\ncleanup\(\) \{.*?^\}\n", JOB, re.M | re.S).group(0)
+    state = (f"CNAME=aorlta-run-{env.get('SLURM_JOB_ID', '123')} VRAM_PID= OUT={tmp_path}/out RUN_ROOT={tmp_path}/runs "
+             f"SYNC_DIR={tmp_path}/shm RUN_ID=r SOCK_DIR={tmp_path}/shm/sockets RUN_DIR={tmp_path}/runs/r "
+             f"BUILT_TRAINER={built} BUILT_BASE=0 PULLED_CHK=0 BASE=b CHK_IMG=c IMG=trainer:1 OWN_DIRS={own} "
+             f"CLAIMS={tmp_path}/claims\nCLAIMED=({tmp_path}/claims/gpu0 {tmp_path}/claims/gpu1)\n")
+    return _bash(tmp_path, f"{funcs}{state}{calls}", **env)
 
 
 def test_cleanup_removes_the_runs_directories_only_when_this_job_claimed_them(tmp_path):
@@ -326,3 +353,36 @@ def test_the_import_pre_flight_loads_aorta_only_for_a_profile_that_uses_it(tmp_p
         report = json.loads(subprocess.run(check + extra, capture_output=True, text=True, env=env).stdout)
         assert report["aorta"] == extra
         assert sorted(k for k in report["failed"] if k.startswith("aorta.")) == aorta
+
+
+def test_cleanup_runs_once_so_a_second_pass_never_removes_directories_claimed_since(tmp_path):
+    for d in ("out", "runs", "shm/r", "shm/sockets", "claims"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    # the TERM trap's cleanup, a job taking the released directories, then the EXIT trap's cleanup
+    calls = (f"cleanup\nmkdir -p {tmp_path}/shm/r {tmp_path}/shm/sockets\n"
+             f"echo '456 directory {tmp_path}/shm/r' > {tmp_path}/claims/dir-r\ncleanup")
+    out = _cleanup(tmp_path, 1, calls=calls, NODE_JOBS="123")
+    assert (tmp_path / "shm" / "r").is_dir() and (tmp_path / "shm" / "sockets").is_dir(), out.stdout + out.stderr
+    assert out.stdout.count("containers left:") == 1
+    assert JOB.index("CLEANED=0\ncleanup() {") < JOB.index("trap cleanup EXIT")
+    assert "trap 'cleanup; exit 143' TERM INT" in JOB
+
+
+def test_an_image_kept_for_another_job_is_removed_by_the_last_job_to_leave(tmp_path):
+    images = tmp_path / "images"
+    images.mkdir()
+    for name in ("trainer_1", "older_1"):
+        (images / name).write_text("")  # older:1 was on the node before either job: no job recorded it
+    for d in ("out", "runs", "claims"):
+        (tmp_path / d).mkdir(exist_ok=True)
+    first = _cleanup(tmp_path, 0, NODE_JOBS="123 456", USERS_OF_IMAGE="aorlta-run-456", IMAGES_DIR=str(images))
+    assert "kept trainer:1" in first.stdout and _removed(tmp_path) == [], first.stdout + first.stderr
+    assert [p.read_text() for p in (tmp_path / "claims" / "images").iterdir()] == ["trainer:1\n"]
+    # job 456 found the image and did not build it; it leaves last
+    last = _cleanup(tmp_path, 0, built=0, SLURM_JOB_ID="456", NODE_JOBS="456", IMAGES_DIR=str(images))
+    assert _removed(tmp_path) == ["trainer:1"] and "removed trainer:1" in last.stdout, last.stdout + last.stderr
+    assert list((tmp_path / "claims" / "images").iterdir()) == [] and (images / "older_1").exists()
+    # a record whose image is gone already is dropped, and nothing is removed for it
+    (tmp_path / "claims" / "images" / "x").write_text("gone:1\n")
+    _cleanup(tmp_path, 0, built=0, SLURM_JOB_ID="789", NODE_JOBS="789", IMAGES_DIR=str(images))
+    assert list((tmp_path / "claims" / "images").iterdir()) == [] and _removed(tmp_path) == ["trainer:1"]

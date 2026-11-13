@@ -3,6 +3,7 @@ the entry point and the run job. Nothing trains and nothing is published; an uns
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -433,7 +434,7 @@ def test_the_run_job_prints_a_score_runs_summary_and_says_it_is_never_resumed():
     post = text[text.index("Every committed iteration's summary"):]
     branch = post[post.index('if cfg.orchestrator.mode == "score":'):post.index("for n in complete_iterations")]
     assert "REPORT_DIR, SUMMARY_NAME" in branch and "sys.exit(0)" in branch
-    header = text[:text.index("#SBATCH")]
+    header = text[:re.search(r"^#SBATCH", text, re.M).start()]  # up to the first directive, not a mention of one
     assert "orchestrator.mode: score" in header and "never resumed" in header
 
 
