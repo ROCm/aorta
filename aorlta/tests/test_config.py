@@ -306,6 +306,20 @@ def test_value_rules(dotted, value, message):
     assert message in str(err.value)
 
 
+def test_the_engine_ports_are_chosen_at_start_unless_a_base_is_given():
+    assert config_from_dict(standin()).rollout.port_base is None
+    four = standin()  # 4 engines: the last window must end at 65535
+    for ok in (1024, 20000, 65536 - 4 * 2000):
+        assert config_from_dict(edit(four, "rollout.port_base", ok)).rollout.port_base == ok
+    for bad in (1023, 65536 - 4 * 2000 + 1, -1):
+        with pytest.raises(ConfigError, match=r"rollout.port_base: must be null or in \[1024, 57536\] \(4 engines"):
+            config_from_dict(edit(four, "rollout.port_base", bad))
+    one = edit(edit(four, "rollout.engines", [0]), "trainer.ranks", 1)
+    assert config_from_dict(edit(one, "rollout.port_base", 63536)).rollout.port_base == 63536
+    with pytest.raises(ConfigError, match="rollout.port_base: expected an int"):
+        config_from_dict(edit(four, "rollout.port_base", "20000"))
+
+
 def test_accepted_alternatives():
     cfg = config_from_dict(edit(edit(standin(), "trainer.aggregation", "constant(4096)"), "trainer.tis", 2.0))
     assert cfg.trainer.aggregation == "constant(4096)" and cfg.trainer.tis == 2.0

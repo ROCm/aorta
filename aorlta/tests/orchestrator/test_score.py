@@ -494,7 +494,8 @@ def orchestrator_mounts(tmp_path, data: dict) -> list[str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AORLTA_", "SLURM"))}
     env.update(PATH=f"{bin_dir}:{env['PATH']}", SLURM_JOB_ID="4242", SLURM_SUBMIT_DIR=str(pkg),
                CONFIG="configs/score.yaml", COMPONENTS="fake", AORLTA_VENV=str(venv),
-               AORLTA_TMPDIR=str(tmp_path / "tmpdir"), AORLTA_HF_HOME=str(tmp_path / "hf"))
+               AORLTA_TMPDIR=str(tmp_path / "tmpdir"), AORLTA_HF_HOME=str(tmp_path / "hf"),
+               AORLTA_CLAIMS_DIR=str(tmp_path / "claims"))
     proc = subprocess.run(["bash", str(REPO / "jobs" / "aorlta-run.sbatch")], cwd=pkg, env=env, capture_output=True,
                           text=True, timeout=300)
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]

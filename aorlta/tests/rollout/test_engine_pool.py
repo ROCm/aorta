@@ -184,6 +184,21 @@ def test_a_dead_engine_restarts_and_serves_only_after_the_landing_check(rt, land
     assert ("error" not in after.result) == landing_ok
 
 
+def test_every_engine_start_is_reported_at_start_up_and_after_a_restart(rt):
+    h = Mortal(0, FakeEngine(CFG, **rt.ENGINE_KW))
+    seen = []
+    pool = rt.make_pool([h, FakeEngine(CFG, **rt.ENGINE_KW)], on_restart=lambda i: True,
+                        on_ready=lambda i, ready, restart: seen.append((i, restart, ready)))
+    assert sorted((i, r) for i, r, _ in seen) == [(0, False), (1, False)]
+    assert all(ready is pool.ready[i] for i, _, ready in seen)
+    pool.begin_iteration(1)
+    h.armed = True
+    pool.generate(0, [1], _sp())
+    pool.wait_restarts(30)
+    assert pool.available == [True, True] and [(i, r) for i, r, _ in seen[2:]] == [(0, True)]
+    assert seen[2][2] is pool.ready[0]
+
+
 def test_a_second_death_in_one_iteration_stops_the_run(rt):
     h = Mortal(0, FakeEngine(CFG, **rt.ENGINE_KW))
     pool = rt.make_pool([h], on_restart=lambda i: True)

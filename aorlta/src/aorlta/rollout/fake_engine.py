@@ -20,6 +20,7 @@ tokenizer's ids can be sent.
 from __future__ import annotations
 
 import math
+import socket
 import threading
 import time
 import types
@@ -28,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..ids import INT32_MAX, HashRng, sha256_ids
+from .ports import CLUSTER_OFFSETS
 
 STOP_TOKEN_ID = 248046  # <|im_end|>, the token the engine stops on (F2, Appendix C)
 BYTE_TOKEN_BASE = 10_000  # ByteTokenizer: token id = BYTE_TOKEN_BASE + byte value
@@ -131,6 +133,10 @@ class FakeEngineConfig:
     # since the last flush(), at most len(input) - 1, as measured on TokenSpeed (F15). It depends on
     # request order, so it is off by default and the responses themselves never depend on it.
     prefix_cache: bool = False
+    # Bind the ports a one-node TokenSpeed engine binds for its `port` (rollout/ports.py) on 127.0.0.1 until
+    # shutdown(), so a taken port fails the start with "Address already in use", as on the engine. Off: the ports
+    # are only reported (`port_args`).
+    bind_ports: bool = False
 
     def __post_init__(self) -> None:
         if not (isinstance(self.seed, int) and not isinstance(self.seed, bool)):
@@ -207,6 +213,22 @@ class FakeEngine:
         self.engine_id = engine_id
         self.server_args = FakeServerArgs(**engine_kwargs)
         self.tokenizer_manager = types.SimpleNamespace(server_args=self.server_args)
+        d = self.server_args.port + CLUSTER_OFFSETS[0]
+        self.port_args = types.SimpleNamespace(  # as TokenSpeed's PortArgs when none of the ports is taken
+            dist_init_addr=f"127.0.0.1:{d}", tokenizer_ipc_name=f"tcp://127.0.0.1:{d + 1}",
+            rpc_ipc_name=f"tcp://127.0.0.1:{d + 3}", metrics_ipc_name=f"tcp://127.0.0.1:{d + 4}",
+            scheduler_input_ipc_name=f"tcp://127.0.0.1:{d + 5}", nccl_port=self.server_args.port + 100)
+        self._sockets: list[socket.socket] = []
+        if self.fake.bind_ports:
+            try:
+                for p in (d, d + 1, d + 3, d + 4, d + 5):
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self._sockets.append(s)
+                    s.bind(("127.0.0.1", p))
+                    s.listen(1)
+            except OSError:
+                self._close_sockets()
+                raise
         self.tokenizer = ByteTokenizer()
         self.requests: list[FakeRequest] = []
         self._sleep = sleep
@@ -236,6 +258,12 @@ class FakeEngine:
 
     def shutdown(self) -> None:
         self._alive = False
+        self._close_sockets()
+
+    def _close_sockets(self) -> None:
+        for s in self._sockets:
+            s.close()
+        self._sockets = []
 
     def flush_prefix_cache(self) -> None:
         with self._lock:

@@ -436,6 +436,37 @@ def test_the_rollout_adapter_hands_over_each_chain_and_puts_the_deadline_on_the_
     assert r.manager.kw["deadline"] is None
 
 
+def test_the_engines_choose_their_ports_unless_the_config_fixes_a_base(tmp_path):
+    auto = wiring.engine_handles(_cfg(tmp_path), 4096)
+    assert [h.gpu for h in auto] == ["0", "1"] and all("port" not in h.engine_kwargs and not h.fixed_port for h in auto)
+    fixed = wiring.engine_handles(_cfg(tmp_path, rollout={"port_base": 20000}), 4096)
+    assert [h.engine_kwargs["port"] for h in fixed] == [20000, 22000] and all(h.fixed_port for h in fixed)
+    assert {k: v for k, v in fixed[1].engine_kwargs.items() if k != "port"} == auto[1].engine_kwargs
+
+
+def test_each_engine_start_is_recorded_with_its_gpu_and_ports(tmp_path, caplog):
+    from aorlta.rollout.fake_engine import FakeEngine, FakeEngineConfig
+
+    cfg = _cfg(tmp_path)
+    handles = [InProcessEngine(i, FakeEngine(FakeEngineConfig(), port=20000 + 2000 * i)) for i in range(2)]
+    r = wiring.RolloutAdapter(cfg, None, handles, max_len=4096, spans=types.SimpleNamespace(now=lambda: 0.0),
+                              compiler=None)
+    ready = {"port": 24000, "attempt": 2, "earlier_attempts": ["attempt 1 on port 12000, a port was taken"], "pid": 5,
+             "startup_sec": 1.5, "ports": {"dist_init": 24233}}
+    r._record_start(1, ready, False)  # no run directory yet: the log line only
+    assert not (cfg.run_dir / wiring.ENGINES_LOG).exists()
+    cfg.run_dir.mkdir(parents=True)
+    with caplog.at_level("INFO", logger=wiring.log.name):
+        r._record_start(1, ready, False)
+        r._record_start(1, dict(ready, port=26000, attempt=1, earlier_attempts=[]), True)
+    rows = [json.loads(x) for x in (cfg.run_dir / wiring.ENGINES_LOG).read_text().splitlines()]
+    assert [(x["engine"], x["gpu"], x["restart"], x["port"], x["attempt"]) for x in rows] == [
+        (1, "inproc", False, 24000, 2), (1, "inproc", True, 26000, 1)]
+    assert rows[0]["ports"] == {"dist_init": 24233} and rows[0]["earlier_attempts"] == ready["earlier_attempts"]
+    assert rows[0]["port_base"] is None and rows[0]["t"].endswith("Z") and rows[0]["pid"] == 5
+    assert "engine 1 on GPU inproc started again on port 26000" in caplog.text
+
+
 def test_an_adapter_on_several_gpus_gets_one_factory_over_its_servers(tmp_path):
     from aorlta.reward.clock import Clock
     from aorlta.reward.remote import RemoteFactory
