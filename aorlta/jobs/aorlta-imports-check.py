@@ -21,7 +21,7 @@ MODULES = (
 DISTS = ("torch", "transformers", "peft", "safetensors", "xxhash", "fla-core", "causal-conv1d", "PyYAML", "click")
 
 
-def main(aorta_src: str) -> int:
+def main(aorta_src: str, aorta_modules: tuple[str, ...] = ("models", "waitcheck")) -> int:
     bad = {}
     for name in MODULES:
         try:
@@ -30,7 +30,7 @@ def main(aorta_src: str) -> int:
             bad[name] = f"{type(exc).__name__}: {exc}"[:300]
     from aorlta.reward.adapters import aorta_import
 
-    for name in ("models", "waitcheck"):  # the waitcheck leg runs in this image (the GPU legs do not)
+    for name in aorta_modules:  # the waitcheck leg runs in this image (the GPU legs do not); none: no aorta adapter
         mod, why = aorta_import.load(name, aorta_src)
         if mod is None:
             bad[f"aorta.{name}"] = why
@@ -40,9 +40,10 @@ def main(aorta_src: str) -> int:
             versions[d] = md.version(d)
         except md.PackageNotFoundError:
             versions[d] = None
-    print(json.dumps({"python": sys.version.split()[0], "versions": versions, "failed": bad}, sort_keys=True))
+    print(json.dumps({"python": sys.version.split()[0], "versions": versions, "aorta": list(aorta_modules),
+                      "failed": bad}, sort_keys=True))
     return 1 if bad else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    sys.exit(main(sys.argv[1], tuple(sys.argv[2:])))

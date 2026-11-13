@@ -58,6 +58,48 @@ The module is imported before the rest of the config is checked, so every name a
 | `reward.reward_fn` | `register_reward_fn(name, factory)` | `factory(profile)` returns a `RewardFn` ("Your own reward function") |
 | a profile pool's `adapter` | `register_check_adapter(name, factory)` | `factory(ctx)` returns a `CheckAdapter` for one worker; `ctx` (`plugins.CheckContext`) holds its profile settings, worker id, clock, timeout and the run's pool paths |
 
+Where each one hooks into a run, and what it receives and returns. Blue boxes are yours; grey boxes are the
+framework, which calls them:
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 520}}}%%
+flowchart TD
+    cfg["run config: plugins: [your module]<br/>imported before the rest of the config is checked;<br/>its register_* calls give each component its name"]
+    cfg --> task
+    task["task: register_task(Task(name, records, ...))<br/>records(pool_dir, tokenizer, thinking) returns a list of PromptRecord:<br/>prompt_id, messages or turn0_ids, prompt_ids_sha256,<br/>task (a TaskRef whose task_sha256 hashes what the checks read), source standin"]
+    task -. "probe_messages(pool_dir): chats for the landing check and the warm-up;<br/>selftest_messages(pool_dir): 4 open-ended chats (both optional)" .-> startup["start-up: engine self-test,<br/>landing probes, trainer warm-up"]
+    task -- "P prompts per iteration" --> engines["TokenSpeed engines: turn 0, then repair turns<br/>(up to rollout.max_repair_turns)"]
+    engines -- "the reply's text" --> parse
+    parse["parse adapter: register_parse_adapter(name, factory)<br/>check(text, thinking, prompt) returns a ParseOutcome:<br/>edits with code, rejected with (message, reason) or None, or no_change<br/>also: reply_stops, and check_prompts(prompts, thinking, max_repair_turns) at start"]
+    parse -- "edits: the code" --> compile
+    compile["compile adapter: register_compile_adapter(name, factory)<br/>factory(workdir, evidence=..., structure=...) returns a compiler;<br/>check(code, tag) returns a CompileResult: ok, rc, seconds, errors"]
+    parse -- "rejected with a message, a turn left" --> feedback
+    compile -- "not ok, a turn left" --> feedback
+    feedback["feedback template: register_feedback_template(name, factory)<br/>build(errors, max_chars) returns a Feedback for a failed compile;<br/>build_apply(message, reason) for a rejected answer (optional)"]
+    feedback -- "Feedback.text, after the leak check" --> engines
+    compile -- "ok, or the last turn" --> cand
+    parse -- "no_change; or rejected on the last turn,<br/>without a message, or with no build_apply" --> cand
+    cfg -. "rollout.compile_adapter: none: every answer ends its chain here" .-> cand
+    cand["Candidate: response_text, response_tokens, max_new_tokens, task, prompt and chain ids"]
+    cand --> service["reward service: the profile's stages in order,<br/>settled legs cached by source, task, leg, settings and checker"]
+    profile["profile: register_profile(name, path to YAML)<br/>pools (adapter, resource, timeout, workers), stages, requires,<br/>leg_settings, adapters' settings, reward_fn, clean_repeats"]
+    profile -. "configures" .-> service
+    service -- "a LegJob per leg: leg, task_sha256, inputs (the response, parsed files),<br/>package, output_dir, leg_settings" --> check
+    check["check adapter: register_check_adapter(name, factory)<br/>factory(ctx: settings, worker_id, clock, timeout_s, pools) returns one per worker;<br/>run(job) returns a LegResult and never raises: clean, finding or fail (settled),<br/>or unsettled; with reason and findings. Also controls() and health()"]
+    check -- "LegResult" --> service
+    service -- "the legs finished so far, the candidate" --> rfn
+    rfn["reward function: register_reward_fn(name, factory); factory(profile)<br/>decide(partial, cand) returns NeedMore(legs), Decided(reward, parts) or Unscored(reason);<br/>compute(legs, cand) returns (reward, parts) or (None, reason); claims_clean(reward, parts)"]
+    rfn -- "NeedMore: run the next stage" --> service
+    rfn -- "Decided or Unscored" --> inv{"the service's checks: compute agrees with decide;<br/>reward in -1.55..1.0 with parts base, broke_healthy, length;<br/>a clean claim needs every profile leg clean"}
+    inv -- "pass" --> grpo["the group's GRPO advantages, then the LoRA trainer"]
+    inv -- "fail" --> unscored["unscored: reward_invariant_violated"]
+
+    classDef hook fill:#e3eefc,stroke:#2b6cb0,color:#1a365d
+    classDef core fill:#f2f2f2,stroke:#888,color:#222
+    class task,parse,compile,feedback,profile,check,rfn hook
+    class cfg,startup,engines,cand,service,inv,grpo,unscored core
+```
+
 A built-in component may be mixed in by name (`standin.parse`, `standin.hipcc` and `standin` are the stand-in
 parse, compile and feedback). Nothing in a profile is required: a task whose answers are not code sets
 `rollout.compile_adapter: none` (every parsed answer ends its chain) and gives its profile only its own checks, with
@@ -213,7 +255,11 @@ image's compiler and ConSan with the checker image's, and that the two builds ag
 
 To add a reward function, write the class, register it (`plugins.register_reward_fn(name, factory)`, where
 `factory(profile)` builds it), and set `reward_fn:` to its name in your profile, which you register with
-`plugins.register_profile`. The config then accepts both names and checks that they agree.
+`plugins.register_profile`. The config then accepts both names and checks that they agree, and that the profile's
+`name:` is the name it is registered under (a candidate carries one and the reward service serves the other).
+A profile that names none of the aorta-backed adapters (`standin.rj_waitcheck`, `standin.aorta_consan`, `standin.aorta_asan`)
+needs no aorta checkout: the run job's import pre-flight loads aorta's backends only for one that does. To
+re-score a run's plan log offline, `python -m aorlta.selector.plan_eval LOG --plugins <your plugin>`.
 
 ## Checks and profiles
 

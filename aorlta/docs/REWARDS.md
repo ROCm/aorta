@@ -30,6 +30,7 @@ The name is what a profile's pool sets as `adapter:`; the leg is what its stage 
 | adapter | leg | needs | states and reasons |
 |---|---|---|---|
 | `standin.parse` (built in, `src/aorlta/reward/adapters/standin_parse.py`) | `gate.parse` | nothing (CPU) | `clean`: the last ```` ```cpp ```` block of the reply, written to the job's directory as `source.hip`; `fail` `parse`: no such block; `unsettled` `adapter_error` |
+| `hipk.gate` (`examples/hip-kernels/hip_kernels.py`) | `gate.parse` | nothing (CPU) | as `standin.parse`, with the rollout's own rule (`parse_code`): no answer when a later ```` ```cpp ```` block never closes, so a cut-off final reply is not scored on an earlier block |
 
 The rollout has parses of its own (`rollout.parse_adapter`), which decide whether an answer ends the chain or gets a
 repair turn; they are not legs. `standin.parse` takes the last ```` ```cpp ```` block; `hipk.parse`
@@ -47,9 +48,9 @@ answer gets the parse's message as a repair turn (the feedback template's `build
 
 | adapter | leg | needs | states and reasons |
 |---|---|---|---|
-| `hipk.run` (`examples/hip-kernels/hip_kernels.py`) | `ref.native` | `hipcc` and a GPU per worker (settings `hipcc`, `gpus`: worker n uses `gpus[(n - 1) % len(gpus)]`); leg settings `target`, `run_timeout_s`; the task's spec in the pool's `tasks.json` | builds the candidate with a generated host program, runs it once and compares every output element with a host reference, and every guard element past an array's end. `clean`: every element within the task's `atol + rtol·|want|`, nothing written past an end; `fail` `wrong_output` (a mismatch or a write past the end), `crash` (a signal, a HIP error), `timeout` (past `run_timeout_s`), `bad_signature` (the harness does not build and the compiler names the kernel or `main`); `unsettled` `harness_build_failed`, `run_not_started`, `no_result`, `no_time_left`, `adapter_error` |
+| `hipk.run` (`examples/hip-kernels/hip_kernels.py`) | `ref.native` | `hipcc` and a GPU per worker (settings `hipcc`, `gpus`, leased to live workers); leg settings `target`, `run_timeout_s`; the task's spec in the pool's `tasks.json` | compiles the candidate alone into a device code object (none of its host code is built or run); a harness built from the task loads it, runs its kernel once and compares every output element with a host reference, and every guard element past an array's end, writing its verdict to a record file (stdout is never read). `clean`: every element within the task's `atol + rtol·|want|`, nothing written past an end; `fail` `wrong_output` (a mismatch or a write past the end), `crash` (a signal or a HIP error after the launch), `timeout` (past `run_timeout_s` after the launch), `bad_signature` (the code object has no kernel of the task's exact signature); `unsettled` `setup_failed`/`setup_timeout` (before the launch: an allocation, the first copy, loading the code object), `candidate_build_failed`, `harness_build_failed`, `run_not_started`, `no_result`, `no_time_left`, `adapter_error` |
 | `qa.match` (`examples/qa/qa_task.py`) | `ref.answer` | nothing (CPU); optional `judge`: a command, and `judge_timeout_s` | see "Exact or normalised match" |
-| `hipk.time` (`examples/hip-kernels/hip_kernels.py`) | `ref.speedup` | `hipcc`, `llvm-readelf` and a GPU of its own | see "Timing" below |
+| `hipk.time` (`examples/hip-kernels/hip_kernels.py`) | `ref.speedup` | `hipcc` and a GPU of its own | see "Timing" below |
 
 ### Exact or normalised match
 
@@ -87,13 +88,11 @@ stalls and dirty controls, for testing the service; they are never a training re
 (`reference/<id>.hip` in the pool) and asks whether it is faster by a required ratio. The statistics are generic, in
 `src/aorlta/reward/timing.py`; the adapter is the hip-kernels example's, and is the pattern for another task's.
 
-How it measures. The candidate is compiled on its own (`launcher_source`: its source, then one C function that
-launches its kernel with the task's grid and block), so nothing it defines, a macro included, reaches the timing code.
-Its object's symbol table (`llvm-readelf --syms`) must not define `main`, a `hip*`, `hsa_*` or `__hip*` name, or any
-function with C linkage other than the launcher and a kernel stub: such a symbol would take the place of the HIP
-runtime's own, `hipEventElapsedTime` say, in the linked program. The harness (`timing_source`) holds the reference
-kernel and the host program. It runs each kernel once on fresh inputs and compares the outputs with the host
-reference; times one batch of each and stops if the projected GPU time is over `gpu_budget_s`; then takes `warmup +
+How it measures. The candidate and the reference are each compiled alone into a device code object
+(`hipcc --genco`), so none of the candidate's host code is built or run and nothing it defines, a macro included,
+reaches the timing code. The harness (`timing_source`) is built from the task alone: it loads both code objects, finds
+the task's kernel in each by its exact mangled signature, and writes its result to a record file the adapter reads
+(stdout is never read). It runs each kernel once on fresh inputs and compares the outputs with the host reference; times one batch of each and stops if the projected GPU time is over `gpu_budget_s`; then takes `warmup +
 repeats` rounds, each a fresh checked run of the candidate and one timed batch (hipEvent around `launches`
 back-to-back launches) of each kernel, the order alternating by round, the inputs reset before each batch.
 
@@ -110,7 +109,7 @@ floor `max(min_noise_floor, MAD_candidate + MAD_reference)`; the speedup `s = me
 | fewer than `repeats` samples, or one that is not a positive finite number | `unsettled` `timing_too_few`, `timing_invalid` |
 | wrong output under the timing harness | `unsettled` `timing_wrong_output` (`reference_wrong_output` for the reference) |
 | over the GPU budget, a timeout, a crash, a HIP error | `unsettled` `too_slow_to_measure`, `timing_timeout`, `timing_crash`, `timing_hip_error` |
-| the harness does not build, a reserved symbol, settings that cannot decide | `unsettled` `harness_build_failed`, `symbol_check_failed` or `defines_reserved_symbol`, `adapter_error` |
+| a code object without the kernel, the harness does not build, settings that cannot decide | `unsettled` `timing_no_kernel` (`reference_no_kernel`), `harness_build_failed`, `adapter_error` |
 
 Correctness comes first twice over: the profile runs `ref.speedup` only after `ref.native` is clean (`requires`), and
 the harness checks the candidate's output on fresh inputs before every round. Nothing the timing cannot decide is
@@ -210,7 +209,7 @@ reward_fn: hipk.speed            # must equal the run config's reward.reward_fn
 clean_repeats: 1                 # settled-clean repeats a clean reward needs
 materialize: true                # write each candidate's files: real adapters read them
 pools:                           # one worker pool per check: its adapter, resource, timeout name and workers
-  gates: {resource: local_cpu, adapter: standin.parse, timeout: gate, workers: 4}
+  gates: {resource: local_cpu, adapter: hipk.gate, timeout: gate, workers: 4}
   compile: {resource: local_cpu, adapter: standin.hipcc, timeout: compile, workers: 8}
   run: {resource: own_gpu, adapter: hipk.run, timeout: sim_run, workers: 3}
   time: {resource: own_gpu, adapter: hipk.time, timeout: sim_run, workers: 1}
@@ -232,7 +231,7 @@ leg_settings:                    # given to the adapter with each job, and part 
 adapters:                        # each adapter's own settings; ${AORLTA_ROCM_ROOT} is that variable, or /opt/rocm
   standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", readelf: "${AORLTA_ROCM_ROOT}/llvm/bin/llvm-readelf"}
   hipk.run: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", gpus: [4, 5, 6]}
-  hipk.time: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", readelf: "${AORLTA_ROCM_ROOT}/llvm/bin/llvm-readelf", gpus: [7]}
+  hipk.time: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", gpus: [7]}
 ```
 
 and in the run config (`configs/hipk-speed-score.yaml`):

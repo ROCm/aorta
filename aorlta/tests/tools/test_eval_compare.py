@@ -64,3 +64,56 @@ def test_runs_that_sampled_differently_are_refused(tmp_path):
 def test_a_directory_that_is_not_a_score_run_is_refused(tmp_path):
     base = score_run(tmp_path, "base")
     assert X.main(["--base", str(base), "--trained", str(tmp_path), "--out", str(tmp_path / "out")]) == 2
+
+
+def test_runs_with_another_batch_layout_or_reward_are_refused(tmp_path, capsys):
+    """Seeds follow the iteration number, which a different P changes; a different reward scores another thing."""
+    base = score_run(tmp_path, "base")
+    other = score_run(tmp_path, "p8")
+    _rewrite(other / "score" / "report.jsonl",
+             lambda r: dict(r, options=dict(r["options"], prompts_per_batch=8)) if r["kind"] == "run" else r)
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+    assert "differ in options" in capsys.readouterr().err
+    other = score_run(tmp_path, "rfn")
+    _rewrite(other / "score" / "report.jsonl",
+             lambda r: dict(r, reward=dict(r["reward"], reward_fn="other.v1")) if r["kind"] == "run" else r)
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+    assert "differ in reward" in capsys.readouterr().err
+
+
+def _rewrite(report: Path, edit) -> None:
+    rows = [json.loads(x) for x in report.read_text().splitlines()]
+    report.write_text("".join(json.dumps(edit(r)) + "\n" for r in rows))
+
+
+def test_runs_whose_tasks_order_or_sample_counts_differ_are_refused(tmp_path, capsys):
+    base = score_run(tmp_path, "base")
+    first = next(json.loads(x)["prompt_id"] for x in (base / "score" / "report.jsonl").read_text().splitlines()
+                 if json.loads(x)["kind"] == "prompt")
+    for name, edit, what in (
+            ("task", lambda r: dict(r, task_sha256="0" * 64) if r.get("prompt_id") == first else r, "task_sha256"),
+            ("count", lambda r: dict(r, samples=r["samples"] - 1) if r.get("prompt_id") == first else r, "samples")):
+        other = score_run(tmp_path, name)
+        _rewrite(other / "score" / "report.jsonl", edit)
+        assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+        assert what in capsys.readouterr().err
+    other = score_run(tmp_path, "order")
+    rep = other / "score" / "report.jsonl"
+    rows = [json.loads(x) for x in rep.read_text().splitlines()]
+    prompts = [r for r in rows if r["kind"] == "prompt"]
+    rows = [rows[0], *reversed(prompts), rows[-1]]
+    rep.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+    assert "same order" in capsys.readouterr().err
+
+
+def test_a_sample_with_no_reply_is_shown_as_such(tmp_path):
+    """A chain that died before its first reply has no turns; the report shows it rather than crashing."""
+    base, trained = score_run(tmp_path, "base"), score_run(tmp_path, "trained")
+    for f in trained.glob("iterations/iter-*/episodes.jsonl"):
+        eps = [json.loads(x) for x in f.read_text().splitlines()]
+        f.write_text("".join(json.dumps(dict(e, turns=[], final_turn=-1, end_reason="engine_error")) + "\n"
+                             for e in eps))
+    assert X.main(["--base", str(base), "--trained", str(trained), "--out", str(tmp_path / "out")]) == 0
+    md = (tmp_path / "out" / "eval-compare.md").read_text()
+    assert "(no reply: the chain ended engine_error before its first turn)" in md

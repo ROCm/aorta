@@ -427,3 +427,60 @@ def test_the_cli_writes_the_report_and_refuses_a_bad_log(tmp_path, capsys):
     (tmp_path / "bad.jsonl").write_text('{"schema": "nope"}\n')
     assert main([str(tmp_path / "bad.jsonl")]) == 2
     assert "plan_eval:" in capsys.readouterr().err
+
+
+TOY_V11_PLUGIN = '''
+from pathlib import Path
+
+from aorlta import plugins
+from aorlta.reward.profiles import PROFILE_DIR
+from aorlta.reward.rewardfn.standin_v11 import StandinV11
+
+
+class ToyV11(StandinV11):
+    name = "toy.v11"
+
+
+here = Path(__file__).parent
+(here / "toy-fake.yaml").write_text((PROFILE_DIR / "fake.yaml").read_text().replace("name: fake", "name: toy-fake")
+                                    .replace("reward_fn: standin.v11", "reward_fn: toy.v11"))
+plugins.register_profile("toy-fake", here / "toy-fake.yaml")
+plugins.register_reward_fn("toy.v11", lambda profile: ToyV11(clean_repeats=profile.clean_repeats))
+'''
+
+
+def test_a_log_whose_profile_and_reward_a_plugin_registered_is_evaluated_once_the_plugin_is_loaded(tmp_path, capsys):
+    """The evaluator refused any reward function but standin.v11 before asking the registry; now `--plugins` loads
+    the plugin and the log is re-scored by the reward it registered, with the same counts as the built-in one."""
+    from aorlta import plugins
+
+    saved = {id(t): dict(t) for t in plugins._TABLES}
+    loaded = dict(plugins.LOADED)
+    try:
+        (tmp_path / "toy_v11_plugin.py").write_text(TOY_V11_PLUGIN)
+        lines = fake_log(iterations=1, prompts=4, K=4)
+        ident = None
+        for line in lines:
+            line["candidate"]["check_profile"] = "toy-fake"
+            if ident is None:
+                from aorlta.reward.rewardfn.standin_v11 import StandinV11
+
+                ident = dict(line["result"]["reward_fn"], name="toy.v11")
+                assert line["result"]["reward_fn"]["name"] == StandinV11.name
+            line["result"]["reward_fn"] = ident
+        log = write_jsonl(tmp_path / "toy.jsonl", lines)
+        assert main([str(log), "--audit-fractions", ""]) == 2
+        err = capsys.readouterr().err
+        assert "check profile 'toy-fake'" in err and "--plugins" in err
+        out = tmp_path / "out"
+        assert main([str(log), "--audit-fractions", "", "--plugins", str(tmp_path / "toy_v11_plugin.py"),
+                     "--out", str(out)]) == 0
+        report = json.loads((out / "plan-eval.json").read_text())
+        assert report["log"]["reward_fn"]["name"] == "toy.v11" and report["log"]["profile"] == "toy-fake"
+        assert report["log"]["reproduced"] == len(lines)
+    finally:
+        for t in plugins._TABLES:
+            t.clear()
+            t.update(saved[id(t)])
+        plugins.LOADED.clear()
+        plugins.LOADED.update(loaded)

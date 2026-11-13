@@ -26,6 +26,7 @@ from aorlta.sync.merge import merge_all
 from aorlta.sync.reload import ReloadError, reload_all
 
 Draw = tuple[tuple[float, ...], tuple[int, ...]]
+GREEDY_TOKENS = 16  # each draw's greedy continuation after its probe
 
 
 def draw_request(ids: Sequence[int], greedy_tokens: int) -> dict[str, Any]:
@@ -33,7 +34,7 @@ def draw_request(ids: Sequence[int], greedy_tokens: int) -> dict[str, Any]:
                 return_logprob=True, logprob_start_len=0)
 
 
-def draw(engine, ids: Sequence[int], greedy_tokens: int = 16) -> Draw:
+def draw(engine, ids: Sequence[int], greedy_tokens: int = GREEDY_TOKENS) -> Draw:
     out = engine.generate(**draw_request(ids, greedy_tokens))
     lps = parse_input_logprobs(out, ids)
     if not all(math.isfinite(v) for v in lps):
@@ -45,7 +46,7 @@ def draw(engine, ids: Sequence[int], greedy_tokens: int = 16) -> Draw:
     return tuple(lps), tuple(int(t) for t in gen)
 
 
-def probe_draws(engines: Sequence[Any], probes: ProbeSet, reps: int, greedy_tokens: int = 16) -> list[list[Draw]]:
+def probe_draws(engines: Sequence[Any], probes: ProbeSet, reps: int, greedy_tokens: int = GREEDY_TOKENS) -> list[list[Draw]]:
     """[rep][engine-major, probe-minor] draws, every probe scored alone and in sequence."""
     return [[draw(e, ids, greedy_tokens) for e in engines for ids in probes.ids] for _ in range(reps)]
 
@@ -88,7 +89,7 @@ def judge(base: list[list[Draw]], pert: list[list[Draw]], rest: list[list[Draw]]
 
 
 def round_trip(engines: Sequence[Any], probes: ProbeSet, *, perturbed_slot: str | Path, restore_slot: str | Path,
-               expected: int, in_flight: Callable[[], int], reps: int = 3, greedy_tokens: int = 16) -> RoundTripResult:
+               expected: int, in_flight: Callable[[], int], reps: int = 3, greedy_tokens: int = GREEDY_TOKENS) -> RoundTripResult:
     if not probes.ids:
         raise LandingError("no probes: the round trip would be judged on zero draws")
     t0 = time.monotonic()

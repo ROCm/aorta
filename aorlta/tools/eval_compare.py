@@ -9,8 +9,9 @@ set to the trained adapter (`tools/export_adapter.py`), each under its own `run.
 It prints the pass rate (the share of samples whose reward claims clean: a correct answer), the mean reward and the
 scored fraction of each, and the per-prompt change, and writes `<out>/eval-compare.json` and `<out>/eval-compare.md`.
 The markdown holds, for the prompts that changed most, one sample of each model: its reward, its checks' states and,
-with `--tokenizer`, its final reply decoded. It refuses two runs that did not score the same prompts with the same
-sampling settings, since their numbers would not be comparable. An unscored sample is never counted as passing.
+with `--tokenizer`, its final reply decoded. It refuses two runs that did not score the same prompts in the same
+order, with the same sampling settings, batch layout, task hashes and reward, since their numbers would not be
+comparable. An unscored sample is never counted as passing.
 """
 
 from __future__ import annotations
@@ -57,11 +58,18 @@ def headline(rep: dict) -> dict:
 
 def compare(base_dir: Path, trained_dir: Path) -> dict:
     base, trained = read_report(base_dir), read_report(trained_dir)
-    if set(base["prompts"]) != set(trained["prompts"]):
-        raise Refused("the two runs did not score the same prompts")
-    sb, st = base["run"].get("sampling"), trained["run"].get("sampling")
-    if sb != st:
-        raise Refused(f"the two runs sampled differently: {sb} against {st}")
+    if list(base["prompts"]) != list(trained["prompts"]):
+        raise Refused("the two runs did not score the same prompts in the same order")
+    for key in ("sampling", "options", "reward"):  # options: P and the passes, which decide each prompt's seeds
+        sb, st = base["run"].get(key), trained["run"].get(key)
+        if sb != st:
+            raise Refused(f"the two runs differ in {key}: {sb} against {st}")
+    for pid, b in base["prompts"].items():
+        t = trained["prompts"][pid]
+        for key in ("task_sha256", "samples"):
+            if b.get(key) != t.get(key):
+                raise Refused(f"{pid}: the two runs differ in {key}: {b.get(key)} against {t.get(key)}")
+    sb = base["run"].get("sampling")
     rows = []
     for pid in sorted(base["prompts"]):
         b, t = base["prompts"][pid], trained["prompts"][pid]
@@ -79,6 +87,8 @@ def compare(base_dir: Path, trained_dir: Path) -> dict:
 
 
 def sample_text(ep: dict, tok) -> str:
+    if not ep.get("turns"):  # a chain that ended before its first reply (engine_error) is a legal episode
+        return f"(no reply: the chain ended {ep.get('end_reason')} before its first turn)"
     ids = ep["turns"][-1]["response_ids"]
     if tok is None:
         return f"({len(ids)} reply tokens; pass --tokenizer to decode)"
@@ -105,7 +115,7 @@ def markdown(result: dict, base_dir: Path, trained_dir: Path, tok, samples: int)
             got = eps.get(r["prompt_id"]) or []
             if not got:
                 continue
-            e = got[0]
+            e = next((x for x in got if x.get("turns")), got[0])  # a sample with a reply, if there is one
             lines += ["", f"**{name}**: reward {fmt(e.get('reward'))}, {e['status']}, checks {e.get('legs')}", "",
                       "```text", sample_text(e, tok)[:3000], "```"]
         lines.append("")
