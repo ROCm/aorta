@@ -1,15 +1,15 @@
-# arith-score.yaml on Qwen/Qwen3-0.6B (a dense Qwen3, tied embeddings): the 64 held-out multiplications, 4 samples each.
+# arith-score.yaml on Qwen/Qwen3-8B (a dense Qwen3): the 64 held-out multiplications, 4 samples each.
 # One GPU: one TokenSpeed engine on GPU 0 and, for training, one LoRA rank beside it; the answer check runs on the CPU.
 # Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir (and
 # model.adapter_dir to score a trained adapter) and data.prompt_pools[0].path, which is this checkout's
 # aorlta/examples/qa/arith/heldout.
 plugins: [examples/qa/qa_task.py]
 run:
-  run_id: arith-score-qwen3-0.6b
+  run_id: arith-score-qwen3-8b
   source: standin
   root: /scratch/aorlta/runs
 model:
-  base_dir: /data/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
+  base_dir: /data/hf/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
   source: standin
 data:
   prompt_pools:

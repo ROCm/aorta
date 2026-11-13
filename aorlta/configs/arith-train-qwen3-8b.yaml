@@ -1,4 +1,4 @@
-# arith-train.yaml on Qwen/Qwen3-0.6B (a dense Qwen3, tied embeddings): 512 generated 3-digit multiplications, 16 per
+# arith-train.yaml on Qwen/Qwen3-8B (a dense Qwen3): 512 generated 3-digit multiplications, 16 per
 # iteration x 8 samples, 20 iterations.
 # One GPU: one TokenSpeed engine on GPU 0 and, for training, one LoRA rank beside it; the answer check runs on the CPU.
 # Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir (and
@@ -6,11 +6,11 @@
 # aorlta/examples/qa/arith/train.
 plugins: [examples/qa/qa_task.py]
 run:
-  run_id: arith-train-qwen3-0.6b
+  run_id: arith-train-qwen3-8b
   source: standin
   root: /scratch/aorlta/runs
 model:
-  base_dir: /data/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
+  base_dir: /data/hf/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
   source: standin
 data:
   prompt_pools:

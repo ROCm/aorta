@@ -122,9 +122,10 @@ was already fair at; it says nothing yet about a real vertical.
   chosen because it is checkable and has room to improve; the stand-in kernel prompts exercise the loop, not a task.
 - **The examples' checks are cheap stand-ins** for the checks a real vertical would run (a full test suite, a
   sanitizer on a real workload, a simulator).
-- **Only Qwen3.5-4B, only gfx950, only one node.** Other Qwen3.5 sizes should work and have not been run; Qwen3
-  models (such as Qwen3-0.6B) need the changes listed under "Models" in GETTING-STARTED.md; fewer than 8 GPUs has run
-  only in the 1-GPU arithmetic and Q&A layouts; MI300X and MI355X have not been run.
+- **Only Qwen3.5-4B trained, only gfx950, only one node.** Other Qwen3.5 sizes should work and have not been run; a
+  dense Qwen3-8B scores (the README's base-model entry) but its short training run stopped at iteration 2 on the gap
+  gate, and Qwen3-0.6B fails in TokenSpeed; fewer than 8 GPUs has run only in the 1-GPU arithmetic and Q&A layouts;
+  MI300X and MI355X have not been run.
 - **Long runs**: the longest training run here is 40 iterations. Stability over hundreds of iterations, and resuming
   one on real hardware beyond the kill-and-resume drill, are not shown.
 - **Multi-turn episodes beyond compile-repair**, an evaluation exporter during a run, and runs outside Slurm.
