@@ -206,11 +206,15 @@ def harness_source(task: dict) -> str:
     args = ", ".join(f"&d_{x}" if x in names else f"&{x}" for x in task["args"])
     lines += ["  hipModule_t mod_;", "  CHECK(\"setup\", hipModuleLoad(&mod_, argv[1]));", "  hipFunction_t fn_;",
               "  {",
-              f"    hipError_t e_ = hipModuleGetFunction(&fn_, mod_, __builtin_get_device_side_mangled_name("
+              # gf_, not e_: CHECK declares its own e_, and `hipError_t e_ = (e_)` reads itself (undefined)
+              f"    hipError_t gf_ = hipModuleGetFunction(&fn_, mod_, __builtin_get_device_side_mangled_name("
               f"{task['kernel']}));",
-              "    if (e_ == hipErrorNotFound || e_ == hipErrorInvalidDeviceFunction) {",
-              "      put(\"{\\\"status\\\": \\\"no_kernel\\\", \\\"stage\\\": \\\"setup\\\"}\");",
-              "      return 0;", "    }", "    CHECK(\"setup\", e_);", "  }",
+              "    if (gf_ == hipErrorNotFound || gf_ == hipErrorInvalidDeviceFunction) {",
+              "      char b_[256];",
+              "      std::snprintf(b_, sizeof b_, \"{\\\"status\\\": \\\"no_kernel\\\", \\\"stage\\\": \\\"setup\\\", "
+              "\\\"error\\\": \\\"%s\\\"}\", hipGetErrorName(gf_));",
+              "      put(b_);",
+              "      return 0;", "    }", "    CHECK(\"setup\", gf_);", "  }",
               f"  void* args_[] = {{{args}}};",
               f"  dim3 grid_ = {task['grid']};", f"  dim3 block_ = {task['block']};",
               "  put(\"{\\\"stage\\\": \\\"launched\\\"}\");",
@@ -543,7 +547,18 @@ def selfcheck(argv=None) -> int:
     is one, through the check's own steps: compiled alone into a code object, the task's harness built, and unless
     --build-only run on the GPU and judged by `verdict`. Prints one JSON line per task; exit 0 when all are clean
     (built, with --build-only)."""
-    from aorlta.reward.adapters.base import ProcessRunner
+    import subprocess
+    from types import SimpleNamespace
+
+    def run(argv, timeout_s, env=None):  # what `verdict` reads of a ProcResult; standalone, so no aorlta import
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s, env=env)
+            return SimpleNamespace(returncode=p.returncode, stdout=p.stdout, stderr=p.stderr, timed_out=False,
+                                   killed=False, launch_error=None)
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            return SimpleNamespace(returncode=-9, stdout=out, stderr="", timed_out=True, killed=False,
+                                   launch_error=None)
 
     ap = argparse.ArgumentParser(prog="hip_kernels.py selfcheck")
     ap.add_argument("--hipcc", default="/opt/rocm/bin/hipcc")
@@ -553,7 +568,6 @@ def selfcheck(argv=None) -> int:
     ap.add_argument("--sources", default=None, help="a directory of <task id>.hip kernels to check instead")
     ap.add_argument("--build-only", action="store_true", help="compile the harnesses, run nothing (no GPU)")
     args = ap.parse_args(argv)
-    runner = ProcessRunner()
     failed = 0
     work = Path(tempfile.mkdtemp(prefix="hipk-selfcheck-"))
     try:
@@ -564,18 +578,18 @@ def selfcheck(argv=None) -> int:
             d = work / task["id"]
             d.mkdir()
             (d / "harness.hip").write_text(harness_source(task), encoding="utf-8")
-            co = runner.run([args.hipcc, "--genco", f"--offload-arch={args.arch}", "-O2", "-o", str(d / "candidate.co"),
-                             str(src)], timeout_s=300)
-            hb = runner.run([args.hipcc, f"--offload-arch={args.arch}", "-O2", "-o", str(d / "harness"),
-                             str(d / "harness.hip")], timeout_s=300)
+            co = run([args.hipcc, "--genco", f"--offload-arch={args.arch}", "-O2", "-o", str(d / "candidate.co"),
+                      str(src)], 300)
+            hb = run([args.hipcc, f"--offload-arch={args.arch}", "-O2", "-o", str(d / "harness"),
+                      str(d / "harness.hip")], 300)
             row = {"task": task["id"], "source": str(src), "build_rc": [co.returncode, hb.returncode]}
             built = co.returncode == 0 and hb.returncode == 0
             if built and not args.build_only:
-                run = runner.run([str(d / "harness"), str(d / "candidate.co"), str(d / "record.json")], timeout_s=60,
-                                 env=dict(os.environ, HIP_VISIBLE_DEVICES=str(args.gpu)))
+                res = run([str(d / "harness"), str(d / "candidate.co"), str(d / "record.json")], 60,
+                          env=dict(os.environ, HIP_VISIBLE_DEVICES=str(args.gpu)))
                 row["record"] = read_record(d / "record.json")
-                row["stdout"] = run.stdout[-500:]
-                row["verdict"] = verdict(run, row["record"])[:2]
+                row["stdout"] = res.stdout[-500:]
+                row["verdict"] = verdict(res, row["record"])[:2]
                 ok = row["verdict"][0] == "clean"
             else:
                 ok = built

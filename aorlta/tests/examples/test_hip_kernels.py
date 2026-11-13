@@ -144,6 +144,8 @@ def test_the_harness_holds_none_of_the_candidates_code(hipk):
         assert "hipModuleLoad(&mod_, argv[1])" in src and " printf(" not in src and "put(b_);" in src
         assert f"__builtin_get_device_side_mangled_name({task['kernel']})" in src
         assert src.count("put(") >= 4
+        assert ", e_)" not in src  # CHECK declares e_ itself: `hipError_t e_ = (e_)` is undefined, and at -O2 it
+        #                           made every lookup take the no_kernel branch (found on a GPU)
 
 
 FAKE_HIPCC = """#!/bin/bash
