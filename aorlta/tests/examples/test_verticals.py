@@ -39,7 +39,7 @@ class Vertical:
     leg: str
     check: str  # the check adapter's name
     good: str  # a reply the placeholder check passes, for the first training prompt
-    bad: tuple[tuple[str, str], ...]  # (reply, the check's fail reason), for the first training prompt
+    bad: tuple[tuple[str, str], ...]  # (reply, fail reason) for the first training prompt; each reason at least once
     nothing: str  # a reply with nothing to check: the parse's repair turn, and the check's first reason
 
     @property
@@ -54,21 +54,26 @@ class Vertical:
 ISA = Vertical(
     "isa-fuzzer", "isa_fuzzer.py", "tasks.jsonl", "ref.program", "isa-fuzzer.check",
     good="Here it is.\n```toy-asm\nMOV r1, #3\nADD r2, r1, r1\n```",
-    bad=(("No block here, sorry.", "no_program"), ("```\nADD r2, r1\nJMP r9\n```", "malformed"),
+    bad=(("No block here, sorry.", "no_program"), ("```\nMOV r1, #3\nADD r2, r1\n```", "malformed"),
+         ("```\nMOV r1, #3\nJMP r2\n```", "malformed"), ("```\nMOV r9, #3\nADD r2, r1, r1\n```", "malformed"),
+         ("```\nNOP r1\nADD r2, r1, r1\n```", "malformed"),
          ("```\nADD r1, r1, #1\nADD r1, r1, #1\nADD r1, r1, #1\nADD r1, r1, #1\nADD r1, r1, #1\n```", "wrong_length"),
          ("```\nMOV r1, #3\nSUB r2, r1, r1\n```", "missing_op")),
     nothing="I would add two registers.")
 QA = Vertical(
     "qa-expert", "qa_expert.py", "questions.jsonl", "ref.answer", "qa-expert.match",
     good="Two and three make five.\n**Answer:** `Five.`",
-    bad=(("It is five.", "no_answer"), ("Answer: 6", "wrong_answer")),
+    bad=(("It is five.", "no_answer"), ("Answer: 5\nOn second thought:\nAnswer: 6", "wrong_answer")),
     nothing="It is five.")
 TRIAGE = Vertical(
     "sanitizer-triage", "sanitizer_triage.py", "reports.jsonl", "ref.verdict", "sanitizer-triage.check",
     good='Looks clean.\n```json\n{"category": "no_issue", "rationale": "The report lists no findings."}\n```',
     bad=(("No findings, so it is fine.", "no_verdict"), ('{"category": "no_issue"}', "bad_keys"),
          ('{"category": "fine", "rationale": "No findings."}', "bad_category"),
-         ('{"category": "no_issue", "rationale": "  "}', "bad_rationale")),
+         ('{"category": "no_issue", "rationale": "Ok."}\nNo\n{"category": "fine", "rationale": "Ok."}', "bad_category"),
+         ('{"category": "no_issue", "rationale": "No findings.", "extra": 1}', "bad_keys"),
+         ('{"category": "no_issue", "rationale": "  "}', "bad_rationale"),
+         ('{"category": "no_issue", "rationale": "%s"}' % ("x" * 401), "bad_rationale")),
     nothing="No findings, so it is fine.")
 ALL = (ISA, QA, TRIAGE)
 BY_NAME = pytest.mark.parametrize("v", ALL, ids=lambda v: v.name)
@@ -136,6 +141,8 @@ def test_the_records_name_the_task_and_hash_what_the_check_reads(load, v):
     rows = mod.load_rows(pool)
     assert [r.prompt_id for r in recs] == [f"{v.name}:{row['id']}" for row in rows]
     assert [r.task.task_sha256 for r in recs] == [mod.row_sha256(row) for row in rows]
+    for key in rows[0]:  # every field the check reads moves the hash, so a cached result is never another task's
+        assert mod.row_sha256({**rows[0], key: "changed"}) != mod.row_sha256(rows[0]), key
     assert all(r.prompt_ids_sha256 == sha256_ids(render_turn0(CharChat(), list(r.messages), "off")) for r in recs)
     assert len({r.messages[0]["content"] for r in recs}) == 1  # one system message, as the probes need
 
@@ -180,7 +187,6 @@ def test_the_check_gives_each_failure_its_own_reason(load, tmp_path, v):
     for reply, reason in v.bad:
         res = check.run(job_for(mod, tmp_path, row, reply, v.leg))
         assert (res.state, res.reason) == ("fail", reason), reply
-    assert len(v.reasons) == len(v.bad)
 
 
 @BY_NAME
