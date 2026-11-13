@@ -12,16 +12,15 @@ from aorlta.rollout import ports as P
 
 
 class Seq:
-    """A random source whose bases come from a list, in order (as `hold_window` draws them)."""
+    """A random source whose shuffle puts the given bases first, in order (as `hold_window` tries them)."""
 
     def __init__(self, bases):
         self.bases = list(bases)
 
-    def choices(self, spans, weights):
-        return [next(s for s in spans if s[0] <= self.bases[0] <= s[1])]
-
-    def randint(self, lo, hi):
-        return self.bases.pop(0)
+    def shuffle(self, slots):
+        rest = [b for b in slots if b not in self.bases]
+        assert all(b in slots for b in self.bases), (self.bases, slots)
+        slots[:] = self.bases + rest
 
 
 def listen(port: int) -> socket.socket:
@@ -96,15 +95,37 @@ def test_a_window_with_a_taken_port_is_passed_over():
 
 def test_engines_of_one_process_never_share_a_window():
     a = P.hold_window(1, rng=Seq([20000]), free=lambda p: True, ephemeral=(32768, 60999))
-    b = P.hold_window(2, rng=Seq([20000 + P.PORT_STRIDE - 1, 20000 + P.PORT_STRIDE]), free=lambda p: True,
-                      ephemeral=(32768, 60999))
-    assert (a, b) == (20000, 22000)  # 21999 would overlap engine 1's window
+    b = P.hold_window(2, rng=Seq([20000, 22000]), free=lambda p: True, ephemeral=(32768, 60999))
+    assert (a, b) == (20000, 22000)  # 20000 is engine 1's
     P.release_window(1)
     assert P.hold_window(3, rng=Seq([20000]), free=lambda p: True, ephemeral=(32768, 60999)) == 20000
     # a holder choosing again gives up its own window first, and skips the ones it is told to avoid
-    assert P.hold_window(2, rng=Seq([22100]), free=lambda p: True, ephemeral=(32768, 60999)) == 22100
-    again = P.hold_window(2, rng=Seq([22500, 12000]), free=lambda p: True, ephemeral=(32768, 60999), avoid=[22100])
+    assert P.hold_window(2, rng=Seq([22000]), free=lambda p: True, ephemeral=(32768, 60999)) == 22000
+    again = P.hold_window(2, rng=Seq([22000, 12000]), free=lambda p: True, ephemeral=(32768, 60999), avoid=[22000])
     assert again == 12000 and P.held_windows() == {3: 20000, 2: 12000}
+
+
+def test_automatic_windows_are_fixed_slots_inside_the_spans():
+    slots = P.slot_bases((32768, 60999))
+    assert slots == list(range(10000, 30001, P.PORT_STRIDE)) + [62000]
+    assert all(any(lo <= b <= hi for lo, hi in P.candidate_bases((32768, 60999))) for b in slots)
+    assert P.slot_bases((1024, 65535)) == []
+
+
+@pytest.mark.parametrize("seed", [105, *range(40)])
+def test_eight_engines_always_find_windows_on_an_idle_host(seed):
+    # random bases fragmented the spans: with Random(105) the eighth of eight found no room in 200 tries
+    import random
+
+    rng = random.Random(seed)
+    bases = [P.hold_window(h, rng=rng, free=lambda p: True, ephemeral=(32768, 60999)) for h in range(8)]
+    assert len(set(bases)) == 8 and all(b in P.slot_bases((32768, 60999)) for b in bases)
+    assert all(not P._overlaps(a, b) for i, a in enumerate(bases) for b in bases[i + 1:])
+    # all twelve slots can be held at once, and a thirteenth is an error
+    more = [P.hold_window(h, rng=rng, free=lambda p: True, ephemeral=(32768, 60999)) for h in range(8, 12)]
+    assert sorted(bases + more) == P.slot_bases((32768, 60999))
+    with pytest.raises(P.PortsUnavailable, match="12 slots"):
+        P.hold_window(12, rng=rng, free=lambda p: True, ephemeral=(32768, 60999))
 
 
 def test_no_free_window_is_an_error_not_a_guess():

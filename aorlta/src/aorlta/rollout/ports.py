@@ -15,10 +15,11 @@ Each check is a bind test that lets the port go again before the engine binds it
 can take a port in between; the engine then fails to start with "Address already in use" (from ZMQ in
 the engine's process) or "Initialization failed" (the TCP store, in the scheduler's).
 
-With `rollout.port_base` null, each start of an engine picks a window here: a random base whose
-cluster passes the same bind test, whose window lies outside the kernel's ephemeral port range
-(`ip_local_port_range`, where outgoing connections get their ports at any time) and overlaps no window
-another engine of this process holds. A start that fails on a taken port tries another window, at
+With `rollout.port_base` null, each start of an engine picks a window here: one of the fixed slots
+`AUTO_LOW + PORT_STRIDE * n`, in a random order, whose cluster passes the same bind test, whose window
+lies outside the kernel's ephemeral port range (`ip_local_port_range`, where outgoing connections get
+their ports at any time) and which another engine of this process does not hold. With the default
+ephemeral range there are 12 slots, so eight engines of a node always find room on an idle host. A start that fails on a taken port tries another window, at
 most START_ATTEMPTS times in all (EngineProc.start). With an int, engine i uses port_base + 2000 i,
 as every run did before the key existed (20000), and is started once.
 """
@@ -37,7 +38,7 @@ CLUSTER_OFFSETS = (233, 234, 236, 237, 238, 239)  # d = port + 233 and the ports
 AUTO_LOW, AUTO_HIGH = 10000, 65536  # automatic windows are chosen in [AUTO_LOW, AUTO_HIGH), less the ephemeral range
 EPHEMERAL_DEFAULT = (32768, 60999)  # Linux's default ip_local_port_range, if the file cannot be read
 EPHEMERAL_FILE = Path("/proc/sys/net/ipv4/ip_local_port_range")
-CHOOSE_TRIES = 200  # random bases tried for one window before giving up
+CHOOSE_TRIES = 200  # slots bind-tested for one window before giving up
 START_ATTEMPTS = 3  # engine starts with automatic ports, the first included, before a taken port stops the run
 _IN_USE = re.compile(r"address already in use|EADDRINUSE", re.IGNORECASE)
 
@@ -95,32 +96,46 @@ class PortsUnavailable(RuntimeError):
     """No free window of engine ports was found."""
 
 
+def slot_bases(ephemeral: tuple[int, int], low: int = AUTO_LOW, high: int = AUTO_HIGH) -> list[int]:
+    """The bases automatic windows are chosen from: `low + PORT_STRIDE * n`, each window wholly inside one span of
+    `candidate_bases`. Fixed slots cannot overlap one another, so the windows held never fragment what is left (any
+    base in a span could: seven windows at random bases can leave no room for an eighth on an idle host)."""
+    out = []
+    for lo, hi in candidate_bases(ephemeral, low, high):
+        first = low + -(-(lo - low) // PORT_STRIDE) * PORT_STRIDE
+        out.extend(range(first, hi + 1, PORT_STRIDE))
+    return out
+
+
 def hold_window(holder: int, *, rng: random.Random | None = None, free: Callable[[int], bool] = port_free,
                 ephemeral: tuple[int, int] | None = None, tries: int = CHOOSE_TRIES,
                 avoid: Iterable[int] = ()) -> int:
-    """A base for `holder` (any id, one window each): its cluster passes the bind test, its window is outside the
-    ephemeral range and overlaps no window another holder in this process holds, nor one in `avoid` (bases a failed
-    start of this holder used). Held until `release_window(holder)`; a holder's earlier window is released first."""
+    """A base for `holder` (any id, one window each), from `slot_bases` in a random order: its cluster passes the bind
+    test, its window is outside the ephemeral range and overlaps no window another holder in this process holds, nor
+    one in `avoid` (bases a failed start of this holder used). At most `tries` slots are bind-tested. Held until
+    `release_window(holder)`; a holder's earlier window is released first."""
     rng = rng or random.SystemRandom()
-    spans = candidate_bases(ephemeral if ephemeral is not None else ephemeral_range())
-    if not spans:
+    slots = slot_bases(ephemeral if ephemeral is not None else ephemeral_range())
+    if not slots:
         raise PortsUnavailable("no port window lies outside the kernel's ephemeral port range")
-    weights = [hi - lo + 1 for lo, hi in spans]
+    rng.shuffle(slots)
     avoid = list(avoid)
+    tested = 0
     with _LOCK:
         _HELD.pop(holder, None)
         others = list(_HELD.values())
-        for _ in range(tries):
-            lo, hi = rng.choices(spans, weights)[0]
-            base = rng.randint(lo, hi)
+        for base in slots:
             if any(_overlaps(base, b) for b in others + avoid):
                 continue
+            if tested == tries:
+                break
+            tested += 1
             if taken(cluster(base), free):
                 continue
             _HELD[holder] = base
             return base
-    raise PortsUnavailable(f"no free window of {PORT_STRIDE} engine ports found in {tries} tries "
-                           f"(bases in {spans}, {len(others)} held by other engines of this process)")
+    raise PortsUnavailable(f"no free window of {PORT_STRIDE} engine ports among {len(slots)} slots ({tested} "
+                           f"bind-tested; {len(others)} held by other engines of this process, {len(avoid)} avoided)")
 
 
 def release_window(holder: int) -> None:
