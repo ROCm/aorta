@@ -224,6 +224,8 @@ def make_compiler(name: str, workdir: str | Path, evidence: EvidenceStore | None
     (`plugins.register_compile_adapter`), called with the same arguments."""
     from .. import plugins
 
+    if name == "none":
+        return NoCompile(evidence=evidence)
     if name == "standin.hipcc":
         return HipccCompiler(workdir, evidence=evidence, structure=structure)
     if name == "fake.compile":
@@ -231,8 +233,24 @@ def make_compiler(name: str, workdir: str | Path, evidence: EvidenceStore | None
     if name in plugins.COMPILE_ADAPTERS:
         return plugins.COMPILE_ADAPTERS[name](workdir, evidence=evidence, structure=structure)
     registered = "".join(f", {n}" for n in sorted(plugins.COMPILE_ADAPTERS))
-    raise CompileUnavailable(f"compile adapter {name!r} is not available; built: standin.hipcc, fake.compile"
+    raise CompileUnavailable(f"compile adapter {name!r} is not available; built: none, standin.hipcc, fake.compile"
                              f"{registered}")
+
+
+class NoCompile:
+    """`rollout.compile_adapter: none`, for a task whose answers are not compiled (a question and answer, a verdict):
+    every parsed answer passes, so its chain ends after it and the reward's checks decide. Repair turns then come only
+    from a parse that rejects an answer with a message."""
+
+    name = "none"
+
+    def __init__(self, evidence: EvidenceStore | None = None):
+        self.evidence = evidence
+
+    def check(self, code: str, tag: str) -> CompileResult:
+        _check_tag(tag)
+        digest = self.evidence.put("") if self.evidence is not None else sha256_text("")
+        return CompileResult(ok=True, rc=0, seconds=0.0, errors=[], raw_stderr_sha256=digest)
 
 
 class FakeCompiler:

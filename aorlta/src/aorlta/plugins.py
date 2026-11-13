@@ -1,8 +1,10 @@
 """Plugins: a task's own prompts, answer parsing, checks and reward function, by name, without editing this package.
 
-A run config lists its plugins under `plugins:`, each an importable module name or the path of a `.py` file (a
-relative path is read from the package root, the directory that holds `src/aorlta`, so a plugin committed beside the
-package runs from the run job's snapshot of the tree). Each is imported once, before the rest of the config is
+A run config lists its plugins under `plugins:`. Each entry is, in this order: the path of a `.py` file (a relative
+path is read from the package root, the directory that holds `src/aorlta`, so a plugin committed beside the package
+runs from the run job's snapshot of the tree); the name of an entry point in the `aorlta.plugins` group, which an
+installed package of your own declares (`[project.entry-points."aorlta.plugins"] my-task = "my_pkg.plugin"`), so a
+private task never has to be copied into this repository; or an importable module name. Each is imported once, before the rest of the config is
 checked, and registers its components with the `register_*` functions below. A config, a profile or the wiring
 then finds a name among the built-in components first and the registered ones after:
 
@@ -35,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]  # the directory that holds src/aorlta
+ENTRY_POINT_GROUP = "aorlta.plugins"
 
 
 class PluginError(ValueError):
@@ -90,7 +93,7 @@ _BUILT_IN = {
     "task": ("standin",),
     "parse adapter": ("standin.parse",),
     "feedback template": ("standin",),
-    "compile adapter": ("standin.hipcc", "fake.compile"),
+    "compile adapter": ("none", "standin.hipcc", "fake.compile"),
     "profile": ("standin-static", "standin-gpu", "fake"),
     "reward function": ("standin.v11",),
     "check adapter": ("standin.parse", "standin.hipcc", "standin.rj_waitcheck", "standin.aorta_consan",
@@ -190,10 +193,17 @@ def _load(entry: str) -> dict:
                 del sys.modules[name]
                 raise PluginError(f"plugins: importing {path} failed: {type(exc).__name__}: {exc}") from exc
     else:
+        from importlib.metadata import entry_points
+
+        named = [ep for ep in entry_points(group=ENTRY_POINT_GROUP) if ep.name == entry]
+        if len(named) > 1:
+            raise PluginError(f"plugins: {len(named)} installed packages declare the entry point {entry!r} in "
+                              f"{ENTRY_POINT_GROUP}")
+        target = named[0].value.split(":", 1)[0].strip() if named else entry
         try:
-            module = importlib.import_module(entry)
+            module = importlib.import_module(target)
         except Exception as exc:
-            raise PluginError(f"plugins: importing {entry} failed: {type(exc).__name__}: {exc}") from exc
+            raise PluginError(f"plugins: importing {target} failed: {type(exc).__name__}: {exc}") from exc
     file = getattr(module, "__file__", None)
     return {"module": module.__name__, "file": file, "sha256": _sha256(Path(file)) if file else None}
 

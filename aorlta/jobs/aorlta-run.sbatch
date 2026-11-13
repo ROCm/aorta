@@ -50,6 +50,9 @@
 #                          which holds the registry credentials for pulling rocm/dev-ubuntu-24.04:7.0.2
 #   AORLTA_MOUNTS          default none. More host directories, space-separated, mounted read-only into the
 #                          orchestrator's and the checkers' containers
+#   AORLTA_PYTHONPATH      default none. More import paths, colon-separated, after the package's own src/: where a
+#                          plugin package of your own lives (`plugins:` in the config), on the host and in every
+#                          container. Mount its directories too (AORLTA_MOUNTS)
 #   AORLTA_EXCLUDE_NODES   default none. Nodes this job refuses to run on (exit 90), as a Slurm host list. #SBATCH
 #                          lines cannot read the environment, so give Slurm the same list when submitting:
 #                            sbatch --exclude="$AORLTA_EXCLUDE_NODES" jobs/aorlta-run.sbatch
@@ -80,6 +83,7 @@ AORLTA_ASAN_LIB=${AORLTA_ASAN_LIB:-}
 AORLTA_HF_HOME=${AORLTA_HF_HOME:-${HF_HOME:-$HOME/.cache/huggingface}}
 AORLTA_TMPDIR=${AORLTA_TMPDIR:-${TMPDIR:-/tmp}}
 read -ra EXTRA_MOUNTS <<< "${AORLTA_MOUNTS:-}"
+XPATH=${AORLTA_PYTHONPATH:+:$AORLTA_PYTHONPATH}
 export TMPDIR=$AORLTA_TMPDIR HF_HOME=$AORLTA_HF_HOME
 export DOCKER_CONFIG=${AORLTA_DOCKER_CONFIG:-${DOCKER_CONFIG:-$HOME/.docker}}
 P=$SLURM_SUBMIT_DIR
@@ -153,7 +157,7 @@ if [ -n "${AORLTA_SITE:-}" ]; then
 fi
 /usr/bin/git -C "$P" archive HEAD | tar -x -C "$CODE" || { echo "[guard] cannot snapshot HEAD of $P" >&2; exit 93; }
 [ -f "$CODE/$CONFIG" ] || { echo "[guard] $CONFIG is not committed at $COMMIT" >&2; exit 94; }
-read -r RUN_ID SYNC_DIR RUN_DIR RUN_ROOT < <(PYTHONPATH="$CODE/src" "$PY" -c "
+read -r RUN_ID SYNC_DIR RUN_DIR RUN_ROOT < <(PYTHONPATH="$CODE/src$XPATH" "$PY" -c "
 from aorlta.config import load_config; c = load_config('$CODE/$CONFIG')
 print(c.run.run_id, c.sync.dir, c.run_dir, c.run.root)") || { echo "[guard] $CONFIG does not load" >&2; exit 94; }
 mkdir -p "$RUN_ROOT" || { echo "[guard] cannot create run.root ($RUN_ROOT)" >&2; exit 95; }
@@ -161,7 +165,7 @@ mkdir -p "$RUN_ROOT" || { echo "[guard] cannot create run.root ($RUN_ROOT)" >&2;
 # (for a Hugging Face snapshot, the model's whole cache directory, so the snapshot's links into blobs/ resolve), then
 # each prompt pool's dataset directory (the pool's path, or its parent if that holds kernels.json and listings/, as the
 # wiring reads it)
-mapfile -t DATA_DIRS < <(PYTHONPATH="$CODE/src" "$PY" -c "
+mapfile -t DATA_DIRS < <(PYTHONPATH="$CODE/src$XPATH" "$PY" -c "
 from pathlib import Path
 from aorlta.config import load_config
 c = load_config('$CODE/$CONFIG')
@@ -177,7 +181,7 @@ MODEL_DIR=${DATA_DIRS[0]:-}
 ADAPTER_DIR=${DATA_DIRS[1]:-}
 POOL_DIRS=("${DATA_DIRS[@]:2}")
 # reward.remote: the socket directory, then one 'adapter gpu socket' line per checker server
-mapfile -t REMOTE < <(PYTHONPATH="$CODE/src" "$PY" -c "
+mapfile -t REMOTE < <(PYTHONPATH="$CODE/src$XPATH" "$PY" -c "
 from aorlta.config import load_config; from aorlta.reward.remote import servers
 r = load_config('$CODE/$CONFIG').reward.remote
 if r is not None:
@@ -261,7 +265,7 @@ if [ -n "$SOCK_DIR" ]; then
               -e SLURM_JOB_ID="$SLURM_JOB_ID" -e AORTA_ASAN_ROCM_LIB="$AORLTA_ASAN_LIB" -e TMPDIR="$SOCK_DIR/tmp"
               -e AORLTA_AORTA_ROOT="$AORLTA_AORTA_ROOT" -e AORLTA_ROCJITSU_ROOT="$AORLTA_ROCJITSU_ROOT"
               -e AORLTA_LIBSTDCXX_SHIM="$AORLTA_LIBSTDCXX_SHIM" -e AORLTA_SITE="${AORLTA_SITE:-}"
-              -e PYTHONPATH="$CODE/src" -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 -w "$CODE")
+              -e PYTHONPATH="$CODE/src$XPATH" -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 -w "$CODE")
   GPUS=$(printf '%s\n' "${REMOTE[@]:1}" | awk '{print $2}' | sort -un | paste -sd, -)
   stamp "CHECKERS: aorta's ASan node-health canary on GPUs $GPUS"
   docker run --rm --name "$CNAME-canary" "${CHK_DOCKER[@]}" -e ROCR_VISIBLE_DEVICES="$GPUS" --entrypoint bash "$CHK_IMG" \
@@ -341,7 +345,7 @@ if [ "$COMPONENTS" = real ]; then  # every module the run imports, in its image,
   add_mounts IMPORT_MOUNTS rw "$P"
   add_mounts IMPORT_MOUNTS ro "$AORLTA_AORTA_ROOT"
   docker run --rm --name "$CNAME-imports" --network none --ulimit core=0 "${IMPORT_MOUNTS[@]}" \
-    -e PYTHONPATH="$CODE/src" -e PYTHONDONTWRITEBYTECODE=1 -w "$CODE" --entrypoint python3 "$IMG" \
+    -e PYTHONPATH="$CODE/src$XPATH" -e PYTHONDONTWRITEBYTECODE=1 -w "$CODE" --entrypoint python3 "$IMG" \
     jobs/aorlta-imports-check.py "$AORLTA_AORTA_ROOT/src" > "$OUT/imports.log" 2>&1 &
   wait $!
   rc=$?
@@ -377,7 +381,7 @@ orchestrator() {  # extra arguments for aorlta.orchestrator.run; core=0, as ever
     --device=/dev/kfd --device=/dev/dri --group-add video --group-add render \
     --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --ipc=host --ulimit memlock=-1 --ulimit core=0 \
     --ulimit nofile=65535:65535 --network=host "${ORCH_MOUNTS[@]}" \
-    -e SLURM_JOB_ID="$SLURM_JOB_ID" -e PYTHONUNBUFFERED=1 -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH="$CODE/src" \
+    -e SLURM_JOB_ID="$SLURM_JOB_ID" -e PYTHONUNBUFFERED=1 -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH="$CODE/src$XPATH" \
     -e HF_HOME="$AORLTA_HF_HOME" -e HF_HUB_OFFLINE=1 -e TMPDIR="$AORLTA_TMPDIR" -e AORLTA_SITE="${AORLTA_SITE:-}" \
     -e AORLTA_AORTA_ROOT="$AORLTA_AORTA_ROOT" -e AORLTA_ROCJITSU_ROOT="$AORLTA_ROCJITSU_ROOT" \
     -e AORLTA_LIBSTDCXX_SHIM="$AORLTA_LIBSTDCXX_SHIM" \
@@ -408,7 +412,7 @@ stamp "RUN rc=$rc (rc 0 is completed, rc 3 is stopped; see run_result.json)"
 tail -5 "$OUT/run.log"
 
 # Every committed iteration's summary names every span it must have; a score run prints its summary instead.
-PYTHONPATH="$CODE/src" "$PY" - "$CODE/$CONFIG" <<'EOF' | tee "$OUT/spans-check.txt"
+PYTHONPATH="$CODE/src$XPATH" "$PY" - "$CODE/$CONFIG" <<'EOF' | tee "$OUT/spans-check.txt"
 import sys
 from aorlta.config import load_config
 from aorlta.episodes.writer import complete_iterations, read_summary

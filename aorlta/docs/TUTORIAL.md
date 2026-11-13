@@ -134,6 +134,33 @@ the end; `score/report.jsonl` has one row per prompt.
 `configs/hipk-train.yaml` is the same task as a 3-iteration training run (one LoRA rank beside engine 0). Submit it
 the same way. Eight prompts are far too few to learn anything from: it is a template to copy, with your own pool.
 
+## A second example: questions and answers, nothing compiled
+
+`examples/qa/` is the shape of a task whose answer is not code: a question with a reference answer (a domain "expert"
+model), or a tool's verdict. Its parts, in `qa_task.py`:
+
+| part | what it does |
+|---|---|
+| prompts | `<pool>/qa.jsonl`, one `{"id", "question", "answer", "aliases"?}` per line; the model is told to end with `Answer: <answer>` |
+| parse and feedback | a reply with an `Answer:` line is the answer; one without gets a repair turn that says so |
+| compile | none: `rollout.compile_adapter: none`, so a parsed answer ends its chain |
+| the check | one leg, `ref.answer`, on the CPU: the last `Answer:` line, normalised (case, spaces, quotes, a final full stop, digit commas), against the answer and its aliases; with a judge command in the profile's `qa.match.judge`, an answer that does not match is the judge's to decide, and no verdict leaves it unscored |
+| the reward | `qa.v1`: +1.0 correct, -0.5 wrong, -1.0 no answer line, minus the length term |
+
+It comes with two pools, each split into `train/` and `heldout/`: `gpu-facts/`, 24 short questions on GPU
+programming, and `arith/` and `arith4/`, generated multiplications (`make_arith.py`), which VALIDATION.md trains on
+to show that the loop learns. Its configs run on **one GPU**: one engine on GPU 0 and one trainer rank beside it.
+
+```bash
+OMP_NUM_THREADS=1 python -m pytest -q tests/examples/test_qa.py           # on CPU, including a wired training run
+CONFIG=configs/qa-score.yaml sbatch jobs/aorlta-run.sbatch                # score the base model on the held-out set
+CONFIG=configs/qa-train.yaml sbatch jobs/aorlta-run.sbatch                # train
+```
+
+Then export the trained checkpoint, score it on the held-out set, and compare the two with
+`tools/eval_compare.py` (VALIDATION.md, "Does it learn?"). Facts the base model does not know cannot be taught this
+way; what training on such a pool changes is how the model answers.
+
 ## Making it yours
 
 - **Your prompts.** Change `tasks.json` and `USER`, or write `records()` for your own data format. Keep the prompt

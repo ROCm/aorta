@@ -16,6 +16,8 @@ a model: so far it has run only on stand-ins, the public Qwen3.5-4B, our own pro
 
 ## Status
 
+What is verified, with the commands to reproduce it, and what is not yet shown: [VALIDATION.md](VALIDATION.md).
+
 On stand-ins the loop runs end to end on one node. The last stand-in training run (`configs/standin.yaml`'s settings,
 3 iterations of 16 prompts × 16 samples) trained every iteration, landed every weight update on all 4 engines, and
 passed the gap check every step. From its iteration summaries (the command is under "Run outputs"):
