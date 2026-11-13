@@ -20,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -139,14 +138,23 @@ class IsaCheck:
     list) `pass` clean and `fail` `tool_rejected`; unsettled when the task is unknown, the reply cannot be read, or the
     tool gives no verdict."""
 
-    version = "1"
     legs = ("ref.program",)
     resource = "local_cpu"
 
     def __init__(self, ctx):
+        from aorlta.reward.adapters.base import ProcessRunner
+        from aorlta.reward.adapters.toolchain import file_identity
+
         self.name, self.ctx = ctx.name, ctx
         self.tool = ctx.settings.get("tool")
         self.tool_timeout_s = float(ctx.settings.get("tool_timeout_s", 60.0))
+        self.version = "1"  # cached legs are keyed by it: the tool, which decides what the format passes, is part of it
+        if self.tool:
+            files = {a: file_identity(a) for a in self.tool if isinstance(a, str) and Path(a).is_file()}
+            ident = json.dumps({"tool": list(self.tool), "timeout_s": self.tool_timeout_s, "files": files},
+                               sort_keys=True)
+            self.version = f"1+tool-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
+        self.runner = ProcessRunner()  # kills the tool's whole process group on a timeout or at close()
         self.rows = {}
         for pool in ctx.pools:
             if (Path(pool) / "tasks.jsonl").is_file():
@@ -180,11 +188,13 @@ class IsaCheck:
             return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
 
     def _tool(self, row, program) -> str | None:
+        proc = self.runner.run(list(self.tool), input=json.dumps({"goal": row["goal"], "program": program}),
+                               timeout_s=min(self.tool_timeout_s, self.ctx.timeout_s))
+        if proc.timed_out or proc.killed or proc.launch_error or proc.returncode != 0 or not proc.stdout.strip():
+            return None
         try:
-            proc = subprocess.run(list(self.tool), input=json.dumps({"goal": row["goal"], "program": program}),
-                                  capture_output=True, text=True, timeout=min(self.tool_timeout_s, self.ctx.timeout_s))
-            out = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.returncode == 0 and proc.stdout else {}
-        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+            out = json.loads(proc.stdout.strip().splitlines()[-1])
+        except ValueError:
             return None
         v = out.get("verdict") if isinstance(out, dict) else None
         return v if v in ("pass", "fail") else None
@@ -194,6 +204,9 @@ class IsaCheck:
 
     def health(self):
         return {"name": self.name, "responsive": True, "tasks": len(self.rows)}
+
+    def close(self):
+        self.runner.close()
 
 
 class IsaV1:

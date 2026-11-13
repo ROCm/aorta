@@ -231,6 +231,43 @@ def test_the_isa_tool_decides_a_well_formed_program_and_no_verdict_is_unsettled(
     assert malformed.reason == "malformed" and not (tmp_path / "tool-input.json").exists()  # the tool sees only these
 
 
+def test_the_isa_tool_is_part_of_the_checkers_identity(load, tmp_path):
+    """Cached legs are keyed by the checker's version: the tool's command, timeout and script are part of it."""
+    load(ISA)
+    t = tool(tmp_path, '{"verdict": "pass"}')
+    versions = [adapter(ISA).version, adapter(ISA, {"tool": t}).version, adapter(ISA, {"tool": t + ["-x"]}).version,
+                adapter(ISA, {"tool": t, "tool_timeout_s": 5}).version]
+    assert len(set(versions)) == 4 and versions[0] == "1" and adapter(ISA, {"tool": t}).version == versions[1]
+    Path(t[0]).write_text("#!/bin/bash\necho '{\"verdict\": \"fail\"}'\n")
+    assert adapter(ISA, {"tool": t}).version != versions[1]
+
+
+def test_an_isa_tool_that_times_out_or_is_retired_leaves_nothing_running(load, tmp_path):
+    import os
+    import threading
+    import time
+
+    mod = load(ISA)
+    row = mod.load_rows(VERTICALS / ISA.name / "pool" / "train")[0]
+    for how in ("timeout", "close"):
+        pid = tmp_path / f"{how}.pid"
+        t = tmp_path / f"tool-{how}"
+        t.write_text(f"#!/bin/bash\nsleep 60 &\necho $! > {pid}\nwait\n")
+        t.chmod(0o755)
+        check = adapter(ISA, {"tool": [str(t)], "tool_timeout_s": 1.0 if how == "timeout" else 60.0})
+        if how == "close":
+            threading.Thread(target=lambda: (time.sleep(1.0), check.close()), daemon=True).start()
+        t0 = time.monotonic()
+        res = check.run(job_for(mod, tmp_path, row, ISA.good, ISA.leg))
+        assert (res.state, res.reason) == ("unsettled", "tool_no_verdict") and time.monotonic() - t0 < 15, how
+        child = int(pid.read_text())
+        deadline = time.monotonic() + 5
+        while os.path.exists(f"/proc/{child}") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not os.path.exists(f"/proc/{child}"), how
+        check.close()
+
+
 @BY_NAME
 def test_the_reward_keeps_the_services_invariants_and_leaves_the_unsettled_unscored(load, v):
     from aorlta.reward.service import REWARD_MAX, REWARD_MIN
