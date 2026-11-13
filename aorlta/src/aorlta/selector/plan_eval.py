@@ -56,10 +56,12 @@ from pathlib import Path
 from typing import Any
 
 from ..atomic import atomic_write_bytes, atomic_write_json, read_text
+from ..config import ConfigError
 from ..ids import canonical_json, candidate_id, policy_version
 from ..reward.profiles import Profile, load_profile
 from ..reward.rewardfn.base import Decided, NeedMore, Unscored
-from ..reward.rewardfn.for_profile import standin_rewardfn
+from .. import plugins
+from ..reward.rewardfn.for_profile import UnsupportedRewardFn, standin_rewardfn
 from ..reward.rewardfn.standin_v11 import StandinV11
 from ..schemas import SETTLED_STATES, Candidate, LegResult, RewardResult, SchemaError, TaskRef, from_dict
 from .base import Z95, SafetySwitch, audit_coin, audit_draw, is_defect, wilson_interval
@@ -457,11 +459,18 @@ def evaluate(samples: Sequence[Sample], *, rewardfn: Any = None, cap: float = DE
     """The whole evaluation as JSON values (see the module docstring)."""
     names = {s.cand.check_profile for s in samples}
     _need(len(names) == 1, f"one check profile per log, got {sorted(names)}")
-    profile = load_profile(names.pop())
+    name = names.pop()
+    try:
+        profile = load_profile(name)
+    except (OSError, ConfigError) as exc:
+        raise PlanEvalError(f"check profile {name!r}: {exc}; if a plugin registers it, load the plugin "
+                            f"(--plugins)") from None
     if rewardfn is None:
-        _need(profile.reward_fn == "standin.v11", f"profile {profile.name!r} is scored by "
-              f"{profile.reward_fn!r}; pass its reward function")
-        rewardfn = standin_rewardfn(profile)
+        try:
+            rewardfn = standin_rewardfn(profile)
+        except UnsupportedRewardFn as exc:
+            raise PlanEvalError(f"{exc}; load the plugin that registers it (--plugins), or pass its reward "
+                                f"function") from None
     identity = {"name": rewardfn.name, "version": rewardfn.version, "code_sha256": rewardfn.code_sha256}
     for s in samples:
         _need(s.result.reward_fn == identity, f"plan log line {s.line}: scored by {s.result.reward_fn}, not by the "
@@ -715,6 +724,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-miss-rate", type=float, default=0.02)
     ap.add_argument("--min-scored-per-group", type=int, default=2)
     ap.add_argument("--out", type=Path, help="write plan-eval.json and plan-eval.md here")
+    ap.add_argument("--plugins", default="", help="plugins to load first, as a run config's `plugins:` lists them "
+                    "(module names or .py paths, comma separated): those of a log whose profile a plugin registered")
     args = ap.parse_args(argv)
     if (args.log is None) == (args.fake is None):
         ap.error("give a plan log, or --fake PATH")
@@ -722,6 +733,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.fake is not None:
         path = write_jsonl(args.fake, fake_log())
     fractions = [float(x) for x in args.audit_fractions.split(",") if x.strip()]
+    try:
+        plugins.load_plugins([x.strip() for x in args.plugins.split(",") if x.strip()])
+    except plugins.PluginError as exc:
+        print(f"plan_eval: {exc}", file=sys.stderr)
+        return 2
     try:
         report = evaluate(read_plan_log(path), cap=args.cap, audit_fractions=fractions,
                           max_miss_rate=args.max_miss_rate, min_scored_per_group=args.min_scored_per_group)
