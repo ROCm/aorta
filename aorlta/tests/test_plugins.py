@@ -278,6 +278,41 @@ def test_a_plugin_is_imported_once(tmp_path, registry):
     assert builtins.__dict__.pop("_aorlta_count") == [1]
 
 
+@pytest.mark.parametrize("form", ["file", "module"])
+def test_a_plugin_that_raises_leaves_nothing_registered(tmp_path, registry, monkeypatch, form):
+    """What a plugin registered before raising is undone, so nothing sees its components and, fixed, it loads in
+    the same process (its factories are new objects, which a leftover registration would refuse)."""
+    body = ("from aorlta import plugins\nplugins.register_parse_adapter('half.parse', lambda: None)\n"
+            "plugins.register_reward_fn('half.v1', lambda profile: None)\n")
+    p = tmp_path / "half_plugin.py"
+    p.write_text(body + "raise RuntimeError('boom')\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    entry = str(p) if form == "file" else "half_plugin"
+    with pytest.raises(plugins.PluginError, match="RuntimeError: boom"):
+        plugins.load_plugins([entry])
+    assert not plugins.registered("half.parse") and not plugins.registered("half.v1") and entry not in plugins.LOADED
+    p.write_text(body)
+    plugins.load_plugins([entry])
+    assert plugins.registered("half.parse") and plugins.registered("half.v1") and entry in plugins.LOADED
+
+
+def test_a_registered_profile_must_carry_its_registered_name(tmp_path, plugin):
+    """The candidates carry the registered name and the reward service serves the profile file's: a file naming
+    anything else (here a built-in profile's name) would have every candidate refused as profile_mismatch."""
+    from aorlta.reward.profiles import load_profile
+
+    other = tmp_path / "other.yaml"
+    other.write_text(PROFILE.replace("name: toy-profile", "name: fake"))
+    plugins.register_profile("toy-other", other)
+    with pytest.raises(ConfigError, match="'toy-other' names itself 'fake'"):
+        load_profile("toy-other")
+    data = toy_config(tmp_path, str(plugin))
+    data["reward"]["profile"] = "toy-other"
+    with pytest.raises(ConfigError, match="'toy-other' names itself 'fake'"):
+        config_from_dict(data)
+    assert load_profile("toy-profile").name == "toy-profile" and load_profile(other).name == "fake"
+
+
 def test_the_run_plan_records_each_plugin_file(tmp_path, plugin):
     cfg = config_from_dict(toy_config(tmp_path, str(plugin)))
     plan = json.loads(write_run_plan(cfg, commit="a" * 40).read_text())

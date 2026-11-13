@@ -254,7 +254,11 @@ image's compiler and ConSan with the checker image's, and that the two builds ag
 
 To add a reward function, write the class, register it (`plugins.register_reward_fn(name, factory)`, where
 `factory(profile)` builds it), and set `reward_fn:` to its name in your profile, which you register with
-`plugins.register_profile`. The config then accepts both names and checks that they agree.
+`plugins.register_profile`. The config then accepts both names and checks that they agree, and that the profile's
+`name:` is the name it is registered under (a candidate carries one and the reward service serves the other).
+A profile that names none of the aorta-backed adapters (`standin.rj_waitcheck`, `standin.aorta_consan`, `standin.aorta_asan`)
+needs no aorta checkout: the run job's import pre-flight loads aorta's backends only for one that does. To
+re-score a run's plan log offline, `python -m aorlta.selector.plan_eval LOG --plugins <your plugin>`.
 
 ## Checks and profiles
 
