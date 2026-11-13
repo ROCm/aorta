@@ -30,6 +30,11 @@ published to the [nightly CI dashboard](https://rocm.github.io/aorta/).
   race reproducer, real training (DDP/FSDP) and inference loops — designed to catch
   timing races and silent corruption that pass on synthetic tests.
 
+**AORLTA** (`aorlta/`), a small GRPO training loop on the TokenSpeed inference engine for post-training a model on
+a task whose answers a program can check, lives in this repository as a separate package. It is early and evolving:
+expect rough edges, and issues are welcome (label `aorlta`). Start with
+[aorlta/docs/GETTING-STARTED.md](aorlta/docs/GETTING-STARTED.md).
+
 ## Installation
 
 Install AORTA in the Python environment from which you will invoke `aorta`.

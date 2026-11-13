@@ -91,6 +91,12 @@ def test_no_answer_line_is_no_answer(qa):
     assert qa.final_answer("The answer is 42.") is None
 
 
+@pytest.mark.parametrize("reply", ["Answer:\n42", "Answer:   \nthe rest of my working", "Answer: 7\nmore working\nAnswer:"])
+def test_an_answer_line_is_read_on_its_own(qa, reply):
+    """An empty `Answer:` does not take the next line's text, and it is the last marker that decides."""
+    assert qa.final_answer(reply) is None
+
+
 def test_the_parse_gives_a_repair_turn_to_a_reply_without_an_answer(qa):
     from aorlta.rollout.chain import make_feedback_template, make_parse_adapter
     from aorlta.rollout.compile_check import make_compiler
@@ -209,7 +215,7 @@ def test_the_judge_is_part_of_the_checkers_identity(qa, tmp_path):
     versions = [adapter(qa).version, adapter(qa, {"judge": [str(judge)]}).version,
                 adapter(qa, {"judge": [str(judge), "--strict"]}).version,
                 adapter(qa, {"judge": [str(judge)], "judge_timeout_s": 5}).version]
-    assert len(set(versions)) == 4 and versions[0] == "1"
+    assert len(set(versions)) == 4 and versions[0] == "2"
     assert adapter(qa, {"judge": [str(judge)]}).version == versions[1]
     judge.write_text("#!/bin/bash\necho '{\"verdict\": \"wrong\"}'\n")
     assert adapter(qa, {"judge": [str(judge)]}).version != versions[1]

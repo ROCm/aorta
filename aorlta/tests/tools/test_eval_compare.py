@@ -119,6 +119,67 @@ def test_a_sample_with_no_reply_is_shown_as_such(tmp_path):
     assert "(no reply: the chain ended engine_error before its first turn)" in md
 
 
+def _episode_file(run_dir: Path) -> Path:
+    return next(run_dir.glob("iterations/iter-*/episodes.jsonl"))
+
+
+def _rewrite_episodes(run_dir: Path, edit) -> None:
+    f = _episode_file(run_dir)
+    eps = edit([json.loads(x) for x in f.read_text().splitlines()])
+    f.write_text("".join(json.dumps(e) + "\n" for e in eps))
+
+
+def test_runs_without_the_evidence_the_checks_read_are_refused(tmp_path, capsys):
+    """A missing run plan, or episode records that do not cover the report one to one, would leave the fingerprint
+    checks nothing to compare; such a run is refused rather than passed."""
+    base = score_run(tmp_path, "base")
+
+    def drop_samples(eps):  # three of the first prompt's four samples gone
+        pid = eps[0]["prompt_id"]
+        return [e for e in eps if e["prompt_id"] != pid or e["k"] == 0]
+
+    def duplicate(eps):  # one sample recorded twice in place of another, so the count still agrees
+        twin = next(e for e in eps[1:] if e["prompt_id"] == eps[0]["prompt_id"])
+        return [e for e in eps if e is not twin] + [eps[0]]
+
+    def renumber(eps):  # one sample's k moved, so that sample has no partner in the other run
+        return [dict(eps[0], k=99), *eps[1:]]
+
+    def unlisted(eps):
+        return [*eps, dict(eps[0], prompt_id="not-in-the-report")]
+
+    for name, edit, what in (("dropped", drop_samples, "committed episode records; its report counts"),
+                             ("duplicate", duplicate, "more than one episode record"),
+                             ("unpaired", renumber, "do not pair"),
+                             ("unlisted", unlisted, "does not list")):
+        other = score_run(tmp_path, name)
+        _rewrite_episodes(other, edit)
+        assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2, name
+        assert what in capsys.readouterr().err, name
+        assert X.main(["--base", str(other), "--trained", str(base), "--out", str(tmp_path / "out")]) == 2, name
+        assert what in capsys.readouterr().err, name
+
+    other = score_run(tmp_path, "plan")
+    (other / "run_plan.json").unlink()
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+    assert "no run_plan.json" in capsys.readouterr().err
+
+    other = score_run(tmp_path, "partial")  # the batch never committed: only iter-<n>.partial holds its records
+    d = _episode_file(other).parent
+    d.rename(d.with_name(d.name + ".partial"))
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+    assert "no committed episode records" in capsys.readouterr().err
+    assert not (tmp_path / "out" / "eval-compare.json").exists()
+
+    other = score_run(tmp_path, "leftover")  # a leftover .partial beside the committed batch is not read at all
+    f = _episode_file(other)
+    stray = f.parent.with_name(f.parent.name + ".partial")
+    stray.mkdir()
+    (stray / f.name).write_text("".join(json.dumps(dict(json.loads(x), k=99)) + "\n"
+                                        for x in f.read_text().splitlines()))
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 0
+
+
 def _edit_episodes(run_dir: Path, edit) -> None:
     for f in run_dir.glob("iterations/iter-*/episodes.jsonl"):
         eps = [json.loads(x) for x in f.read_text().splitlines()]
