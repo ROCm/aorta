@@ -9,11 +9,18 @@ and `ref.native`, this module's check, which compiles the candidate alone into a
 on a GPU from a host program built from the task alone, and compares every output element with a host reference
 computed from the same inputs. The reward is `hipk.v1` (below).
 
-Registered names: task `hipk`; parse `hipk.parse`; feedback `hipk.feedback`; profile `hipk-gpu` (hipk-gpu.yaml);
-check adapters `hipk.gate` and `hipk.run`; reward function `hipk.v1`.
+An optional profile, `hipk-speed` (hipk-speed.yaml), adds a fourth leg after `ref.native`: `ref.speedup`, the
+candidate timed against the task's reference kernel (`hipk.time`, judged by `aorlta.reward.timing`), scored by
+`hipk.speed`, which grades hipk.v1's clean reward by the measured speedup (docs/REWARDS.md, "Timing").
+
+Registered names: task `hipk`; parse `hipk.parse`; feedback `hipk.feedback`; profiles `hipk-gpu` (hipk-gpu.yaml) and
+`hipk-speed` (hipk-speed.yaml); check adapters `hipk.gate`, `hipk.run` and `hipk.time`; reward functions `hipk.v1`
+and `hipk.speed`.
 
 Run as a script, it checks the tasks themselves with the reference kernels in reference/:
     python examples/hip-kernels/hip_kernels.py selfcheck --hipcc /opt/rocm/bin/hipcc [--gpu 0] [--build-only]
+and times one task's kernel against its reference with the timing check (a GPU is needed):
+    python examples/hip-kernels/hip_kernels.py timecheck --task vector_add [--candidate my.hip] [--gpu 0]
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -534,6 +542,346 @@ class HipkV1:
         return reward is not None and isinstance(parts, dict) and parts.get("base", 0.0) > 0.0
 
 
+# --- the timing check (optional: hipk-speed.yaml) ----------------------------------------------
+
+TIMING_STATUS = {"candidate_wrong_output": "timing_wrong_output", "reference_wrong_output": "reference_wrong_output",
+                 "hip_error": "timing_hip_error", "too_slow": "too_slow_to_measure",
+                 "candidate_no_kernel": "timing_no_kernel", "reference_no_kernel": "reference_no_kernel"}
+
+
+def timing_source(task: dict, scalars: dict | None = None) -> str:
+    """The timing harness, built from the task alone, like `harness_source`: `timing <candidate code object>
+    <reference code object> <record> <warmup> <repeats> <launches> <budget_ms>`. It loads both code objects and finds
+    the task's kernel in each by its exact mangled signature (`candidate_no_kernel`, `reference_no_kernel`); runs each
+    once on fresh inputs and compares the outputs with the host reference (`reference_wrong_output`,
+    `candidate_wrong_output`); times one batch of each to project the run's GPU time, and stops if that exceeds the
+    budget (`too_slow`); then takes `warmup + repeats` rounds, each a fresh checked run of the candidate and then one
+    batch of `launches` launches of each kernel, in an order that alternates by round. Every launch runs on buffers
+    reset just before it, outside its timed interval, so a launch cannot skip work an earlier one did. Its record (the file, written whole, never stdout): `ok` with every batch's time per
+    launch in microseconds, warm-up rounds included; or `hip_error` and the call that failed. `scalars` gives some of
+    the task's scalars other values (C++ expressions) for the timing alone, so that the kernels run long enough to
+    time. No code of the candidate's runs on the host."""
+    scalars = scalars or {}
+    lines = ["#include <hip/hip_runtime.h>", "#include <cmath>", "#include <cstdint>", "#include <cstdio>",
+             "#include <cstdlib>", "#include <cstring>", "#include <string>", "#include <vector>", "",
+             "// The task's kernel, defined here only to name it: what runs is loaded from the two code objects.",
+             f"{task['signature']} {{}}", "",
+             "static const char* g_path = nullptr;",
+             "static void put(const std::string& json) {  // written aside, then renamed over the record",
+             '  std::string tmp = std::string(g_path) + ".partial";',
+             '  FILE* f = std::fopen(tmp.c_str(), "w");',
+             "  if (f == nullptr) return;",
+             "  std::fputs(json.c_str(), f);",
+             "  if (std::fclose(f) == 0) std::rename(tmp.c_str(), g_path);",
+             "}",
+             'static int say(const char* status) { put(std::string("{\\"status\\": \\"") + status + "\\"}"); '
+             "return 0; }",
+             "static std::string series(const std::vector<float>& v) {",
+             '  std::string s = "[";',
+             "  char b[32];",
+             '  for (size_t i = 0; i < v.size(); ++i) { std::snprintf(b, sizeof b, "%s%.6g", i ? ", " : "", v[i]); '
+             "s += b; }",
+             '  return s + "]";',
+             "}",
+             "static void fill(std::vector<float>& v, uint32_t seed, float lo, float hi) {",
+             "  for (auto& x : v) { seed = seed * 1664525u + 1013904223u; "
+             "x = lo + (hi - lo) * float(seed >> 8) / 16777216.0f; }",
+             "}", "",
+             "int main(int argc, char** argv) {",
+             "  if (argc != 8) return 2;",
+             "  g_path = argv[3];",
+             "  const int warmup = atoi(argv[4]), repeats = atoi(argv[5]), launches = atoi(argv[6]);",
+             "  const double budget_ms = atof(argv[7]);"]
+    for ctype, name, value in task["scalars"]:
+        lines.append(f"  {ctype} {name} = {scalars.get(name, value)};")
+    arrays = task["arrays"]
+    for i, a in enumerate(arrays):
+        n = a["size"]
+        lines.append(f"  std::vector<float> h_{a['name']}(({n}) + {GUARD}, {GUARD_VALUE});")
+        if a["role"] == "out":
+            lines.append(f"  for (long i = 0; i < ({n}); ++i) h_{a['name']}[i] = {SENTINEL};")
+        else:
+            lines.append(f"  {{ std::vector<float> v({n}); fill(v, {1000 + 17 * i}u, {_f(a.get('lo', -1.0))}, "
+                         f"{_f(a.get('hi', 1.0))}); for (long i = 0; i < ({n}); ++i) h_{a['name']}[i] = v[i]; }}")
+        lines.append(f"  std::vector<float> r_{a['name']} = h_{a['name']};")
+    lines.append("  {")
+    for a in arrays:
+        lines.append(f"    float* {a['name']} = r_{a['name']}.data();")
+    lines.append("    " + task["reference"])
+    lines.append("  }")
+    for a in arrays:
+        x = a["name"]
+        lines += [f"  float* d_{x} = nullptr; float* p_{x} = nullptr;",
+                  f"  const size_t bytes_{x} = h_{x}.size() * sizeof(float);",
+                  f"  if (hipMalloc(&d_{x}, bytes_{x}) != hipSuccess || hipMalloc(&p_{x}, bytes_{x}) != hipSuccess",
+                  f"      || hipMemcpy(p_{x}, h_{x}.data(), bytes_{x}, hipMemcpyHostToDevice) != hipSuccess)",
+                  '    return say("hip_error");']
+    names = {a["name"] for a in arrays}
+    args = ", ".join(f"&d_{x}" if x in names else f"&{x}" for x in task["args"])
+    lines += ["  hipFunction_t fn_[2];",
+              "  for (int who = 0; who < 2; ++who) {",
+              "    hipModule_t mod;",
+              '    if (hipModuleLoad(&mod, argv[1 + who]) != hipSuccess) return say("hip_error");',
+              f"    hipError_t gf = hipModuleGetFunction(&fn_[who], mod, __builtin_get_device_side_mangled_name("
+              f"{task['kernel']}));",
+              "    if (gf == hipErrorNotFound || gf == hipErrorInvalidDeviceFunction)",
+              '      return say(who ? "reference_no_kernel" : "candidate_no_kernel");',
+              '    if (gf != hipSuccess) return say("hip_error");',
+              "  }",
+              f"  void* args_[] = {{{args}}};",
+              f"  dim3 grid_ = {task['grid']};", f"  dim3 block_ = {task['block']};"]
+    resets = " && ".join(f"hipMemcpy(d_{x}, p_{x}, bytes_{x}, hipMemcpyDeviceToDevice) == hipSuccess"
+                         for x in (a["name"] for a in arrays))
+    lines += [f"  auto reset = [&]() -> bool {{ return {resets}; }};",
+              "  auto launch = [&](int who) -> bool {",
+              "    return hipModuleLaunchKernel(fn_[who], grid_.x, grid_.y, grid_.z, block_.x, block_.y, block_.z, 0, "
+              "nullptr, args_, nullptr) == hipSuccess;",
+              "  };",
+              "  std::vector<float> got;",
+              "  auto verify = [&]() -> const char* {"]
+    for a in arrays:
+        x, n = a["name"], a["size"]
+        lines += [f"    got.resize(h_{x}.size());",
+                  f"    if (hipMemcpy(got.data(), d_{x}, bytes_{x}, hipMemcpyDeviceToHost) != hipSuccess)",
+                  '      return "hip_error";',
+                  f'    for (long i = ({n}); i < (long)got.size(); ++i) if (got[i] != {GUARD_VALUE}) return "wrong";']
+        if a["role"] != "in":
+            lines += [f"    for (long i = 0; i < ({n}); ++i) {{",
+                      f"      float g = got[i], w = r_{x}[i];",
+                      f"      if (!((std::isnan(g) && std::isnan(w)) || std::fabs(g - w) <= {_f(task['atol'])} + "
+                      f'{_f(task["rtol"])} * std::fabs(w))) return "wrong";',
+                      "    }"]
+    lines += ["    return nullptr;", "  };",
+              "  auto fresh = [&](int who) -> const char* {",
+              '    if (!reset() || !launch(who) || hipDeviceSynchronize() != hipSuccess) return "hip_error";',
+              "    return verify();",
+              "  };",
+              "  hipEvent_t t0, t1;",
+              "  if (hipEventCreate(&t0) != hipSuccess || hipEventCreate(&t1) != hipSuccess)",
+              '    return say("hip_error");',
+              "  auto batch = [&](int who) -> float {  // each launch on freshly reset buffers, timed alone",
+              "    float total = 0.0f;",
+              "    for (int l = 0; l < launches; ++l) {",
+              "      if (!reset() || hipDeviceSynchronize() != hipSuccess || hipEventRecord(t0) != hipSuccess) "
+              "return -1.0f;",
+              "      if (!launch(who) || hipEventRecord(t1) != hipSuccess || hipEventSynchronize(t1) != hipSuccess) "
+              "return -1.0f;",
+              "      float ms = 0.0f;",
+              "      if (hipEventElapsedTime(&ms, t0, t1) != hipSuccess) return -1.0f;",
+              "      total += ms;",
+              "    }",
+              "    return 1000.0f * total / launches;",
+              "  };",
+              "  for (int who = 1; who >= 0; --who) {",
+              "    const char* bad = fresh(who);",
+              '    if (bad) return say(!strcmp(bad, "hip_error") ? "hip_error" : '
+              '(who ? "reference_wrong_output" : "candidate_wrong_output"));',
+              "  }",
+              "  const float pc = batch(0), pr = batch(1);",
+              '  if (pc < 0.0f || pr < 0.0f) return say("hip_error");',
+              "  if ((pc + pr) / 1000.0 * launches * (warmup + repeats) > budget_ms) {",
+              "    char b[160];",
+              '    std::snprintf(b, sizeof b, "{\\"status\\": \\"too_slow\\", \\"candidate_us\\": %.6g, '
+              '\\"reference_us\\": %.6g}", pc, pr);',
+              "    put(b);",
+              "    return 0;",
+              "  }",
+              "  std::vector<float> tc, tr;",
+              "  for (int r = 0; r < warmup + repeats; ++r) {",
+              "    const char* bad = fresh(0);",
+              '    if (bad) return say(!strcmp(bad, "hip_error") ? "hip_error" : "candidate_wrong_output");',
+              "    for (int k = 0; k < 2; ++k) {",
+              "      const int who = (r + k) % 2;",
+              "      const float us = batch(who);",
+              '      if (us < 0.0f) return say("hip_error");',
+              "      (who ? tr : tc).push_back(us);",
+              "    }",
+              "  }",
+              "  char head[96];",
+              '  std::snprintf(head, sizeof head, "{\\"status\\": \\"ok\\", \\"warmup\\": %d, \\"launches\\": %d", '
+              "warmup, launches);",
+              '  put(std::string(head) + ", \\"candidate_us\\": " + series(tc) + ", \\"reference_us\\": " + '
+              'series(tr) + "}");',
+              "  return 0;",
+              "}", ""]
+    return "\n".join(lines)
+
+
+def timing_verdict(run, record, policy) -> tuple[str, str | None, list[dict], dict | None]:
+    """A timing leg's (state, reason, findings) from the harness's run (a ProcResult) and its record (read_record),
+    and the judged measurement (`aorlta.reward.timing.Speedup`) when there was one. The candidate's correctness was
+    settled by `ref.native` before this leg runs, so nothing that stops the measurement is blamed on it: a crash, a
+    timeout, a wrong output under the timing harness, too slow to measure in the budget and noise are all unsettled,
+    never clean."""
+    from aorlta.reward import timing
+
+    if run.launch_error or run.killed:
+        return "unsettled", "run_not_started", [], None
+    if run.timed_out:
+        return "unsettled", "timing_timeout", [], None
+    status = (record or {}).get("status")
+    if status is None:
+        return "unsettled", "timing_crash" if run.returncode not in (0, None) else "no_result", [], None
+    if status != "ok":
+        return "unsettled", TIMING_STATUS.get(status, "no_result"), [], None
+    cand, ref = record.get("candidate_us"), record.get("reference_us")
+    if run.returncode != 0 or not isinstance(cand, list) or not isinstance(ref, list):
+        return "unsettled", "no_result", [], None
+    sp = timing.judge(cand, ref, policy)
+    state, reason, findings = timing.leg_outcome(sp)
+    return state, reason, findings, sp
+
+
+class HipkTime:
+    """`hipk.time`, leg `ref.speedup`: the candidate timed against its task's reference kernel (`reference/<id>.hip`
+    in the pool) on a GPU of settings `gpus` (leased like `hipk.run`'s), and judged by `aorlta.reward.timing` with the
+    leg's settings (`ratio`, `warmup`, `repeats`, `max_rel_mad`, `min_noise_floor`; also `launches` per timed batch,
+    `gpu_budget_s` of projected GPU time, `run_timeout_s`, `target`, and `scalars`: values for the timing of any task
+    scalar so named, `{n: "1 << 24"}` say, since at the tasks' own sizes a launch is mostly its overhead). Both kernels
+    are compiled alone into device code objects and run by `timing_source`'s harness, so none of the candidate's host
+    code runs and its verdict comes only from the harness's record file. Clean only when the speedup clears `ratio`
+    past the noise floor; `fail` `not_faster` when it falls short of it past the floor; everything else is unsettled.
+    Run it after `ref.native` (the profile's `requires`). `version` names the compiler and this file."""
+
+    legs = ("ref.speedup",)
+    resource = "own_gpu"
+
+    def __init__(self, ctx):
+        from aorlta.reward.adapters.base import ProcessRunner
+        from aorlta.reward.adapters.toolchain import toolchain_identity
+
+        self.name, self.ctx = ctx.name, ctx
+        s = ctx.settings
+        self.hipcc = s.get("hipcc") or "/opt/rocm/bin/hipcc"
+        self.tasks = {}
+        for pool in ctx.pools:
+            if (Path(pool) / "tasks.json").is_file():
+                for task in load_tasks(pool):
+                    self.tasks[task_sha256(task)] = (task, Path(pool) / "reference" / f"{task['id']}.hip")
+        # cached legs are keyed by the version: the compiler, this file, the timing judge and every reference kernel
+        from aorlta.reward import timing
+
+        refs = hashlib.sha256()
+        for key in sorted(self.tasks):
+            ref = self.tasks[key][1]
+            refs.update(key.encode() + b"\0" + (ref.read_bytes() if ref.is_file() else b"missing") + b"\0")
+        gpus = [int(g) for g in (s.get("gpus") or [0])]
+        # and where it measures: a speedup is a fact about one node's GPUs, so a run resumed on another re-measures
+        where = hashlib.sha256(json.dumps([socket.gethostname(), gpus]).encode()).hexdigest()[:12]
+        self.version = (f"4+{toolchain_identity(self.hipcc)}+{hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]}"
+                        f"+timing-{hashlib.sha256(Path(timing.__file__).read_bytes()).hexdigest()[:16]}"
+                        f"+refs-{refs.hexdigest()[:16]}+on-{where}")
+        tail = ctx.worker_id.rsplit("/", 1)[-1]
+        seq = int(tail) if tail.isdigit() else 1
+        self.gpu = lease_gpu(gpus, gpus[(seq - 1) % len(gpus)])
+        self._leased = True
+        self.runner = ProcessRunner()
+        self._work: Path | None = None
+        self._built: dict[tuple, Path] = {}
+
+    def _build(self, key: tuple, source: str, argv_for, deadline: float, log: Path) -> Path | None:
+        """A build cached by `key` for this worker: `source` written to a file, then `argv_for(src, out)` builds
+        `out` from it; None if it does not build in time."""
+        if key in self._built:
+            return self._built[key]
+        if self._work is None:
+            self._work = Path(tempfile.mkdtemp(prefix="hipk-time-"))
+        out = self._work / hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:20]
+        src = out.with_suffix(".hip")
+        src.write_text(source, encoding="utf-8")
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        res = self.runner.run(argv_for(src, out), timeout_s=left, cwd=str(self._work))
+        log.write_text(res.stderr[-20000:], encoding="utf-8")
+        if res.returncode != 0 or res.timed_out or res.killed or res.launch_error:
+            return None
+        self._built[key] = out
+        return out
+
+    def run(self, job):
+        from aorlta.reward import timing
+        from aorlta.reward.adapters.base import make_result, run_dir, unsettled
+
+        t0 = self.ctx.clock()
+
+        def out(state, reason=None, findings=()):
+            return make_result(job, state, reason, findings=findings, t_start=t0, t_end=self.ctx.clock())
+
+        try:
+            entry = self.tasks.get(job.task_sha256)
+            source = job.inputs.get("source")
+            if job.leg != "ref.speedup" or entry is None or not source or not job.output_dir or not entry[1].is_file():
+                return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
+            task, ref_path = entry
+            settings = job.leg_settings
+            policy = timing.TimingPolicy.from_settings(settings)
+            launches = int(settings.get("launches", 20))
+            gpu_budget_s = float(settings.get("gpu_budget_s", 10.0))
+            scalars = settings.get("scalars") or {}
+            if launches < 1 or not gpu_budget_s > 0 or not (
+                    isinstance(scalars, dict) and all(isinstance(v, (str, int)) for v in scalars.values())):
+                return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
+            scalars = {k: str(v) for k, v in scalars.items()}
+            d = run_dir(job)
+            src = timing_source(task, scalars)
+            (d / "timing.hip").write_text(src, encoding="utf-8")
+            target = settings.get("target", "gfx950")
+            arch = f"--offload-arch={target}"
+            deadline = time.monotonic() + max(1.0, self.ctx.timeout_s)
+            cand = self.runner.run([self.hipcc, "--genco", arch, "-O2", "-o", str(d / "candidate.co"), str(source)],
+                                   timeout_s=max(0.001, deadline - time.monotonic()), cwd=str(d))
+            (d / "build.log").write_text(cand.stderr[-20000:], encoding="utf-8")
+            ref_text = ref_path.read_text(encoding="utf-8")
+            ref_co = self._build(("reference", ref_text, target), ref_text,
+                                 lambda s_, o: [self.hipcc, "--genco", arch, "-O2", "-o", str(o), str(s_)], deadline,
+                                 d / "reference-build.log")
+            harness = self._build(("harness", src, target), src,
+                                  lambda s_, o: [self.hipcc, arch, "-O2", "-o", str(o), str(s_)], deadline,
+                                  d / "harness-build.log")
+            if cand.returncode != 0 or cand.timed_out or cand.killed or cand.launch_error or ref_co is None \
+                    or harness is None:
+                return out("unsettled", "harness_build_failed")
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return out("unsettled", "no_time_left")
+            env = dict(os.environ, HIP_VISIBLE_DEVICES=str(self.gpu))
+            record = d / "record.json"
+            run = self.runner.run([str(harness), str(d / "candidate.co"), str(ref_co), str(record), str(policy.warmup),
+                                   str(policy.repeats), str(launches), repr(1000.0 * gpu_budget_s)],
+                                  timeout_s=min(float(settings.get("run_timeout_s", 60.0)), left), env=env,
+                                  cwd=str(d))
+            (d / "run.log").write_text((run.stdout + "\n" + run.stderr)[-20000:], encoding="utf-8")
+            state, reason, findings, sp = timing_verdict(run, read_record(record), policy)
+            if sp is not None:
+                (d / "timing.json").write_text(json.dumps(sp.__dict__, indent=1), encoding="utf-8")
+            return out(state, reason, findings)
+        except Exception:  # noqa: BLE001 - an adapter never raises
+            return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
+
+    def controls(self):
+        return []
+
+    def health(self):
+        return {"name": self.name, "responsive": True, "gpu": self.gpu, "tasks": len(self.tasks)}
+
+    def close(self):
+        self.runner.close()
+        if self._leased:
+            self._leased = False
+            release_gpu(self.gpu)
+        if self._work is not None:
+            shutil.rmtree(self._work, ignore_errors=True)
+
+
+def hipk_speed(profile=None):
+    """`hipk.speed`: hipk.v1, with a clean reward graded by `ref.speedup` (`aorlta.reward.rewardfn.speedup`): 0.75 to
+    1.0 for a kernel faster than the reference by the leg's `ratio`, below 0.5 for a correct one that is not."""
+    from aorlta.reward.rewardfn.speedup import WithSpeedup
+
+    return WithSpeedup(HipkV1(profile), name="hipk.speed")
+
+
 # --- registration ------------------------------------------------------------------------------
 
 
@@ -544,9 +892,12 @@ def register() -> None:
     plugins.register_parse_adapter("hipk.parse", HipkParse)
     plugins.register_feedback_template("hipk.feedback", HipkFeedback)
     plugins.register_profile("hipk-gpu", HERE / "hipk-gpu.yaml")
+    plugins.register_profile("hipk-speed", HERE / "hipk-speed.yaml")
     plugins.register_check_adapter("hipk.run", HipkRun)
     plugins.register_check_adapter("hipk.gate", HipkGate)
+    plugins.register_check_adapter("hipk.time", HipkTime)
     plugins.register_reward_fn("hipk.v1", HipkV1)
+    plugins.register_reward_fn("hipk.speed", hipk_speed)
 
 
 if __name__ != "__main__":
@@ -625,8 +976,59 @@ def selfcheck(argv=None) -> int:
     return 1 if failed or not checked else 0
 
 
+def timecheck(argv=None) -> int:
+    """One task's candidate (by default its own reference kernel, so a speedup near 1, which is `not_faster`) timed by
+    `hipk.time` on one GPU, with hipk-speed.yaml's leg settings; `--set key=value` overrides one (a JSON value).
+    Prints the leg's state, reason and findings and the judged measurement as one JSON line; exit 0."""
+    ap = argparse.ArgumentParser(prog="hip_kernels.py timecheck")
+    ap.add_argument("--task", required=True)
+    ap.add_argument("--candidate", help="a HIP source defining the task's kernel (default: reference/<task>.hip)")
+    ap.add_argument("--hipcc", default="/opt/rocm/bin/hipcc")
+    ap.add_argument("--gpu", type=int, default=0)
+    ap.add_argument("--pool", default=str(HERE))
+    ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    args = ap.parse_args(argv)
+    sys.path.insert(0, str(HERE.parents[1] / "src"))
+    from aorlta import plugins
+    from aorlta.config import parse_yaml
+    from aorlta.schemas import LegJob
+
+    settings = dict(parse_yaml((HERE / "hipk-speed.yaml").read_bytes())["leg_settings"]["ref.speedup"])
+    for kv in args.set:
+        key, value = kv.split("=", 1)
+        settings[key] = json.loads(value)
+    pool = str(Path(args.pool).resolve())  # the check runs hipcc from a directory of its own
+    task = next(t for t in load_tasks(pool) if t["id"] == args.task)
+    candidate = str(Path(args.candidate).resolve()) if args.candidate else str(Path(pool) / "reference" /
+                                                                                f"{task['id']}.hip")
+    work = Path(tempfile.mkdtemp(prefix="hipk-timecheck-"))
+    try:
+        ctx = plugins.CheckContext(name="hipk.time", worker_id="time/1",
+                                   settings={"hipcc": args.hipcc, "gpus": [args.gpu]},
+                                   clock=time.time, timeout_s=args.timeout, pools=(pool,))
+        adapter = HipkTime(ctx)
+        job = LegJob(job_id="timecheck", leg="ref.speedup", candidate_id="timecheck", control_id=None,
+                     source_sha256="0" * 64, task_sha256=task_sha256(task), leg_settings=settings,
+                     inputs={"source": candidate}, output_dir=str(work))
+        t0 = time.monotonic()
+        try:
+            res = adapter.run(job)
+        finally:
+            adapter.close()
+        measured = [json.loads(p.read_text()) for p in work.glob("*/timing.json")]
+        print(json.dumps({"task": task["id"], "candidate": Path(candidate).name, "state": res.state,
+                          "reason": res.reason, "findings": res.findings, "timing": measured[0] if measured else None,
+                          "seconds": round(time.monotonic() - t0, 1)}), flush=True)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "selfcheck":
         sys.exit(selfcheck(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "timecheck":
+        sys.exit(timecheck(sys.argv[2:]))
     print(__doc__)
     sys.exit(2)

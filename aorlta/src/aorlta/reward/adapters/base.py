@@ -32,6 +32,9 @@ RESOURCES = ("local_cpu", "sim_cpu", "external_gpu", "own_gpu")
 # The kind of a build fact a clean `gate.compile` may carry among its findings (adapters/standin_hipcc.py): the
 # launched kernels' LDS, read from their descriptors. It is a record of the build, not a finding.
 TRUSTED_BUILD = "trusted_build"
+# The kind of a measurement a clean timing leg may carry (reward/timing.py): what was measured, not a finding.
+MEASUREMENT = "measurement"
+RECORD_KINDS = frozenset({TRUSTED_BUILD, MEASUREMENT})
 
 
 @runtime_checkable
@@ -118,10 +121,10 @@ def safe_run(adapter: Any, job: LegJob, clock: Callable[[], float] = time.time) 
 
 def inconsistency(result: LegResult) -> str | None:
     """Why a leg's state contradicts its findings, or None: a finding needs findings, and a clean leg has none
-    (a trusted build fact is not a finding)."""
+    (a trusted build fact or a measurement is a record, not a finding)."""
     if result.state == "finding" and not result.findings:
         return "finding_without_findings"
-    if result.state == "clean" and any(not (isinstance(f, dict) and f.get("kind") == TRUSTED_BUILD)
+    if result.state == "clean" and any(not (isinstance(f, dict) and f.get("kind") in RECORD_KINDS)
                                        for f in result.findings):
         return "clean_with_findings"
     return None

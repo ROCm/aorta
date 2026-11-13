@@ -152,6 +152,7 @@ Not there yet:
 - One node layout is wired. A task of your own (prompts, answer parsing, checks and reward) is a plugin, with no
   edit to the package: [docs/ADAPTING.md](docs/ADAPTING.md) has the contract, and [docs/TUTORIAL.md](docs/TUTORIAL.md)
   walks through `examples/hip-kernels/`, a kernel-writing task whose reward runs the kernel and checks its output.
+  [docs/REWARDS.md](docs/REWARDS.md) lists the checks and reward functions there are, and how to compose them.
 
 ## Layout
 
@@ -174,7 +175,7 @@ compile and waitcheck failures, so a candidate that passes them stays unscored);
 `jobs/aorlta-reward-standin.sbatch` (a test of the stand-in GPU checks) and two scripts the run job calls; `docker/`
 the trainer image; `tests/` the CPU suite; `tools/merge_base_adapter.py`, which merges a PEFT adapter into its base
 checkpoint; `examples/standin-pool/`, a synthetic prompt pool; `examples/hip-kernels/` with `configs/hipk-score.yaml`
-and `configs/hipk-train.yaml`, the worked example of a task as a plugin; `docs/ADAPTING.md` and `docs/TUTORIAL.md`. Code comments cite sections and
+and `configs/hipk-train.yaml`, the worked example of a task as a plugin; `docs/ADAPTING.md`, `docs/TUTORIAL.md` and `docs/REWARDS.md`. Code comments cite sections and
 labels (Section 6.x, C1-C9, D7, ...) of our internal design notes, which are not included.
 
 ## Requirements

@@ -210,6 +210,7 @@ and in-process engines; it is the template for testing a new source without a GP
 
 ## Your own reward function
 
+The checks and reward functions that already exist, and how to compose them, are listed in [REWARDS.md](REWARDS.md).
 The interface is `RewardFn` in `reward/rewardfn/base.py`:
 
 ```python

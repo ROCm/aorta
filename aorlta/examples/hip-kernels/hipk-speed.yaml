@@ -1,0 +1,45 @@
+# `hipk-speed`: hipk-gpu plus `ref.speedup`, which times a correct candidate against its task's reference kernel
+# (examples/hip-kernels/hip_kernels.py, `hipk.time`; aorlta.reward.timing judges it). Scored by hipk.speed: a kernel
+# that is not correct scores as under hipk.v1; a correct one scores 0.75 to 1.0 when it is faster than the reference
+# by `ratio` past the noise floor, below 0.5 when it is measured and not, and is unscored when the timing cannot decide.
+name: hipk-speed
+reward_fn: hipk.speed
+clean_repeats: 1
+materialize: true
+pools:
+  gates: {resource: local_cpu, adapter: hipk.gate, timeout: gate, workers: 4}
+  compile: {resource: local_cpu, adapter: standin.hipcc, timeout: compile, workers: 8}
+  run: {resource: own_gpu, adapter: hipk.run, timeout: sim_run, workers: 3}
+  time: {resource: own_gpu, adapter: hipk.time, timeout: sim_run, workers: 1}
+stages:
+  - {name: S0, pool: gates, legs: [gate.parse]}
+  - {name: S1, pool: compile, legs: [gate.compile]}
+  - {name: S2, pool: run, legs: [ref.native]}
+  - {name: S3, pool: time, legs: [ref.speedup]}
+requires:
+  gate.compile: [gate.parse]
+  ref.native: [gate.compile]
+  ref.speedup: [ref.native]
+leg_settings:
+  gate.compile: {offload_arch: gfx950, flags: ["-c", "-O1"]}
+  ref.native: {target: gfx950, run_timeout_s: 20}
+  # faster by 10% past the noise floor; 5 warm-up and 30 kept rounds of 20 launches each; noisy above a 5% relative
+  # MAD; a noise floor of at least 2%. The kernels are timed at larger sizes than the tasks' own (`scalars`, by the
+  # tasks' scalar names): at n = 100003 a launch takes about its own overhead, whatever the kernel does.
+  ref.speedup:
+    target: gfx950
+    ratio: 1.1
+    warmup: 5
+    repeats: 30
+    launches: 20
+    max_rel_mad: 0.05
+    min_noise_floor: 0.02
+    gpu_budget_s: 10
+    run_timeout_s: 60
+    scalars: {n: "(1 << 24) + 3", rows: "3001", cols: "5171"}
+# `${AORLTA_ROCM_ROOT}` is that environment variable, or /opt/rocm. The timing worker has a GPU to itself (7), apart
+# from the correctness runs (4-6) and the engines (rollout.engines), so their work does not land in its measurements.
+adapters:
+  standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", readelf: "${AORLTA_ROCM_ROOT}/llvm/bin/llvm-readelf"}
+  hipk.run: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", gpus: [4, 5, 6]}
+  hipk.time: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", gpus: [7]}

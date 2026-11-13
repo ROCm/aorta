@@ -502,3 +502,328 @@ def test_the_example_trains_on_cpu_through_the_real_wiring(tmp_path, hipk, tiny_
     assert all(len(e["turns"]) == 3 and e["end_reason"] == "no_code_block" for e in eps if e["end_reason"] != "engine_error")
     bases = {round(e["reward"] + 0.05, 1) for e in eps if e["status"] == "scored"}  # base, give or take the length term
     assert bases <= {1.0, -0.5, -1.0} and {1.0, -0.5} <= bases  # correct, wrong output, and no code block at all
+
+
+# --- the timing check (hipk-speed.yaml) ----------------------------------------------------------
+
+
+def timing_record(status="ok", cand_us=None, ref_us=None, **kw):
+    body = {"status": status, "warmup": 5, "launches": 20, **kw}
+    if cand_us is not None:
+        body.update(candidate_us=cand_us, reference_us=ref_us)
+    return body
+
+
+def steady(us, n=35):
+    return [100.0] * 5 + [us] * (n - 5)
+
+
+class FakeRunner:
+    """The timing check's subprocesses, without hipcc or a GPU: the candidate's and the reference's code objects, the
+    harness build and the timed run each answer as the test sets them, the run writing `record` (a dict) to the
+    record file it is given; every call is recorded."""
+
+    def __init__(self, run, record=None, *, co=None, ref=None, harness=None):
+        self.answers = {"co": co or proc(), "ref": ref or proc(), "harness": harness or proc(), "run": run}
+        self.record, self.calls = record, []
+
+    def run(self, argv, *, timeout_s, env=None, cwd=None, input=None):
+        if argv[0].endswith("hipcc"):
+            step = ("co" if argv[-1].endswith("source.hip") else "ref") if "--genco" in argv else "harness"
+        else:
+            step = "run"
+        self.calls.append((step, list(argv), timeout_s, env))
+        if step == "run" and self.record is not None:
+            Path(argv[3]).write_text(json.dumps(self.record))
+        return self.answers[step]
+
+    def close(self):
+        pass
+
+
+def time_job(hipk, tmp_path, runner, *, settings=None, task_id="vector_add", pools=None):
+    from aorlta.reward.adapters.base import checked_result
+    from aorlta.schemas import LegJob
+
+    task = next(t for t in hipk.load_tasks(EXAMPLE) if t["id"] == task_id)
+    src = tmp_path / "source.hip"
+    src.write_text((EXAMPLE / "reference" / f"{task_id}.hip").read_text())
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    ctx = plugins.CheckContext(name="hipk.time", worker_id="time/1", settings={"hipcc": "/x/bin/hipcc", "gpus": [7]},
+                               clock=lambda: 0.0, timeout_s=30.0, pools=pools or (str(EXAMPLE),))
+    adapter = plugins.CHECK_ADAPTERS["hipk.time"](ctx)
+    adapter.runner = runner
+    leg_settings = {"target": "gfx950", "ratio": 1.1, "warmup": 5, "repeats": 30, "launches": 20, **(settings or {})}
+    job = LegJob(job_id="j", leg="ref.speedup", candidate_id="c", control_id=None, source_sha256="s" * 64,
+                 task_sha256=hipk.task_sha256(task), leg_settings=leg_settings, inputs={"source": str(src)},
+                 output_dir=str(out))
+    try:
+        return checked_result(job, adapter.run(job), 0.0, 0.0)
+    finally:
+        adapter.close()
+
+
+SPOOF_LINE = "AORLTA_TIMING " + json.dumps(timing_record(cand_us=steady(1.0), ref_us=steady(10.0)))
+TIMED = [
+    ("faster", proc(), timing_record(cand_us=steady(8.0), ref_us=steady(10.0)), ("clean", None)),
+    ("slower", proc(), timing_record(cand_us=steady(12.0), ref_us=steady(10.0)), ("fail", "not_faster")),
+    ("itself", proc(), timing_record(cand_us=steady(10.0), ref_us=steady(10.0)), ("fail", "not_faster")),
+    ("within_noise", proc(), timing_record(cand_us=steady(9.0), ref_us=steady(10.0)),
+     ("unsettled", "timing_within_noise")),
+    ("noisy", proc(), timing_record(cand_us=[100.0] * 5 + [5.0, 15.0] * 15, ref_us=steady(10.0)),
+     ("unsettled", "timing_noisy")),
+    ("too_few", proc(), timing_record(cand_us=steady(8.0, 20), ref_us=steady(10.0, 20)),
+     ("unsettled", "timing_too_few")),
+    ("timeout", proc(timed_out=True, rc=-9), None, ("unsettled", "timing_timeout")),
+    ("crash", proc(rc=-11), None, ("unsettled", "timing_crash")),
+    ("crash_after_ok", proc(rc=-11), timing_record(cand_us=steady(8.0), ref_us=steady(10.0)),
+     ("unsettled", "no_result")),
+    ("silent", proc(rc=0, stdout="nothing"), None, ("unsettled", "no_result")),
+    ("stdout_is_not_read", proc(rc=0, stdout=SPOOF_LINE), None, ("unsettled", "no_result")),
+    ("wrong_output", proc(), timing_record("candidate_wrong_output"), ("unsettled", "timing_wrong_output")),
+    ("reference_wrong", proc(), timing_record("reference_wrong_output"), ("unsettled", "reference_wrong_output")),
+    ("no_kernel", proc(), timing_record("candidate_no_kernel"), ("unsettled", "timing_no_kernel")),
+    ("hip_error", proc(), timing_record("hip_error"), ("unsettled", "timing_hip_error")),
+    ("too_slow", proc(), timing_record("too_slow", candidate_us=9e5, reference_us=10.0),
+     ("unsettled", "too_slow_to_measure")),
+    ("unknown_status", proc(), timing_record("maybe"), ("unsettled", "no_result")),
+    ("not_lists", proc(), timing_record(cand_us="8", ref_us=steady(10.0)), ("unsettled", "no_result")),
+    ("not_started", proc(launch_error="OSError"), None, ("unsettled", "run_not_started")),
+    ("killed", proc(killed=True), None, ("unsettled", "run_not_started")),
+]
+
+
+@pytest.mark.parametrize("case, run, record, want", TIMED, ids=[c[0] for c in TIMED])
+def test_each_timing_outcome_has_one_leg_state(hipk, tmp_path, case, run, record, want):
+    from aorlta.reward import timing
+
+    runner = FakeRunner(run, record)
+    res = time_job(hipk, tmp_path, runner)
+    assert (res.state, res.reason) == want and res.leg == "ref.speedup"
+    assert (res.state == "clean") == (case == "faster")  # nothing it could not measure is clean
+    rec = timing.measurement(res)
+    assert (rec is not None) == (res.state != "unsettled")
+    if case == "faster":
+        assert rec["speedup"] == 1.25 and rec["samples"] == 30
+    assert [c[0] for c in runner.calls] == ["co", "ref", "harness", "run"]
+    (_, argv, _, env), = [c for c in runner.calls if c[0] == "run"]
+    assert argv[1].endswith("candidate.co") and argv[4:7] == ["5", "30", "20"] and float(argv[7]) == 10000.0
+    assert env["HIP_VISIBLE_DEVICES"] == "7"
+
+
+def test_the_timing_checkers_version_covers_the_references_and_the_judge(hipk, tmp_path, monkeypatch):
+    """Cached ref.speedup legs are keyed by the checker's version: a changed reference kernel, or a changed timing
+    judge, is a new version."""
+    import shutil
+
+    from aorlta.reward import timing
+
+    pool = tmp_path / "pool"
+    shutil.copytree(EXAMPLE, pool, ignore=shutil.ignore_patterns("__pycache__"))
+
+    def version():
+        ctx = plugins.CheckContext(name="hipk.time", worker_id="time/1", settings={"hipcc": "/x/bin/hipcc", "gpus": [7]},
+                                   clock=lambda: 0.0, timeout_s=30.0, pools=(str(pool),))
+        a = plugins.CHECK_ADAPTERS["hipk.time"](ctx)
+        a.close()
+        return a.version
+
+    first = version()
+    assert version() == first
+    (pool / "reference" / "saxpy.hip").write_text((pool / "reference" / "saxpy.hip").read_text() + "// edited\n")
+    second = version()
+    judge = tmp_path / "timing.py"
+    judge.write_text(Path(timing.__file__).read_text() + "# edited\n")
+    monkeypatch.setattr(timing, "__file__", str(judge))
+    assert len({first, second, version()}) == 3
+
+
+def test_every_timed_launch_runs_on_freshly_reset_buffers(hipk):
+    """A launch that found the previous launch's outputs could skip its work; each timed launch is preceded by its own
+    reset, outside the timed interval."""
+    for task in hipk.load_tasks(EXAMPLE):
+        src = hipk.timing_source(task)
+        body = src[src.index("auto batch = [&](int who)"):]
+        body = body[:body.index("\n  };")]
+        loop = body[body.index("for (int l = 0; l < launches; ++l) {"):]
+        assert loop.index("reset()") < loop.index("hipEventRecord(t0)") < loop.index("launch(who)") < \
+            loop.index("hipEventRecord(t1)")
+
+
+def test_the_timing_checkers_version_names_where_it_measures(hipk, monkeypatch):
+    """A speedup is a fact about one node's GPUs: another host, or other GPUs, is another version, so a resumed run's
+    cached leg and reward entries (whose keys include the leg's) are not reused there."""
+    import socket
+
+    def version(gpus):
+        ctx = plugins.CheckContext(name="hipk.time", worker_id="time/1", settings={"hipcc": "/x/bin/hipcc", "gpus": gpus},
+                                   clock=lambda: 0.0, timeout_s=30.0, pools=(str(EXAMPLE),))
+        a = plugins.CHECK_ADAPTERS["hipk.time"](ctx)
+        a.close()
+        return a.version
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "node-a")
+    a7 = version([7])
+    assert version([7]) == a7 and version([6]) != a7
+    monkeypatch.setattr(socket, "gethostname", lambda: "node-b")
+    assert version([7]) != a7
+
+
+def test_timecheck_resolves_a_relative_candidate_and_pool(hipk, tmp_path, monkeypatch):
+    """The check runs hipcc from its own directory, so the paths it is given must not be relative."""
+    seen = []
+
+    class Recording:
+        def __init__(self, ctx):
+            seen.append(ctx.pools)
+            self.ctx = ctx
+
+        def run(self, job):
+            seen.append(job.inputs["source"])
+            from aorlta.reward.adapters.base import unsettled
+
+            return unsettled(job, "adapter_error", t_start=0.0, t_end=0.0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hipk, "HipkTime", Recording)
+    (tmp_path / "mine.hip").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    rel_pool = os.path.relpath(EXAMPLE, tmp_path)
+    assert hipk.timecheck(["--task", "saxpy", "--candidate", "mine.hip", "--pool", rel_pool]) == 0
+    assert seen == [(str(EXAMPLE),), str(tmp_path / "mine.hip")]
+
+
+def test_the_reference_and_the_harness_are_built_once_per_worker(hipk, tmp_path):
+    """The candidate is compiled for every job; the reference's code object and the harness, per task and settings."""
+    from aorlta.reward.adapters.base import checked_result
+    from aorlta.schemas import LegJob
+
+    runner = FakeRunner(proc(), timing_record(cand_us=steady(8.0), ref_us=steady(10.0)))
+    ctx = plugins.CheckContext(name="hipk.time", worker_id="time/1", settings={"hipcc": "/x/bin/hipcc", "gpus": [7]},
+                               clock=lambda: 0.0, timeout_s=30.0, pools=(str(EXAMPLE),))
+    adapter = plugins.CHECK_ADAPTERS["hipk.time"](ctx)
+    adapter.runner = runner
+    task = next(t for t in hipk.load_tasks(EXAMPLE) if t["id"] == "vector_add")
+    src = tmp_path / "source.hip"
+    src.write_text("x")
+
+    try:
+        for i in range(2):
+            (tmp_path / f"o{i}").mkdir()
+            job = LegJob(job_id=f"j{i}", leg="ref.speedup", candidate_id="c", control_id=None, source_sha256="s" * 64,
+                         task_sha256=hipk.task_sha256(task), leg_settings={"ratio": 1.1, "warmup": 5, "repeats": 30},
+                         inputs={"source": str(src)}, output_dir=str(tmp_path / f"o{i}"))
+            assert checked_result(job, adapter.run(job), 0.0, 0.0).state == "clean"
+    finally:
+        adapter.close()
+    assert [c[0] for c in runner.calls] == ["co", "ref", "harness", "run", "co", "run"]
+
+
+@pytest.mark.parametrize("which, answer", [
+    ("co", proc(rc=1, stderr="error: x")), ("co", proc(timed_out=True)), ("ref", proc(rc=1)),
+    ("ref", proc(launch_error="OSError")), ("harness", proc(rc=1, stderr="ld.lld: error")),
+    ("harness", proc(killed=True)),
+])
+def test_a_harness_that_does_not_build_is_unsettled(hipk, tmp_path, which, answer):
+    runner = FakeRunner(proc(), timing_record(cand_us=steady(8.0), ref_us=steady(10.0)), **{which: answer})
+    res = time_job(hipk, tmp_path, runner)
+    assert (res.state, res.reason) == ("unsettled", "harness_build_failed")
+    assert "run" not in [c[0] for c in runner.calls]
+
+
+@pytest.mark.parametrize("settings", [{"ratio": 0}, {"repeats": 2}, {"launches": 0}, {"gpu_budget_s": 0},
+                                      {"max_rel_mad": 2.0}, {"scalars": ["n"]}, {"scalars": {"n": 1.5}}])
+def test_settings_that_cannot_decide_are_an_adapter_error(hipk, tmp_path, settings):
+    runner = FakeRunner(proc(), timing_record(cand_us=steady(8.0), ref_us=steady(10.0)))
+    res = time_job(hipk, tmp_path, runner, settings=settings)
+    assert (res.state, res.reason) == ("unsettled", "adapter_error") and not runner.calls
+
+
+def test_a_task_without_its_reference_is_an_adapter_error(hipk, tmp_path):
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    (pool / "tasks.json").write_text((EXAMPLE / "tasks.json").read_text())
+    runner = FakeRunner(proc(), timing_record(cand_us=steady(8.0), ref_us=steady(10.0)))
+    res = time_job(hipk, tmp_path, runner, pools=(str(pool),))
+    assert (res.state, res.reason) == ("unsettled", "adapter_error") and not runner.calls
+
+
+def test_the_timing_harness_holds_none_of_the_candidates_code(hipk):
+    """Built from the task alone: both kernels come from code objects named on its command line, and its verdict goes
+    to the record file."""
+    for task in hipk.load_tasks(EXAMPLE):
+        src = hipk.timing_source(task)
+        assert "hipModuleLoad(&mod, argv[1 + who])" in src and " printf(" not in src and "g_path = argv[3];" in src
+        assert f"__builtin_get_device_side_mangled_name({task['kernel']})" in src and "<<<" not in src
+
+
+def test_the_timing_sizes_are_the_settings_scalars(hipk, tmp_path):
+    task = next(t for t in hipk.load_tasks(EXAMPLE) if t["id"] == "block_sum")
+    harness = hipk.timing_source(task, {"n": "(1 << 24) + 3", "rows": "7"})
+    assert "  int n = (1 << 24) + 3;" in harness and "  int blocks = (n + 255) / 256;" in harness
+    assert "rows" not in harness and "  int n = 100003;" in hipk.timing_source(task)
+    runner = FakeRunner(proc(), timing_record(cand_us=steady(8.0), ref_us=steady(10.0)))
+    assert time_job(hipk, tmp_path, runner, settings={"scalars": {"n": 4096}}, task_id="block_sum").state == "clean"
+    (written,) = tmp_path.glob("out/*/timing.hip")
+    assert "  int n = 4096;" in written.read_text()
+
+
+@pytest.mark.skipif(not Path(HIPCC).exists(), reason=f"no hipcc at {HIPCC} (HIPCC)")
+@pytest.mark.parametrize("task_id", ["saxpy", "block_sum", "transpose"])
+def test_the_timing_harness_builds_with_the_reference(hipk, tmp_path, task_id):
+    """The reference's code object and the harness compile, CPU only: nothing is run."""
+    from aorlta.reward.profiles import load_profile
+
+    task = next(t for t in hipk.load_tasks(EXAMPLE) if t["id"] == task_id)
+    scalars = load_profile("hipk-speed").leg_settings["ref.speedup"]["scalars"]
+    (tmp_path / "timing.hip").write_text(hipk.timing_source(task, scalars))
+    ref = str(EXAMPLE / "reference" / f"{task_id}.hip")
+    for argv in (["--genco", ref, "-o", "ref.co"], ["timing.hip", "-o", "timing"]):
+        p = subprocess.run([HIPCC, "--offload-arch=gfx950", "-O2", *argv], cwd=tmp_path, capture_output=True,
+                           text=True, env=dict(os.environ, TMPDIR=str(tmp_path)))
+        assert p.returncode == 0, p.stderr[-3000:]
+
+
+def test_the_speed_profile_and_config(tmp_path, hipk, registry):  # noqa: F811
+    from aorlta.reward.profiles import load_profile
+    from aorlta.reward.rewardfn.for_profile import standin_rewardfn
+
+    profile = load_profile("hipk-speed")
+    assert profile.reward_fn == "hipk.speed"
+    assert profile.legs == ("gate.parse", "gate.compile", "ref.native", "ref.speedup")
+    assert profile.requires["ref.speedup"] == ("ref.native",)
+    assert {p.adapter for p in profile.pools.values()} == {"hipk.gate", "standin.hipcc", "hipk.run", "hipk.time"}
+    from aorlta.reward import timing
+
+    timing.TimingPolicy.from_settings(profile.leg_settings["ref.speedup"])
+    time_gpus, run_gpus = set(profile.adapters["hipk.time"]["gpus"]), set(profile.adapters["hipk.run"]["gpus"])
+    assert not time_gpus & run_gpus
+    fn = standin_rewardfn(profile)
+    assert fn.name == "hipk.speed" and fn.legs == profile.legs
+    cfg = site_config(tmp_path, "hipk-speed-score")
+    assert (cfg.reward.profile, cfg.reward.reward_fn) == ("hipk-speed", "hipk.speed")
+    assert not (time_gpus | run_gpus) & set(cfg.rollout.engines)
+    from aorlta.orchestrator import wiring
+
+    wiring.check_supported(cfg)
+
+
+def test_the_speed_reward_on_the_example_legs(hipk):
+    from aorlta.reward import timing
+
+    fn = plugins.REWARD_FNS["hipk.speed"](None)
+    c = cand(tokens=0)
+    good = timing.record(timing.judge([9.0] * 35, [10.0] * 5 + [12.0] * 30, timing.TimingPolicy()))
+    legs = {n: leg(n, "clean") for n in ("gate.parse", "gate.compile", "ref.native")}
+    clean = dict(legs, **{"ref.speedup": leg("ref.speedup", "clean")})
+    clean["ref.speedup"].findings.append(good)
+    reward, parts = fn.compute(clean, c)
+    assert fn.claims_clean(reward, parts) and 0.75 < reward < 1.0
+    slow = dict(legs, **{"ref.speedup": leg("ref.speedup", "unsettled", "timing_noisy")})
+    assert fn.compute(slow, c) == (None, {"reason": "ref.speedup:timing_noisy"})
+    wrong = dict(legs, **{"ref.native": leg("ref.native", "fail", "wrong_output"),
+                          "ref.speedup": leg("ref.speedup", "not_run")})
+    assert fn.compute(wrong, c)[0] == -0.5
