@@ -1,0 +1,12 @@
+# `sanitizer-triage`: one leg, `ref.verdict`, on the CPU: the reply's last JSON object against the verdict's form
+# (examples/verticals/sanitizer-triage/sanitizer_triage.py). No compile and no sanitizer leg.
+name: sanitizer-triage
+reward_fn: sanitizer-triage.v1
+clean_repeats: 1
+materialize: true
+pools:
+  check: {resource: local_cpu, adapter: sanitizer-triage.check, timeout: gate, workers: 4}
+stages:
+  - {name: S0, pool: check, legs: [ref.verdict]}
+adapters:
+  sanitizer-triage.check: {}
