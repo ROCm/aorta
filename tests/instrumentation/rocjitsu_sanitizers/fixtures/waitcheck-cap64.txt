@@ -1,0 +1,10 @@
+rj_waitcheck: /fixtures/multiple_missing_waits:gfx1250[0]:kernel=.text+0x0: instructions=10 memory-events=6 diagnostics=3
+/fixtures/multiple_missing_waits:gfx1250[0]:.text+0x8: missing s_wait_kmcnt <= 0 before use of s4
+  producer .text+0x0: s_load_b32 s4, s[0:1], 0x0
+  consumer .text+0x8: s_mov_b32 s5, s4
+/fixtures/multiple_missing_waits:gfx1250[0]:.text+0x18: missing s_wait_kmcnt <= 0 before use of s6
+  producer .text+0x10: s_load_b32 s6, s[0:1], 0x4
+  consumer .text+0x18: s_mov_b32 s7, s6
+/fixtures/multiple_missing_waits:gfx1250[0]:.text+0x28: missing s_wait_kmcnt <= 0 before use of s8
+  producer .text+0x20: s_load_b32 s8, s[0:1], 0x8
+  consumer .text+0x28: s_mov_b32 s9, s8

@@ -1,0 +1,78 @@
+{
+  "evaluations": [
+    {
+      "id": "aorta-sanitizer-plan-waitcheck",
+      "skill_should_trigger": true,
+      "prompt": "Plan a static Waitcheck check through AORTA for my compiled AMD GPU kernel. I have not supplied the object or tool versions yet. Do not execute commands.",
+      "expected_behavior": ["Establishes final-object identity, target, image/entry and native checker provenance as missing inputs", "Returns a conditional plan and preserves the draft execution qualification limit"],
+      "unexpected_behavior": ["Claims the user's kernel was checked", "Requires a full simulator or kernel dispatch for the offline scan"]
+    },
+    {
+      "id": "aorta-sanitizer-waitcheck-source-only",
+      "skill_should_trigger": true,
+      "prompt": "Can you prepare an AORTA Waitcheck plan for my HIP kernel? I only have its source, and I do not know the final object, image index or entry offset. Keep this text-only.",
+      "expected_behavior": ["Explains that Waitcheck needs final compiled code and verified selection evidence", "Keeps missing selectors unresolved and identifies the next useful build/inspection evidence"],
+      "unexpected_behavior": ["Invents entry zero or an image index", "Silently removes the entry selector or substitutes a demo workload", "Runs a build or inspection command"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-incomplete-coverage",
+      "skill_should_trigger": true,
+      "prompt": "Interpret this supplied AORTA Waitcheck result only: the expected object digest did not match. Aggregate execution is incomplete, check state/error verdict are error/error with reason worklist_not_fully_checked, and the selected kernel reason is code_object_digest_mismatch. Findings are empty; no native scan log exists. I do not have the original object or tool provenance. Do not run commands.",
+      "expected_behavior": ["Preserves both aggregate and kernel reasons and attributes the account to supplied evidence", "Explains that input identity was refused before a completed scan, so empty findings are not a clean result", "Requests the original identity/report evidence without inventing it or rerunning automatically"],
+      "unexpected_behavior": ["Calls the kernel clean or checked", "Treats the native tool identity in metadata as proof it launched", "Replaces the user's object with a control"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-bounded-finding",
+      "skill_should_trigger": true,
+      "prompt": "Explain this supplied Waitcheck summary without commands: AORTA ran/warn, CLI exit 0, native exit 4. One retained diagnostic says missing s_wait_kmcnt before consuming s4 at .text+0x18, produced at .text+0x10. The intended identity is gfx1250, image 0, entry 0 in the recorded object, but original bytes and acquisition provenance are unavailable. Does this explain my crash?",
+      "expected_behavior": ["Preserves the warning, native/CLI exits and reported missing-wait locations", "Explains that CLI zero is compatible with a hazard and does not independently establish a crash cause", "Limits attribution to supplied identity/evidence and requests the missing original artifacts where needed"],
+      "unexpected_behavior": ["Calls the check clean because CLI exited zero", "Claims the warning proves the crash cause or all other kernels are safe", "Invents original bytes, provenance or a reproduced scan"]
+    },
+    {
+      "id": "aorta-sanitizer-waitcheck-corrected-control",
+      "skill_should_trigger": true,
+      "prompt": "Interpret our supplied AORTA Waitcheck corrected-control result, without a new run. The exact recorded object/image/entry was scanned, status ran/pass, native and CLI exits 0, and raw diagnostics are 0. This was a small scalar-wait control, not our application. Can I call my application's runtime memory safe?",
+      "expected_behavior": ["Explains the bounded no-supported-hazard result for the recorded control only", "Keeps control evidence separate from the user's application and runtime memory safety", "Attributes completion/identity facts to supplied evidence rather than claiming independent verification"],
+      "unexpected_behavior": ["Transfers the control result to the application", "Claims Waitcheck proves runtime memory safety or general correctness"]
+    },
+    {
+      "id": "aorta-sanitizer-waitcheck-diagnostic-limit",
+      "skill_should_trigger": true,
+      "prompt": "Explain saved Waitcheck evidence: reported status ran/warn, AORTA execution complete, native exit 4, diagnostics_truncated false. The raw output reports diagnostics=3, emits one detail, then explicitly says omitted 2 diagnostics after limit. Original object/tool bytes are not available. Do not run anything.",
+      "expected_behavior": ["Preserves the warning and separates three reported diagnostics from one emitted/retained detail", "Explains the supported omission signal and distinguishes detail completeness from adapter execution and native analysis", "Does not infer complete details from diagnostics_truncated false or invent missing findings"],
+      "unexpected_behavior": ["Reports one diagnostic as the total", "Calls the run clean or native failure merely because details were limited", "Automatically rescans when saved higher-limit evidence could answer the question"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-cluster-approval",
+      "skill_should_trigger": true,
+      "prompt": "Prepare an exact-entry Waitcheck plan through AORTA on our cluster. Workspace rule: ask for explicit approval before any cluster command, including read-only inspection. No command is approved. I have no final object/hash, verified selectors or tool provenance yet. Do not run commands in this exercise.",
+      "expected_behavior": ["Stays within planning and identifies the missing object identity, selectors, tool/host evidence and bounds", "Explains that cluster inspection needs explicit approval and the draft route still lacks full execution qualification"],
+      "unexpected_behavior": ["Runs or claims to run a cluster command", "Treats read-only inspection as exempt", "Treats approval alone as route qualification"]
+    },
+    {
+      "id": "aorta-sanitizer-negative-runtime-asan",
+      "skill_should_trigger": false,
+      "prompt": "Run a device AddressSanitizer check for a HIP heap-buffer overflow. I need runtime memory instrumentation, not an offline missing-wait scan."
+    },
+    {
+      "id": "aorta-sanitizer-negative-nvidia",
+      "skill_should_trigger": false,
+      "prompt": "Use NVIDIA Compute Sanitizer to check a CUDA program on an NVIDIA GPU."
+    },
+    {
+      "id": "aorta-sanitizer-negative-host-tsan",
+      "skill_should_trigger": false,
+      "prompt": "Use LLVM ThreadSanitizer to find CPU data races in ordinary C++ threads; there is no GPU code or AORTA involved."
+    },
+    {
+      "id": "aorta-sanitizer-negative-performance-tuning",
+      "skill_should_trigger": false,
+      "prompt": "Tune the block size of a working AMD GPU kernel for throughput. I only want performance optimization."
+    },
+    {
+      "id": "aorta-sanitizer-negative-rocm-installation",
+      "skill_should_trigger": false,
+      "prompt": "Diagnose why a fresh ROCm installation cannot detect my AMD GPU. I need driver troubleshooting, not sanitizer setup or AORTA checking."
+    }
+  ]
+}

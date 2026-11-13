@@ -1,0 +1,82 @@
+name: Shared sanitizer foundation and Waitcheck checks
+
+on:
+  pull_request:
+    paths:
+      - '.agents/skills/rocm-sanitizer-triage/**'
+      - 'examples/sanitizers/waitcheck/**'
+      - 'docs/sanitizers/**'
+      - 'src/aorta/instrumentation/rocjitsu_sanitizers/**'
+      - '.github/workflows/sanitizer-skill-checks.yml'
+      - 'tests/instrumentation/rocjitsu_sanitizers/**'
+  workflow_dispatch:
+    inputs:
+      run_agent_evals:
+        description: 'Run paid model routing and behavior checks on the planning-only cases'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  waitcheck-examples:
+    name: Waitcheck example helper (no GPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install AORTA and test runner
+        run: python -m pip install -e . pytest
+      - name: Check examples and reporting contracts
+        run: >-
+          python -m pytest -q
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_skill_recipe.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_controls_example.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_isolation_recipe.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_native_cases.py
+          tests/instrumentation/rocjitsu_sanitizers/test_diagnostic_summary.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_failures.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_report.py
+          tests/instrumentation/rocjitsu_sanitizers/test_report_pipeline.py
+          tests/instrumentation/rocjitsu_sanitizers/test_selection_models.py
+          tests/instrumentation/rocjitsu_sanitizers/test_recipe_daily.py
+
+  structural:
+    name: Skill structure and AMD card
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check package, dataset, references and card sections
+        uses: amd/skillscope@68b69e2eff60c41f5d5482bb89f24e07ce4fbebb # v0.1.2
+        with:
+          command: structural
+          skills: .agents/skills/rocm-sanitizer-triage
+          args: >-
+            --skill-files skill-card.md
+            --skill-sections Description,Owner,License
+            --docs docs/sanitizers/skill-maintenance.md,docs/sanitizers/waitcheck-reporting.md,examples/sanitizers/waitcheck/docs/waitcheck-examples.md,examples/sanitizers/waitcheck/docs/waitcheck-isolation.md
+
+  agent-evals:
+    name: Manual planning evaluations
+    if: github.event_name == 'workflow_dispatch' && inputs.run_agent_evals
+    needs: structural
+    uses: amd/skillscope/.github/workflows/reusable.yml@68b69e2eff60c41f5d5482bb89f24e07ce4fbebb # v0.1.2
+    with:
+      skills: .agents/skills/rocm-sanitizer-triage
+      structural: required
+      routing: required
+      behavioral: required
+      runner: ubuntu-latest
+      min_accuracy: '1'
+    secrets:
+      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
