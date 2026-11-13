@@ -1,62 +1,94 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `43216269914` (2026-11-12 12:21:51 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/43216269914)
+Run `2026-11-13T141111-43423647792` · commit `21d7befb8a84` · 2026-11-13 14:11:11 UTC
 
-Run `2026-11-12T122151-43216269914` · commit `74a407513e6a` · 2026-11-12 12:21:51 UTC
-
-🔴 **Failed** — 5/5 missing
+🟢 **Healthy** — 5/5 matched
 
 Observed `warn` or `fail` verdicts may be expected positive-control outcomes. A matched row is healthy even when the verdict is fail. Baseline status is matched or unmatched.
 
 | Recipe | Backend | Observed | Expected | Execution | Findings | Coverage | Baseline |
 |---|---|---|---|---|--:|---|---|
-| daily-waitcheck-gemm | waitcheck (static) | ⚪ — | 🟡 warn | 🔴 missing | 0 | — | **🔴 report missing** |
-| daily-consan-clean | consan (dynamic) | ⚪ — | 🟢 pass | 🔴 missing | 0 | — | **🔴 report missing** |
-| daily-consan-racy | consan (dynamic) | ⚪ — | 🔴 fail | 🔴 missing | 0 | — | **🔴 report missing** |
-| daily-fpsan-match | fpsan (digest) | ⚪ — | 🟢 pass | 🔴 missing | 0 | — | **🔴 report missing** |
-| daily-fpsan-mismatch | fpsan (digest) | ⚪ — | 🔴 fail | 🔴 missing | 0 | — | **🔴 report missing** |
+| daily-waitcheck-gemm | waitcheck (static) | 🟡 warn | 🟡 warn | complete | 64 | — | **🟢 matched** |
+| daily-consan-clean | consan (dynamic) | 🟢 pass | 🟢 pass | complete | 0 | 0/0, 2/2 | **🟢 matched** |
+| daily-consan-racy | consan (dynamic) | 🔴 fail | 🔴 fail | complete | 1 | 0/0, 2/2 | **🟢 matched** |
+| daily-fpsan-match | fpsan (digest) | 🟢 pass | 🟢 pass | complete | 0 | — | **🟢 matched** |
+| daily-fpsan-mismatch | fpsan (digest) | 🔴 fail | 🔴 fail | complete | 1 | — | **🟢 matched** |
 
 Three views below: **Nightly gate** (baseline-checked, the gate), **Workload survey** and **FpSan** (both observed only, non-gating).
 
 ## Nightly gate · Kernel details
 
-<details><summary><b>daily-waitcheck-gemm</b> — ⚪ — — **🔴 report missing**</summary>
+<details><summary><b>daily-waitcheck-gemm</b> — 🟡 warn — **🟢 matched**</summary>
 
-Observed ⚪ —
+Observed 🟡 warn · expected 🟡 warn
+Observation: waitcheck warn; 64 finding(s) (wait_hazard)
+backend `rj_waitcheck` `2c406bcc3be3` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
 
-Observation: report missing
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `gemm_NT_M256_N4096_K1024` | 479 | 🟡 warn | 32 | `sol_126578.hsaco` | `57c5d8efa4` | — |
+| `gemm_NT_M128_N4096_K1280` | 471 | 🟡 warn | 0 | `sol_175415.hsaco` | `57c5d8efa4` | same code object as gemm_NT_M256_N4096_K1024; scanned once |
+| `gemm_TT_M64_N64_K1280` | 440 | 🟡 warn | 32 | `sol_137678.hsaco` | `aeb46fded1` | — |
 
-</details>
-
-<details><summary><b>daily-consan-clean</b> — ⚪ — — **🔴 report missing**</summary>
-
-Observed ⚪ —
-
-Observation: report missing
-
-</details>
-
-<details><summary><b>daily-consan-racy</b> — ⚪ — — **🔴 report missing**</summary>
-
-Observed ⚪ —
-
-Observation: report missing
+| Sanitizer | Code | Severity | Count | Example |
+|---|---|---|--:|---|
+| waitcheck | `wait_hazard` | warning | 64 | sol_126578.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20 |
 
 </details>
 
-<details><summary><b>daily-fpsan-match</b> — ⚪ — — **🔴 report missing**</summary>
+<details><summary><b>daily-consan-clean</b> — 🟢 pass — **🟢 matched**</summary>
 
-Observed ⚪ —
+Observed 🟢 pass · expected 🟢 pass
+Observation: consan pass; preflight pass
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
-Observation: report missing
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `consan_lds_race` | 1 | 🟢 pass | 0 | `—` | `—` | — |
 
 </details>
 
-<details><summary><b>daily-fpsan-mismatch</b> — ⚪ — — **🔴 report missing**</summary>
+<details><summary><b>daily-consan-racy</b> — 🔴 fail — **🟢 matched**</summary>
 
-Observed ⚪ —
+Observed 🔴 fail · expected 🔴 fail
+Observation: consan fail; 1 finding(s) (sampled_conflict); preflight pass
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
-Observation: report missing
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `consan_lds_race_2wave` | 1 | 🔴 fail | 1 | `—` | `—` | — |
+
+| Sanitizer | Code | Severity | Count | Example |
+|---|---|---|--:|---|
+| consan | `sampled_conflict` | race | 1 | [rocjitsu-dbi-hooks] ConSan conflict reader=109037459829888 first_index=0 second_index=11 first_kind=2 second_kind=1 first_owner=0 second_owner=1 epoch=0 gener… |
+
+</details>
+
+<details><summary><b>daily-fpsan-match</b> — 🟢 pass — **🟢 matched**</summary>
+
+Observed 🟢 pass · expected 🟢 pass
+Observation: fpsan pass
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
+
+| Kernel pair | Observed | Reference digest | Candidate digest | Instrumented | Detail |
+|---|---|---|---|---|---|
+| `row_dot` | 🟢 pass | `53b41a29b1abfb54…` | `53b41a29b1abfb54…` | both | — |
+
+</details>
+
+<details><summary><b>daily-fpsan-mismatch</b> — 🔴 fail — **🟢 matched**</summary>
+
+Observed 🔴 fail · expected 🔴 fail
+Observation: fpsan fail; reason fpsan_digest_mismatch; 1 finding(s) (fpsan_digest_mismatch)
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
+
+| Kernel pair | Observed | Reference digest | Candidate digest | Instrumented | Detail |
+|---|---|---|---|---|---|
+| `row_dot_no_accumulate` | 🔴 fail | `53b41a29b1abfb54…` | `b85f98818a3ebb61…` | both | fpsan_digest_mismatch |
+
+| Sanitizer | Code | Severity | Count | Example |
+|---|---|---|--:|---|
+| fpsan | `fpsan_digest_mismatch` | error | 1 | reference and candidate kernels disagree under FpSan: reference digest 53b41a29b1abfb54... != candidate digest b85f98818a3ebb61... |
 
 </details>
 
@@ -64,7 +96,172 @@ Observation: report missing
 
 How real GPU kernels behave under AMD's sanitizers — **waitcheck** (static `s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where both produced a report the kernel is shown under each, and a scan that was skipped or whose report is missing still appears, marked report missing with no verdict. **No expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here is an observation of how the kernel behaved, not a gate result. Each case lists a copy-paste command to reproduce the run.
 
-No workload-survey kernels in this run.
+Surveyed 3 workloads (59 kernels) across 6 sanitizer runs — 🟢 2 pass · 🟡 1 warn · 🔴 1 fail · 🔴 1 error · ⚪ 1 not_checked
+
+| Workload | Kernels | waitcheck | ConSan | Findings | Note |
+|---|--:|---|---|--:|---|
+| gemm | 1 | 🟡 warn | 🔴 error | 32 | combined_hook_timeout |
+| gpt oss | 55 | 🟢 pass | 🔴 fail | 49 | sampled_conflict |
+| qwen3 | 3 | 🟢 pass | ⚪ not_checked | 0 | 1 of 2 kernels not checked (1x consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object) |
+
+<details><summary><b>consan-gemm</b> — observed 🔴 error</summary>
+
+Observation: consan error; reason combined_hook_timeout; gemm_f32_ss: combined_hook_timeout; preflight error
+
+Reason: `combined_hook_timeout — gemm_f32_ss: combined_hook_timeout`
+
+Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `gemm_f32_ss` | 1 | 🔴 error | 0 | `consan_gemm_f32.hsaco` | `57c5d8efa4` | combined_hook_timeout |
+
+</details>
+
+<details><summary><b>consan-gpt-oss</b> — observed 🔴 fail</summary>
+
+Observation: consan fail; _combine_sampled_and_draft_tokens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _compute_slot_mappings_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _gather_block_tables_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _get_num_sampled_and_rejected_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _masked_compaction: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _post_update_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_pos_seq_lens_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _prepare_prefill_inputs_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object, _rope_kernel_cached_thd_2c_gqa_onehead_fwd: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object; 49 finding(s) (sampled_conflict); preflight pass
+
+Finding: `[rocjitsu-dbi-hooks] ConSan conflict reader=169731184 first_index=16 second_index=16 first_kind=2 second_kind=2 first_owner=2 second_owner=2 epoch=1 generation…`
+
+Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sanitizers/models/gpt-oss.yaml --out results`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `_combine_sampled_and_draft_tokens_kernel` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `44f4a73c86` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_compute_slot_mappings_kernel` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `597c8b991d` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_fused_add_rmsnorm_kernel` | 1 | 🔴 fail | 8 | `dispatched.hsaco` | `b7cbcd5bb8` | — |
+| `_fused_add_rmsnorm_pad` | 1 | 🔴 fail | 8 | `dispatched.hsaco` | `dc6e5bea86` | — |
+| `_gather_block_tables_kernel` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `ffba6285b6` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_get_num_sampled_and_rejected_kernel` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `cb7a82decf` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_masked_compaction` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `a3e32aef6c` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `02170daa86` | — |
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `8b64fa68f3` | — |
+| `_post_update_kernel` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `d39ae3b1c4` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_prepare_pos_seq_lens_kernel` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `6eb8b8627f` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_prepare_prefill_inputs_kernel` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `fa4bd10847` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_rms_norm_kernel` | 1 | 🔴 fail | 8 | `dispatched.hsaco` | `b6dcdd21dd` | — |
+| `_rope_kernel_cached_thd_2c_gqa_fwd` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `44472db069` | — |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `d5458dc446` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+| `_stage2_pow2` | 1 | 🔴 fail | 7 | `dispatched.hsaco` | `e6acd0c33b` | — |
+| `_swiglu_bf16xbf16_16x128` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `6860ae4cbc` | — |
+| `_topk_forward` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `d46a6cefb7` | — |
+| `_topk_topp_kernel` | 1 | 🔴 fail | 9 | `dispatched.hsaco` | `b7b68ee37b` | — |
+| `kernel_unified_attention_2d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `05e205ab8f` | — |
+| `kernel_unified_attention_3d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `6d038c64ca` | — |
+| `pack_bitmatrix` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `62b879e054` | — |
+| `reduce_segments` | 1 | 🔴 fail | 9 | `dispatched.hsaco` | `7bcee0d9ae` | — |
+
+</details>
+
+<details><summary><b>consan-qwen3</b> — observed ⚪ not_checked</summary>
+
+Observation: consan not_checked; reason 1 of 2 kernels not checked (1x consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object); _compute_slot_mapping_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object; preflight pass
+
+Reason: `1 of 2 kernels not checked (1x consan_not_applicable: no LDS access, barrier, a… — _compute_slot_mapping_kernel: consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object`
+
+Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sanitizers/models/qwen3.yaml --out results`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `_fwd_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `336ef011aa` | — |
+| `_compute_slot_mapping_kernel` | 1 | ⚪ not_checked | 0 | `dispatched.hsaco` | `2b4432007a` | consan_not_applicable: no LDS access, barrier, atomic or fence sites in any loaded code object |
+
+</details>
+
+<details><summary><b>waitcheck-gemm</b> — observed 🟡 warn</summary>
+
+Observation: waitcheck warn; 32 finding(s) (wait_hazard)
+
+Finding: `consan_gemm_f32.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v20`
+
+Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `gemm_f32_ss` | 1 | 🟡 warn | 32 | `consan_gemm_f32.hsaco` | `57c5d8efa4` | — |
+
+</details>
+
+<details><summary><b>waitcheck-gpt-oss</b> — observed 🟢 pass</summary>
+
+Observation: waitcheck pass
+
+Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sanitizers/models/gpt-oss.yaml --out results`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `02170daa86` | — |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `02f9a6e283` | — |
+| `_fused_add_rmsnorm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `0429ecf4ed` | — |
+| `kernel_unified_attention_2d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `05e205ab8f` | — |
+| `_stage2_pow2` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `1192e120f5` | — |
+| `_fused_add_rmsnorm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `136cc91e21` | — |
+| `_rms_norm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `1dcf3e3765` | — |
+| `kernel_unified_attention_2d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `1e85e67552` | — |
+| `_fused_add_rmsnorm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `26b4c78f52` | — |
+| `_fused_add_rmsnorm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `28c7fc9948` | — |
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `357789577b` | — |
+| `_rope_kernel_cached_thd_2c_gqa_fwd` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `44472db069` | — |
+| `_combine_sampled_and_draft_tokens_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `44f4a73c86` | — |
+| `_fused_add_rmsnorm_pad` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `494126cd1a` | — |
+| `_topk_topp_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `50fe4fea9d` | — |
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `5111186046` | — |
+| `reduce_segments` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `53c2bad898` | — |
+| `_compute_slot_mappings_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `597c8b991d` | — |
+| `_topk_forward` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `5c4d4d519d` | — |
+| `_fused_add_rmsnorm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `61903965e1` | — |
+| `pack_bitmatrix` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `62b879e054` | — |
+| `_rms_norm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `63fa64b777` | — |
+| `_swiglu_bf16xbf16_16x128` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `6860ae4cbc` | — |
+| `kernel_unified_attention_2d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `699e09c798` | — |
+| `kernel_unified_attention_2d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `6a27646a37` | — |
+| `kernel_unified_attention_3d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `6d038c64ca` | — |
+| `_prepare_pos_seq_lens_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `6eb8b8627f` | — |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `6f97774106` | — |
+| `kernel_unified_attention_2d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `7433030bb8` | — |
+| `reduce_segments` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `7bcee0d9ae` | — |
+| `pack_bitmatrix` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `7da1e46e4d` | — |
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `8b64fa68f3` | — |
+| `_rope_kernel_cached_thd_2c_gqa_fwd` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `8f39bbd1bd` | — |
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1_swiglu` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `99783dba6b` | — |
+| `_masked_compaction` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `a3e32aef6c` | — |
+| `kernel_unified_attention_2d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `a5497ec8d0` | — |
+| `_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `b60dc71885` | — |
+| `_rms_norm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `b6dcdd21dd` | — |
+| `_topk_topp_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `b7b68ee37b` | — |
+| `_fused_add_rmsnorm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `b7cbcd5bb8` | — |
+| `_get_num_sampled_and_rejected_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `cb7a82decf` | — |
+| `_rms_norm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `cca3ceda2f` | — |
+| `_post_update_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `d39ae3b1c4` | — |
+| `_topk_forward` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `d46a6cefb7` | — |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `d5458dc446` | — |
+| `_fused_add_rmsnorm_pad` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `dc6e5bea86` | — |
+| `pack_bitmatrix` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `de085311a4` | — |
+| `_fused_add_rmsnorm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `df48165cc5` | — |
+| `_rms_norm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `e189a11509` | — |
+| `_rms_norm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `e5d86d5d3e` | — |
+| `_stage2_pow2` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `e6acd0c33b` | — |
+| `_rms_norm_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `ec7c47196f` | — |
+| `kernel_unified_attention_3d` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `f437d8850a` | — |
+| `_prepare_prefill_inputs_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `fa4bd10847` | — |
+| `_gather_block_tables_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `ffba6285b6` | — |
+
+</details>
+
+<details><summary><b>waitcheck-qwen3</b> — observed 🟢 pass</summary>
+
+Observation: waitcheck pass
+
+Reproduce: `python scripts/sanitizers/model_survey.py run --inventory recipes/sanitizers/models/qwen3.yaml --out results`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `_topk_topp_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `0673f02020` | — |
+| `_compute_slot_mapping_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `2b4432007a` | — |
+| `_fwd_kernel` | 1 | 🟢 pass | 0 | `dispatched.hsaco` | `336ef011aa` | — |
+
+</details>
 
 ## FpSan
 
@@ -208,6 +405,7 @@ Reproduce: `python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan --
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | daily-fpsan-match | daily-fpsan-mismatch | Gate |
 |---|---|---|---|---|---|---|---|
+| 2026-11-13T141111-43423647792 | `21d7befb8a84` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | 🟢 healthy |
 | 2026-11-12T122151-43216269914 | `74a407513e6a` | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | 🔴 failed |
 | 2026-11-11T122106-43018719581 | `ac11f84616a8` | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | 🔴 failed |
 | 2026-11-10T122053-42814082346 | `ac11f84616a8` | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | Observed: ⚪ —<br>**🔴 report missing** | 🔴 failed |
@@ -237,4 +435,3 @@ Reproduce: `python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan --
 | 2026-10-20T141440-39422086566 | `3c6a345ae84f` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | Observed: ⚪ —<br>**⚪ not run** | Observed: ⚪ —<br>**⚪ not run** | 🟢 healthy |
 | 2026-10-19T141550-39252050781 | `3c6a345ae84f` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | Observed: ⚪ —<br>**⚪ not run** | Observed: ⚪ —<br>**⚪ not run** | 🟢 healthy |
 | 2026-10-18T141043-39126948533 | `3c6a345ae84f` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | Observed: ⚪ —<br>**⚪ not run** | Observed: ⚪ —<br>**⚪ not run** | 🟢 healthy |
-| 2026-10-17T140956-39032141956 | `3c6a345ae84f` | Observed: 🟡 warn<br>**🟢 matched** | Observed: 🟢 pass<br>**🟢 matched** | Observed: 🔴 fail<br>**🟢 matched** | Observed: ⚪ —<br>**⚪ not run** | Observed: ⚪ —<br>**⚪ not run** | 🟢 healthy |
