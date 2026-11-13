@@ -9,7 +9,10 @@ Engine start). Copied from an earlier prototype, with its known fixes:
 - `get_server_info()` and `flush_cache()` are never called (A9): the resolved ServerArgs are read from
   `engine.tokenizer_manager.server_args`;
 - the same process body can host the fake engine (`factory="fake"`), so the pipe protocol, the death
-  path and the timeout path are tested on CPU.
+  path and the timeout path are tested on CPU;
+- an engine whose kwargs name no `port` picks a free window of ports at each start, and tries another
+  if one is taken before the engine binds it (rollout/ports.py); the ready message names the ports the
+  engine resolved.
 
 Messages (driver -> worker), each a tuple whose first item is the kind:
   ("gen", rid, input_ids, sampling_params, extra) -> ("gen", rid, slim result | {"error": str})
@@ -29,6 +32,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any
+
+from . import ports as port_choice
 
 READY_KEYS = (
     "sampling_backend", "enable_output_logprobs", "enable_prefix_caching", "dtype", "disable_kvstore",
@@ -111,7 +116,8 @@ def worker_main(conn: Any, engine_index: int, gpu: str, engine_kwargs: dict, fac
         t0 = time.monotonic()
         engine = _make_engine(factory, engine_index, engine_kwargs, fake)
         send(("ready", engine_index, {"startup_sec": round(time.monotonic() - t0, 1), "pid": os.getpid(),
-                                      "info": _server_info(engine)}))
+                                      "info": _server_info(engine),
+                                      "ports": port_choice.bound_ports(getattr(engine, "port_args", None))}))
     except BaseException:
         send(("ready", engine_index, {"error": traceback.format_exc()[-4000:]}))
         return
@@ -165,7 +171,8 @@ class _Slot:
 
 
 class EngineProc:
-    """Driver-side handle on one engine process. `generate` is thread-safe and blocking."""
+    """Driver-side handle on one engine process. `generate` is thread-safe and blocking. With a `port` in
+    `engine_kwargs` the engine starts on it; without one, each start chooses one (`start`)."""
 
     def __init__(
         self,
@@ -181,6 +188,8 @@ class EngineProc:
         self.engine_kwargs = dict(engine_kwargs)
         self.factory, self.fake = factory, fake
         self.ready_timeout_s = ready_timeout_s
+        self.fixed_port = "port" in self.engine_kwargs
+        self.port: int | None = self.engine_kwargs.get("port")  # the port of the last successful start
         self.ready: dict | None = None
         self._proc: Any = None
         self._conn: Any = None
@@ -196,8 +205,43 @@ class EngineProc:
         return not self._dead
 
     def start(self) -> dict:
+        """Start the engine process and wait until it is ready. With a fixed port it is started once. Otherwise each
+        start holds a free window of ports (`ports.hold_window`), and a start that fails on a port taken after that
+        check (`ports.lost_to_another`) is tried again on another window, at most `ports.START_ATTEMPTS` times in
+        all; any other failure is raised at once. The ready message gains `port` (the base used), `attempt` and
+        `earlier_attempts` (why the starts before it failed)."""
+        if self.fixed_port:
+            ready = self._start_on(self.engine_kwargs)
+            ready.update(port=self.port, attempt=1, earlier_attempts=[])
+            return ready
+        holder, failed, used = id(self), [], []
+        for attempt in range(1, port_choice.START_ATTEMPTS + 1):
+            try:
+                base = port_choice.hold_window(holder, avoid=used)
+            except port_choice.PortsUnavailable as exc:
+                raise EngineStartError(f"engine {self.index}: {exc}" + "".join(f"\n{f}" for f in failed)) from None
+            try:
+                ready = self._start_on(dict(self.engine_kwargs, port=base))
+            except EngineStartError as exc:
+                port_choice.release_window(holder)
+                if not port_choice.lost_to_another(str(exc), base):
+                    if failed:
+                        raise EngineStartError("\n".join([str(exc), *failed])) from None
+                    raise
+                used.append(base)
+                failed.append(f"engine {self.index} attempt {attempt} on port {base}, a port was taken: "
+                              f"{str(exc)[-400:]}")
+                continue
+            self.port = base
+            ready.update(port=base, attempt=attempt, earlier_attempts=failed)
+            return ready
+        raise EngineStartError(f"engine {self.index}: a port was taken on each of {port_choice.START_ATTEMPTS} "
+                               "starts\n" + "\n".join(failed))
+
+    def _start_on(self, engine_kwargs: dict) -> dict:
         import multiprocessing as mp
 
+        port = engine_kwargs.get("port")
         ctx = mp.get_context("spawn")
         parent, child = ctx.Pipe()
         with _ENV_LOCK:
@@ -205,7 +249,7 @@ class EngineProc:
             os.environ["HIP_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"] = self.gpu
             try:
                 proc = ctx.Process(
-                    target=worker_main, args=(child, self.index, self.gpu, self.engine_kwargs, self.factory, self.fake),
+                    target=worker_main, args=(child, self.index, self.gpu, engine_kwargs, self.factory, self.fake),
                     daemon=False,
                 )
                 proc.start()
@@ -219,15 +263,15 @@ class EngineProc:
         self._proc, self._conn = proc, parent
         if not parent.poll(self.ready_timeout_s):
             self._terminate()
-            raise EngineStartError(f"engine {self.index} not ready after {self.ready_timeout_s:g} s")
+            raise EngineStartError(f"engine {self.index} (port {port}) not ready after {self.ready_timeout_s:g} s")
         try:
             _, _, ready = parent.recv()
         except (EOFError, OSError) as exc:
             self._terminate()
-            raise EngineStartError(f"engine {self.index} died during start-up ({exc})") from None
+            raise EngineStartError(f"engine {self.index} (port {port}) died during start-up ({exc})") from None
         if "error" in ready:
             self._terminate()
-            raise EngineStartError(f"engine {self.index} failed to start:\n{ready['error']}")
+            raise EngineStartError(f"engine {self.index} (port {port}) failed to start:\n{ready['error']}")
         self.ready = ready
         self._dead, self.death = False, None
         threading.Thread(target=self._read, name=f"engine-{self.index}-reader", daemon=True).start()
@@ -308,6 +352,8 @@ class EngineProc:
             proc.join(timeout=timeout_s)
         self._terminate()
         self._fail_all(f"engine {self.index} stopped")
+        if not self.fixed_port:
+            port_choice.release_window(id(self))
 
 
 class InProcessEngine:

@@ -48,6 +48,7 @@ LORA_R, LORA_ALPHA = 16, 32  # Section 6.4: a fresh r16/alpha32 LoRA
 PROBE_KERNELS = 40  # WP3's probes are the last `sync.probes` of these stand-in kernels
 WORKER_THREADS = 8  # CPU threads per spawned trainer rank: its CPU work is small, and the compile pool shares the node
 ENGINE_CALL_TIMEOUT_S = 600.0  # a probe, a greedy draw or a reload, as EngineProc's own reload default
+ENGINES_LOG = "engines.jsonl"  # in the run directory: one line per engine start, with its GPU and ports
 # A plugin task's engine self-test chats (plugins.Task.selftest_messages): open-ended, so two seeds' first 128 tokens
 # differ on a sound sampler whatever the task's own prompts are.
 SELF_TEST_CHATS = tuple(
@@ -319,7 +320,8 @@ def startup_max_len(cfg: RunConfig, tokenizer, records: Sequence, selftest_messa
 
 
 def engine_handles(cfg: RunConfig, max_len: int) -> list:
-    """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`."""
+    """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`: on
+    `rollout.port_base + 2000 i`, or with no port, so that each start chooses one (rollout/ports.py)."""
     from ..rollout.engine_pool import engine_kwargs, engine_port
     from ..rollout.engine_proc import EngineProc
 
@@ -327,7 +329,8 @@ def engine_handles(cfg: RunConfig, max_len: int) -> list:
     kw = engine_kwargs(model_dir=str(served_model_dir(cfg)), dtype="bfloat16", P=r.P, K=r.K, n_engines=len(r.engines),
                        max_len=max_len, gpu_memory_utilization=r.gpu_memory_utilization,
                        run_seed=cfg.orchestrator.run_seed)
-    return [EngineProc(i, str(g), dict(kw, port=engine_port(i))) for i, g in enumerate(r.engines)]
+    return [EngineProc(i, str(g), kw if r.port_base is None else dict(kw, port=engine_port(i, r.port_base)))
+            for i, g in enumerate(r.engines)]
 
 
 def rollout_compiler(cfg: RunConfig):
@@ -352,9 +355,29 @@ class RolloutAdapter:
         self.clock = clock  # the orchestrator's clock: its deadlines are read on it
         self.handles = [CountedHandle(h) for h in handles]
         self.pool = EnginePool(self.handles, run_seed=cfg.orchestrator.run_seed,
-                               request_timeout_s=cfg.rollout.request_timeout_s, clock=spans.now)
+                               request_timeout_s=cfg.rollout.request_timeout_s, on_ready=self._record_start,
+                               clock=spans.now)
         self.manager = None
         self._on_shutdown = list(on_shutdown)
+        self._record_lock = threading.Lock()
+
+    def _record_start(self, i: int, ready: dict, restart: bool) -> None:
+        """One line of <run_dir>/engines.jsonl per engine start, and one in the log: where it runs and the ports it
+        uses, so that two runs on one node can be told apart afterwards. A run has written its plan, so its directory
+        exists, by then; a measurement without a run directory (measure/t10.py) gets only the log line."""
+        import datetime as dt
+
+        row = {"t": dt.datetime.now(dt.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+               "engine": i, "gpu": getattr(self.handles[i], "gpu", None), "restart": restart,
+               "port_base": self.cfg.rollout.port_base, "port": ready.get("port"), "ports": ready.get("ports"),
+               "attempt": ready.get("attempt"), "earlier_attempts": ready.get("earlier_attempts") or [],
+               "pid": ready.get("pid"), "startup_sec": ready.get("startup_sec")}
+        log.info("engine %d on GPU %s started%s on port %s (attempt %s): %s", i, row["gpu"],
+                 " again" if restart else "", row["port"], row["attempt"], row["ports"])
+        if not self.cfg.run_dir.is_dir():
+            return
+        with self._record_lock, open(self.cfg.run_dir / ENGINES_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
 
     def start(self, selftest_prompts: Sequence) -> dict:
         from ..rollout.chain import RolloutManager, RolloutSettings, make_leak_check
@@ -378,7 +401,8 @@ class RolloutAdapter:
         self.manager = RolloutManager(settings, self.pool, self.tok,
                                       self.compiler, leak_check=make_leak_check(r.leak_check_adapter),
                                       spans=self.spans, compile_workers=min(96, os.cpu_count() or 8))
-        return {"engines": len(self.handles), "max_model_len": self.max_len, "self_tests": self.pool.self_tests}
+        return {"engines": len(self.handles), "max_model_len": self.max_len, "self_tests": self.pool.self_tests,
+                "ports": [{"port": (rd or {}).get("port"), "ports": (rd or {}).get("ports")} for rd in self.pool.ready]}
 
     def run(self, prompts, iteration: int, policy_version: str, *, on_candidate, on_chain=None, deadline=None):
         """Each chain goes to `on_chain` as it ends (its candidate with it), so groups train during generation.
