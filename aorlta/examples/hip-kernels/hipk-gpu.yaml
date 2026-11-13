@@ -1,12 +1,13 @@
-# `hipk-gpu`: the example task's checks (examples/hip-kernels/hip_kernels.py). The stand-in parse and compile gates,
-# then `ref.native`: the candidate built with its task's harness and run on one of the GPUs in `hipk.run.gpus`, its
-# outputs compared with a host reference. Scored by hipk.v1.
+# `hipk-gpu`: the example task's checks (examples/hip-kernels/hip_kernels.py). `hipk.gate` (the parse gate with the
+# rollout's own rule) and the stand-in compile gate, then `ref.native`: the candidate compiled alone into a code object,
+# run by its task's harness on one of the GPUs in `hipk.run.gpus`, its outputs compared with a host reference. Scored
+# by hipk.v1.
 name: hipk-gpu
 reward_fn: hipk.v1
 clean_repeats: 1
 materialize: true
 pools:
-  gates: {resource: local_cpu, adapter: standin.parse, timeout: gate, workers: 4}
+  gates: {resource: local_cpu, adapter: hipk.gate, timeout: gate, workers: 4}
   compile: {resource: local_cpu, adapter: standin.hipcc, timeout: compile, workers: 8}
   run: {resource: own_gpu, adapter: hipk.run, timeout: sim_run, workers: 4}
 stages:
@@ -19,8 +20,8 @@ requires:
 leg_settings:
   gate.compile: {offload_arch: gfx950, flags: ["-c", "-O1"]}
   ref.native: {target: gfx950, run_timeout_s: 20}
-# `${AORLTA_ROCM_ROOT}` is that environment variable, or /opt/rocm. Worker n of the run pool uses
-# gpus[(n - 1) % len(gpus)]: keep these off the engines' GPUs (rollout.engines).
+# `${AORLTA_ROCM_ROOT}` is that environment variable, or /opt/rocm. Each live worker of the run pool holds one of
+# `gpus` (a replaced worker's successor takes the one it gave back): keep these off the engines' GPUs (rollout.engines).
 adapters:
   standin.hipcc: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", readelf: "${AORLTA_ROCM_ROOT}/llvm/bin/llvm-readelf"}
   hipk.run: {hipcc: "${AORLTA_ROCM_ROOT}/bin/hipcc", gpus: [4, 5, 6, 7]}

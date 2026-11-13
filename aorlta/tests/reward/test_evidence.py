@@ -23,6 +23,10 @@ PKG_FILES = {  # path under pkg/ -> kept?
     "ab/abcd/san.asan-0123456789abcdef/asan/asan.log": True,
     "ab/abcd/san.waitcheck-0123456789abcdef/waitcheck-0.log": True,
     "ab/abcd/response.txt": False,
+    "ab/abcd/ref.native-0123456789abcdef/r1/run.log": True,  # a task's own check, as the worked HIP example's
+    "ab/abcd/ref.native-0123456789abcdef/r1/harness.hip": True,
+    "ab/abcd/ref.native-0123456789abcdef/r1/record.json": True,
+    "ab/abcd/ref.native-0123456789abcdef/r1/candidate.co": False,
 }
 
 

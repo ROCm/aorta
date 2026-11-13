@@ -218,12 +218,14 @@ class ProcessRunner:
         self._closed = threading.Event()
 
     def run(self, argv: Sequence[str], *, timeout_s: float, env: Mapping[str, str] | None = None,
-            cwd: str | None = None) -> ProcResult:
+            cwd: str | None = None, input: str | None = None) -> ProcResult:
+        """`input`, if given, is written to the child's stdin (else stdin is not redirected)."""
         t0 = time.monotonic()
         if self._closed.is_set():
             return ProcResult(None, "", "", 0.0, False, True, "runner closed")
         try:
-            proc = subprocess.Popen(list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            proc = subprocess.Popen(list(argv), stdin=subprocess.PIPE if input is not None else None,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                     errors="replace", env=dict(env) if env is not None else None, cwd=cwd,
                                     start_new_session=True)
         except OSError as exc:
@@ -234,7 +236,7 @@ class ProcessRunner:
             else:
                 self._proc = proc
         try:
-            out, err = proc.communicate(timeout=timeout_s)
+            out, err = proc.communicate(input=input, timeout=timeout_s)
             timed_out = False
         except subprocess.TimeoutExpired:
             self._kill(proc)

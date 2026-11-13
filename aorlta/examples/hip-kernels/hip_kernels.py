@@ -4,12 +4,13 @@ Each task in `tasks.json` names a kernel, its exact signature, what it computes 
 answers with a HIP source in one ```cpp block. The rollout compiles it with the stand-in compile check (hipcc -c) and
 gives up to `rollout.max_repair_turns` repair turns with the compiler's errors; a reply that has no code block, or
 whose code does not define the kernel, gets a repair turn that says so (this module's parse and feedback). The reward
-service then runs three legs: the stand-in parse gate and compile gate, and `ref.native`, this module's check, which
-builds the candidate with a generated host program, runs it on a GPU and compares every output element with a host
-reference computed from the same inputs. The reward is `hipk.v1` (below).
+service then runs three legs: this module's parse gate (the rollout's own parse rule) and the stand-in compile gate,
+and `ref.native`, this module's check, which compiles the candidate alone into a device code object, runs its kernel
+on a GPU from a host program built from the task alone, and compares every output element with a host reference
+computed from the same inputs. The reward is `hipk.v1` (below).
 
 Registered names: task `hipk`; parse `hipk.parse`; feedback `hipk.feedback`; profile `hipk-gpu` (hipk-gpu.yaml);
-check adapter `hipk.run`; reward function `hipk.v1`.
+check adapters `hipk.gate` and `hipk.run`; reward function `hipk.v1`.
 
 Run as a script, it checks the tasks themselves with the reference kernels in reference/:
     python examples/hip-kernels/hip_kernels.py selfcheck --hipcc /opt/rocm/bin/hipcc [--gpu 0] [--build-only]
@@ -25,6 +26,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -36,7 +38,6 @@ USER = (
     "Write a complete HIP C++ source file: include <hip/hip_runtime.h>, define the kernel, and write no main "
     "function. Reply with the source in a single ```cpp code block."
 )
-RESULT_TAG = "AORLTA_RESULT "
 SENTINEL = "-7777.0f"  # what an output element holds before the kernel runs: one it never writes is a mismatch
 GUARD = 256  # elements past the end of every device array, which the kernel must leave alone
 GUARD_VALUE = "31337.0f"
@@ -146,22 +147,41 @@ def _f(x) -> str:
     return f"{float(x)!r}f"
 
 
-def harness_source(task: dict, kernel_source: str) -> str:
-    """The candidate's source followed by a host program that fills the inputs, runs the kernel once, and prints one
-    `AORLTA_RESULT {json}` line: `ok`, `mismatch` (an output element differs from the host reference beyond the
-    tolerance), `out_of_bounds` (a write past the end of an array) or `hip_error`."""
-    lines = [kernel_source.rstrip(), "", "// ---- AORLTA harness ----", "#include <cmath>", "#include <cstdint>",
-             "#include <cstdio>", "#include <vector>", "",
+def harness_source(task: dict) -> str:
+    """The task's host program, which holds none of the candidate's code: it loads the candidate's device code object
+    (argv[1]), fills the inputs, runs the task's kernel from it once and compares every output element with a host
+    reference. It writes its record to the file argv[2], replacing it whole each time: `{"stage": "setup"}` at the
+    start, `{"stage": "launched"}` just before the kernel runs, then one with a `status`: `ok`, `mismatch` (an output
+    element differs from the host reference beyond the tolerance), `out_of_bounds` (a write past the end of an
+    array), `no_kernel` (the code object has no kernel of the task's exact signature) or `hip_error` (with the
+    `stage` it failed in)."""
+    lines = ["#include <hip/hip_runtime.h>", "#include <cmath>", "#include <cstdint>", "#include <cstdio>",
+             "#include <string>", "#include <vector>", "",
+             "// The task's kernel, defined here only to name it (__builtin_get_device_side_mangled_name): the code",
+             "// that runs is the candidate's, from the code object in argv[1].",
+             f"{task['signature']} {{}}", "",
+             "static const char* g_path = nullptr;",
+             "static void put(const char* json) {  // written aside, then renamed over the record",
+             "  std::string tmp = std::string(g_path) + \".partial\";",
+             "  FILE* f = std::fopen(tmp.c_str(), \"w\");",
+             "  if (f == nullptr) return;",
+             "  std::fputs(json, f);",
+             "  if (std::fclose(f) == 0) std::rename(tmp.c_str(), g_path);",
+             "}", "",
              "static void fill(std::vector<float>& v, uint32_t seed, float lo, float hi) {",
              "  for (auto& x : v) { seed = seed * 1664525u + 1013904223u; "
              "x = lo + (hi - lo) * float(seed >> 8) / 16777216.0f; }",
              "}", "",
-             "#define CHECK(call) do { hipError_t e_ = (call); if (e_ != hipSuccess) { "
-             f"printf(\"{RESULT_TAG}{{\\\"status\\\": \\\"hip_error\\\", \\\"at\\\": \\\"%s\\\"}}\\n\", #call); "
+             "#define CHECK(stage, call) do { hipError_t e_ = (call); if (e_ != hipSuccess) { char b_[512]; "
+             "std::snprintf(b_, sizeof b_, \"{\\\"status\\\": \\\"hip_error\\\", \\\"stage\\\": \\\"%s\\\", "
+             "\\\"at\\\": \\\"%s\\\", \\\"error\\\": \\\"%s\\\"}\", stage, #call, hipGetErrorName(e_)); put(b_); "
              "return 0; } } while (0)", "",
-             "int main() {"]
+             "int main(int argc, char** argv) {",
+             "  if (argc != 3) return 2;",
+             "  g_path = argv[2];",
+             "  put(\"{\\\"stage\\\": \\\"setup\\\"}\");"]
     for ctype, name, value in task["scalars"]:
-        lines.append(f"  const {ctype} {name} = {value};")
+        lines.append(f"  {ctype} {name} = {value};")
     arrays = task["arrays"]
     for i, a in enumerate(arrays):
         n = a["size"]
@@ -179,18 +199,29 @@ def harness_source(task: dict, kernel_source: str) -> str:
     lines.append("  }")
     for a in arrays:
         lines += [f"  float* d_{a['name']} = nullptr;",
-                  f"  CHECK(hipMalloc(&d_{a['name']}, h_{a['name']}.size() * sizeof(float)));",
-                  f"  CHECK(hipMemcpy(d_{a['name']}, h_{a['name']}.data(), h_{a['name']}.size() * sizeof(float), "
-                  "hipMemcpyHostToDevice));"]
+                  f"  CHECK(\"setup\", hipMalloc(&d_{a['name']}, h_{a['name']}.size() * sizeof(float)));",
+                  f"  CHECK(\"setup\", hipMemcpy(d_{a['name']}, h_{a['name']}.data(), h_{a['name']}.size() * "
+                  "sizeof(float), hipMemcpyHostToDevice));"]
     names = {a["name"] for a in arrays}
-    args = ", ".join(f"d_{x}" if x in names else x for x in task["args"])
-    lines += [f"  {task['kernel']}<<<{task['grid']}, {task['block']}>>>({args});",
-              "  CHECK(hipGetLastError());", "  CHECK(hipDeviceSynchronize());",
+    args = ", ".join(f"&d_{x}" if x in names else f"&{x}" for x in task["args"])
+    lines += ["  hipModule_t mod_;", "  CHECK(\"setup\", hipModuleLoad(&mod_, argv[1]));", "  hipFunction_t fn_;",
+              "  {",
+              f"    hipError_t e_ = hipModuleGetFunction(&fn_, mod_, __builtin_get_device_side_mangled_name("
+              f"{task['kernel']}));",
+              "    if (e_ == hipErrorNotFound || e_ == hipErrorInvalidDeviceFunction) {",
+              "      put(\"{\\\"status\\\": \\\"no_kernel\\\", \\\"stage\\\": \\\"setup\\\"}\");",
+              "      return 0;", "    }", "    CHECK(\"setup\", e_);", "  }",
+              f"  void* args_[] = {{{args}}};",
+              f"  dim3 grid_ = {task['grid']};", f"  dim3 block_ = {task['block']};",
+              "  put(\"{\\\"stage\\\": \\\"launched\\\"}\");",
+              "  CHECK(\"launch\", hipModuleLaunchKernel(fn_, grid_.x, grid_.y, grid_.z, block_.x, block_.y, block_.z, 0, "
+              "nullptr, args_, nullptr));",
+              "  CHECK(\"run\", hipDeviceSynchronize());",
               "  long checked = 0, mismatches = 0, first = -1, oob = 0;"]
     for a in arrays:
         n = a["size"]
-        lines += [f"  CHECK(hipMemcpy(h_{a['name']}.data(), d_{a['name']}, h_{a['name']}.size() * sizeof(float), "
-                  "hipMemcpyDeviceToHost));",
+        lines += [f"  CHECK(\"run\", hipMemcpy(h_{a['name']}.data(), d_{a['name']}, h_{a['name']}.size() * "
+                  "sizeof(float), hipMemcpyDeviceToHost));",
                   f"  for (long i = ({n}); i < (long)h_{a['name']}.size(); ++i) if (h_{a['name']}[i] != {GUARD_VALUE}) "
                   "++oob;"]
         if a["role"] != "in":
@@ -202,75 +233,131 @@ def harness_source(task: dict, kernel_source: str) -> str:
                       "    if (!same) { if (first < 0) first = checked - 1; ++mismatches; }",
                       "  }"]
     lines += ["  const char* status = oob ? \"out_of_bounds\" : (mismatches ? \"mismatch\" : \"ok\");",
-              f"  printf(\"{RESULT_TAG}{{\\\"status\\\": \\\"%s\\\", \\\"checked\\\": %ld, \\\"mismatches\\\": %ld, "
-              "\\\"first\\\": %ld, \\\"out_of_bounds\\\": %ld}\\n\", status, checked, mismatches, first, oob);",
-              "  return 0;", "}", ""]
+              "  char b_[512];",
+              "  std::snprintf(b_, sizeof b_, \"{\\\"status\\\": \\\"%s\\\", \\\"checked\\\": %ld, "
+              "\\\"mismatches\\\": %ld, \\\"first\\\": %ld, \\\"out_of_bounds\\\": %ld}\", status, checked, "
+              "mismatches, first, oob);",
+              "  put(b_);", "  return 0;", "}", ""]
     return "\n".join(lines)
 
 
-def read_result(stdout: str) -> dict | None:
-    """The harness's result line, or None."""
-    for line in reversed(stdout.splitlines()):
-        if line.startswith(RESULT_TAG):
-            try:
-                out = json.loads(line[len(RESULT_TAG):])
-            except ValueError:
-                return None
-            return out if isinstance(out, dict) and isinstance(out.get("status"), str) else None
-    return None
+def read_record(path: str | Path) -> dict | None:
+    """The harness's record file, or None (absent, unreadable, or not a record)."""
+    try:
+        out = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return out if isinstance(out, dict) and isinstance(out.get("status", out.get("stage")), str) else None
 
 
-def verdict(build_rc, build_stderr, run, task) -> tuple[str, str | None, list[dict]]:
-    """A leg's (state, reason, findings) from the harness's build and run. `run` is None when the build failed, else
-    a ProcResult. Only what is the candidate's is blamed on it: a build failure is the candidate's when the compiler
-    names its kernel or `main` (its compile alone passed in gate.compile, so the signature is what differs), a hang
-    past the limit and a crash are its, and anything else is unsettled, never clean."""
-    if build_rc != 0:
-        if re.search(r"\b(" + re.escape(task["kernel"]) + r"|main)\b", build_stderr or ""):
-            return "fail", "bad_signature", []
-        return "unsettled", "harness_build_failed", []
+def verdict(run, record) -> tuple[str, str | None, list[dict]]:
+    """A leg's (state, reason, findings) from the harness's run (a ProcResult) and its record (read_record). The
+    verdict comes only from the record the harness writes, never from the candidate's output, and only what is the
+    candidate's is blamed on it: a code object without the task's kernel (bad_signature), a wrong output, and a crash
+    or a hang once the kernel was launched. A failure before the launch (an allocation, the first copy, loading the
+    code object) is the node's, and leaves the leg unsettled, never clean."""
     if run.launch_error or run.killed:
         return "unsettled", "run_not_started", []
-    if run.timed_out:
-        return "fail", "timeout", []
-    result = read_result(run.stdout)
-    if result is None:
-        return ("fail", "crash", []) if run.returncode not in (0, None) else ("unsettled", "no_result", [])
-    status = result["status"]
-    if status == "ok" and run.returncode == 0 and result.get("checked", 0) > 0:
-        return "clean", None, []
+    record = record or {}
+    status, stage = record.get("status"), record.get("stage")
+    if status == "no_kernel":
+        return "fail", "bad_signature", []
+    if status == "hip_error":
+        return ("unsettled", "setup_failed", []) if stage == "setup" else ("fail", "crash", [])
     if status in ("mismatch", "out_of_bounds"):
         return "fail", "wrong_output", []
-    if status == "hip_error":
-        return "fail", "crash", []
+    if status == "ok":
+        if run.returncode == 0 and not run.timed_out and isinstance(record.get("checked"), int) \
+                and record["checked"] > 0:
+            return "clean", None, []
+        return "unsettled", "no_result", []
+    if stage == "launched":
+        if run.timed_out:
+            return "fail", "timeout", []
+        if run.returncode not in (0, None):
+            return "fail", "crash", []
+    if stage == "setup" or not record:
+        return "unsettled", ("setup_timeout" if run.timed_out else "setup_failed"), []
     return "unsettled", "no_result", []
 
 
-class HipkRun:
-    """`hipk.run`, leg `ref.native`: the candidate built with its task's harness (hipcc, settings `hipcc`, leg setting
-    `target`), run on this worker's GPU (settings `gpus`: worker n runs on `gpus[(n - 1) % len(gpus)]`, by
-    HIP_VISIBLE_DEVICES) for at most `run_timeout_s`, and its outputs compared with the host reference. Clean only
-    when every output element matches and nothing was written past an array's end."""
+_LEASE_LOCK = threading.Lock()
+_LEASED: dict[int, int] = {}  # GPU -> live hipk.run adapters on it, in this process
 
-    version = "1"
+
+def lease_gpu(gpus: list[int], preferred: int) -> int:
+    """A GPU of `gpus` for a new worker: `preferred` if no live worker has it, else the first free one, else the
+    least shared. The service retires and replaces workers under new ids, so an id says nothing about which GPUs
+    the live workers hold."""
+    with _LEASE_LOCK:
+        free = [g for g in gpus if not _LEASED.get(g)]
+        gpu = preferred if preferred in free else (free[0] if free else min(gpus, key=lambda g: _LEASED.get(g, 0)))
+        _LEASED[gpu] = _LEASED.get(gpu, 0) + 1
+        return gpu
+
+
+def release_gpu(gpu: int) -> None:
+    with _LEASE_LOCK:
+        n = _LEASED.get(gpu, 0) - 1
+        if n > 0:
+            _LEASED[gpu] = n
+        else:
+            _LEASED.pop(gpu, None)
+
+
+class HipkRun:
+    """`hipk.run`, leg `ref.native`: the candidate compiled alone into a device code object (hipcc --genco, settings
+    `hipcc`, leg setting `target`), so none of its host code is built or run; the task's harness, built from the task
+    alone, loads it and runs its kernel on this worker's GPU (settings `gpus`, leased to live workers: see
+    `lease_gpu`; by HIP_VISIBLE_DEVICES) for at most `run_timeout_s`, and compares its outputs with the host reference.
+    Clean only when every output element matches and nothing was written past an array's end. `version` names the
+    compiler hipcc runs and this file, so a leg cached under another compiler or harness is not reused."""
+
     legs = ("ref.native",)
     resource = "own_gpu"
 
     def __init__(self, ctx):
         from aorlta.reward.adapters.base import ProcessRunner
+        from aorlta.reward.adapters.toolchain import toolchain_identity
 
         self.name, self.ctx = ctx.name, ctx
         s = ctx.settings
         self.hipcc = s.get("hipcc") or "/opt/rocm/bin/hipcc"
-        gpus = list(s.get("gpus") or [0])
-        seq = int(ctx.worker_id.rsplit("/", 1)[-1]) if ctx.worker_id.rsplit("/", 1)[-1].isdigit() else 1
-        self.gpu = int(gpus[(seq - 1) % len(gpus)])
+        self.version = f"2+{toolchain_identity(self.hipcc)}+{hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]}"
+        gpus = [int(g) for g in (s.get("gpus") or [0])]
+        tail = ctx.worker_id.rsplit("/", 1)[-1]
+        seq = int(tail) if tail.isdigit() else 1
+        self.gpu = lease_gpu(gpus, gpus[(seq - 1) % len(gpus)])
+        self._leased = True
         self.tasks = {}
         for pool in ctx.pools:
             if (Path(pool) / "tasks.json").is_file():
                 for task in load_tasks(pool):
                     self.tasks[task_sha256(task)] = task
         self.runner = ProcessRunner()
+        self._harness_dir: Path | None = None
+        self._harnesses: dict[tuple[str, str], Path] = {}
+
+    def _harness(self, task: dict, target: str, timeout_s: float, evidence: Path) -> Path | None:
+        """The task's harness program for `target`, built once per worker (its source is also written to
+        `evidence`); None if it does not build."""
+        src = harness_source(task)
+        (evidence / "harness.hip").write_text(src, encoding="utf-8")
+        key = (task_sha256(task), target)
+        if key in self._harnesses:
+            return self._harnesses[key]
+        if self._harness_dir is None:
+            self._harness_dir = Path(tempfile.mkdtemp(prefix="hipk-harness-"))
+        d = self._harness_dir / f"{key[0][:16]}-{target}"
+        d.mkdir(exist_ok=True)
+        (d / "harness.hip").write_text(src, encoding="utf-8")
+        build = self.runner.run([self.hipcc, f"--offload-arch={target}", "-O2", "-o", str(d / "harness"),
+                                 str(d / "harness.hip")], timeout_s=timeout_s, cwd=str(d))
+        (evidence / "harness-build.log").write_text(build.stderr[-20000:], encoding="utf-8")
+        if build.returncode != 0 or build.timed_out or build.killed or build.launch_error:
+            return None
+        self._harnesses[key] = d / "harness"
+        return d / "harness"
 
     def run(self, job):
         from aorlta.reward.adapters.base import make_result, run_dir, unsettled
@@ -282,26 +369,27 @@ class HipkRun:
             if job.leg != "ref.native" or task is None or not source or not job.output_dir:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
             d = run_dir(job)
-            (d / "harness.hip").write_text(harness_source(task, Path(source).read_text(encoding="utf-8")),
-                                           encoding="utf-8")
             target = job.leg_settings.get("target", "gfx950")
             budget = max(1.0, self.ctx.timeout_s)
             t_build = time.monotonic()
-            build = self.runner.run([self.hipcc, f"--offload-arch={target}", "-O2", "-o", str(d / "harness"),
-                                     str(d / "harness.hip")], timeout_s=budget, cwd=str(d))
-            if build.timed_out or build.killed or build.launch_error:
+            co = self.runner.run([self.hipcc, "--genco", f"--offload-arch={target}", "-O2", "-o",
+                                  str(d / "candidate.co"), str(source)], timeout_s=budget, cwd=str(d))
+            (d / "build.log").write_text(co.stderr[-20000:], encoding="utf-8")
+            if co.returncode != 0 or co.timed_out or co.killed or co.launch_error:  # it compiled in gate.compile
+                return unsettled(job, "candidate_build_failed", t_start=t0, t_end=self.ctx.clock())
+            harness = self._harness(task, target, max(1.0, budget - (time.monotonic() - t_build)), d)
+            if harness is None:
                 return unsettled(job, "harness_build_failed", t_start=t0, t_end=self.ctx.clock())
-            (d / "build.log").write_text(build.stderr[-20000:], encoding="utf-8")
-            run = None
-            if build.returncode == 0:
-                left = budget - (time.monotonic() - t_build)
-                limit = min(float(job.leg_settings.get("run_timeout_s", 20.0)), left)
-                if limit <= 0:
-                    return unsettled(job, "no_time_left", t_start=t0, t_end=self.ctx.clock())
-                env = dict(os.environ, HIP_VISIBLE_DEVICES=str(self.gpu))
-                run = self.runner.run([str(d / "harness")], timeout_s=limit, env=env, cwd=str(d))
-                (d / "run.log").write_text((run.stdout + "\n" + run.stderr)[-20000:], encoding="utf-8")
-            state, reason, findings = verdict(build.returncode, build.stderr, run, task)
+            left = budget - (time.monotonic() - t_build)
+            limit = min(float(job.leg_settings.get("run_timeout_s", 20.0)), left)
+            if limit <= 0:
+                return unsettled(job, "no_time_left", t_start=t0, t_end=self.ctx.clock())
+            env = dict(os.environ, HIP_VISIBLE_DEVICES=str(self.gpu))
+            record = d / "record.json"
+            run = self.runner.run([str(harness), str(d / "candidate.co"), str(record)], timeout_s=limit, env=env,
+                                  cwd=str(d))
+            (d / "run.log").write_text((run.stdout + "\n" + run.stderr)[-20000:], encoding="utf-8")
+            state, reason, findings = verdict(run, read_record(record))
             return make_result(job, state, reason, findings=findings, t_start=t0, t_end=self.ctx.clock())
         except Exception:  # noqa: BLE001 - an adapter never raises
             return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
@@ -314,6 +402,52 @@ class HipkRun:
 
     def close(self):
         self.runner.close()
+        if self._leased:
+            self._leased = False
+            release_gpu(self.gpu)
+        if self._harness_dir is not None:
+            shutil.rmtree(self._harness_dir, ignore_errors=True)
+
+
+class HipkGate:
+    """`hipk.gate`, leg `gate.parse`: the reward's parse gate with the rollout's own rule (`hipk.parse`, which is
+    the stand-in `parse_code`): the last ```cpp block, and none when a later block never closes. The stand-in gate
+    takes the last complete block, so a final reply whose last block was cut off would be scored on an earlier one
+    the rollout had rejected. Writes `source.hip` as the stand-in gate does."""
+
+    name = "hipk.gate"
+    version = "1"
+    legs = ("gate.parse",)
+    resource = "local_cpu"
+
+    def __init__(self, ctx=None):
+        self._clock = ctx.clock if ctx is not None else time.time
+
+    def run(self, job):
+        from aorlta.atomic import atomic_write_bytes
+        from aorlta.reward.adapters.base import make_result, unsettled
+        from aorlta.rollout.compile_check import parse_code
+
+        t0 = self._clock()
+        try:
+            response = job.inputs.get("response") or (str(Path(job.package) / "response.txt") if job.package else None)
+            if job.leg != "gate.parse" or not response or not job.output_dir:
+                return unsettled(job, "adapter_error", t_start=t0, t_end=self._clock())
+            source = parse_code(Path(response).read_text(encoding="utf-8"), "off")
+            if source is None:
+                return make_result(job, "fail", "parse", t_start=t0, t_end=self._clock())
+            out = Path(job.output_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            atomic_write_bytes(out / "source.hip", source.encode("utf-8"))
+            return make_result(job, "clean", t_start=t0, t_end=self._clock())
+        except Exception:  # noqa: BLE001 - an adapter never raises
+            return unsettled(job, "adapter_error", t_start=t0, t_end=self._clock())
+
+    def controls(self):
+        return []
+
+    def health(self):
+        return {"name": self.name, "responsive": True}
 
 
 # --- the reward --------------------------------------------------------------------------------
@@ -393,6 +527,7 @@ def register() -> None:
     plugins.register_feedback_template("hipk.feedback", HipkFeedback)
     plugins.register_profile("hipk-gpu", HERE / "hipk-gpu.yaml")
     plugins.register_check_adapter("hipk.run", HipkRun)
+    plugins.register_check_adapter("hipk.gate", HipkGate)
     plugins.register_reward_fn("hipk.v1", HipkV1)
 
 
@@ -404,36 +539,48 @@ if __name__ != "__main__":
 
 
 def selfcheck(argv=None) -> int:
-    """Each task's harness with its reference kernel (reference/<id>.hip): built, and unless --build-only run on the
-    GPU, where every task must report `ok`. Prints one JSON line per task; exit 0 when all pass."""
+    """Each task's reference kernel (reference/<id>.hip), or with --sources DIR the kernel DIR/<id>.hip where there
+    is one, through the check's own steps: compiled alone into a code object, the task's harness built, and unless
+    --build-only run on the GPU and judged by `verdict`. Prints one JSON line per task; exit 0 when all are clean
+    (built, with --build-only)."""
+    from aorlta.reward.adapters.base import ProcessRunner
+
     ap = argparse.ArgumentParser(prog="hip_kernels.py selfcheck")
     ap.add_argument("--hipcc", default="/opt/rocm/bin/hipcc")
     ap.add_argument("--arch", default="gfx950")
     ap.add_argument("--gpu", type=int, default=0)
     ap.add_argument("--pool", default=str(HERE))
+    ap.add_argument("--sources", default=None, help="a directory of <task id>.hip kernels to check instead")
     ap.add_argument("--build-only", action="store_true", help="compile the harnesses, run nothing (no GPU)")
     args = ap.parse_args(argv)
-    import subprocess
-
+    runner = ProcessRunner()
     failed = 0
     work = Path(tempfile.mkdtemp(prefix="hipk-selfcheck-"))
     try:
         for task in load_tasks(args.pool):
-            ref = (HERE / "reference" / f"{task['id']}.hip").read_text(encoding="utf-8")
-            src, exe = work / f"{task['id']}.hip", work / task["id"]
-            src.write_text(harness_source(task, ref), encoding="utf-8")
-            build = subprocess.run([args.hipcc, f"--offload-arch={args.arch}", "-O2", "-o", str(exe), str(src)],
-                                   capture_output=True, text=True)
-            row = {"task": task["id"], "build_rc": build.returncode}
-            if build.returncode == 0 and not args.build_only:
-                run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60,
-                                     env=dict(os.environ, HIP_VISIBLE_DEVICES=str(args.gpu)))
-                row["result"] = read_result(run.stdout)
-                ok = run.returncode == 0 and row["result"] is not None and row["result"]["status"] == "ok"
+            src = Path(args.sources or HERE / "reference") / f"{task['id']}.hip"
+            if not src.is_file():
+                continue
+            d = work / task["id"]
+            d.mkdir()
+            (d / "harness.hip").write_text(harness_source(task), encoding="utf-8")
+            co = runner.run([args.hipcc, "--genco", f"--offload-arch={args.arch}", "-O2", "-o", str(d / "candidate.co"),
+                             str(src)], timeout_s=300)
+            hb = runner.run([args.hipcc, f"--offload-arch={args.arch}", "-O2", "-o", str(d / "harness"),
+                             str(d / "harness.hip")], timeout_s=300)
+            row = {"task": task["id"], "source": str(src), "build_rc": [co.returncode, hb.returncode]}
+            built = co.returncode == 0 and hb.returncode == 0
+            if built and not args.build_only:
+                run = runner.run([str(d / "harness"), str(d / "candidate.co"), str(d / "record.json")], timeout_s=60,
+                                 env=dict(os.environ, HIP_VISIBLE_DEVICES=str(args.gpu)))
+                row["record"] = read_record(d / "record.json")
+                row["stdout"] = run.stdout[-500:]
+                row["verdict"] = verdict(run, row["record"])[:2]
+                ok = row["verdict"][0] == "clean"
             else:
-                ok = build.returncode == 0
+                ok = built
                 if not ok:
-                    row["stderr"] = build.stderr[-2000:]
+                    row["stderr"] = (co.stderr + hb.stderr)[-2000:]
             row["pass"] = ok
             failed += not ok
             print(json.dumps(row), flush=True)
