@@ -96,6 +96,40 @@ def test_the_parse_gives_a_repair_turn_for_no_block_or_no_kernel(hipk):
     assert turn.text == other.rejection[0] and len(turn.text) <= 2000
 
 
+def test_the_parse_names_the_kernel_from_the_signature_not_the_task_id(hipk, tmp_path):
+    """Shape variants of one kernel have their own task ids; the kernel the reply must define is the signature's."""
+    from aorlta.orchestrator import wiring
+    from aorlta.rollout.chain import make_parse_adapter
+
+    task = dict(hipk.load_tasks(EXAMPLE)[1], id="saxpy_n1024")
+    (tmp_path / "tasks.json").write_text(json.dumps([task]))
+    (p,) = wiring.TaskPromptPool(plugins.task("hipk"), CharChat(), "off", tmp_path).records()
+    parse = make_parse_adapter("hipk.parse")
+    parse.check_prompts([p], "off")
+    ref = (EXAMPLE / "reference" / "saxpy.hip").read_text()
+    assert parse.check(f"```cpp\n{ref}\n```", "off", p).kind == "edits"
+    other = parse.check("```cpp\n__global__ void saxpy_n1024(float a, const float* x, float* y, int n) {}\n```",
+                        "off", p)
+    assert other.kind == "rejected" and other.rejection[1] == "no_kernel" and "`saxpy`" in other.rejection[0]
+    unnamed = dataclasses.replace(p, messages=[p.messages[0], {"role": "user", "content": "Write a kernel."}])
+    with pytest.raises(ValueError, match="no __global__ signature"):
+        parse.check_prompts([unnamed], "off")
+
+
+def test_the_selfcheck_fails_a_task_with_no_reference_and_a_run_that_checked_nothing(hipk, tmp_path, capsys):
+    """By default every task needs its reference kernel; with --sources a task without one is skipped, but a run
+    that checked no task at all is not a pass."""
+    (tmp_path / "pool").mkdir()
+    (tmp_path / "pool" / "tasks.json").write_text(json.dumps([dict(hipk.load_tasks(EXAMPLE)[0], id="no_reference")]))
+    assert hipk.selfcheck(["--pool", str(tmp_path / "pool"), "--build-only"]) == 1
+    (row,) = [json.loads(x) for x in capsys.readouterr().out.splitlines()]
+    assert (row["task"], row["pass"], row["error"]) == ("no_reference", False, "no reference kernel")
+    (tmp_path / "sources").mkdir()
+    assert hipk.selfcheck(["--pool", str(EXAMPLE), "--sources", str(tmp_path / "sources"), "--build-only"]) == 1
+    out = capsys.readouterr()
+    assert out.out == "" and "had a kernel to check" in out.err
+
+
 def proc(rc=0, stdout="", stderr="", timed_out=False, killed=False, launch_error=None):
     from aorlta.reward.adapters.base import ProcResult
 

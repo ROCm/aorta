@@ -14,6 +14,118 @@ This directory is a self-contained Python package, `aorlta`, inside the aorta re
 import it, and the stand-in checks use aorta's sanitizer backends from a separate checkout. It is the framework, not
 a model: so far it has run only on stand-ins, the public Qwen3.5-4B, our own prompts and our own cheap checks.
 
+New to it? [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) is the order to do things in: what you need, the CPU
+tests, the first GPU run, reading the outputs, the settings, and what the job's exit codes mean.
+
+## How it works
+
+One training iteration, as `orchestrator/loop.py` runs it (the numbers are its steps). The rollout chain is
+`rollout/chain.py`, the checks `reward/service.py` with the stages of the run's profile, the trainer `trainer/`, the
+weight sync `sync/`. Every red box stops the run; the reason is in `run_result.json`.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart TD
+    subgraph setup["Start of a run, once"]
+        plan["run plan: the resolved config, the code commit, file hashes"] --> estart["engines start: settings read back,<br/>sampling self-test (different seeds must differ)"]
+        estart --> rt["round trip: a perturbation must change every probe's log-probs,<br/>restoring the base must bring them back bit for bit"]
+        rt --> warm["trainer warm-up; on resume, the checkpoint is restored and must land"]
+    end
+    warm --> select
+
+    select["1 select P prompts from the pool: seeded, resume-safe"] --> turn
+    subgraph rollout["2-3 generate: TokenSpeed engines at policy v(n-1), K chains per prompt"]
+        turn["one request per chain and turn, with its own seed"] --> parse{"parse the reply<br/>rollout.parse_adapter"}
+        parse -- "an answer" --> compile{"compile check<br/>rollout.compile_adapter (none: skipped)"}
+        parse -- "rejected with a reason (the parser sets rejection), a turn left" --> feedback["repair turn<br/>rollout.feedback_template"]
+        compile -- "errors, a turn left" --> feedback
+        feedback --> turn
+        parse -- "no change; rejected on the last turn;<br/>rejected with no reason (standin.parse: no code block)" --> cand
+        compile -- "compiled, or errors on the last turn" --> cand["the chain ends: its final answer is a candidate"]
+    end
+    cand -- "handed over as each chain ends" --> stages
+    subgraph reward["reward service: staged checks behind a cache, reward.profile"]
+        stages["stages run in order while the reward function needs more:<br/>parse gate, compile gate, waitcheck, ConSan, ASan in the stand-in profiles;<br/>a task's own profile names only its own checks"] --> rfn["reward function, reward.reward_fn:<br/>a reward in -1.55..1.0, or unscored (an unsettled check is never clean)"]
+    end
+    rfn --> group["4 a group whose K results are final: GRPO advantages within it,<br/>its gradient accumulated at once (streaming)"]
+    group --> barrier["5 generation barrier: engines idle; 6 wait for scoring, to its deadline"]
+    barrier --> frac{"7 scored fraction at least<br/>orchestrator.min_scored_fraction?"}
+    frac -- "no, after re-checking unsettled legs once" --> stopped(["stop: the iteration is not trained"])
+    frac -- "yes" --> gap
+    subgraph trainer["8 LoRA trainer ranks, GRPO"]
+        gap{"gap gate: trainer vs engine log-probs of the sampled tokens,<br/>per sample, against trainer.max_generation_gap"} -- "over the limit: left out" --> offp{"more than<br/>max_off_policy_fraction left out?"}
+        gap -- "within the limit" --> opt
+        offp -- "no" --> opt["one optimizer step, then the step checks:<br/>finite, non-zero gradient; LoRA moved; frozen weights did not; ranks agree"]
+    end
+    offp -- "yes" --> stopped2(["stop: nothing is published"])
+    opt -- "a check fails" --> stopped2
+    opt -- "checks pass" --> merge
+    subgraph sync["9 weight sync"]
+        merge["merge the LoRA into bf16 weights"] --> slot["write a weight slot in sync.dir (/dev/shm by default)"]
+        slot --> reload["reload every engine (none may hold a request)"]
+        reload --> land{"landing check on every engine:<br/>probe log-probs changed, and agree with the trainer's"}
+    end
+    land -- "NOT_LANDED or MISMATCH" --> stopped3(["stop: the weights did not land"])
+    land -- "LANDED, or NOOP (5 in a row stop)" --> record["10 record: episodes, summary, TensorBoard,<br/>checkpoint ckpt/iter-n; the iteration directory's rename commits it"]
+    record -- "next iteration: the engines hold v(n)" --> select
+
+    classDef stop fill:#fdd,stroke:#c00,color:#600
+    class stopped,stopped2,stopped3 stop
+```
+
+A score run (`orchestrator.mode: score`, `orchestrator/score.py`) serves a model, checks it is exactly the one the
+run plan hashed, and runs the same rollouts and checks over the pool, with no trainer and no weight sync; an unscored
+sample is still never clean. A trained checkpoint holds a LoRA latent; to score it, export it as a PEFT adapter with
+`tools/export_adapter.py`, which [#612](https://github.com/ROCm/aorta/pull/612) adds (`tools/eval_compare.py` comes
+with the worked examples, [#613](https://github.com/ROCm/aorta/pull/613)):
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart LR
+    ckpt["ckpt/iter-n/trainer/trainer.pt:<br/>fp32 LoRA latent, Adam state, RNG states"] -- "tools/export_adapter.py" --> peft["PEFT adapter directory"]
+    base["model.base_dir: a Hugging Face checkpoint"] --> served
+    peft -- "model.adapter_dir" --> merged["tools/merge_base_adapter.py:<br/>base plus adapter, merged in the run"]
+    base --> merged
+    merged --> served{"served model: files hash as recorded,<br/>slot matches its manifest, round trip PROVEN"}
+    served -- "yes" --> score["score: P prompts at a time, K samples each,<br/>orchestrator.score.passes passes"]
+    served -- "no" --> refused(["nothing is scored"])
+    score --> report["score/report.jsonl, summary.txt, model.json"]
+    report -- "tools/eval_compare.py, base vs trained" --> compare["pass rate, mean reward, per-prompt deltas"]
+
+    classDef stop fill:#fdd,stroke:#c00,color:#600
+    class refused stop
+```
+
+Where it runs, in `configs/standin.yaml` (the worked examples' one-GPU configs put one engine and one rank on GPU 0,
+and run their checks on the CPU):
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart TB
+    subgraph node["One 8-GPU MI350X node"]
+        subgraph orch["orchestrator container"]
+            loop["the loop, the reward service and its CPU check pools<br/>(parse and compile gates, waitcheck), the checks' cache, the weight sync"]
+            subgraph gpus["GPUs 0-3: on each, one TokenSpeed engine (45% of its memory) and one LoRA trainer rank;<br/>the 4 ranks all-reduce their gradients once per step"]
+                g0["GPU 0<br/>engine 0, rank 0"]
+                g1["GPU 1<br/>engine 1, rank 1"]
+                g2["GPU 2<br/>engine 2, rank 2"]
+                g3["GPU 3<br/>engine 3, rank 3"]
+            end
+        end
+        subgraph chk["checker container, reward.remote: one server per check and GPU"]
+            c4["GPU 4: ConSan"]
+            a5["GPU 5: ASan"]
+            c6["GPU 6: ConSan"]
+            a7["GPU 7: ASan"]
+        end
+        shm[("/dev/shm: weight slots, checker sockets")]
+    end
+    loop -- "requests and replies; complete groups to train" --> gpus
+    loop -- "ConSan and ASan legs, over Unix sockets" --> chk
+    loop -- "merged weights" --> shm
+    shm -- "reload" --> gpus
+```
+
 ## Status
 
 What is verified, with the commands to reproduce it, and what is not yet shown: [VALIDATION.md](VALIDATION.md).
@@ -80,7 +192,11 @@ labels (Section 6.x, C1-C9, D7, ...) of our internal design notes, which are not
   job mounts from the host, needs ROCm 7.0.2). On a node without the TokenSpeed image the job builds it (about
   12 min) from a source tree of that commit, `TS_SRC`.
 - The base model `Qwen/Qwen3.5-4B` at revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`, already in the Hugging
-  Face cache: the job runs offline.
+  Face cache: the job runs offline. Only the Qwen3.5 family works as it stands (the turn templates use its
+  control-token ids, and the trainer its linear-attention fast path).
+- A stand-in prompt pool: a kernel dataset in the format of `examples/standin-pool/`, with at least 40 kernels of
+  60 to 400 instructions (the landing check picks 40). The dataset the stand-in runs used is not published, and the
+  example pool is too small to run on.
 - What the stand-in checks call: aorta at `d22f6116235c05395a0241a83d6f7e952a988454` (a commit of this repository),
   for its sanitizer backends and test kernels; rocjitsu's `rj_waitcheck` and `librocjitsu_dbi_hooks.so`, from
   ROCm/rocm-systems branch `shared/rocjitsu/sanitizers`; the ROCm 7.0.2 ASan runtime libraries; a libstdc++ recent
@@ -115,8 +231,14 @@ data: {prompt_pools: [/data/aorlta/standin-pool]}
 cd aorlta                  # from the root of the aorta checkout, in a Python 3.12 venv
 pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt
 pip install -e . --no-deps
-python -m pytest -q -n auto
+export OMP_NUM_THREADS=1 MALLOC_MMAP_THRESHOLD_=65536 MALLOC_ARENA_MAX=2
+python -m pytest -q -n 8 -m "not heavy and not cpu_run"
+OMP_NUM_THREADS=2 python -m pytest -q -n 2 -m "heavy and not cpu_run"
+OMP_NUM_THREADS=4 python -m pytest -q -m cpu_run
 ```
+
+These are CI's three parts. Keep the worker counts small: `-n auto` on a machine with many cores runs out of memory,
+since a worker can grow by about 1.5 GB for each wired test it runs.
 
 Run them in a git checkout: a run records its code commit. Tests that need hipcc, a GPU, the base model's tokenizer
 (read from `HF_HOME`), a full stand-in dataset (`AORLTA_STANDIN_DATASET`), aorta's fixtures or the checker tools skip
@@ -139,7 +261,8 @@ python -m aorlta.orchestrator.run --config "$SCRATCH/dev.yaml" --components fake
 ```
 
 It prints `{"status": "completed", "iterations_completed": 3, ...}` and writes a run directory (see "Run outputs")
-under `$SCRATCH/runs/standin/`.
+under `$SCRATCH/runs/standin/`. The fakes bring their own prompts and checks: this checks the config and the loop,
+not the prompt pool or the checks the config names.
 
 ## A stand-in run on GPUs
 
@@ -205,7 +328,7 @@ same config runs with the fakes, as under "The loop on CPU, with fake components
 | round trip | start | weights that do not reach the engines: a synthetic perturbation must change every probe's log-probs, and restoring the base must bring them back bit for bit |
 | sampling | each iteration | more than 5% of groups whose K answers are all identical |
 | unscored is never clean | each check | an adapter error, a timeout, a lost worker or a check with nothing to watch leaves the check unsettled, and the sample unscored unless a finding is confirmed; a clean reward needs every check of the profile clean |
-| minimum scored fraction | after scoring | training on an iteration with fewer than `orchestrator.min_scored_fraction` of its samples scored (0.9 by default, 0.75 in `standin.yaml`): the unsettled checks are retried once, then the run stops |
+| minimum scored fraction | after scoring | training on an iteration with fewer than `orchestrator.min_scored_fraction` of the candidates handed to the reward service scored (0.9 by default, 0.75 in `standin.yaml`): the unsettled checks are retried once, then the run stops |
 | gap check | each step | a sample whose trainer and engine log-probs differ by more than `trainer.max_generation_gap` (0.05 nats of mean \|Δ\| in `standin.yaml`) is left out of the step; if more than `max_off_policy_fraction` (2%) are left out, the step is refused and the run stops |
 | step checks | each step | a non-finite or zero gradient, a non-finite loss, or a group trained twice; after the step, a LoRA tensor that is non-finite or did not move, a frozen weight that moved, or ranks that disagree. The run stops before the weights are published |
 | landing check | each weight sync | an engine whose probe log-probs did not change after a real update (NOT_LANDED), or differ from the trainer's by more than a limit calibrated at start (MISMATCH): the run stops. Five updates in a row that change nothing on the engines (NOOP) stop it too |
@@ -247,7 +370,25 @@ for n in complete_iterations(sys.argv[1]):
 TensorBoard reads `tb/` (checked with 2.21; it is not a dependency). The checkpoint is a plain `torch.save` dict:
 `torch.load(path, map_location="cpu", weights_only=True)["lora"]` gives the 496 fp32 LoRA tensors (r 16, alpha 32),
 named `<module>.lora_A` and `<module>.lora_B`. The engines' weight slots are in `/dev/shm` and are removed when the
-run ends; a run has no export to a merged Hugging Face model or a PEFT adapter directory yet.
+run ends. To use a trained LoRA elsewhere, export a checkpoint as a PEFT adapter directory, then score it, merge it,
+or load it with peft:
+
+```bash
+python tools/export_adapter.py --ckpt RUN_DIR/ckpt/iter-000003 --out /path/to/adapter
+# score it: model.adapter_dir: /path/to/adapter in a score run's config, on the run's base
+python tools/merge_base_adapter.py merge --base BASE_DIR --adapter /path/to/adapter --out /path/to/merged
+```
+
+The export checks the checkpoint against its manifest and reads its output back bit for bit; merged with
+`merge_base_adapter.py`, it gives exactly the weights the engines served at that iteration, unless the run used
+`sync.stochastic_rounding`.
+
+## Getting help
+
+Open an issue on this repository with the **AORLTA problem or question** template (label `aorlta`): what you ran,
+the commit, the model, the GPUs, the full command and the end of the log. Vivek Khandelwal (@vivekkhandelwal1)
+maintains AORLTA and reads them. Feedback on these docs is as welcome as a bug report: open an issue titled
+`docs: ...` for anything that was unclear, wrong or missing.
 
 ## Known limits
 
@@ -258,5 +399,5 @@ run ends; a run has no export to a merged Hugging Face model or a PEFT adapter d
   unscored. In the last stand-in training run 152 of 768 samples stayed unscored, all with `sanitizer_not_settled`;
   that is why `standin.yaml` sets the scored fraction to 0.75, which iteration 3 met exactly (192 of 256).
 - A hung candidate kernel costs its ASan check the full 45 s limit (ConSan's limit is 30 s in `standin.yaml`).
-- Score runs: an adapter's merge has run only in the CPU tests, `rollout.K` must be at least 2, and a pass whose groups
+- Score runs: an adapter's merge (and so a scored export of a trained checkpoint) has run only in the CPU tests, `rollout.K` must be at least 2, and a pass whose groups
   give K identical answers too often stops, as a training iteration does.

@@ -99,6 +99,16 @@ def defines_kernel(source: str, kernel: str) -> bool:
                      source) is not None
 
 
+def prompt_kernel(prompt) -> str | None:
+    """The kernel a prompt asks for, read from the signature in its user message: a task's id names the task and
+    need not be its kernel's name (shape variants of one kernel have their own ids)."""
+    for m in getattr(prompt, "messages", None) or ():
+        if m.get("role") == "user":
+            found = re.search(r"__global__\s+(?:__launch_bounds__\s*\([^)]*\)\s*)?void\s+(\w+)\s*\(", m["content"])
+            return found.group(1) if found else None
+    return None
+
+
 class HipkParse:
     """`hipk.parse`: the last ```cpp block (the stand-in parse's rule). No block, or a block that does not define the
     task's kernel, is rejected with a message, which `hipk.feedback` turns into a repair turn."""
@@ -114,6 +124,8 @@ class HipkParse:
         for p in prompts:
             if not p.prompt_id.startswith("hipk:"):
                 raise ValueError(f"hipk.parse reads hipk prompts, got {p.prompt_id!r}")
+            if prompt_kernel(p) is None:
+                raise ValueError(f"{p.prompt_id}: its user message has no __global__ signature to name the kernel")
 
     def check(self, text, thinking, prompt):
         from aorlta.rollout.compile_check import ParseOutcome, parse_code
@@ -123,7 +135,9 @@ class HipkParse:
             return ParseOutcome("rejected", rejection=(
                 "Your reply has no complete ```cpp code block. Reply with the whole HIP source in one ```cpp block.",
                 "no_code_block"))
-        kernel = prompt.prompt_id.split(":", 1)[1]
+        kernel = prompt_kernel(prompt)
+        if kernel is None:
+            raise ValueError(f"{prompt.prompt_id}: its user message has no __global__ signature to name the kernel")
         if not defines_kernel(code, kernel):
             return ParseOutcome("rejected", rejection=(
                 f"Your source does not define the kernel `{kernel}`. Define it as a __global__ function with exactly "
@@ -897,7 +911,8 @@ def selfcheck(argv=None) -> int:
     """Each task's reference kernel (reference/<id>.hip), or with --sources DIR the kernel DIR/<id>.hip where there
     is one, through the check's own steps: compiled alone into a code object, the task's harness built, and unless
     --build-only run on the GPU and judged by `verdict`. Prints one JSON line per task; exit 0 when all are clean
-    (built, with --build-only)."""
+    (built, with --build-only). A task with no reference kernel fails; with --sources a task with no source is
+    skipped, and a run that checked no task at all fails."""
     import subprocess
     from types import SimpleNamespace
 
@@ -919,13 +934,18 @@ def selfcheck(argv=None) -> int:
     ap.add_argument("--sources", default=None, help="a directory of <task id>.hip kernels to check instead")
     ap.add_argument("--build-only", action="store_true", help="compile the harnesses, run nothing (no GPU)")
     args = ap.parse_args(argv)
-    failed = 0
+    failed = checked = 0
     work = Path(tempfile.mkdtemp(prefix="hipk-selfcheck-"))
     try:
         for task in load_tasks(args.pool):
             src = Path(args.sources or HERE / "reference") / f"{task['id']}.hip"
             if not src.is_file():
+                if args.sources is None:
+                    failed += 1
+                    print(json.dumps({"task": task["id"], "source": str(src), "pass": False,
+                                      "error": "no reference kernel"}), flush=True)
                 continue
+            checked += 1
             d = work / task["id"]
             d.mkdir()
             (d / "harness.hip").write_text(harness_source(task), encoding="utf-8")
@@ -951,7 +971,9 @@ def selfcheck(argv=None) -> int:
             print(json.dumps(row), flush=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return 1 if failed else 0
+    if not checked:
+        print(f"selfcheck: no task of {args.pool} had a kernel to check", file=sys.stderr)
+    return 1 if failed or not checked else 0
 
 
 def timecheck(argv=None) -> int:
