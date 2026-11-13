@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import unicodedata
 from pathlib import Path
 
@@ -140,6 +142,9 @@ class QaMatch:
         self.version = "1"  # cached legs are keyed by it: the judge, which can turn a mismatch clean, is part of it
         if self.judge:
             files = {a: file_identity(a) for a in self.judge if isinstance(a, str) and Path(a).is_file()}
+            exe = shutil.which(self.judge[0]) if isinstance(self.judge[0], str) else None  # as PATH finds it, if bare
+            if exe:
+                files[f"exe:{self.judge[0]}"] = f"{os.path.realpath(exe)}:{file_identity(exe)}"
             ident = json.dumps({"judge": list(self.judge), "timeout_s": self.judge_timeout_s, "files": files},
                                sort_keys=True)
             self.version = f"1+judge-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
