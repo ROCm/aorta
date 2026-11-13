@@ -9,18 +9,25 @@ measure it". [ADAPTING.md](ADAPTING.md) says how to plug in your own task.
 
 This guide is the order to do things in. Paths are relative to `aorlta/` in a checkout of this repository.
 
+A few passages describe parts added by separate pull requests, which are not in a checkout until those merge: plugins
+for a task of your own ([#611](https://github.com/ROCm/aorta/pull/611)), the adapter exporter
+([#612](https://github.com/ROCm/aorta/pull/612)), and the worked examples, `examples/qa` and `examples/hip-kernels`
+with their `qa-*`, `arith-*` and `hipk-*` configs ([#613](https://github.com/ROCm/aorta/pull/613)). Each such passage
+names its pull request.
+
 ## What you need
 
 | | tested | notes |
 |---|---|---|
 | GPUs | one node with 8 MI350X (gfx950) | The images and the shipped profiles build for gfx950 only. MI355X is gfx950 too, but untested. MI300X (gfx942) needs TokenSpeed's image built for it, `docker/Dockerfile.trainer`'s causal-conv1d built for it (`HIP_ARCHITECTURES`, `PYTORCH_ROCM_ARCH`), and `offload_arch`/`target` changed in the profiles: untested. |
-| fewer GPUs | no | The layout is configuration: `rollout.engines` (one engine per GPU listed), `trainer.devices` (null: rank r beside engine r), and `reward.remote.adapters` (the GPU sanitizer checks). The engine start-up check needs `rollout.P >= 4`, not 4 engines, so one engine with one colocated rank and CPU-only checks should run, more slowly; it has not been run. |
+| fewer GPUs | only with the worked examples (#613) | The layout is configuration: `rollout.engines` (one engine per GPU listed), `trainer.devices` (null: rank r beside engine r), and `reward.remote.adapters` (the GPU sanitizer checks). The engine start-up check needs `rollout.P >= 4`, not 4 engines, so one engine with one colocated rank and CPU-only checks runs, more slowly: the worked examples' Q&A and arithmetic configs do (#613). With the stand-in configs it has not been run. |
 | node software | Docker, and Slurm | `jobs/aorlta-run.sbatch` refuses to run outside a Slurm job (exit 91). The docker daemon must be able to read the checkout and every data directory at the paths the job sees them: not a root-squashed network home, and not a Slurm job's private `/tmp`. |
 | Python | 3.12 | For the CPU tests and for the job, which reads the config on the host. Many cluster hosts have an older `python3`; `uv venv --seed -p 3.12 <dir>` (uv fetches a 3.12 if it has to), or any CPython 3.12, will do. |
 | images | built by the job | TokenSpeed at commit `3b684074c0ef79bc8bc00b31cda8dc2850e4b71f` (`git clone https://github.com/lightseekorg/tokenspeed && git -C tokenspeed checkout 3b684074c0ef79bc8bc00b31cda8dc2850e4b71f`, then `TS_SRC=$PWD/tokenspeed`), built by the job from its `docker/Dockerfile.amd`; and the trainer image on top of it from `docker/Dockerfile.trainer`. |
 | model | `Qwen/Qwen3.5-4B` at revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` | The job runs offline, so download it first: `HF_HOME=<cache> hf download Qwen/Qwen3.5-4B --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`. `model.base_dir` is the snapshot directory under `<cache>/hub/`. Only the Qwen3.5 family works as it stands: the turn templates use Qwen3.5's control-token ids (`rollout/templates.py`), and the trainer needs transformers' Qwen3.5 linear-attention fast path (`trainer.require_fast_path`). Another Qwen3.5 size, or a fine-tune of it, is the supported change. |
 | prompts | a pool of your own | The stand-in configs read a kernel dataset (`kernels.json` and `listings/`) that is not published. `examples/standin-pool/` shows its format but is too small for a run: the stand-in landing check alone picks 40 kernels of 60 to 400 instructions. |
-| stand-in check tools | only for the stand-in profiles | `standin-static` runs rocjitsu's `rj_waitcheck` (ROCm/rocm-systems branch `shared/rocjitsu/sanitizers`, built from source, with a libstdc++ that has GLIBCXX_3.4.31); `standin-gpu` adds ConSan (`librocjitsu_dbi_hooks.so` from the same build) and ASan (the ROCm 7.0.2 `*-asan` packages' `lib/asan`), through aorta's sanitizer backends at commit `d22f6116235c05395a0241a83d6f7e952a988454`. None of these is packaged; a task with checks of its own needs none of them. |
+| stand-in check tools | only for the stand-in profiles | `standin-static` runs rocjitsu's `rj_waitcheck` (ROCm/rocm-systems branch `shared/rocjitsu/sanitizers`, built from source, with a libstdc++ that has GLIBCXX_3.4.31); `standin-gpu` adds ConSan (`librocjitsu_dbi_hooks.so` from the same build) and ASan (the ROCm 7.0.2 `*-asan` packages' `lib/asan`), through aorta's sanitizer backends. None of these is packaged; a task with checks of its own needs none of them. |
+| aorta checkout | every GPU run | aorta at commit `d22f6116235c05395a0241a83d6f7e952a988454`, at `AORLTA_AORTA_ROOT` (default `/opt/aorta`). The job's import pre-flight loads two of its sanitizer backends whatever the check profile (`jobs/aorlta-imports-check.py`), and stops with exit 99 if it cannot. The stand-in checks also use it at run time. |
 
 ## 1. Install and run the CPU tests
 
@@ -67,8 +74,9 @@ and set the job's environment (the full list is in the header of `jobs/aorlta-ru
 ```bash
 export AORLTA_SITE=/path/to/site.yaml AORLTA_VENV=~/venvs/aorlta TS_SRC=/path/to/tokenspeed
 export AORLTA_HF_HOME=/path/to/hf-cache AORLTA_TMPDIR=/path/to/tmp   # both visible to the docker daemon
+export AORLTA_AORTA_ROOT=/path/to/aorta-d22f6116   # every GPU run: the import pre-flight needs it (exit 99)
 # the stand-in profiles only:
-export AORLTA_ROCJITSU_ROOT=... AORLTA_LIBSTDCXX_SHIM=... AORLTA_AORTA_ROOT=... AORLTA_ASAN_LIB=...
+export AORLTA_ROCJITSU_ROOT=... AORLTA_LIBSTDCXX_SHIM=... AORLTA_ASAN_LIB=...
 ```
 
 `rocm/dev-ubuntu-24.04:7.0.2`, which the job pulls for the GPU sanitizer checks, comes from Docker Hub: set
@@ -78,10 +86,18 @@ export AORLTA_ROCJITSU_ROOT=... AORLTA_LIBSTDCXX_SHIM=... AORLTA_AORTA_ROOT=... 
 
 Score the base model first (`orchestrator.mode: score`): the same rollouts and checks with no training, so it shows
 whether the checks settle and whether the reward separates answers, before any training time is spent. Then train.
-Both are one job, submitted from `aorlta/` with the config committed:
+These are two separate jobs, each submitted from `aorlta/` with its config committed; a score run never goes on to
+train. First the score run:
 
 ```bash
 mkdir -p runs && CONFIG=configs/score-standin.yaml sbatch jobs/aorlta-run.sbatch
+```
+
+then, once its `score/summary.txt` looks right (section 5), the training run:
+
+```bash
+CONFIG=configs/standin.yaml sbatch jobs/aorlta-run.sbatch      # the score run's checks, layout and seed, with training
+CONFIG=configs/dev-standin.yaml sbatch jobs/aorlta-run.sbatch  # or: CPU checks only (standin-static), 4 GPUs
 ```
 
 What the job does, in order, is listed in the README ("A stand-in run on GPUs"). Its log is `runs/job-<id>.out`;
@@ -116,7 +132,8 @@ cache, if it is still there).
   ```
 - TensorBoard: `pip install tensorboard` (not a dependency), then `tensorboard --logdir <run_dir>/tb`.
 - Checkpoints (`ckpt/iter-<n>/trainer/trainer.pt`) hold the fp32 LoRA, the optimizer state and the RNG states; the
-  last 2 are kept. The README's "Run outputs" says how to use a trained LoRA outside the run.
+  last 2 are kept. They are for resuming the run; the README's "Run outputs" says how to load one and read its LoRA
+  tensors.
 
 ## 6. The settings you will change
 
@@ -131,7 +148,7 @@ Every key, with its default and range, is in `src/aorlta/config.py`; an unknown 
 | `trainer.ranks`, `trainer.devices`, `trainer.lr`, `trainer.micro_batch_tokens` | the LoRA trainer; the LoRA itself is r 16, alpha 32 (`LORA_R`, `LORA_ALPHA` in `orchestrator/wiring.py`) |
 | `trainer.max_generation_gap`, `trainer.gap_statistic` | how far the trainer's log-probs may be from the engine's before a sample is left out |
 | `orchestrator.iterations`, `orchestrator.run_seed` | the run's length and seed |
-| `orchestrator.min_scored_fraction` | the share of an iteration's samples that must be scored before it trains (0.9 by default); after one retry of the unsettled checks, a shortfall stops the run |
+| `orchestrator.min_scored_fraction` | the share of the iteration's candidates handed to the reward service that must be scored before it trains (0.9 by default); after one retry of the unsettled checks, a shortfall stops the run. Chains an engine lost, cut at the generation deadline or quarantined are never handed over, so they are not in this share; the summary's `policy.not_handed_over` counts them |
 | `orchestrator.deadlines.generation_s`, `scoring_s` | floors of the per-iteration deadlines |
 | `orchestrator.score.prompts`, `passes` | what a score run scores |
 | `reward.profile`, `reward.timeouts`, `reward.gpu_check_s` | which checks run, and their time limits |
@@ -148,21 +165,21 @@ AORLTA runs on one node; it does not span nodes. On that node, the config says w
 |---|---|
 | `rollout.engines` | one TokenSpeed engine per GPU index listed |
 | `trainer.ranks`, `trainer.devices` | LoRA trainer ranks: with `devices` null, rank r shares engine r's GPU (it gets what the engine leaves, `1 - gpu_memory_utilization`); a list gives the ranks GPUs of their own |
-| the check profile, `reward.remote.adapters` | where GPU checks run (the stand-in sanitizers: their own GPUs; a plugin's check: its own settings) |
+| the check profile, `reward.remote.adapters` | where GPU checks run (the stand-in sanitizers: the GPUs `reward.remote.adapters` lists; a plugin's check (#611): the GPUs its check profile lists) |
 
 | GPUs | layout | runs |
 |---|---|---|
-| 1 | `engines: [0]`, `ranks: 1` (beside the engine), CPU checks | the Q&A example (`configs/qa-*.yaml`, `configs/arith-*.yaml`); measured below |
+| 1 | `engines: [0]`, `ranks: 1` (beside the engine), CPU checks | the worked examples' Q&A and arithmetic configs (`configs/qa-*.yaml`, `configs/arith-*.yaml`, #613); with the stand-in configs, untested |
 | 2 | `engines: [0, 1]`, `ranks: 1` or 2 | any task without GPU checks; untested |
-| 4 | `engines: [0, 1, 2, 3]`, `ranks: 1` to 4 | `configs/dev-standin.yaml`; with GPU checks, put them on GPUs the engines leave (`hipk.run.gpus`) |
-| 8 | 4 engines and ranks, the other 4 for GPU checks | `configs/standin.yaml`, `configs/hipk-*.yaml` |
+| 4 | `engines: [0, 1, 2, 3]`, `ranks: 1` to 4, CPU checks | `configs/dev-standin.yaml`. To keep GPU checks on 4 GPUs, use fewer engines and list the freed GPUs for the checks (`reward.remote.adapters` for the stand-in sanitizers); untested |
+| 8 | 4 engines and ranks, the other 4 for GPU checks | `configs/standin.yaml`; the worked HIP-kernel example's `configs/hipk-*.yaml` (#613) |
 
 Memory, measured from the job's `vram.tsv` (peak per GPU, MI350X, 288 GiB), with Qwen3.5-4B:
 
 | what | peak |
 |---|---|
 | a TokenSpeed engine at `gpu_memory_utilization: 0.45` | 131 GiB: an engine reserves its share for its KV cache, whatever the model's size, so lower the share on a GPU someone else uses |
-| an engine plus a colocated rank, 512-token replies (`configs/arith-train.yaml`) | 187 GiB |
+| an engine plus a colocated rank, 512-token replies, 16 prompts x 8 samples, `micro_batch_tokens: 20480` (the worked arithmetic example's `configs/arith-train.yaml`, #613) | 187 GiB |
 | an engine plus a colocated rank, 4096-token replies, `micro_batch_tokens: 20480` (`configs/dev-standin.yaml`) | 266 GiB |
 
 Estimates, not measured: a rank holds the bf16 base (2 bytes per parameter), a bf16 copy of the merged target
@@ -190,9 +207,10 @@ cancelled job left behind. The job asks Slurm for the whole node (`--exclusive`)
   last `orchestrator.keep_ckpts` (2) are kept; older ones are deleted by the run. Each holds the fp32 LoRA, the Adam
   state and the RNG states (a few hundred MB for Qwen3.5-4B, an estimate from its 130 MB fp32 LoRA). Delete a
   finished run's directory, or its `ckpt/`, when you no longer need to resume it.
-- **Adapters and merged models**: the README's "Run outputs" says how to turn a checkpoint into a PEFT adapter, how
-  to merge an adapter into its base (`tools/merge_base_adapter.py`), and how to score it: a score run with
-  `model.adapter_dir` set to the adapter serves the base plus the adapter.
+- **Adapters and merged models**: a score run with `model.adapter_dir` set to a PEFT LoRA adapter trained on that
+  base serves the base plus the adapter, merged by `tools/merge_base_adapter.py` (README, "Score a model without
+  training"). That adapter comes from outside the run: a checkpoint's `trainer.pt` is not a PEFT adapter, and turning
+  one into an adapter needs the adapter exporter, `tools/export_adapter.py` (#612).
 
 ## When things go wrong
 
@@ -217,8 +235,10 @@ Stops that a run reports in `run_result.json`, and what they usually mean:
   seeds. TokenSpeed on AMD defaults to a greedy sampler that ignores temperature and seed; the engines are started
   with `sampling_backend: triton`, and this check is what catches it if that ever stops taking effect.
 - the round trip is not PROVEN: a weight update did not reach the engines. Nothing is trained or scored.
-- the scored fraction is short: too many checks did not settle (look at the counts by reason in the summary). A
-  check that cannot settle leaves a sample unscored, never clean; lower `min_scored_fraction` only once you know why.
+- `scored_fraction_below_threshold`: too many checks did not settle. The failing iteration writes no summary; its
+  diagnostics are in `run_result.json`, under `stop.detail.policy` (the counts, before and after the retry) and
+  `stop.detail.unsettled` (each unsettled check: candidate, leg, reason, worker). A check that cannot settle leaves a
+  sample unscored, never clean; lower `min_scored_fraction` only once you know why.
 - a gap or landing check failed: trainer and engine disagree on the model. Stop and report it, with the run
   directory; it is not a setting to tune away.
 
