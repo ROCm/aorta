@@ -1,0 +1,38 @@
+# arith-score.yaml on Qwen/Qwen3-0.6B (a dense Qwen3, tied embeddings): the 64 held-out multiplications, 4 samples each.
+# One GPU: one TokenSpeed engine on GPU 0 and, for training, one LoRA rank beside it; the answer check runs on the CPU.
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir (and
+# model.adapter_dir to score a trained adapter) and data.prompt_pools[0].path, which is this checkout's
+# aorlta/examples/qa/arith/heldout.
+plugins: [examples/qa/qa_task.py]
+run:
+  run_id: arith-score-qwen3-0.6b
+  source: standin
+  root: /scratch/aorlta/runs
+model:
+  base_dir: /data/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
+  source: standin
+data:
+  prompt_pools:
+    - path: /opt/aorlta/examples/qa/arith/heldout
+      source: standin
+      task: qa
+rollout:
+  engines: [0]
+  K: 4
+  P: 16
+  max_repair_turns: 1
+  thinking: "off"
+  temperature: 0.7
+  max_new_tokens: 512
+  compile_adapter: none
+  parse_adapter: qa.parse
+  feedback_template: qa.feedback
+  # a question with one short answer can get K identical replies: that is not a broken sampler here (the engines'
+  # start-up self-test checks that), so only stop when most groups are
+  identical_groups_stop: 0.75
+reward:
+  profile: qa-match
+  reward_fn: qa.v1
+orchestrator:
+  mode: score
+  run_seed: 20261113
