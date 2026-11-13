@@ -105,3 +105,75 @@ def test_a_tampered_checkpoint_or_an_existing_output_is_refused(trained, tmp_pat
     pt.write_bytes(bytes(raw))
     assert X.main(["--ckpt", str(bad), "--out", str(tmp_path / "never")]) == 2
     assert not (tmp_path / "never").exists() and not (tmp_path / "never.partial").exists()
+
+
+def _replace_trainer_pt(pt: Path) -> None:
+    """Overwrite a checkpoint's trainer.pt with a well-formed trainer state holding different LoRA tensors."""
+    saved = torch.load(pt, map_location="cpu", weights_only=True)
+    saved["lora"] = {k: v + 1 for k, v in saved["lora"].items()}
+    torch.save(saved, pt)
+
+
+def test_a_trainer_file_replaced_after_the_manifest_check_is_never_exported(trained, tmp_path, monkeypatch):
+    """The trainer file is read once: the bytes checked against the manifest are the bytes exported and hashed,
+    whether the file is replaced before the manifest check (refused), together with a manifest that records it
+    (refused: the bytes read are not the ones recorded), or after the check (the checked bytes are exported)."""
+    import shutil
+
+    from aorlta.ids import sha256_json
+    from aorlta.orchestrator import state as ckpt_state
+
+    _, ckpt, _ = trained
+    real_verify = ckpt_state.verify_checkpoint
+    lora = torch.load(ckpt / "trainer" / "trainer.pt", map_location="cpu", weights_only=True)["lora"]
+    recorded = json.loads((ckpt / "MANIFEST.json").read_text())["files"]["trainer/trainer.pt"]["sha256"]
+    for when in ("before", "rewritten", "after"):
+        copy = tmp_path / when / ckpt.name
+        shutil.copytree(ckpt, copy)
+
+        def verify(path, when=when):
+            if when in ("before", "rewritten"):
+                _replace_trainer_pt(path / "trainer" / "trainer.pt")
+            if when == "rewritten":
+                m = json.loads((path / "MANIFEST.json").read_text())
+                m["files"] = ckpt_state.file_manifest(path, skip=("MANIFEST.json",))
+                m["files_sha256"] = sha256_json(m["files"])
+                (path / "MANIFEST.json").write_text(json.dumps(m))
+            state = real_verify(path)
+            if when == "after":
+                _replace_trainer_pt(path / "trainer" / "trainer.pt")
+            return state
+
+        monkeypatch.setattr(ckpt_state, "verify_checkpoint", verify)
+        out = tmp_path / when / "adapter"
+        rc = X.main(["--ckpt", str(copy), "--out", str(out)])
+        if when != "after":
+            assert rc == 2 and not out.exists(), when
+            continue
+        assert rc == 0
+        manifest = json.loads((out / X.MANIFEST_NAME).read_text())
+        assert manifest["checkpoint"]["trainer_pt_sha256"] == recorded
+        got = read_all(out)
+        for name, t in lora.items():
+            assert torch.equal(got[f"{name}.weight"], t), name
+
+
+def test_an_output_created_during_the_export_is_not_replaced(trained, tmp_path, monkeypatch):
+    """`out` is checked at entry, and again at publication: one that appears while the export runs is refused,
+    with the checked export left in `<out>.partial`, and is never replaced."""
+    _, ckpt, _ = trained
+    out = tmp_path / "adapter"
+    real_read = X.read_latent
+    theirs = []
+
+    def read_then_someone_creates_out(path):
+        got = real_read(path)
+        out.mkdir()
+        theirs.append(out.stat().st_ino)
+        return got
+
+    monkeypatch.setattr(X, "read_latent", read_then_someone_creates_out)
+    assert X.main(["--ckpt", str(ckpt), "--out", str(out)]) == 2
+    assert out.stat().st_ino == theirs[0] and not any(out.iterdir())
+    partial = out.with_name(out.name + ".partial")
+    assert json.loads((partial / X.MANIFEST_NAME).read_text())["pass"]

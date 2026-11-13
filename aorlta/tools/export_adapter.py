@@ -16,7 +16,8 @@ base directory when the run directory is the checkpoint's grandparent.
   export_adapter.py --ckpt RUN_DIR/ckpt/iter-000003 --out DIR [--base-model NAME_OR_PATH]
 
 Exit codes: 0 written and checked; 1 the read-back check failed; 2 the inputs were refused before anything was
-written (a failed read-back is left in `<out>.partial`). A run that used `sync.stochastic_rounding` served weights rounded from this latent with random bits, so a
+written, or `<out>` appeared while the export ran and is left as it was (a failed read-back, and a checked export
+refused this way, are left in `<out>.partial`). A run that used `sync.stochastic_rounding` served weights rounded from this latent with random bits, so a
 merge of the export (round to nearest) is close to, not equal to, what its engines served.
 """
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import sys
@@ -54,16 +56,30 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def read_latent(ckpt: Path) -> tuple[dict, dict[str, tuple[torch.Tensor, torch.Tensor]], int]:
-    """(the checkpoint's run state, module -> (A, B), steps done), after the checkpoint's own manifest check."""
+def read_latent(ckpt: Path) -> tuple[dict, dict[str, tuple[torch.Tensor, torch.Tensor]], int, str]:
+    """(the checkpoint's run state, module -> (A, B), steps done, sha256 of the trainer file), after the checkpoint's
+    own manifest check. The trainer file is read once, before that check, and the bytes read are what must match the
+    manifest's entry for it and what is loaded and hashed: a file replaced while the export runs is refused or never
+    read, and is not exported or hashed in place of the checked bytes."""
+    from aorlta.ids import sha256_json
+    from aorlta.orchestrator.state import MANIFEST_NAME as CKPT_MANIFEST
     from aorlta.orchestrator.state import TRAINER_DIR, CheckpointError, verify_checkpoint
     from aorlta.trainer.rank_pool import TRAINER_STATE, TRAINER_STATE_SCHEMA
 
+    rel = f"{TRAINER_DIR}/{TRAINER_STATE}"
     try:
+        raw = (ckpt / rel).read_bytes()
         state = verify_checkpoint(ckpt)
+        recorded = json.loads((ckpt / CKPT_MANIFEST).read_text(encoding="utf-8"))
     except (CheckpointError, OSError, ValueError) as exc:
         raise Refused(f"{ckpt}: {exc}") from None
-    saved = torch.load(ckpt / TRAINER_DIR / TRAINER_STATE, map_location="cpu", weights_only=True)
+    digest = hashlib.sha256(raw).hexdigest()
+    files = recorded.get("files") if isinstance(recorded, dict) else None
+    if (not isinstance(files, dict) or recorded.get("files_sha256") != sha256_json(files)
+            or recorded.get("iteration") != state.iteration
+            or files.get(rel) != {"sha256": digest, "size": len(raw)}):
+        raise Refused(f"{ckpt}: {rel} as read is not the file its manifest records")
+    saved = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
     if not isinstance(saved, dict) or saved.get("schema") != TRAINER_STATE_SCHEMA:
         raise Refused(f"{ckpt}: trainer state schema {saved.get('schema') if isinstance(saved, dict) else None!r}")
     lora = saved.get("lora")
@@ -83,7 +99,7 @@ def read_latent(ckpt: Path) -> tuple[dict, dict[str, tuple[torch.Tensor, torch.T
             raise Refused(f"{ckpt}: {module} is not a PEFT module name ({PEFT_PREFIX}...)")
         modules[module] = (slot["lora_A"], slot["lora_B"])
     return ({"run_id": state.run_id, "iteration": state.iteration, "policy_version": state.policy_version},
-            modules, int(saved.get("steps_done", 0)))
+            modules, int(saved.get("steps_done", 0)), digest)
 
 
 def adapter_config(modules: dict, base_model: str | None) -> dict:
@@ -114,7 +130,7 @@ def export(ckpt: Path, out: Path, base_model: str | None = None) -> dict:
     ckpt, out = Path(ckpt), Path(out)
     if out.exists():
         raise Refused(f"{out} exists")
-    state, modules, steps = read_latent(ckpt)
+    state, modules, steps, trainer_sha256 = read_latent(ckpt)
     plan_base = run_plan_base(ckpt)
     cfg = adapter_config(modules, base_model if base_model is not None else plan_base)
     tensors = {}
@@ -136,15 +152,34 @@ def export(ckpt: Path, out: Path, base_model: str | None = None) -> dict:
         and torch.equal(back[k].view(torch.uint8), t.view(torch.uint8)) for k, t in tensors.items())
     manifest = {
         "schema": SCHEMA, "pass": same, "checkpoint": {"dir": str(ckpt.resolve()), "state": state, "steps_done": steps,
-                                                       "trainer_pt_sha256": sha256_file(ckpt / "trainer" / "trainer.pt")},
+                                                       "trainer_pt_sha256": trainer_sha256},
         "run_plan_base_dir": plan_base, "modules": len(modules), "tensors": len(tensors),
         "r": cfg["r"], "lora_alpha": cfg["lora_alpha"],
         "files": {n: sha256_file(tmp / n) for n in (ADAPTER_WEIGHTS, ADAPTER_CONFIG)},
     }
     atomic_write_json(tmp / MANIFEST_NAME, manifest)
     if same:  # a failed read-back stays in <out>.partial, never at <out>
-        tmp.rename(out)
+        publish(tmp, out)
     return manifest
+
+
+def publish(tmp: Path, out: Path) -> None:
+    """Rename `tmp` to `out`, refusing (with `tmp` left in place) an `out` that appeared since the check at entry.
+    On POSIX a rename replaces an empty directory, so `out` is first reserved by creating it, which fails if anything
+    is there; the rename then replaces only that reservation, and fails if anything was written into it meanwhile."""
+    try:
+        out.mkdir()
+    except FileExistsError:
+        raise Refused(f"{out} appeared during the export; the checked export is left in {tmp}") from None
+    try:
+        os.rename(tmp, out)
+    except OSError as exc:
+        try:
+            out.rmdir()  # only if still empty: what was written into it is not ours to remove
+        except OSError:
+            pass
+        raise Refused(f"{out} changed during the export ({exc.strerror}); the checked export is left in "
+                      f"{tmp}") from None
 
 
 def main(argv: list[str] | None = None) -> int:
