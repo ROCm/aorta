@@ -15,7 +15,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.recipe import load_sanitizer_reci
 from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import waitcheck_argv
 from aorta.triage.recipe import RecipeSchemaError
 
-ASSETS = Path(__file__).resolve().parents[3] / ".agents/skills/rocm-sanitizer-triage/assets"
+ASSETS = Path(__file__).resolve().parents[3] / "examples/sanitizers/waitcheck/assets"
 CASES = ("invalid-image", "invalid-entry", "cap-high", "cap-low")
 
 

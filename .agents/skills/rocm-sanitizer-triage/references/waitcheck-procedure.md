@@ -163,13 +163,13 @@ simulated responses. A real cap64/cap1 comparison now records three summary
 diagnostics with three/one retained details; the low-cap report leaves truncation
 false. The original reader rejected its count mismatch; the updated reader now
 explains its supported explicit omission signal. See the
-[recorded result](waitcheck-examples.md#recorded-diagnostic-limit-result).
+[recorded result](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#recorded-diagnostic-limit-result).
 Native invalid selection was not reached in that original run. Subsequent bounded
 runs independently validated updated-producer cap64/cap1 metadata and native
 rejection of deliberately absent image/entry selectors; see the
-[subsequent results](waitcheck-examples.md#subsequent-updated-report-and-selector-results).
+[subsequent results](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#subsequent-updated-report-and-selector-results).
 This closes those recorded integration cases, not broader format/target support.
 Applicable process cleanup, complete tool provenance, full agent activity/model
 evidence and the real-attention skill walkthrough remain open. Preserve warnings
 and count evidence; unknown completion formats remain unqualified.
-See [qualification gaps](waitcheck-examples.md#qualification-gaps).
+See [qualification gaps](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#qualification-gaps).

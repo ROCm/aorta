@@ -2,7 +2,7 @@
 
 **Draft development procedure; one bounded isolation run is recorded below.** This tests whether selecting
 one kernel keeps a neighboring kernel out of the result. Follow the
-[common workflow](aorta-workflow.md) and applicable approval rules. Every cluster
+[common workflow](../../../../.agents/skills/rocm-sanitizer-triage/references/aorta-workflow.md) and applicable approval rules. Every cluster
 command, including listing and hashing, needs explicit approval where required
 by the user's environment. This plan does not grant execution approval.
 
@@ -37,7 +37,7 @@ reuse and preserves evidence on failure. GNU `timeout` is required. Save the
 filled command block and its outer exit status with the returned evidence.
 
 ```bash
-SKILL=/absolute/path/to/rocm-sanitizer-triage
+EXAMPLES=/absolute/path/to/aorta/examples/sanitizers/waitcheck
 WORK=/absolute/path/to/new-waitcheck-isolation
 AMDCLANG=/absolute/path/to/amdclang++
 PREBUILT=/absolute/path/to/rocjitsu/bundle
@@ -45,8 +45,8 @@ WAITCHECK="$PREBUILT/bin/rj_waitcheck"
 (
 set -eu
 mkdir "$WORK"
-cp "$SKILL/assets/waitcheck-controls/two_kernel_isolation.hip" "$WORK/"
-cp "$SKILL/assets/waitcheck-controls/LICENSE.upstream.txt" "$WORK/"
+cp "$EXAMPLES/assets/waitcheck-controls/two_kernel_isolation.hip" "$WORK/"
+cp "$EXAMPLES/assets/waitcheck-controls/LICENSE.upstream.txt" "$WORK/"
 sha256sum "$WORK/two_kernel_isolation.hip" "$AMDCLANG" "$WAITCHECK" > "$WORK/setup.sha256"
 timeout --kill-after=10s 30s "$AMDCLANG" --version > "$WORK/compiler.txt" 2>&1
 timeout --kill-after=10s 300s "$AMDCLANG" -O2 -x hip --offload-arch=gfx1250 \

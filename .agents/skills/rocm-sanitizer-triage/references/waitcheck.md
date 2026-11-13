@@ -23,7 +23,7 @@ The adapter contract was also checked at AORTA
 `ac11f84616a8bf7cc475e455bfb4a7ae250d4928`. Three development controls have now
 run through that installation on Linux x86_64: a scalar missing-wait finding,
 its corrected counterpart and a deliberately wrong input digest. See the
-[reproducible examples and qualification gaps](waitcheck-examples.md).
+[reproducible examples and qualification gaps](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md).
 This is bounded evidence for gfx1250 and the recorded tool, **not a qualified
 general launch route**. Other targets, tool versions and hazard classes are not
 established by these controls.
@@ -86,29 +86,12 @@ and offline evidence reader, use the [single-entry procedure](waitcheck-procedur
 It remains draft; recorded development controls do not qualify arbitrary user
 execution.
 
-Copy the bundled [draft exact-entry recipe](../assets/waitcheck-exact-entry.yaml)
-to the task directory. Replace every `REQUIRED_...` value with verified facts.
-Index/offset placeholders deliberately fail parsing; do not delete them to bypass
-that error. Set the object path relative to the copied recipe or use an absolute
-path on the execution host. Retain an explicit digest to bind the plan to that
-object; AORTA checks the file against it when scanning.
-
-The recipe selects `source.kind: kernel`, one identity and only `waitcheck`.
-Its scope/selection fields satisfy the schema; they do not prove entry coverage.
-`consan_policy: strict` is required by this schema even for Waitcheck-only use.
-
-Prepare these invocation shapes with concrete paths; they are not authorization
-or instructions to execute this unqualified route:
-
-```text
-aorta sweep run --recipe <prepared.yaml> --output <new-plan-output> --dry-run
-aorta sweep run --recipe <prepared.yaml> --output <new-scan-output>
-```
-
-A dry run reads inputs and writes a `not_checked/dry_run` report without scanning.
-It cannot establish tool compatibility, real entry existence, target support or
-checker coverage. Real invocation belongs to separately authorized development
-qualification, or later skill execution after qualification and agent evaluation.
+The procedure owns recipe preparation, dry-run/run command shapes and retained
+evidence. Its [exact-entry template](../assets/waitcheck-exact-entry.yaml) selects
+one identity and only `waitcheck`; `consan_policy: strict` is a required schema
+field, not a request to run ConSan. Unresolved image/entry placeholders fail
+parsing intentionally. A dry-run `not_checked/dry_run` result does not establish
+tool compatibility, real entry existence or checking coverage.
 
 For explicitly requested whole-object scope, prepare a separately labeled recipe
 without `entry_offset`; establish object/image identity and make no per-kernel
@@ -172,7 +155,7 @@ builds do not prove identical code or a crash explanation. AORTA execution
 
 ## 7. Required examples and agent cases
 
-The packaged [three-case example](waitcheck-examples.md) supplies two small source
+The repository [three-case example](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md) supplies two small source
 files and generates finding, corrected and digest-mismatch recipes. It is for
 explicitly authorized development validation; it does not check the user's kernel
 or replace their requested scope with a demo.
@@ -202,13 +185,13 @@ qualified AORTA route.
 
 ## 8. Qualification record
 
-The [qualification table](waitcheck-examples.md#qualification-gaps) separates
+The [qualification table](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#qualification-gaps) separates
 the verified controls from untested behavior. A separate
-[two-kernel development pair](waitcheck-isolation.md#recorded-development-result-10-november-2026)
+[two-kernel development pair](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-isolation.md#recorded-development-result-10-november-2026)
 now supports exact-entry isolation for its recorded build and tool: the faulty
 entry warns while its corrected neighbor passes. This is not an arbitrary-kernel
 or multi-entry-worklist qualification. A
-[three-diagnostic limit comparison](waitcheck-examples.md#recorded-diagnostic-limit-result)
+[three-diagnostic limit comparison](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#recorded-diagnostic-limit-result)
 originally stopped at a raw-count/retained-detail gate at limit1; the updated reader
 now explains the saved explicit omission signal. Broader cap/completion semantics
 and early stopping are not natively qualified. The native binary
@@ -217,7 +200,7 @@ but its full upstream build provenance remains unresolved. Applicable agent
 evaluation and release acceptance are still required. Advance readiness only under the
 [common rules](aorta-workflow.md#route-readiness).
 
-The [recorded attention result](waitcheck-examples.md#recorded-attention-kernel-result)
+The [recorded attention result](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#recorded-attention-kernel-result)
 adds one independently verified real-application AORTA warning with an explicit
 omission signal, plus accepted agent interpretation content. It preserves the
 same exact-entry and provenance boundaries; it does not qualify arbitrary kernels

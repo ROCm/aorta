@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 LABELS = ("missing", "corrected", "mismatch")
 TARGET = "gfx1250"
 UPSTREAM = "d03c6fe410eed62b211d56bb7878dd1f494269fe"
-ASSETS = Path(__file__).resolve().parent.parent / "assets" / "waitcheck-controls"
+ASSETS = Path(__file__).resolve().parent / "assets" / "waitcheck-controls"
 LOG_LIMIT = 1024 * 1024
 
 

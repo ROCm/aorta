@@ -1,7 +1,8 @@
 # Common AORTA workflow
 
 This is the shared contract. Checker-specific prerequisites, commands and evidence
-rules belong in the four checker references linked from `SKILL.md`.
+rules belong in the checker references supplied by `SKILL.md`. This increment
+provides Waitcheck only; shared rules do not establish other integrations.
 
 ## Inputs and task mode
 
@@ -146,7 +147,6 @@ For skill-guided execution, require both checker qualification and passing relev
 agent evaluations. Do not upgrade all routes because one passes. AORTA backend
 availability and skill route qualification are separate facts.
 
-The four backend references use the same eight-section handoff structure. Specialists
-fill those sections and supply evidence; the shared owner reviews integration and
-updates readiness. A section marked pending is an explicit missing deliverable,
-not a successful check.
+A section marked pending in a checker reference is missing evidence, not a
+successful check. Readiness applies only to the integration and scope documented
+there.

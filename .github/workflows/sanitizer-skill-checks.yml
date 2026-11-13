@@ -1,9 +1,10 @@
-name: Sanitizer skill checks
+name: Shared sanitizer foundation and Waitcheck checks
 
 on:
   pull_request:
     paths:
       - '.agents/skills/rocm-sanitizer-triage/**'
+      - 'examples/sanitizers/waitcheck/**'
       - 'docs/sanitizers/**'
       - 'src/aorta/instrumentation/rocjitsu_sanitizers/**'
       - '.github/workflows/sanitizer-skill-checks.yml'
@@ -63,7 +64,7 @@ jobs:
           args: >-
             --skill-files skill-card.md
             --skill-sections Description,Owner,License
-            --docs docs/sanitizers/skill-maintenance.md,docs/sanitizers/waitcheck-reporting.md
+            --docs docs/sanitizers/skill-maintenance.md,docs/sanitizers/waitcheck-reporting.md,examples/sanitizers/waitcheck/docs/waitcheck-examples.md,examples/sanitizers/waitcheck/docs/waitcheck-isolation.md
 
   agent-evals:
     name: Manual planning evaluations

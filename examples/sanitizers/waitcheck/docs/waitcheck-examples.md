@@ -38,15 +38,15 @@ The helper does not build, install tools, discover entries or authorize executio
 Set paths for the local installation, using a new work directory:
 
 ```bash
-SKILL=/absolute/path/to/rocm-sanitizer-triage
+EXAMPLES=/absolute/path/to/aorta/examples/sanitizers/waitcheck
 WORK=/absolute/path/to/new-waitcheck-example
 AMDCLANG=/absolute/path/to/amdclang++
 WAITCHECK=/absolute/path/to/bundle/bin/rj_waitcheck
 (
 set -eu
 mkdir "$WORK"
-"$AMDCLANG" -O2 -x hip --offload-arch=gfx1250 "$SKILL/assets/waitcheck-controls/missing_wait.hip" -o "$WORK/missing_wait"
-"$AMDCLANG" -O2 -x hip --offload-arch=gfx1250 "$SKILL/assets/waitcheck-controls/corrected_wait.hip" -o "$WORK/corrected_wait"
+"$AMDCLANG" -O2 -x hip --offload-arch=gfx1250 "$EXAMPLES/assets/waitcheck-controls/missing_wait.hip" -o "$WORK/missing_wait"
+"$AMDCLANG" -O2 -x hip --offload-arch=gfx1250 "$EXAMPLES/assets/waitcheck-controls/corrected_wait.hip" -o "$WORK/corrected_wait"
 "$WAITCHECK" "$WORK/missing_wait" --list-code-objects
 "$WAITCHECK" "$WORK/missing_wait" --target gfx1250 --list-kernels
 "$WAITCHECK" "$WORK/corrected_wait" --list-code-objects
@@ -62,7 +62,7 @@ the entry offset.
 
 ## Prepare, run and verify
 
-The [portable helper](../scripts/waitcheck_controls.py) keeps generated recipes,
+The [portable helper](../waitcheck_controls.py) keeps generated recipes,
 input snapshots, command records, reports and logs outside the installed skill.
 It requires fresh output directories. It validates this small three-case example,
 not arbitrary kernel results. Unexpected findings or output are failures of the
@@ -88,16 +88,16 @@ root containing `bin/rj_waitcheck`, and `TOOL_SHA256` to its verified hash.
 Use Python from the AORTA environment:
 
 ```bash
-python "$SKILL/scripts/waitcheck_controls.py" prepare \
+python "$EXAMPLES/waitcheck_controls.py" prepare \
   --missing-object "$WORK/missing_wait" --corrected-object "$WORK/corrected_wait" \
   --kernel-name _Z17waitcheck_controlv --build-id "$BUILD_ID" \
   --missing-index "$MISSING_INDEX" --missing-entry "$MISSING_ENTRY" \
   --corrected-index "$CORRECTED_INDEX" --corrected-entry "$CORRECTED_ENTRY" \
   --output "$WORK/prepared"
-python "$SKILL/scripts/waitcheck_controls.py" run \
+python "$EXAMPLES/waitcheck_controls.py" run \
   --prepared "$WORK/prepared" --aorta "$AORTA" --prebuilt "$PREBUILT" \
   --tool-sha256 "$TOOL_SHA256" --output "$WORK/run"
-python "$SKILL/scripts/waitcheck_controls.py" verify --run "$WORK/run"
+python "$EXAMPLES/waitcheck_controls.py" verify --run "$WORK/run"
 ```
 
 The run helper's successful comparison includes an expected error in the
@@ -284,4 +284,4 @@ are provided. This pair now has a verified development result; do not collect
 more random kernels to replace the remaining specific qualification checks.
 Other gaps mostly need controlled failure/output fixtures or agent tests.
 Keep the route draft, or explicitly narrow its supported claims, until the
-relevant gaps are closed under the [readiness rules](aorta-workflow.md#route-readiness).
+relevant gaps are closed under the [readiness rules](../../../../.agents/skills/rocm-sanitizer-triage/references/aorta-workflow.md#route-readiness).

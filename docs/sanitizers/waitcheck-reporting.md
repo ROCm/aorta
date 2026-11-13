@@ -113,7 +113,7 @@ For supplied real evidence, use the skill's saved reader as described in
 [the procedure](../../.agents/skills/rocm-sanitizer-triage/references/waitcheck-procedure.md#4-read-the-saved-report-and-raw-log).
 Preserve original inputs and use a fresh, writable output destination. Reader
 exit0 means a summary was written; keep native and AORTA exits separate. The
-[recorded examples](../../.agents/skills/rocm-sanitizer-triage/references/waitcheck-examples.md)
+[recorded examples](../../examples/sanitizers/waitcheck/docs/waitcheck-examples.md)
 describe bounded real-tool evidence and remaining qualification limits.
 
 ## Changed implementation

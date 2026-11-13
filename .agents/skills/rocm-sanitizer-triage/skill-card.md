@@ -2,7 +2,10 @@
 
 ## Description
 
-Plans ROCm sanitizer checks through AORTA and explains the evidence needed to interpret their results.
+Shared ROCm sanitizer skill foundation with an offline Waitcheck integration
+through AORTA: exact-entry planning and supplied-evidence interpretation for
+compiled missing-wait hazards. Skill-guided execution remains draft. Other
+sanitizer procedures are not included in this increment.
 
 ## Owner
 

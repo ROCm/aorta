@@ -18,7 +18,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.selection import select_kernels
 from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import run_waitcheck
 
 ROOT = Path(__file__).resolve().parents[3]
-SCRIPT = ROOT / ".agents/skills/rocm-sanitizer-triage/scripts/waitcheck_controls.py"
+SCRIPT = ROOT / "examples/sanitizers/waitcheck/waitcheck_controls.py"
 SPEC = importlib.util.spec_from_file_location("waitcheck_controls_example", SCRIPT)
 helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
