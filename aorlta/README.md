@@ -79,7 +79,14 @@ labels (Section 6.x, C1-C9, D7, ...) of our internal design notes, which are not
   job mounts from the host, needs ROCm 7.0.2). On a node without the TokenSpeed image the job builds it (about
   12 min) from a source tree of that commit, `TS_SRC`.
 - The base model `Qwen/Qwen3.5-4B` at revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`, already in the Hugging
-  Face cache: the job runs offline.
+  Face cache: the job runs offline. A dense Qwen3 runs too (`src/aorlta/model_family.py`): the control-token ids and
+  generation prompts come from the model's tokenizer and chat template, and the trainer's loader and the LoRA and merge
+  names from its `config.json`. Measured on one MI350X GPU, with the arithmetic example: Qwen3-8B
+  (`configs/arith-score-qwen3-8b.yaml`) scored 256 of 256 samples, 226 correct, landing round trip PROVEN; a
+  3-iteration training run trained iteration 1 and its update LANDED, then the gap gate stopped it at iteration 2,
+  with all 8 samples of one prompt 17 to 39 nats from the trainer's log-probs, which is not explained yet. Qwen3-0.6B
+  makes TokenSpeed (3b684074) fail with an illegal memory access in its scheduler after two batches, in a score and
+  a training run alike, so no 0.6B config is shipped.
 - What the stand-in checks call: aorta at `d22f6116235c05395a0241a83d6f7e952a988454` (a commit of this repository),
   for its sanitizer backends and test kernels; rocjitsu's `rj_waitcheck` and `librocjitsu_dbi_hooks.so`, from
   ROCm/rocm-systems branch `shared/rocjitsu/sanitizers`; the ROCm 7.0.2 ASan runtime libraries; a libstdc++ recent

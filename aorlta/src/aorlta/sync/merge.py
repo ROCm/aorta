@@ -36,14 +36,18 @@ from aorlta.ids import canonical_json
 ROUNDINGS = ("nearest", "stochastic")
 ROUNDING_SEED_TAG = "aorlta.stochastic_rounding/1"
 
-# PEFT target modules (the prototype's TARGETS) and the checkpoint keys they map to (Section 6.4, Model).
+# PEFT target modules (the prototype's TARGETS) and the checkpoint keys they map to (Section 6.4, Model): the
+# attention and MLP projections of every text decoder layer, and in Qwen3.5 the linear-attention projections too (a
+# Qwen3 layer has none, so those names match nothing there). The decoder's layers are `model.language_model.layers.N`
+# in a Qwen3.5 checkpoint and `model.layers.N` in a Qwen3 one (`model_family`); Qwen3.5's vision tower and its MTP
+# head (`mtp.layers.0`) are never targets.
 TARGET_MODULE_PATTERN = (
     r".*layers\.\d+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj)"
     r"|linear_attn\.(in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj))"
 )
 TARGET_KEY_RE = re.compile(
-    r".*language_model\.layers\.\d+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj)"
-    r"|linear_attn\.(in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj))\.weight"
+    r"model\.(?:language_model\.)?layers\.\d+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)"
+    r"|mlp\.(gate_proj|up_proj|down_proj)|linear_attn\.(in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj))\.weight"
 )
 GROUP_RE = re.compile(r"\.(self_attn|mlp|linear_attn)\.([a-z_]+)\.weight$")
 

@@ -2,7 +2,8 @@
 
 `update_weights_from_disk(path, flush_cache=True)` replies `(success, message, num_paused_requests)`, and on
 success the message ends "(N checkpoint tensors read)", N counting the tensors the loader yielded (A5). A reply
-counts only if success is exactly True and N is exactly the slot's tensor count (248 partial, 738 full).
+counts only if success is exactly True and N is exactly the slot's tensor count (`writer.expected_count`: for
+Qwen3.5-4B 248 partial, 738 full).
 
 A flushing reload is refused while a request pins the prefix cache (A7), so reloads happen only behind the
 generation barrier; a reload attempted with requests in flight is a programming error and stops the run.

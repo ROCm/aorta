@@ -97,11 +97,6 @@ class HipkParse:
 
     name = "hipk.parse"
 
-    def __init__(self):
-        from aorlta.rollout.templates import IM_END_ID
-
-        self.reply_stops = (IM_END_ID,)
-
     def check_prompts(self, prompts, thinking, max_repair_turns=0):
         for p in prompts:
             if not p.prompt_id.startswith("hipk:"):

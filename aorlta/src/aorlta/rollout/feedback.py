@@ -31,7 +31,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from .templates import Tokenizer, repair_suffix
+from .templates import Tokenizer, chat_format, repair_suffix
 
 HEADER = "Your code did not compile (hipcc --offload-arch=gfx950 -c). Errors:"
 FOOTER = "Fix the errors and reply with the complete corrected source in a single ```cpp code block."
@@ -190,5 +190,6 @@ def numbered_list(feedback_text: str) -> str:
 def feedback_token_bound(tokenizer: Tokenizer, max_chars: int, thinking: str) -> int:
     """Tokens of the repair suffix around the longest list, for sizing `max_model_len`: the fixed text plus at most
     one token per character of the list [E; the per-chain length check before each submit is the exact guard]."""
-    fixed = tokenizer.encode(repair_suffix(HEADER + "\n" + MORE.format(n=99999) + "\n" + FOOTER, thinking))
+    fixed = tokenizer.encode(repair_suffix(HEADER + "\n" + MORE.format(n=99999) + "\n" + FOOTER, thinking,
+                                         chat_format(tokenizer)))
     return len(fixed) + max_chars
