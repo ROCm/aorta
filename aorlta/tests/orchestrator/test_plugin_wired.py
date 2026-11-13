@@ -103,3 +103,36 @@ def test_a_task_may_give_its_own_self_test_chats(tmp_path, tiny_base, plugin, mo
     plugins.TASKS["toy"] = dataclasses.replace(toy, selftest_messages=lambda pool_dir: chats[:3])
     with pytest.raises(wiring.WiringError, match="the engine self-test needs 4 chats, got 3"):
         build(cfg, tiny_base)
+
+
+def test_the_engine_context_fits_the_start_up_requests(tmp_path, plugin, monkeypatch):
+    """Short prompts, no repair turn and a small reply budget gave the engines a context shorter than the self-test's
+    requests (its chats plus SELF_TEST_TOKENS) and the round trip's (sync.probe_tokens plus its continuation), so
+    the run would have died at start."""
+    from aorlta.rollout.engine_pool import SELF_TEST_TOKENS
+    from aorlta.rollout.templates import render_turn0
+    from aorlta.sync.roundtrip import GREEDY_TOKENS
+
+    tok = E.ByteTokenizer()
+    seen = []
+
+    class Sized(Exception):
+        pass
+
+    def engine_handles(cfg, max_len):
+        seen.append(max_len)
+        raise Sized
+
+    monkeypatch.setattr(wiring, "engine_handles", engine_handles)
+    selftest = max(len(render_turn0(tok, list(m), "off")) for m in wiring.SELF_TEST_CHATS) + SELF_TEST_TOKENS
+    for probe_tokens in (64, 4096):
+        data = TP.toy_config(tmp_path, str(plugin))
+        data["rollout"].update({"max_new_tokens": 16, "max_repair_turns": 0})
+        data["orchestrator"] = {"mode": "score", "run_seed": 3, "score": {"prompts": 4, "passes": 1}}
+        data["sync"]["probe_tokens"] = probe_tokens
+        cfg = config_from_dict(data)
+        with pytest.raises(Sized):
+            wiring.build(cfg, parts=wiring.Parts(tokenizer=tok, probes=E.PROBES))
+        records = wiring.TaskPromptPool(plugins.task("toy"), tok, "off", str(tmp_path / "pool")).records()
+        assert wiring.rollout_max_len(cfg, tok, records) < min(selftest, probe_tokens + GREEDY_TOKENS)
+    assert seen == [selftest, 4096 + GREEDY_TOKENS]

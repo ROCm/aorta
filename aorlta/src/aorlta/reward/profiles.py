@@ -154,6 +154,17 @@ def profile_problems(p: Profile) -> list[str]:
     return out
 
 
+# The adapters that import aorta's sanitizer backends from AORLTA_AORTA_ROOT; a profile naming none of them needs no
+# aorta checkout.
+AORTA_ADAPTERS = frozenset({"standin.rj_waitcheck", "standin.aorta_consan", "standin.aorta_asan"})
+
+
+def aorta_preflight_modules(profile: Profile) -> tuple[str, ...]:
+    """The aorta modules the run job's import pre-flight loads in the run image (`jobs/aorlta-imports-check.py`):
+    `models` and `waitcheck` when a pool of the profile uses an aorta adapter, none otherwise."""
+    return ("models", "waitcheck") if any(p.adapter in AORTA_ADAPTERS for p in profile.pools.values()) else ()
+
+
 def profile_from_dict(data: Mapping[str, Any], source: str = "<profile>") -> Profile:
     if not isinstance(data, Mapping):
         raise ConfigError(f"{source}: a profile is a mapping")
@@ -170,6 +181,11 @@ def load_profile(name_or_path: str | Path) -> Profile:
     from .. import plugins
 
     path = Path(name_or_path)
-    if path.suffix not in (".yaml", ".yml"):
-        path = plugins.profile_path(str(name_or_path)) or PROFILE_DIR / f"{name_or_path}.yaml"
-    return profile_from_dict(parse_yaml(path.read_bytes(), str(path)), str(path))
+    if path.suffix in (".yaml", ".yml"):
+        return profile_from_dict(parse_yaml(path.read_bytes(), str(path)), str(path))
+    path = plugins.profile_path(str(name_or_path)) or PROFILE_DIR / f"{name_or_path}.yaml"
+    profile = profile_from_dict(parse_yaml(path.read_bytes(), str(path)), str(path))
+    if profile.name != name_or_path:  # candidates carry the name asked for; the service serves the file's
+        raise ConfigError(f"{path}: profile {str(name_or_path)!r} names itself {profile.name!r}; a candidate would "
+                          f"carry one and the reward service serve the other (profile_mismatch on every sample)")
+    return profile

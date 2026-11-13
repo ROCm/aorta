@@ -9,8 +9,9 @@ set to the trained adapter (`tools/export_adapter.py`), each under its own `run.
 It prints the pass rate (the share of samples whose reward claims clean: a correct answer), the mean reward and the
 scored fraction of each, and the per-prompt change, and writes `<out>/eval-compare.json` and `<out>/eval-compare.md`.
 The markdown holds, for the prompts that changed most, one sample of each model: its reward, its checks' states and,
-with `--tokenizer`, its final reply decoded. It refuses two runs that did not score the same prompts with the same
-sampling settings, since their numbers would not be comparable. An unscored sample is never counted as passing.
+with `--tokenizer`, its final reply decoded. It refuses two runs that did not score the same prompts in the same
+order, with the same sampling settings, batch layout, task hashes, first prompts and seeds, reward code and plugin
+files, since their numbers would not be comparable. An unscored sample is never counted as passing.
 """
 
 from __future__ import annotations
@@ -47,6 +48,34 @@ def episodes(run_dir: Path) -> dict[str, list[dict]]:
     return out
 
 
+def fingerprints(base_dir: Path, trained_dir: Path) -> None:
+    """Refuse two runs whose names agree but whose inputs or scoring differ: the paired samples' first prompt (its
+    token hash, so a changed template shows) and seed, the reward function's version and code hash on every scored
+    sample, and the plugin files the run plans hashed (a task's own checks and reward live there)."""
+    eb, et = episodes(base_dir), episodes(trained_dir)
+    for pid in sorted(set(eb) & set(et)):
+        first = {(e["k"], e["iteration"]): (e["turns"][0]["prompt_ids_sha256"], e["turns"][0]["seed"])
+                 for e in eb[pid] if e.get("turns")}
+        for e in et[pid]:
+            got = first.get((e["k"], e["iteration"]))
+            if e.get("turns") and got is not None and got != (e["turns"][0]["prompt_ids_sha256"],
+                                                               e["turns"][0]["seed"]):
+                raise Refused(f"{pid} sample {e['k']}: the two runs' first prompts or seeds differ")
+    rb, rt = ({(e.get("reward_version"), e.get("reward_code_sha256")) for eps in run.values() for e in eps
+               if e.get("status") == "scored"} for run in (eb, et))
+    if rb and rt and rb != rt:
+        raise Refused(f"the two runs were scored by different reward code: {sorted(rb)} against {sorted(rt)}")
+    pb, pt = (_plugin_hashes(d) for d in (base_dir, trained_dir))
+    if pb != pt:
+        raise Refused(f"the two runs loaded different plugin files: {pb} against {pt}")
+
+
+def _plugin_hashes(run_dir: Path) -> dict:
+    path = Path(run_dir) / "run_plan.json"
+    plan = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    return {k: (v or {}).get("sha256") for k, v in sorted((plan.get("plugins") or {}).items())}
+
+
 def headline(rep: dict) -> dict:
     t = rep["total"]
     return {"samples": t["samples"], "scored": t["scored"], "scored_fraction": t["scored_fraction"],
@@ -57,11 +86,19 @@ def headline(rep: dict) -> dict:
 
 def compare(base_dir: Path, trained_dir: Path) -> dict:
     base, trained = read_report(base_dir), read_report(trained_dir)
-    if set(base["prompts"]) != set(trained["prompts"]):
-        raise Refused("the two runs did not score the same prompts")
-    sb, st = base["run"].get("sampling"), trained["run"].get("sampling")
-    if sb != st:
-        raise Refused(f"the two runs sampled differently: {sb} against {st}")
+    if list(base["prompts"]) != list(trained["prompts"]):
+        raise Refused("the two runs did not score the same prompts in the same order")
+    for key in ("sampling", "options", "reward"):  # options: P and the passes, which decide each prompt's seeds
+        sb, st = base["run"].get(key), trained["run"].get(key)
+        if sb != st:
+            raise Refused(f"the two runs differ in {key}: {sb} against {st}")
+    for pid, b in base["prompts"].items():
+        t = trained["prompts"][pid]
+        for key in ("task_sha256", "samples"):
+            if b.get(key) != t.get(key):
+                raise Refused(f"{pid}: the two runs differ in {key}: {b.get(key)} against {t.get(key)}")
+    fingerprints(base_dir, trained_dir)
+    sb = base["run"].get("sampling")
     rows = []
     for pid in sorted(base["prompts"]):
         b, t = base["prompts"][pid], trained["prompts"][pid]
@@ -79,6 +116,8 @@ def compare(base_dir: Path, trained_dir: Path) -> dict:
 
 
 def sample_text(ep: dict, tok) -> str:
+    if not ep.get("turns"):  # a chain that ended before its first reply (engine_error) is a legal episode
+        return f"(no reply: the chain ended {ep.get('end_reason')} before its first turn)"
     ids = ep["turns"][-1]["response_ids"]
     if tok is None:
         return f"({len(ids)} reply tokens; pass --tokenizer to decode)"
@@ -105,7 +144,7 @@ def markdown(result: dict, base_dir: Path, trained_dir: Path, tok, samples: int)
             got = eps.get(r["prompt_id"]) or []
             if not got:
                 continue
-            e = got[0]
+            e = next((x for x in got if x.get("turns")), got[0])  # a sample with a reply, if there is one
             lines += ["", f"**{name}**: reward {fmt(e.get('reward'))}, {e['status']}, checks {e.get('legs')}", "",
                       "```text", sample_text(e, tok)[:3000], "```"]
         lines.append("")

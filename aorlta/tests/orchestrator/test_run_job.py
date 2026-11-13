@@ -2,8 +2,11 @@
 containers that load a profile or the config get the site's tool roots and site file."""
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 PKG = Path(__file__).resolve().parents[2]
 JOB = (PKG / "jobs" / "aorlta-run.sbatch").read_text()
@@ -131,7 +134,8 @@ def _bash(tmp_path, script: str, **env) -> subprocess.CompletedProcess:
         (bin_dir / name).chmod(0o755)
     base = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DOCKER_LOG": str(tmp_path / "docker.log"), "SLURM_JOB_ID": "123",
             "SLURMD_NODENAME": "node1", "JOBS": "", "NODE_JOBS": "", "CONTAINERS": "", "USERS_OF_IMAGE": ""}
-    return subprocess.run(["bash", "-c", script], env={**base, **env}, capture_output=True, text=True, timeout=60)
+    return subprocess.run([shutil.which("bash") or "/bin/bash", "-c", script], env={**base, **env}, capture_output=True,
+                          text=True, timeout=60)
 
 
 def _removed(tmp_path) -> list[str]:
@@ -154,8 +158,10 @@ def test_a_job_slurm_does_not_know_has_ended_and_no_answer_from_slurm_is_running
     script = f"{_functions('job_ended')}job_ended 77 && echo ended || echo running"
     assert _bash(tmp_path, script).stdout.strip() == "ended"
     assert _bash(tmp_path, script, SQUEUE_DOWN="1").stdout.strip() == "running"
-    (tmp_path / "bin" / "squeue").unlink()  # no squeue at all
-    assert _bash(tmp_path, script, PATH=f"{tmp_path / 'bin'}").stdout.strip() == "running"
+    tools = tmp_path / "tools"  # no squeue at all, the host's included: a PATH with grep alone
+    tools.mkdir()
+    (tools / "grep").symlink_to(shutil.which("grep"))
+    assert _bash(tmp_path, script, PATH=str(tools)).stdout.strip() == "running"
 
 
 def test_only_the_containers_of_jobs_slurm_no_longer_runs_are_stale(tmp_path):
@@ -247,9 +253,9 @@ def test_cleanup_removes_the_runs_directories_only_when_this_job_claimed_them(tm
 
 
 def test_the_job_claims_every_gpu_its_config_uses(tmp_path):
-    snippet = JOB[JOB.index('read -ra RUN_GPUS < <(PYTHONPATH="$CODE/src$XPATH" "$PY" -c "') + len(
-        'read -ra RUN_GPUS < <(PYTHONPATH="$CODE/src$XPATH" "$PY" -c "'):JOB.index('") || { echo "[guard] $CONFIG does '
-                                                                                  'not load"', JOB.index("RUN_GPUS")]
+    start = 'read -ra RUN_GPUS < <(PYTHONPATH="$CODE/src$XPATH" "$PY" -c "'
+    snippet = JOB[JOB.index(start) + len(start):JOB.index('") || { echo "[guard] $CONFIG does not load"',
+                                                          JOB.index("RUN_GPUS"))]
     import sys
 
     def gpus(config: Path, **edits) -> list[int]:
@@ -265,3 +271,58 @@ def test_the_job_claims_every_gpu_its_config_uses(tmp_path):
     devices = tmp_path / "devices.yaml"
     devices.write_text((PKG / "configs" / "arith-train.yaml").read_text().replace("  ranks: 1", "  ranks: 1\n  devices: [3]"))
     assert gpus(devices) == [0, 3]
+
+
+def _aorta_modules_snippet() -> str:
+    """The Python the job runs on the host to pick the aorta modules of the import pre-flight."""
+    block = JOB[JOB.index("AORTA_MODULES=$("):]
+    return block[block.index('-c "') + 4:block.index('") ||')]
+
+
+def test_the_import_pre_flight_loads_aorta_only_for_a_profile_that_uses_it(tmp_path, monkeypatch):
+    """A task whose profile names no aorta adapter starts without an aorta checkout; a stand-in profile still has
+    its waitcheck backend imported in the run image, and a missing checkout still stops it there."""
+    import json
+    import sys
+
+    sys.path.insert(0, str(PKG / "tests"))
+    import test_plugins as TP
+
+    from aorlta import plugins
+    from aorlta.reward.profiles import aorta_preflight_modules, load_profile
+
+    assert aorta_preflight_modules(load_profile("standin-static")) == ("models", "waitcheck")
+    assert aorta_preflight_modules(load_profile("standin-gpu")) == ("models", "waitcheck")
+    assert aorta_preflight_modules(load_profile("fake")) == ()
+    saved = {id(t): dict(t) for t in plugins._TABLES}
+    try:
+        for t in plugins._TABLES:
+            t.clear()
+        plugins.LOADED.clear()
+        d = tmp_path / "toyplugin"
+        d.mkdir()
+        (d / "toy_plugin.py").write_text(TP.PLUGIN)
+        (d / "toy-profile.yaml").write_text(TP.PROFILE)
+        (tmp_path / "pool").mkdir()
+        toy = TP.toy_config(tmp_path, str(d / "toy_plugin.py"))
+        standin = TP.toy_config(tmp_path, str(d / "toy_plugin.py"))
+        standin["reward"] = {"profile": "standin-static", "reward_fn": "standin.v11"}
+        picked = {}
+        for name, data in (("toy", toy), ("standin", standin)):
+            (tmp_path / f"{name}.yaml").write_text(json.dumps(data))
+            code = _aorta_modules_snippet().replace("$CODE/$CONFIG", str(tmp_path / f"{name}.yaml"))
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env={"PYTHONPATH": str(PKG / "src"), "PATH": "/usr/bin:/bin"})
+            assert out.returncode == 0, out.stderr
+            picked[name] = out.stdout.split()
+        assert picked == {"toy": [], "standin": ["models", "waitcheck"]}
+    finally:
+        for t in plugins._TABLES:
+            t.clear()
+            t.update(saved[id(t)])
+    check = [sys.executable, str(PKG / "jobs" / "aorlta-imports-check.py"), str(tmp_path / "no-aorta" / "src")]
+    env = {"PYTHONPATH": str(PKG / "src"), "PATH": "/usr/bin:/bin"}
+    for extra, aorta in (([], []), (["models", "waitcheck"], ["aorta.models", "aorta.waitcheck"])):
+        report = json.loads(subprocess.run(check + extra, capture_output=True, text=True, env=env).stdout)
+        assert report["aorta"] == extra
+        assert sorted(k for k in report["failed"] if k.startswith("aorta.")) == aorta
