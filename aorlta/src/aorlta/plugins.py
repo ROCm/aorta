@@ -87,6 +87,8 @@ PROFILES: dict[str, Path] = {}
 REWARD_FNS: dict[str, Callable[[Any], Any]] = {}
 CHECK_ADAPTERS: dict[str, Callable[[CheckContext], Any]] = {}
 LOADED: dict[str, dict] = {}  # plugin as listed -> {"module", "file", "sha256"}
+_TABLES = (TASKS, PARSE_ADAPTERS, FEEDBACK_TEMPLATES, COMPILE_ADAPTERS, PROFILES, REWARD_FNS, CHECK_ADAPTERS)
+_OWNERS: set[str] | None = None  # while a plugin loads: the modules that registered something
 _LOCK = threading.RLock()
 
 _BUILT_IN = {
@@ -110,6 +112,12 @@ def _register(kind: str, table: dict, name: str, value: Any) -> None:
         if name in table and table[name] is not value and table[name] != value:
             raise PluginError(f"{kind} {name!r} is already registered")
         table[name] = value
+        if _OWNERS is not None:  # inside load_plugins: which module registered it, for a rollback
+            f = sys._getframe(1)
+            while f is not None and f.f_globals.get("__name__") == __name__:
+                f = f.f_back
+            if f is not None:
+                _OWNERS.add(f.f_globals.get("__name__"))
 
 
 def register_task(task: Task) -> None:
@@ -151,8 +159,7 @@ def register_check_adapter(name: str, factory: Callable[[CheckContext], Any]) ->
 
 def registered(name: str) -> bool:
     """Whether a plugin registered `name` as any kind of component."""
-    return any(name in t for t in (TASKS, PARSE_ADAPTERS, FEEDBACK_TEMPLATES, COMPILE_ADAPTERS, PROFILES, REWARD_FNS,
-                                   CHECK_ADAPTERS))
+    return any(name in t for t in _TABLES)
 
 
 def _sha256(path: Path) -> str:
@@ -169,7 +176,21 @@ def load_plugins(plugins: Sequence[str]) -> None:
         with _LOCK:
             if entry in LOADED:
                 continue
-            LOADED[entry] = _load(entry)
+            global _OWNERS
+            before = {id(t): set(t) for t in _TABLES}
+            modules = set(sys.modules)
+            _OWNERS = set()
+            try:
+                LOADED[entry] = _load(entry)
+            except BaseException:
+                for t in _TABLES:  # what this import registered before failing is undone, nothing else
+                    for name in set(t) - before[id(t)]:
+                        del t[name]
+                for owner in _OWNERS - modules:  # and a module it imported that registered runs again on a retry
+                    sys.modules.pop(owner, None)
+                raise
+            finally:
+                _OWNERS = None
 
 
 def _load(entry: str) -> dict:

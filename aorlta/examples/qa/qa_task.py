@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-import subprocess
+import shutil
 import unicodedata
 from pathlib import Path
 
@@ -123,14 +124,26 @@ class QaMatch:
     `no_answer` when the reply has no `Answer:` line; unsettled when the task is unknown, the reply cannot be read,
     or the judge does not give a verdict."""
 
-    version = "1"
     legs = ("ref.answer",)
     resource = "local_cpu"
 
     def __init__(self, ctx):
+        from aorlta.reward.adapters.base import ProcessRunner
+        from aorlta.reward.adapters.toolchain import file_identity
+
         self.name, self.ctx = ctx.name, ctx
         self.judge = ctx.settings.get("judge")
         self.judge_timeout_s = float(ctx.settings.get("judge_timeout_s", 60.0))
+        self.version = "1"  # cached legs are keyed by it: the judge, which can turn a mismatch clean, is part of it
+        if self.judge:
+            files = {a: file_identity(a) for a in self.judge if isinstance(a, str) and Path(a).is_file()}
+            exe = shutil.which(self.judge[0]) if isinstance(self.judge[0], str) else None  # as PATH finds it, if bare
+            if exe:
+                files[f"exe:{self.judge[0]}"] = f"{os.path.realpath(exe)}:{file_identity(exe)}"
+            ident = json.dumps({"judge": list(self.judge), "timeout_s": self.judge_timeout_s, "files": files},
+                               sort_keys=True)
+            self.version = f"1+judge-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
+        self.runner = ProcessRunner()  # kills the judge's whole process group on a timeout or at close()
         self.rows = {}
         for pool in ctx.pools:
             if (Path(pool) / "qa.jsonl").is_file():
@@ -164,12 +177,14 @@ class QaMatch:
             return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
 
     def _judge(self, row, answer) -> str | None:
+        proc = self.runner.run(list(self.judge), input=json.dumps({"question": row["question"],
+                                                                   "reference": row["answer"], "answer": answer}),
+                               timeout_s=min(self.judge_timeout_s, self.ctx.timeout_s))
+        if proc.timed_out or proc.killed or proc.launch_error or proc.returncode != 0 or not proc.stdout.strip():
+            return None
         try:
-            proc = subprocess.run(list(self.judge), input=json.dumps({"question": row["question"],
-                                                                      "reference": row["answer"], "answer": answer}),
-                                  capture_output=True, text=True, timeout=min(self.judge_timeout_s, self.ctx.timeout_s))
-            out = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.returncode == 0 and proc.stdout else {}
-        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+            out = json.loads(proc.stdout.strip().splitlines()[-1])
+        except ValueError:
             return None
         v = out.get("verdict") if isinstance(out, dict) else None
         return v if v in ("correct", "wrong") else None
@@ -179,6 +194,9 @@ class QaMatch:
 
     def health(self):
         return {"name": self.name, "responsive": True, "questions": len(self.rows)}
+
+    def close(self):
+        self.runner.close()
 
 
 class QaV1:

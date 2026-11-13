@@ -1,7 +1,7 @@
 """Keeping the GPU legs' evidence (run 2, step 4): the reward service's packages live in the run's node-local scratch,
 which the orchestrator removes at shutdown, so what explains an unsettled ConSan or ASan leg would go with it (run 1's
-evidence archive came out empty). `archive_legs` copies the sanitizer legs' logs, generated harness sources and JSON,
-and each candidate's parsed source, into one tarball in the run's sealed evidence store (Section 6.10 item 3) before
+evidence archive came out empty). `archive_legs` copies the sanitizer and reference legs' logs, generated harness
+sources and JSON, and each candidate's parsed source, into one tarball in the run's sealed evidence store (Section 6.10 item 3) before
 the scratch goes. Package layout: `pkg/<sha[:2]>/<sha>/<leg>-<key[:16]>/...`.
 """
 
@@ -15,14 +15,14 @@ MAX_FILE_BYTES = 2 << 20
 
 
 def kept(rel: Path) -> bool:
-    """Whether a file under the package root is evidence: a sanitizer leg's log, JSON or harness source, or the
-    source the parse gate wrote."""
+    """Whether a file under the package root is evidence: a sanitizer leg's or a reference check's (`ref.*`, such as
+    a task plugin's own check) log, JSON or harness source, or the source the parse gate wrote."""
     parts = rel.parts
     if len(parts) < 4:
         return False
     leg = parts[2]
-    return (leg.startswith("san.") and rel.suffix in SUFFIXES) or (leg.startswith("gate.parse-")
-                                                                    and rel.name == "source.hip")
+    return (leg.startswith(("san.", "ref.")) and rel.suffix in SUFFIXES) or (leg.startswith("gate.parse-")
+                                                                              and rel.name == "source.hip")
 
 
 def archive_legs(pkg_root: str | Path, dest: str | Path, *, max_file_bytes: int = MAX_FILE_BYTES) -> int:

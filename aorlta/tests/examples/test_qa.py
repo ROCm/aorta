@@ -198,3 +198,63 @@ def test_the_qa_example_trains_on_cpu_through_the_real_wiring(tmp_path, qa, tiny
     assert all(len(e["turns"]) == 2 for e in eps)  # the answer, and qa.parse's repair turn
     scored = [e for e in eps if e["status"] == "scored"]
     assert scored and all(e["legs"]["ref.answer"] == "fail" and -1.05 <= e["reward"] <= -1.0 for e in scored)
+
+
+def test_the_judge_is_part_of_the_checkers_identity(qa, tmp_path):
+    """Cached ref.answer legs are keyed by the checker's version: turning the judge on, changing its command, its
+    timeout or its script is a new version, so a cached wrong_answer is not reused where the judge would decide."""
+    judge = tmp_path / "judge"
+    judge.write_text("#!/bin/bash\necho '{\"verdict\": \"correct\"}'\n")
+    judge.chmod(0o755)
+    versions = [adapter(qa).version, adapter(qa, {"judge": [str(judge)]}).version,
+                adapter(qa, {"judge": [str(judge), "--strict"]}).version,
+                adapter(qa, {"judge": [str(judge)], "judge_timeout_s": 5}).version]
+    assert len(set(versions)) == 4 and versions[0] == "1"
+    assert adapter(qa, {"judge": [str(judge)]}).version == versions[1]
+    judge.write_text("#!/bin/bash\necho '{\"verdict\": \"wrong\"}'\n")
+    assert adapter(qa, {"judge": [str(judge)]}).version != versions[1]
+
+
+def test_a_judge_that_times_out_or_is_retired_leaves_nothing_running(qa, tmp_path):
+    """The judge's whole process group is killed, on a timeout and when the worker is retired (close()), not only
+    the command itself: a wrapper's children went on running before."""
+    import os
+    import threading
+    import time
+
+    row = next(r for r in qa.load_rows(QA / "gpu-facts" / "train") if r["id"] == "wave-cdna")
+    for how in ("timeout", "close"):
+        pid = tmp_path / f"{how}.pid"
+        judge = tmp_path / f"judge-{how}"
+        judge.write_text(f"#!/bin/bash\nsleep 60 &\necho $! > {pid}\nwait\n")
+        judge.chmod(0o755)
+        a = adapter(qa, {"judge": [str(judge)], "judge_timeout_s": 1.0 if how == "timeout" else 60.0})
+        if how == "close":
+            threading.Thread(target=lambda: (time.sleep(1.0), a.close()), daemon=True).start()
+        t0 = time.monotonic()
+        res = a.run(job_for(qa, tmp_path, row, "Answer: a wave of sixty-four"))
+        assert (res.state, res.reason) == ("unsettled", "judge_no_verdict")
+        assert time.monotonic() - t0 < 15, how  # not the adapter's own 30 s, nor the child's 60 s
+        child = int(pid.read_text())
+        deadline = time.monotonic() + 5
+        while os.path.exists(f"/proc/{child}") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not os.path.exists(f"/proc/{child}"), how
+        a.close()
+
+
+def test_a_judge_found_through_path_is_part_of_the_checkers_identity(qa, tmp_path, monkeypatch):
+    """A bare command name is resolved as PATH finds it: replacing that executable, or which one PATH selects, is a new
+    checker version."""
+    bins = [tmp_path / "a", tmp_path / "b"]
+    for d in bins:
+        d.mkdir()
+        (d / "my-judge").write_text("#!/bin/bash\necho '{\"verdict\": \"correct\"}'\n")
+        (d / "my-judge").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bins[0]}:/usr/bin:/bin")
+    first = adapter(qa, {"judge": ["my-judge"]}).version
+    assert adapter(qa, {"judge": ["my-judge"]}).version == first
+    (bins[0] / "my-judge").write_text("#!/bin/bash\necho '{\"verdict\": \"wrong\"}'\n")
+    second = adapter(qa, {"judge": ["my-judge"]}).version
+    monkeypatch.setenv("PATH", f"{bins[1]}:/usr/bin:/bin")
+    assert len({first, second, adapter(qa, {"judge": ["my-judge"]}).version}) == 3

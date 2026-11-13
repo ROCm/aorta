@@ -302,6 +302,22 @@ def rollout_max_len(cfg: RunConfig, tokenizer, records: Sequence) -> int:
                          r.max_repair_turns)
 
 
+def startup_max_len(cfg: RunConfig, tokenizer, records: Sequence, selftest_messages: Sequence | None) -> int:
+    """The context the start-up requests need, which the rollouts' budget does not cover when prompts are short and
+    replies small: the engine self-test (its chats, or the pool's turn 0s, plus `SELF_TEST_TOKENS`) and the landing
+    probes (`sync.probe_tokens`) plus the round trip's greedy continuation."""
+    from ..rollout.engine_pool import SELF_TEST_TOKENS
+    from ..rollout.templates import render_turn0, turn0_ids
+    from ..sync.roundtrip import GREEDY_TOKENS
+
+    thinking = cfg.rollout.thinking
+    if selftest_messages is not None:
+        selftest = max(len(render_turn0(tokenizer, m, thinking)) for m in selftest_messages)
+    else:
+        selftest = max(len(turn0_ids(p, tokenizer, thinking)) for p in records)
+    return max(selftest + SELF_TEST_TOKENS, cfg.sync.probe_tokens + GREEDY_TOKENS)
+
+
 def engine_handles(cfg: RunConfig, max_len: int) -> list:
     """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`."""
     from ..rollout.engine_pool import engine_kwargs, engine_port
@@ -1297,6 +1313,10 @@ def build(cfg: RunConfig, *, config_path=None, commit: str | None = None, parts:
             raise WiringError(f"task {task.name!r}: the engine self-test needs {SELF_TEST_PROMPTS} chats, "
                               f"got {len(selftest)}")
         selftest = selftest[:SELF_TEST_PROMPTS]
+    try:
+        max_len = max(max_len, startup_max_len(cfg, tok, records, selftest))
+    except TemplateError as exc:
+        raise WiringError(f"{pool_cfg.task} engine self-test chats: {exc}") from None
     compiler = parts.compiler if parts.compiler is not None else rollout_compiler(cfg)
     handles = parts.handles if parts.handles is not None else engine_handles(cfg, max_len)
     if cfg.orchestrator.mode == "score":  # no trainer, no optimizer, no weight sync
