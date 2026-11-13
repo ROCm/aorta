@@ -117,3 +117,33 @@ def test_a_sample_with_no_reply_is_shown_as_such(tmp_path):
     assert X.main(["--base", str(base), "--trained", str(trained), "--out", str(tmp_path / "out")]) == 0
     md = (tmp_path / "out" / "eval-compare.md").read_text()
     assert "(no reply: the chain ended engine_error before its first turn)" in md
+
+
+def _edit_episodes(run_dir: Path, edit) -> None:
+    for f in run_dir.glob("iterations/iter-*/episodes.jsonl"):
+        eps = [json.loads(x) for x in f.read_text().splitlines()]
+        f.write_text("".join(json.dumps(edit(e)) + "\n" for e in eps))
+
+
+def test_runs_whose_prompts_seeds_reward_code_or_plugins_differ_are_refused(tmp_path, capsys):
+    """Names can agree while what they name changed: a Q&A template (the first prompt's token hash), the seeds, the
+    reward function's code, or a plugin's file."""
+    base = score_run(tmp_path, "base")
+
+    def first_turn(**kw):
+        return lambda e: dict(e, turns=[dict(e["turns"][0], **kw), *e["turns"][1:]]) if e["turns"] else e
+
+    for name, edit, what in (("prompt", first_turn(prompt_ids_sha256="0" * 64), "first prompts or seeds"),
+                             ("seed", first_turn(seed=7), "first prompts or seeds"),
+                             ("code", lambda e: dict(e, reward_code_sha256="0" * 64) if e["status"] == "scored"
+                              else e, "different reward code")):
+        other = score_run(tmp_path, name)
+        _edit_episodes(other, edit)
+        assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2, name
+        assert what in capsys.readouterr().err
+    other = score_run(tmp_path, "plugin")
+    plan = json.loads((other / "run_plan.json").read_text())
+    plan["plugins"] = {"my_plugin.py": {"module": "m", "file": "f", "sha256": "1" * 64}}
+    (other / "run_plan.json").write_text(json.dumps(plan))
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+    assert "different plugin files" in capsys.readouterr().err
