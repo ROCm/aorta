@@ -1,0 +1,4 @@
+{"id": "placeholder-h1", "goal": "PLACEHOLDER held-out goal 1: any toy program that uses SUB.", "min_lines": 2, "max_lines": 4, "must_use": ["SUB"]}
+{"id": "placeholder-h2", "goal": "PLACEHOLDER held-out goal 2: any toy program that uses AND and OR.", "min_lines": 3, "max_lines": 6, "must_use": ["AND", "OR"]}
+{"id": "placeholder-h3", "goal": "PLACEHOLDER held-out goal 3: any toy program that uses MOV.", "min_lines": 1, "max_lines": 3, "must_use": ["MOV"]}
+{"id": "placeholder-h4", "goal": "PLACEHOLDER held-out goal 4: any toy program that uses ADD and SUB.", "min_lines": 2, "max_lines": 5, "must_use": ["ADD", "SUB"]}

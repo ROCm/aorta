@@ -1,0 +1,12 @@
+# `qa-expert`: one leg, `ref.answer`, on the CPU: the reply's last `Answer:` line against the reference
+# (examples/verticals/qa-expert/qa_expert.py). No compile and no sanitizer leg.
+name: qa-expert
+reward_fn: qa-expert.v1
+clean_repeats: 1
+materialize: true
+pools:
+  match: {resource: local_cpu, adapter: qa-expert.match, timeout: gate, workers: 4}
+stages:
+  - {name: S0, pool: match, legs: [ref.answer]}
+adapters:
+  qa-expert.match: {}
