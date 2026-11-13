@@ -3,7 +3,8 @@
 `FakeEngine.generate` takes the arguments AORLTA passes to TokenSpeed's `Engine.generate` and
 returns the same shape: `{"text", "output_ids", "meta_info"}`, with `meta_info` carrying
 `finish_reason` ({"type": "stop", "matched": 248046} or {"type": "length", "length": N}, as
-measured on the engine), token counts, `cached_tokens` and, when asked for and enabled,
+measured on the engine; the stop is the request's first `stop_token_ids` entry, 248046 if it names none), token
+counts, `cached_tokens` and, when asked for and enabled,
 `output_token_logprobs` as (logprob, token_id, None) triples, which is what TokenSpeed returns at
 3b684074 (`engine/logprobs.py:255-259`).
 
@@ -307,9 +308,10 @@ class FakeEngine:
 
         content = self.tokenizer.encode(self._answer_text(rng))
         max_new = sp["max_new_tokens"]
+        stop_id = (sp.get("stop_token_ids") or [STOP_TOKEN_ID])[0]  # the model's stop token, as the request names it
         if len(content) + 1 <= max_new:
-            output_ids = content + [STOP_TOKEN_ID]
-            finish = {"type": "stop", "matched": STOP_TOKEN_ID}
+            output_ids = content + [stop_id]
+            finish = {"type": "stop", "matched": stop_id}
         else:
             output_ids = content[:max_new]
             finish = {"type": "length", "length": max_new}
@@ -328,8 +330,8 @@ class FakeEngine:
             meta["output_token_logprobs"] = self._logprobs(rng, output_ids)
         log("ok", len(output_ids))
         self._wait(latency)
-        return {"text": self.tokenizer.decode(output_ids, skip_special_tokens=True), "output_ids": output_ids,
-                "meta_info": meta}
+        text = self.tokenizer.decode(output_ids[:-1] if finish["type"] == "stop" else output_ids, skip_special_tokens=True)
+        return {"text": text, "output_ids": output_ids, "meta_info": meta}
 
     def _check_sampling(self, sampling_params: Any) -> dict:
         if not isinstance(sampling_params, dict):
