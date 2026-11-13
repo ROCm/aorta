@@ -62,6 +62,7 @@ Where each one hooks into a run, and what it receives and returns. Blue boxes ar
 framework, which calls them:
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 520}}}%%
 flowchart TD
     cfg["run config: plugins: [your module]<br/>imported before the rest of the config is checked;<br/>its register_* calls give each component its name"]
     cfg --> task
