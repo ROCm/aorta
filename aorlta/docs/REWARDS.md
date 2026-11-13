@@ -93,8 +93,9 @@ How it measures. The candidate and the reference are each compiled alone into a 
 reaches the timing code. The harness (`timing_source`) is built from the task alone: it loads both code objects, finds
 the task's kernel in each by its exact mangled signature, and writes its result to a record file the adapter reads
 (stdout is never read). It runs each kernel once on fresh inputs and compares the outputs with the host reference; times one batch of each and stops if the projected GPU time is over `gpu_budget_s`; then takes `warmup +
-repeats` rounds, each a fresh checked run of the candidate and one timed batch (hipEvent around `launches`
-back-to-back launches) of each kernel, the order alternating by round, the inputs reset before each batch.
+repeats` rounds, each a fresh checked run of the candidate and one batch of `launches` launches of each kernel, the
+order alternating by round; every launch runs on buffers reset just before it and is timed alone (hipEvents around
+the launch, the reset outside), so a launch cannot skip work an earlier one did.
 
 How it decides (`timing.judge`). The first `warmup` samples of each side are dropped. Of the rest: each side's median
 and relative MAD (`median(|x - median|) / median`); `noisy` if either relative MAD is above `max_rel_mad`; the noise
@@ -113,9 +114,9 @@ floor `max(min_noise_floor, MAD_candidate + MAD_reference)`; the speedup `s = me
 
 Correctness comes first twice over: the profile runs `ref.speedup` only after `ref.native` is clean (`requires`), and
 the harness checks the candidate's output on fresh inputs before every round. Nothing the timing cannot decide is
-clean. What the timing does not see: a kernel that behaves differently on repeated launches without a reset (a timed
-batch's later launches run on the outputs of the earlier ones, unchecked), or one that is correct at the task's size
-and not at the timing size (the harness checks it at the timing size, so that is unsettled, not clean).
+clean. A kernel correct at the task's size and not at the timing size is caught too (the harness checks it at the
+timing size, so that is unsettled, not clean). The checker's version names the node and the GPUs it measures on, so
+a cached speedup is not reused after a run moves to another node.
 
 Leg settings (`examples/hip-kernels/hipk-speed.yaml`): `ratio` 1.1, `warmup` 5, `repeats` 30, `launches` 20,
 `max_rel_mad` 0.05, `min_noise_floor` 0.02, `gpu_budget_s` 10, `run_timeout_s` 60, `target`, and `scalars`, the

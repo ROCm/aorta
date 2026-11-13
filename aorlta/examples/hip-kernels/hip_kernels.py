@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -541,8 +542,8 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
     once on fresh inputs and compares the outputs with the host reference (`reference_wrong_output`,
     `candidate_wrong_output`); times one batch of each to project the run's GPU time, and stops if that exceeds the
     budget (`too_slow`); then takes `warmup + repeats` rounds, each a fresh checked run of the candidate and then one
-    timed batch of `launches` back-to-back launches of each kernel, in an order that alternates by round, on inputs
-    reset before each batch. Its record (the file, written whole, never stdout): `ok` with every batch's time per
+    batch of `launches` launches of each kernel, in an order that alternates by round. Every launch runs on buffers
+    reset just before it, outside its timed interval, so a launch cannot skip work an earlier one did. Its record (the file, written whole, never stdout): `ok` with every batch's time per
     launch in microseconds, warm-up rounds included; or `hip_error` and the call that failed. `scalars` gives some of
     the task's scalars other values (C++ expressions) for the timing alone, so that the kernels run long enough to
     time. No code of the candidate's runs on the host."""
@@ -644,13 +645,18 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
               "  hipEvent_t t0, t1;",
               "  if (hipEventCreate(&t0) != hipSuccess || hipEventCreate(&t1) != hipSuccess)",
               '    return say("hip_error");',
-              "  auto batch = [&](int who) -> float {",
-              "    if (!reset() || hipEventRecord(t0) != hipSuccess) return -1.0f;",
-              "    for (int l = 0; l < launches; ++l) if (!launch(who)) return -1.0f;",
-              "    if (hipEventRecord(t1) != hipSuccess || hipEventSynchronize(t1) != hipSuccess) return -1.0f;",
-              "    float ms = 0.0f;",
-              "    if (hipEventElapsedTime(&ms, t0, t1) != hipSuccess) return -1.0f;",
-              "    return 1000.0f * ms / launches;",
+              "  auto batch = [&](int who) -> float {  // each launch on freshly reset buffers, timed alone",
+              "    float total = 0.0f;",
+              "    for (int l = 0; l < launches; ++l) {",
+              "      if (!reset() || hipDeviceSynchronize() != hipSuccess || hipEventRecord(t0) != hipSuccess) "
+              "return -1.0f;",
+              "      if (!launch(who) || hipEventRecord(t1) != hipSuccess || hipEventSynchronize(t1) != hipSuccess) "
+              "return -1.0f;",
+              "      float ms = 0.0f;",
+              "      if (hipEventElapsedTime(&ms, t0, t1) != hipSuccess) return -1.0f;",
+              "      total += ms;",
+              "    }",
+              "    return 1000.0f * total / launches;",
               "  };",
               "  for (int who = 1; who >= 0; --who) {",
               "    const char* bad = fresh(who);",
@@ -745,10 +751,12 @@ class HipkTime:
         for key in sorted(self.tasks):
             ref = self.tasks[key][1]
             refs.update(key.encode() + b"\0" + (ref.read_bytes() if ref.is_file() else b"missing") + b"\0")
-        self.version = (f"3+{toolchain_identity(self.hipcc)}+{hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]}"
-                        f"+timing-{hashlib.sha256(Path(timing.__file__).read_bytes()).hexdigest()[:16]}"
-                        f"+refs-{refs.hexdigest()[:16]}")
         gpus = [int(g) for g in (s.get("gpus") or [0])]
+        # and where it measures: a speedup is a fact about one node's GPUs, so a run resumed on another re-measures
+        where = hashlib.sha256(json.dumps([socket.gethostname(), gpus]).encode()).hexdigest()[:12]
+        self.version = (f"4+{toolchain_identity(self.hipcc)}+{hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]}"
+                        f"+timing-{hashlib.sha256(Path(timing.__file__).read_bytes()).hexdigest()[:16]}"
+                        f"+refs-{refs.hexdigest()[:16]}+on-{where}")
         tail = ctx.worker_id.rsplit("/", 1)[-1]
         seq = int(tail) if tail.isdigit() else 1
         self.gpu = lease_gpu(gpus, gpus[(seq - 1) % len(gpus)])

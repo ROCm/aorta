@@ -605,6 +605,37 @@ def test_the_timing_checkers_version_covers_the_references_and_the_judge(hipk, t
     assert len({first, second, version()}) == 3
 
 
+def test_every_timed_launch_runs_on_freshly_reset_buffers(hipk):
+    """A launch that found the previous launch's outputs could skip its work; each timed launch is preceded by its own
+    reset, outside the timed interval."""
+    for task in hipk.load_tasks(EXAMPLE):
+        src = hipk.timing_source(task)
+        body = src[src.index("auto batch = [&](int who)"):]
+        body = body[:body.index("\n  };")]
+        loop = body[body.index("for (int l = 0; l < launches; ++l) {"):]
+        assert loop.index("reset()") < loop.index("hipEventRecord(t0)") < loop.index("launch(who)") < \
+            loop.index("hipEventRecord(t1)")
+
+
+def test_the_timing_checkers_version_names_where_it_measures(hipk, monkeypatch):
+    """A speedup is a fact about one node's GPUs: another host, or other GPUs, is another version, so a resumed run's
+    cached leg and reward entries (whose keys include the leg's) are not reused there."""
+    import socket
+
+    def version(gpus):
+        ctx = plugins.CheckContext(name="hipk.time", worker_id="time/1", settings={"hipcc": "/x/bin/hipcc", "gpus": gpus},
+                                   clock=lambda: 0.0, timeout_s=30.0, pools=(str(EXAMPLE),))
+        a = plugins.CHECK_ADAPTERS["hipk.time"](ctx)
+        a.close()
+        return a.version
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "node-a")
+    a7 = version([7])
+    assert version([7]) == a7 and version([6]) != a7
+    monkeypatch.setattr(socket, "gethostname", lambda: "node-b")
+    assert version([7]) != a7
+
+
 def test_timecheck_resolves_a_relative_candidate_and_pool(hipk, tmp_path, monkeypatch):
     """The check runs hipcc from its own directory, so the paths it is given must not be relative."""
     seen = []
