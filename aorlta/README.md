@@ -62,7 +62,8 @@ compile and waitcheck failures, so a candidate that passes them stays unscored);
 `jobs/aorlta-reward-standin.sbatch` (a test of the stand-in GPU checks) and two scripts the run job calls; `docker/`
 the trainer image; `tests/` the CPU suite; `tools/merge_base_adapter.py`, which merges a PEFT adapter into its base
 checkpoint; `examples/standin-pool/`, a synthetic prompt pool; `examples/hip-kernels/` with `configs/hipk-score.yaml`
-and `configs/hipk-train.yaml`, the worked example of a task as a plugin; `docs/ADAPTING.md` and `docs/TUTORIAL.md`. Code comments cite sections and
+and `configs/hipk-train.yaml`, the worked example of a task as a plugin; `examples/verticals/`, starter plugins to copy
+for an ISA fuzzer, a Q&A expert and sanitizer triage; `docs/ADAPTING.md` and `docs/TUTORIAL.md`. Code comments cite sections and
 labels (Section 6.x, C1-C9, D7, ...) of our internal design notes, which are not included.
 
 ## Requirements
