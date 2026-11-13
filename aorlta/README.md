@@ -37,10 +37,10 @@ flowchart TD
     subgraph rollout["2-3 generate: TokenSpeed engines at policy v(n-1), K chains per prompt"]
         turn["one request per chain and turn, with its own seed"] --> parse{"parse the reply<br/>rollout.parse_adapter"}
         parse -- "an answer" --> compile{"compile check<br/>rollout.compile_adapter (none: skipped)"}
-        parse -- "rejected, a turn left" --> feedback["repair turn<br/>rollout.feedback_template"]
+        parse -- "rejected with a reason (the parser sets rejection), a turn left" --> feedback["repair turn<br/>rollout.feedback_template"]
         compile -- "errors, a turn left" --> feedback
         feedback --> turn
-        parse -- "no change, or rejected on the last turn" --> cand
+        parse -- "no change; rejected on the last turn;<br/>rejected with no reason (standin.parse: no code block)" --> cand
         compile -- "compiled, or errors on the last turn" --> cand["the chain ends: its final answer is a candidate"]
     end
     cand -- "handed over as each chain ends" --> stages
@@ -75,7 +75,9 @@ flowchart TD
 
 A score run (`orchestrator.mode: score`, `orchestrator/score.py`) serves a model, checks it is exactly the one the
 run plan hashed, and runs the same rollouts and checks over the pool, with no trainer and no weight sync; an unscored
-sample is still never clean. A trained checkpoint holds a LoRA latent; to score it, export it as a PEFT adapter:
+sample is still never clean. A trained checkpoint holds a LoRA latent; to score it, export it as a PEFT adapter with
+`tools/export_adapter.py`, which [#612](https://github.com/ROCm/aorta/pull/612) adds (`tools/eval_compare.py` comes
+with the worked examples, [#613](https://github.com/ROCm/aorta/pull/613)):
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 400}}}%%

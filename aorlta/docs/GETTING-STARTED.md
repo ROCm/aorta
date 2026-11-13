@@ -27,7 +27,7 @@ names its pull request.
 | model | `Qwen/Qwen3.5-4B` at revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` | The job runs offline, so download it first: `HF_HOME=<cache> hf download Qwen/Qwen3.5-4B --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`. `model.base_dir` is the snapshot directory under `<cache>/hub/`. Only the Qwen3.5 family works as it stands: the turn templates use Qwen3.5's control-token ids (`rollout/templates.py`), and the trainer needs transformers' Qwen3.5 linear-attention fast path (`trainer.require_fast_path`). Another Qwen3.5 size, or a fine-tune of it, is the supported change. |
 | prompts | a pool of your own | The stand-in configs read a kernel dataset (`kernels.json` and `listings/`) that is not published. `examples/standin-pool/` shows its format but is too small for a run: the stand-in landing check alone picks 40 kernels of 60 to 400 instructions. |
 | stand-in check tools | only for the stand-in profiles | `standin-static` runs rocjitsu's `rj_waitcheck` (ROCm/rocm-systems branch `shared/rocjitsu/sanitizers`, built from source, with a libstdc++ that has GLIBCXX_3.4.31); `standin-gpu` adds ConSan (`librocjitsu_dbi_hooks.so` from the same build) and ASan (the ROCm 7.0.2 `*-asan` packages' `lib/asan`), through aorta's sanitizer backends. None of these is packaged; a task with checks of its own needs none of them. |
-| aorta checkout | every GPU run | aorta at commit `d22f6116235c05395a0241a83d6f7e952a988454`, at `AORLTA_AORTA_ROOT` (default `/opt/aorta`). The job's import pre-flight loads two of its sanitizer backends whatever the check profile (`jobs/aorlta-imports-check.py`), and stops with exit 99 if it cannot. The stand-in checks also use it at run time. |
+| aorta checkout | every GPU run | aorta at commit `d22f6116235c05395a0241a83d6f7e952a988454`, at `AORLTA_AORTA_ROOT` (default `/opt/aorta`). The job's import pre-flight loads two of its sanitizer backends whatever the check profile (`jobs/aorlta-imports-check.py`), and stops with exit 99 if it cannot, so a task with checks of its own needs it too for now; with [#611](https://github.com/ROCm/aorta/pull/611) the pre-flight loads them only when the profile names an aorta adapter. The stand-in checks also use it at run time. |
 
 ## 1. Install and run the CPU tests
 
@@ -74,7 +74,7 @@ and set the job's environment (the full list is in the header of `jobs/aorlta-ru
 ```bash
 export AORLTA_SITE=/path/to/site.yaml AORLTA_VENV=~/venvs/aorlta TS_SRC=/path/to/tokenspeed
 export AORLTA_HF_HOME=/path/to/hf-cache AORLTA_TMPDIR=/path/to/tmp   # both visible to the docker daemon
-export AORLTA_AORTA_ROOT=/path/to/aorta-d22f6116   # every GPU run: the import pre-flight needs it (exit 99)
+export AORLTA_AORTA_ROOT=/path/to/aorta-d22f6116   # every GPU run until #611: the import pre-flight needs it (exit 99)
 # the stand-in profiles only:
 export AORLTA_ROCJITSU_ROOT=... AORLTA_LIBSTDCXX_SHIM=... AORLTA_ASAN_LIB=...
 ```
