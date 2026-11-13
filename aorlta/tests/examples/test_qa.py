@@ -241,3 +241,20 @@ def test_a_judge_that_times_out_or_is_retired_leaves_nothing_running(qa, tmp_pat
             time.sleep(0.05)
         assert not os.path.exists(f"/proc/{child}"), how
         a.close()
+
+
+def test_a_judge_found_through_path_is_part_of_the_checkers_identity(qa, tmp_path, monkeypatch):
+    """A bare command name is resolved as PATH finds it: replacing that executable, or which one PATH selects, is a new
+    checker version."""
+    bins = [tmp_path / "a", tmp_path / "b"]
+    for d in bins:
+        d.mkdir()
+        (d / "my-judge").write_text("#!/bin/bash\necho '{\"verdict\": \"correct\"}'\n")
+        (d / "my-judge").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bins[0]}:/usr/bin:/bin")
+    first = adapter(qa, {"judge": ["my-judge"]}).version
+    assert adapter(qa, {"judge": ["my-judge"]}).version == first
+    (bins[0] / "my-judge").write_text("#!/bin/bash\necho '{\"verdict\": \"wrong\"}'\n")
+    second = adapter(qa, {"judge": ["my-judge"]}).version
+    monkeypatch.setenv("PATH", f"{bins[1]}:/usr/bin:/bin")
+    assert len({first, second, adapter(qa, {"judge": ["my-judge"]}).version}) == 3
