@@ -112,6 +112,13 @@ def expected_server_args(dtype: str = "bfloat16") -> dict:
             "dtype": dtype}
 
 
+def engine_expected(handle: Any, expected: dict) -> dict:
+    """`expected`, plus the `attention_backend` the handle's engine was started with, if it names one (an
+    `EngineProc` keeps its `engine_kwargs`): what AORLTA set is what the engine must report."""
+    asked = (getattr(handle, "engine_kwargs", None) or {}).get("attention_backend")
+    return expected if asked is None else {**expected, "attention_backend": asked}
+
+
 def server_arg_problems(info: dict, expected: dict) -> list[str]:
     """Each read-back setting that differs from what AORLTA set (a missing one counts)."""
     return [f"{k} is {info.get(k, '<missing>')!r}, expected {v!r}" for k, v in expected.items() if info.get(k) != v]
@@ -186,15 +193,18 @@ def max_model_len(max_prompt: int, max_new: int, max_feedback_tokens: int, repai
 
 def engine_kwargs(
     *, model_dir: str, dtype: str, P: int, K: int, n_engines: int, max_len: int, gpu_memory_utilization: float,
-    run_seed: int, log_level: str = "warning",
+    run_seed: int, log_level: str = "warning", attention_backend: str | None = None,
 ) -> dict:
     """The Section 6.1 engine kwargs, without `port` (set per engine)."""
-    return {
+    kw = {
         "model": model_dir, "tokenizer": model_dir, "dtype": dtype, "sampling_backend": "triton",
         "enable_output_logprobs": True, "enable_prefix_caching": True, "disable_kvstore": True,
         "disable_autotune": True, "max_num_seqs": math.ceil(P * K / n_engines), "max_model_len": max_len,
         "gpu_memory_utilization": gpu_memory_utilization, "seed": run_seed, "log_level": log_level,
     }
+    if attention_backend is not None:  # the model family's (model_family); else TokenSpeed's own choice
+        kw["attention_backend"] = attention_backend
+    return kw
 
 
 def engine_port(index: int) -> int:
@@ -281,7 +291,7 @@ class EnginePool:
         handle = self.handles[i]
         ready = handle.start()
         self.ready[i] = ready
-        problems = server_arg_problems(ready.get("info", {}), self.expected)
+        problems = server_arg_problems(ready.get("info", {}), engine_expected(handle, self.expected))
         if problems:
             handle.stop()
             raise RolloutStop(f"engine {i} refused: " + "; ".join(problems))

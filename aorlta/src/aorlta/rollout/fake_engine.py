@@ -165,6 +165,7 @@ class FakeServerArgs:
     port: int = 8000
     seed: int | None = None
     log_level: str = "info"
+    attention_backend: str | None = None
 
     def __post_init__(self) -> None:
         if self.sampling_backend is None:

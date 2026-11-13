@@ -33,7 +33,7 @@ from typing import Any
 READY_KEYS = (
     "sampling_backend", "enable_output_logprobs", "enable_prefix_caching", "dtype", "disable_kvstore",
     "disable_autotune", "max_num_seqs", "max_model_len", "gpu_memory_utilization", "port", "seed", "numerics",
-    "page_size", "max_total_tokens", "weight_version",
+    "page_size", "max_total_tokens", "weight_version", "attention_backend",
 )
 _ENV_LOCK = threading.Lock()
 _GPU_ENV = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")

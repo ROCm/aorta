@@ -41,6 +41,28 @@ def test_start_refuses_an_engine_not_set_as_asked(rt, bad, field):
     assert server_arg_problems(dict(fake.tokenizer_manager.server_args.__dict__), expected_server_args())
 
 
+def test_engine_kwargs_name_attention_kernels_only_when_the_model_family_does():
+    base = dict(model_dir="/m", dtype="bfloat16", P=4, K=2, n_engines=1, max_len=4096, gpu_memory_utilization=0.45,
+                run_seed=5)
+    assert "attention_backend" not in engine_kwargs(**base)
+    assert engine_kwargs(**base, attention_backend="triton")["attention_backend"] == "triton"
+
+
+class AskedTriton(InProcessEngine):
+    engine_kwargs = {"attention_backend": "triton"}  # as an EngineProc keeps the kwargs it starts its engine with
+
+
+@pytest.mark.parametrize("reported, refused", [(None, True), ("mha", True), ("triton", False)])
+def test_start_refuses_an_engine_whose_attention_kernels_are_not_the_ones_it_was_started_with(rt, reported, refused):
+    fake = FakeEngine(CFG, **{**rt.ENGINE_KW, "attention_backend": reported})
+    if refused:
+        with pytest.raises(RolloutStop, match="attention_backend is .*expected 'triton'"):
+            rt.make_pool([AskedTriton(0, fake)])
+    else:
+        rt.make_pool([AskedTriton(0, fake)])
+    rt.make_pool([FakeEngine(CFG, **{**rt.ENGINE_KW, "attention_backend": reported})])  # none asked: any is fine
+
+
 class SeedBlind(InProcessEngine):
     def generate(self, ids, sp, *, timeout_s, extra=None):
         return super().generate(ids, dict(sp, seed=1), timeout_s=timeout_s, extra=extra)

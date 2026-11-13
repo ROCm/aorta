@@ -319,14 +319,17 @@ def startup_max_len(cfg: RunConfig, tokenizer, records: Sequence, selftest_messa
 
 
 def engine_handles(cfg: RunConfig, max_len: int) -> list:
-    """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`."""
+    """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`, with
+    the attention kernels of the base's family (`model_family.engine_attention_backend`)."""
+    from ..model_family import engine_attention_backend
     from ..rollout.engine_pool import engine_kwargs, engine_port
     from ..rollout.engine_proc import EngineProc
 
     r = cfg.rollout
     kw = engine_kwargs(model_dir=str(served_model_dir(cfg)), dtype="bfloat16", P=r.P, K=r.K, n_engines=len(r.engines),
                        max_len=max_len, gpu_memory_utilization=r.gpu_memory_utilization,
-                       run_seed=cfg.orchestrator.run_seed)
+                       run_seed=cfg.orchestrator.run_seed,
+                       attention_backend=engine_attention_backend(cfg.model.base_dir))
     return [EngineProc(i, str(g), dict(kw, port=engine_port(i))) for i, g in enumerate(r.engines)]
 
 
