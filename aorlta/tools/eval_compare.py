@@ -11,13 +11,16 @@ scored fraction of each, and the per-prompt change, and writes `<out>/eval-compa
 The markdown holds, for the prompts that changed most, one sample of each model: its reward, its checks' states and,
 with `--tokenizer`, its final reply decoded. It refuses two runs that did not score the same prompts in the same
 order, with the same sampling settings, batch layout, task hashes, first prompts and seeds, reward code and plugin
-files, since their numbers would not be comparable. An unscored sample is never counted as passing.
+files, since their numbers would not be comparable, and a run whose run plan is missing or whose committed episode
+records do not cover every sample of its report, since those checks would have nothing to read. An unscored sample is
+never counted as passing.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -39,21 +42,58 @@ def read_report(run_dir: Path) -> dict:
     return {"run": run, "total": total, "prompts": prompts}
 
 
+COMMITTED = re.compile(r"iter-\d+")  # a batch is committed when iterations/iter-<n>/ appears; iter-<n>.partial is not
+
+
 def episodes(run_dir: Path) -> dict[str, list[dict]]:
+    """The committed episode records, by prompt."""
     out: dict[str, list[dict]] = {}
     for f in sorted((Path(run_dir) / "iterations").glob("iter-*/episodes.jsonl")):
+        if not COMMITTED.fullmatch(f.parent.name):
+            continue
         for line in f.read_text(encoding="utf-8").splitlines():
             e = json.loads(line)
             out.setdefault(e["prompt_id"], []).append(e)
     return out
 
 
-def fingerprints(base_dir: Path, trained_dir: Path) -> None:
+def paired_episodes(base_dir: Path, trained_dir: Path, base: dict, trained: dict) -> tuple[dict, dict]:
+    """Both runs' committed episodes, refused unless each report's every sample has exactly one record (its
+    iteration and k) and the two runs' records pair one to one. A record with no turns (a chain that ended before its
+    first reply) is legal."""
+    runs = []
+    for run_dir, rep in ((base_dir, base), (trained_dir, trained)):
+        eps = episodes(run_dir)
+        if not eps:
+            raise Refused(f"{run_dir}: no committed episode records (iterations/iter-<n>/episodes.jsonl)")
+        if extra := sorted(set(eps) - set(rep["prompts"])):
+            raise Refused(f"{run_dir}: episode records for prompts its report does not list: {extra[:3]}")
+        keys = {}
+        for pid, row in rep["prompts"].items():
+            got = [(e["iteration"], e["k"]) for e in eps.get(pid, [])]
+            if len(got) != len(set(got)):
+                raise Refused(f"{run_dir}: {pid} has more than one episode record for a sample")
+            if len(got) != row.get("samples"):
+                raise Refused(f"{run_dir}: {pid} has {len(got)} committed episode records; its report counts "
+                              f"{row.get('samples')} samples")
+            keys[pid] = set(got)
+        runs.append((eps, keys))
+    (eb, kb), (et, kt) = runs
+    for pid in base["prompts"]:
+        if kb[pid] != kt[pid]:
+            raise Refused(f"{pid}: the two runs' samples do not pair (iteration, k): "
+                          f"{sorted(kb[pid] ^ kt[pid])[:3]} are in one run only")
+    return eb, et
+
+
+def fingerprints(base_dir: Path, trained_dir: Path, base: dict, trained: dict) -> None:
     """Refuse two runs whose names agree but whose inputs or scoring differ: the paired samples' first prompt (its
     token hash, so a changed template shows) and seed, the reward function's version and code hash on every scored
-    sample, and the plugin files the run plans hashed (a task's own checks and reward live there)."""
-    eb, et = episodes(base_dir), episodes(trained_dir)
-    for pid in sorted(set(eb) & set(et)):
+    sample, and the plugin files the run plans hashed (a task's own checks and reward live there). A run with no
+    run plan, or whose episode records do not cover its report, is refused: there is nothing to check it against."""
+    pb, pt = (_plugin_hashes(d) for d in (base_dir, trained_dir))
+    eb, et = paired_episodes(base_dir, trained_dir, base, trained)
+    for pid in sorted(eb):
         first = {(e["k"], e["iteration"]): (e["turns"][0]["prompt_ids_sha256"], e["turns"][0]["seed"])
                  for e in eb[pid] if e.get("turns")}
         for e in et[pid]:
@@ -65,14 +105,15 @@ def fingerprints(base_dir: Path, trained_dir: Path) -> None:
                if e.get("status") == "scored"} for run in (eb, et))
     if rb and rt and rb != rt:
         raise Refused(f"the two runs were scored by different reward code: {sorted(rb)} against {sorted(rt)}")
-    pb, pt = (_plugin_hashes(d) for d in (base_dir, trained_dir))
     if pb != pt:
         raise Refused(f"the two runs loaded different plugin files: {pb} against {pt}")
 
 
 def _plugin_hashes(run_dir: Path) -> dict:
     path = Path(run_dir) / "run_plan.json"
-    plan = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if not path.is_file():
+        raise Refused(f"{run_dir}: no run_plan.json, so its plugin files cannot be checked")
+    plan = json.loads(path.read_text(encoding="utf-8"))
     return {k: (v or {}).get("sha256") for k, v in sorted((plan.get("plugins") or {}).items())}
 
 
@@ -97,7 +138,7 @@ def compare(base_dir: Path, trained_dir: Path) -> dict:
         for key in ("task_sha256", "samples"):
             if b.get(key) != t.get(key):
                 raise Refused(f"{pid}: the two runs differ in {key}: {b.get(key)} against {t.get(key)}")
-    fingerprints(base_dir, trained_dir)
+    fingerprints(base_dir, trained_dir, base, trained)
     sb = base["run"].get("sampling")
     rows = []
     for pid in sorted(base["prompts"]):

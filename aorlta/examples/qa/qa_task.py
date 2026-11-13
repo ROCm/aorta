@@ -30,7 +30,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SYSTEM = "You are a helpful assistant."
 USER = "{question}\n\nEnd your reply with a line of the form 'Answer: <your answer>'."
-ANSWER_RE = re.compile(r"^\s*\**\s*answer\s*\**\s*[:：]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+ANSWER_RE = re.compile(r"^[ \t]*\**[ \t]*answer[ \t]*\**[ \t]*[:：][ \t]*(.*?)[ \t]*$", re.IGNORECASE)  # one line
 
 
 def load_rows(pool_dir) -> list[dict]:
@@ -57,9 +57,10 @@ def normalise(text: str) -> str:
 
 
 def final_answer(reply: str) -> str | None:
-    """The last `Answer:` line's answer, or None."""
-    found = ANSWER_RE.findall(reply)
-    return found[-1] if found else None
+    """The last `Answer:` line's answer, or None. Each line is read on its own, so an empty `Answer:` never takes the
+    next line as its answer, and the last marker decides, an empty one included."""
+    found = [m.group(1) for line in reply.splitlines() if (m := ANSWER_RE.match(line))]
+    return (found[-1] or None) if found else None
 
 
 def messages(row: dict) -> list[dict]:
@@ -139,7 +140,7 @@ class QaMatch:
         self.name, self.ctx = ctx.name, ctx
         self.judge = ctx.settings.get("judge")
         self.judge_timeout_s = float(ctx.settings.get("judge_timeout_s", 60.0))
-        self.version = "1"  # cached legs are keyed by it: the judge, which can turn a mismatch clean, is part of it
+        self.version = "2"  # cached legs are keyed by it: the judge, which can turn a mismatch clean, is part of it
         if self.judge:
             files = {a: file_identity(a) for a in self.judge if isinstance(a, str) and Path(a).is_file()}
             exe = shutil.which(self.judge[0]) if isinstance(self.judge[0], str) else None  # as PATH finds it, if bare
@@ -147,7 +148,7 @@ class QaMatch:
                 files[f"exe:{self.judge[0]}"] = f"{os.path.realpath(exe)}:{file_identity(exe)}"
             ident = json.dumps({"judge": list(self.judge), "timeout_s": self.judge_timeout_s, "files": files},
                                sort_keys=True)
-            self.version = f"1+judge-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
+            self.version = f"2+judge-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
         self.runner = ProcessRunner()  # kills the judge's whole process group on a timeout or at close()
         self.rows = {}
         for pool in ctx.pools:
