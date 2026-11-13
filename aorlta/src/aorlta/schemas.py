@@ -18,8 +18,9 @@ from .config import ConfigError, plain, strict_decode
 
 Source = Literal["standin"]
 LegState = Literal["clean", "finding", "fail", "unsettled", "skipped_by_plan", "not_run"]
-# "standin-gpu" adds aorta ConSan/ASan on a GPU to standin-static (C2.T11, and stand-in runs).
-CheckProfile = Literal["standin-static", "standin-gpu", "fake"]
+# "standin-static", "standin-gpu" (aorta ConSan/ASan on a GPU added, C2.T11), "fake", or a profile a plugin
+# registered (plugins.py); the run config checks the name, and the service serves only its own profile.
+CheckProfile = str
 EndReason = Literal[
     "compiled",
     "no_change",  # a parse that finds the kernel left as shown (an explicit no-change answer, or edits that change

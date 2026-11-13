@@ -318,6 +318,28 @@ def test_identical_groups_above_5_percent_stop_the_run(rt):
     assert healthy.metrics["distinct_turn0_mean"] == 4 and healthy.stop_reasons == []
 
 
+def test_rollout_identical_groups_stop_sets_the_share_that_stops_the_run(rt):
+    """`rollout.identical_groups_stop`: the same all-identical groups stop the run at the default and at 0.5, and do
+    not at 1.0; the config carries the value into the rollout's settings."""
+    from aorlta.config import config_from_dict
+    from aorlta.rollout.chain import IDENTICAL_GROUPS_STOP, RolloutSettings
+
+    for limit, stops in ((IDENTICAL_GROUPS_STOP, True), (0.5, True), (1.0, False)):
+        fake = rt.fake_engines(1, FakeEngineConfig(seed=1, **SHORT))[0]
+        pool = rt.make_pool([SeedBlind(0, fake)])
+        result = rt.make_manager(pool, K=4, identical_groups_stop=limit).run(
+            rt.make_prompts(rt.SpecialByteTokenizer(), 3), 1, "v")
+        assert result.metrics["groups_all_identical"] == 3
+        assert any("sampler suspected" in r for r in result.stop_reasons) == stops, limit
+    cfg = config_from_dict({"run": {"run_id": "r", "source": "standin", "root": "/x"},
+                            "model": {"base_dir": "/b", "source": "standin"},
+                            "data": {"prompt_pools": [{"path": "/p", "source": "standin"}]},
+                            "rollout": {"identical_groups_stop": 0.3},
+                            "reward": {"profile": "fake", "reward_fn": "standin.v11"},
+                            "orchestrator": {"iterations": 1, "run_seed": 1}})
+    assert RolloutSettings.from_config(cfg, 4096).identical_groups_stop == 0.3
+
+
 def test_prompts_go_to_engines_by_lpt_and_groups_stay_on_one_engine(rt):
     result, reqs, got, prompts, mgr = _run(rt, FakeEngineConfig(seed=1, compile_error_rate=0.5, **SHORT), P=6, K=3,
                                            engines=3)

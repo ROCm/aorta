@@ -11,7 +11,8 @@ group goes to one rank as it completes, and the step is one all-reduce and one o
 
 What this wiring does not do, each refused by `check_supported` or stated where it bites:
   - streaming accumulation only, one step per iteration;
-  - stand-in prompts only, with the held-out kernels left out of training;
+  - one prompt pool: the stand-in prompts, with the held-out kernels left out of training, or a task a plugin
+    registered (plugins.py), whose prompts are its own;
   - no eval exporter (`orchestrator.eval_every` must be null);
   - the selector off or log-only with no planner endpoint;
   - the generation deadline stops chains from starting another turn, but does not abort a request already running
@@ -47,6 +48,14 @@ LORA_R, LORA_ALPHA = 16, 32  # Section 6.4: a fresh r16/alpha32 LoRA
 PROBE_KERNELS = 40  # WP3's probes are the last `sync.probes` of these stand-in kernels
 WORKER_THREADS = 8  # CPU threads per spawned trainer rank: its CPU work is small, and the compile pool shares the node
 ENGINE_CALL_TIMEOUT_S = 600.0  # a probe, a greedy draw or a reload, as EngineProc's own reload default
+# A plugin task's engine self-test chats (plugins.Task.selftest_messages): open-ended, so two seeds' first 128 tokens
+# differ on a sound sampler whatever the task's own prompts are.
+SELF_TEST_CHATS = tuple(
+    ({"role": "system", "content": "You are an expert AMD GPU kernel engineer."}, {"role": "user", "content": q})
+    for q in ("Describe, in your own words, three different reasons a GPU kernel can run slower than expected.",
+              "Write a short story, of about a paragraph, about a GPU that is learning to schedule its own work.",
+              "List some ideas for small exercises that teach someone how GPU memory coalescing works.",
+              "Explain to a new engineer, with an example of your choosing, what a race condition in a kernel is."))
 FAKE_FAIL_RATE = 0.05  # per leg, in the fake profile: enough failures that rewards differ within a group
 STANDIN_REWARD_FNS = ("standin.v11",)
 MERGE_TOOL = Path(__file__).resolve().parents[3] / "tools" / "merge_base_adapter.py"
@@ -81,8 +90,11 @@ def check_supported(cfg: RunConfig) -> None:
     pools = cfg.data.prompt_pools
     if len(pools) != 1 or pools[0].source != "standin":
         problems.append("data.prompt_pools must be exactly one stand-in pool")
-    if cfg.reward.reward_fn not in STANDIN_REWARD_FNS:
-        problems.append(f"reward.reward_fn is {cfg.reward.reward_fn!r}: only standin.v11 is wired")
+    from .. import plugins
+
+    if cfg.reward.reward_fn not in STANDIN_REWARD_FNS and cfg.reward.reward_fn not in plugins.REWARD_FNS:
+        problems.append(f"reward.reward_fn is {cfg.reward.reward_fn!r}: only standin.v11 and reward functions a "
+                        f"plugin registered are wired")
     if cfg.selector.endpoint is not None:
         problems.append("selector.endpoint is set: no planner is wired (log-only runs without one)")
     if cfg.rollout.P < SELF_TEST_PROMPTS:
@@ -165,6 +177,59 @@ def standin_dataset_dir(path: str | Path) -> Path:
     raise WiringError(f"{path}: neither it nor its parent holds kernels.json and listings/")
 
 
+class TaskPromptPool:
+    """The PromptPool port over a task a plugin registered (`plugins.Task`): its records from the pool's directory,
+    checked once: unique prompt ids, every record of the stand-in source."""
+
+    source = "standin"
+
+    def __init__(self, task, tokenizer, thinking: str, pool_dir: str | Path):
+        self.task, self.tokenizer, self.thinking, self.pool_dir = task, tokenizer, thinking, Path(pool_dir)
+        self._records: list | None = None
+
+    def records(self) -> list:
+        if self._records is None:
+            recs = list(self.task.records(self.pool_dir, self.tokenizer, self.thinking))
+            if not recs:
+                raise WiringError(f"task {self.task.name!r} gave no prompts from {self.pool_dir}")
+            ids = [r.prompt_id for r in recs]
+            if len(set(ids)) != len(ids):
+                raise WiringError(f"task {self.task.name!r} gave a prompt id twice")
+            stray = sorted({r.source for r in recs} - {self.source})
+            if stray:
+                raise WiringError(f"task {self.task.name!r} gave records of source {stray}, not {self.source!r}")
+            self._records = recs
+        return list(self._records)
+
+
+def task_probes(cfg: RunConfig, tokenizer, task, pool_dir: str | Path, records: Sequence):
+    """The landing probes and warm-up ids of a task's run: `sync.probes` chats from the task's `probe_messages`, or
+    the first records' own messages. Each chat is a system and a user message (or a user message alone), and they
+    share one system message."""
+    from ..sync.landing import build_probes
+
+    chats = (list(task.probe_messages(Path(pool_dir))) if task.probe_messages is not None
+             else [r.messages for r in records if r.messages is not None])
+    chats = chats[:cfg.sync.probes]
+    if len(chats) < cfg.sync.probes:
+        raise WiringError(f"task {task.name!r}: the landing check needs {cfg.sync.probes} probe chats "
+                          f"(sync.probes), it has {len(chats)}")
+    systems, users = set(), []
+    for chat in chats:
+        roles = [m["role"] for m in chat]
+        if roles == ["system", "user"]:
+            systems.add(chat[0]["content"])
+        elif roles == ["user"]:
+            systems.add("")
+        else:
+            raise WiringError(f"task {task.name!r}: a probe chat is a system and a user message, got roles {roles}")
+        users.append(chat[-1]["content"])
+    if len(systems) != 1:
+        raise WiringError(f"task {task.name!r}: the probe chats must share one system message")
+    return build_probes(getattr(tokenizer, "tok", tokenizer), users, system=systems.pop(),
+                        tokens=cfg.sync.probe_tokens)
+
+
 def node_dir(cfg: RunConfig) -> Path:
     """This run's node-local directory, which also holds its weight slots: `<sync.dir>/<run_id>`."""
     return Path(cfg.sync.dir) / cfg.run.run_id
@@ -237,6 +302,22 @@ def rollout_max_len(cfg: RunConfig, tokenizer, records: Sequence) -> int:
                          r.max_repair_turns)
 
 
+def startup_max_len(cfg: RunConfig, tokenizer, records: Sequence, selftest_messages: Sequence | None) -> int:
+    """The context the start-up requests need, which the rollouts' budget does not cover when prompts are short and
+    replies small: the engine self-test (its chats, or the pool's turn 0s, plus `SELF_TEST_TOKENS`) and the landing
+    probes (`sync.probe_tokens`) plus the round trip's greedy continuation."""
+    from ..rollout.engine_pool import SELF_TEST_TOKENS
+    from ..rollout.templates import render_turn0, turn0_ids
+    from ..sync.roundtrip import GREEDY_TOKENS
+
+    thinking = cfg.rollout.thinking
+    if selftest_messages is not None:
+        selftest = max(len(render_turn0(tokenizer, m, thinking)) for m in selftest_messages)
+    else:
+        selftest = max(len(turn0_ids(p, tokenizer, thinking)) for p in records)
+    return max(selftest + SELF_TEST_TOKENS, cfg.sync.probe_tokens + GREEDY_TOKENS)
+
+
 def engine_handles(cfg: RunConfig, max_len: int) -> list:
     """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`."""
     from ..rollout.engine_pool import engine_kwargs, engine_port
@@ -263,10 +344,11 @@ class RolloutAdapter:
     """C1 behind the RolloutPort."""
 
     def __init__(self, cfg: RunConfig, tokenizer, handles: Sequence[Any], *, max_len: int, spans, compiler,
-                 on_shutdown: Sequence[Callable[[], None]] = (), clock=None):
+                 on_shutdown: Sequence[Callable[[], None]] = (), clock=None, selftest_messages: Sequence | None = None):
         from ..rollout.engine_pool import EnginePool
 
         self.cfg, self.tok, self.spans, self.max_len, self.compiler = cfg, tokenizer, spans, max_len, compiler
+        self.selftest_messages = None if selftest_messages is None else list(selftest_messages)  # else the prompts
         self.clock = clock  # the orchestrator's clock: its deadlines are read on it
         self.handles = [CountedHandle(h) for h in handles]
         self.pool = EnginePool(self.handles, run_seed=cfg.orchestrator.run_seed,
@@ -279,9 +361,15 @@ class RolloutAdapter:
         from ..rollout.engine_pool import RolloutStop
         from ..rollout.templates import turn0_ids
 
+        from ..rollout.templates import render_turn0
+
         r = self.cfg.rollout
         try:
-            self.pool.start([turn0_ids(p, self.tok, r.thinking) for p in selftest_prompts])
+            if self.selftest_messages is not None:
+                ids = [render_turn0(self.tok, m, r.thinking) for m in self.selftest_messages]
+            else:
+                ids = [turn0_ids(p, self.tok, r.thinking) for p in selftest_prompts]
+            self.pool.start(ids)
         except RolloutStop as exc:
             raise RunStopped("engine_start_failed", {"error": describe_error(exc, self.cfg.run.source)}) from None
         settings = RolloutSettings.from_config(self.cfg, self.max_len)
@@ -416,7 +504,8 @@ class RewardAdapter:
                 from ..reward.factories import standin_factories
 
                 factories = standin_factories(self.profile, clock, timeouts=dataclasses.asdict(cfg.reward.timeouts),
-                                              check_s=cfg.reward.gpu_check_s)
+                                              check_s=cfg.reward.gpu_check_s,
+                                              pools=tuple(p.path for p in cfg.data.prompt_pools))
             factories.update(remote_factories(cfg, clock))
         missing = sorted({p.adapter for p in self.profile.pools.values()} - set(factories))
         if missing:
@@ -1179,36 +1268,63 @@ def build(cfg: RunConfig, *, config_path=None, commit: str | None = None, parts:
     from ..spans import SpanRecorder
     from .loop import Orchestrator
 
+    from .. import plugins
+
     parts = parts or Parts()
     check_supported(cfg)
     clock = Clock()
     spans = SpanRecorder(monotonic=clock.now, wall=clock.wall)
     dataset = None
-    if parts.pool is None or parts.probes is None:  # the prompts and the landing probes come from the dataset
-        dataset = standin_dataset_dir(cfg.data.prompt_pools[0].path)
+    pool_cfg = cfg.data.prompt_pools[0]
+    task = None if pool_cfg.task == "standin" else plugins.task(pool_cfg.task)
+    if task is None and (parts.pool is None or parts.probes is None):  # the prompts and probes come from the dataset
+        dataset = standin_dataset_dir(pool_cfg.path)
     tok = parts.tokenizer or HFTokenizer.load(cfg.model.base_dir)
-    pool = parts.pool if parts.pool is not None else StandinPromptPool(tok, cfg.rollout.thinking, dataset)
+    if parts.pool is not None:
+        pool = parts.pool
+    elif task is not None:
+        pool = TaskPromptPool(task, tok, cfg.rollout.thinking, pool_cfg.path)
+    else:
+        pool = StandinPromptPool(tok, cfg.rollout.thinking, dataset)
     try:
         records = pool.records()
         max_len = rollout_max_len(cfg, tok, records)
     except TemplateError as exc:
-        raise WiringError(f"stand-in prompts: {exc}") from None
+        raise WiringError(f"{pool_cfg.task} prompts: {exc}") from None
+    probes = parts.probes
+    if probes is None and task is not None:
+        probes = task_probes(cfg, tok, task, pool_cfg.path, records)
+    selftest = None
+    if task is not None:
+        selftest = (list(task.selftest_messages(Path(pool_cfg.path))) if task.selftest_messages is not None
+                    else list(SELF_TEST_CHATS))
+        from ..rollout.engine_pool import SELF_TEST_PROMPTS
+
+        if len(selftest) < SELF_TEST_PROMPTS:
+            raise WiringError(f"task {task.name!r}: the engine self-test needs {SELF_TEST_PROMPTS} chats, "
+                              f"got {len(selftest)}")
+        selftest = selftest[:SELF_TEST_PROMPTS]
+    try:
+        max_len = max(max_len, startup_max_len(cfg, tok, records, selftest))
+    except TemplateError as exc:
+        raise WiringError(f"{pool_cfg.task} engine self-test chats: {exc}") from None
     compiler = parts.compiler if parts.compiler is not None else rollout_compiler(cfg)
     handles = parts.handles if parts.handles is not None else engine_handles(cfg, max_len)
     if cfg.orchestrator.mode == "score":  # no trainer, no optimizer, no weight sync
         from .score import Scorer
 
         rollout = RolloutAdapter(cfg, tok, handles, max_len=max_len, spans=spans, compiler=compiler,
-                                 on_shutdown=[lambda: remove_node_dir(cfg)], clock=clock)
-        model = ServedModel(cfg, tok, rollout, spans=spans, dataset=dataset, probes=parts.probes)
+                                 on_shutdown=[lambda: remove_node_dir(cfg)], clock=clock, selftest_messages=selftest)
+        model = ServedModel(cfg, tok, rollout, spans=spans, dataset=dataset, probes=probes)
         reward = RewardAdapter(cfg, clock=clock, spans=spans, factories=parts.reward_factories)
         return Scorer(cfg, pool=pool, rollout=rollout, reward=reward, model=model, clock=clock, spans=spans,
                       commit=commit, config_path=config_path)
     trainer = TrainerAdapter(cfg, spans=spans, load_model=parts.load_model, device=parts.trainer_device,
                              require_fast_path=parts.require_fast_path, amp=parts.amp)
     rollout = RolloutAdapter(cfg, tok, handles, max_len=max_len, spans=spans, compiler=compiler,
-                             on_shutdown=[trainer.shutdown, lambda: remove_node_dir(cfg)], clock=clock)
-    sync = SyncAdapter(cfg, tok, trainer, rollout, spans=spans, dataset=dataset, probes=parts.probes)
+                             on_shutdown=[trainer.shutdown, lambda: remove_node_dir(cfg)], clock=clock,
+                             selftest_messages=selftest)
+    sync = SyncAdapter(cfg, tok, trainer, rollout, spans=spans, dataset=dataset, probes=probes)
     trainer.warmup_ids = lambda: sync.probes().ids  # the landing probes: real stand-in prompt tokens
     reward = RewardAdapter(cfg, clock=clock, spans=spans, factories=parts.reward_factories)
     return Orchestrator(cfg, pool=pool, rollout=rollout, reward=reward, trainer=trainer, sync=sync, clock=clock,

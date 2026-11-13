@@ -17,10 +17,14 @@ from .profiles import Profile, tool_root
 
 
 def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, float] | None = None,
-                      check_s: dict[str, float] | None = None) -> dict[str, Callable[[str], Any]]:
-    """Factories for every `standin.*` adapter the profile names. An adapter's own subprocess timeout
-    sits a little under the watchdog's, so the adapter reports first when it can. `check_s` is
+                      check_s: dict[str, float] | None = None,
+                      pools: tuple[str, ...] = ()) -> dict[str, Callable[[str], Any]]:
+    """Factories for every `standin.*` adapter the profile names, and every adapter it names that a plugin registered
+    (plugins.py; `pools` are the run's prompt pool paths, which such an adapter is given). An adapter's own subprocess
+    timeout sits a little under the watchdog's, so the adapter reports first when it can. `check_s` is
     `reward.gpu_check_s`: the GPU legs' per-check limit, by leg, inside that bound."""
+    from .. import plugins
+
     timeouts = timeouts or {}
     check_s = check_s or {}
     cfg = profile.adapters
@@ -61,4 +65,8 @@ def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, flo
             aorta_src=c["aorta_src"], hipcc=c.get("hipcc", hipcc), target=c.get("target", "gfx950"),
             timeout_s=max(1.0, own("standin.aorta_asan") / 18), check_timeout_s=check_s.get("san.asan"),
             control_source=c.get("control_source"), clock=clock.wall), max_packages=16, inband_controls=True)
+    for name in sorted(names & set(plugins.CHECK_ADAPTERS)):
+        out[name] = lambda wid, name=name: plugins.CHECK_ADAPTERS[name](plugins.CheckContext(
+            name=name, worker_id=wid, settings=dict(cfg.get(name, {})), clock=clock.wall, timeout_s=own(name),
+            pools=tuple(pools), check_s=dict(check_s)))
     return out

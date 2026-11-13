@@ -65,7 +65,7 @@ from .templates import (
 
 SCORED_ENDS = frozenset({"compiled", "no_change", "no_code_block", "turns_exhausted", "context_limit", "logprob_error"})
 TRAINED_ENDS = frozenset({"compiled", "no_change", "no_code_block", "turns_exhausted", "context_limit"})
-IDENTICAL_GROUPS_STOP = 0.05  # above this share of groups with all K answers identical, stop (sampler suspected)
+IDENTICAL_GROUPS_STOP = 0.05  # the default of rollout.identical_groups_stop
 REPAIR_TURN_IDS = ("append", "rerender")
 
 
@@ -132,22 +132,48 @@ def _check_built(kind: str, name: str, built: Sequence[str]) -> None:
         raise RolloutStop(f"{kind} {name!r} is not available; built: {', '.join(built)}")
 
 
+def _parse_adapters() -> tuple[str, ...]:
+    from .. import plugins
+
+    return PARSE_ADAPTERS + tuple(sorted(plugins.PARSE_ADAPTERS))
+
+
+def _feedback_templates() -> tuple[str, ...]:
+    from .. import plugins
+
+    return FEEDBACK_TEMPLATES + tuple(sorted(plugins.FEEDBACK_TEMPLATES))
+
+
+def _named(kind: str, obj: Any, name: str) -> Any:
+    if getattr(obj, "name", None) != name:
+        raise RolloutStop(f"the {kind} registered as {name!r} is named {getattr(obj, 'name', None)!r}")
+    return obj
+
+
 def check_adapter_names(parse_adapter: str, feedback_template: str) -> None:
-    """Refuse a configured parse or feedback component that is not built, rather than silently use the
-    stand-in in its place."""
-    _check_built("parse adapter", parse_adapter, PARSE_ADAPTERS)
-    _check_built("feedback template", feedback_template, FEEDBACK_TEMPLATES)
+    """Refuse a configured parse or feedback component that is not built or registered by a plugin, rather than
+    silently use the stand-in in its place."""
+    _check_built("parse adapter", parse_adapter, _parse_adapters())
+    _check_built("feedback template", feedback_template, _feedback_templates())
 
 
 def make_parse_adapter(name: str) -> ParseAdapter:
-    """The configured parse."""
-    _check_built("parse adapter", name, PARSE_ADAPTERS)
+    """The configured parse: the stand-in one, or one a plugin registered."""
+    from .. import plugins
+
+    _check_built("parse adapter", name, _parse_adapters())
+    if name in plugins.PARSE_ADAPTERS:
+        return _named("parse adapter", plugins.PARSE_ADAPTERS[name](), name)
     return StandinParse()
 
 
 def make_feedback_template(name: str) -> FeedbackTemplate:
-    """The configured feedback."""
-    _check_built("feedback template", name, FEEDBACK_TEMPLATES)
+    """The configured feedback: the stand-in one, or one a plugin registered."""
+    from .. import plugins
+
+    _check_built("feedback template", name, _feedback_templates())
+    if name in plugins.FEEDBACK_TEMPLATES:
+        return _named("feedback template", plugins.FEEDBACK_TEMPLATES[name](), name)
     return StandinFeedback()
 
 
@@ -177,6 +203,7 @@ class RolloutSettings:
     parse_adapter: str = "standin.parse"
     feedback_template: str = "standin"
     repair_turn_ids: str = "append"  # REPAIR_TURN_IDS
+    identical_groups_stop: float = IDENTICAL_GROUPS_STOP  # above this share of all-identical groups, stop
 
     @classmethod
     def from_config(cls, cfg: RunConfig, max_model_len: int) -> RolloutSettings:
@@ -188,6 +215,7 @@ class RolloutSettings:
             temperature=r.temperature, top_p=r.top_p, top_k=r.top_k, max_new_tokens=r.max_new_tokens,
             max_feedback_chars=r.max_feedback_chars, max_model_len=max_model_len, P=r.P,
             parse_adapter=r.parse_adapter, feedback_template=r.feedback_template, repair_turn_ids=r.repair_turn_ids,
+            identical_groups_stop=r.identical_groups_stop,
         )
 
     def sampling_params(self, seed: int) -> dict:
@@ -491,7 +519,7 @@ class RolloutManager:
         chains = [o.record for o in outcomes]
         metrics = self._metrics(iteration, prompts, outcomes, assignment, estimates, seeds, t_start, t_end)
         stop: list[str] = []
-        if metrics["groups_all_identical_frac"] > IDENTICAL_GROUPS_STOP:
+        if metrics["groups_all_identical_frac"] > s.identical_groups_stop:
             stop.append(f"{metrics['groups_all_identical']} of {metrics['groups_compared']} groups have all "
                         f"{s.K} answers identical at T {s.temperature} (sampler suspected)")
         if self.pool.stop_reason:
