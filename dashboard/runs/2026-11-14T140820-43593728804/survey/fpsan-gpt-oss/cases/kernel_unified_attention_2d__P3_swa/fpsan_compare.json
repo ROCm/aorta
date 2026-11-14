@@ -1,0 +1,241 @@
+{
+  "kernel": "kernel_unified_attention_2d",
+  "scenario": "P3_swa",
+  "reference": {
+    "kernel": "kernel_unified_attention_2d",
+    "changes": [
+      "num_warps 4 -> 8"
+    ]
+  },
+  "sides": {
+    "reference": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354",
+      "tensors": [
+        {
+          "name": "arg0",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            667,
+            64,
+            64
+          ],
+          "sha256": "3efca9fb7d7057d4eba117e4215bc27251b7cb549a8d6849b403671190567c53"
+        },
+        {
+          "name": "arg1",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            667,
+            64,
+            64
+          ],
+          "sha256": "e908b992b47140bd88f684f00d883b26533b233628e29ec28ea9fbe513877de4"
+        },
+        {
+          "name": "arg2",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            11,
+            64,
+            8,
+            64
+          ],
+          "sha256": "157a65c94f1abe1dbcec773fec52bc84206c698dffe0667adbbc8d81b3cb5a9f"
+        },
+        {
+          "name": "arg3",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            11,
+            64,
+            8,
+            64
+          ],
+          "sha256": "1a3616de413ca1a5a5d3499385ad1045a555150fe97ce1a9ece885e4ad305b67"
+        },
+        {
+          "name": "arg4",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            64
+          ],
+          "sha256": "ce5b46af6d775a7ee71a2366845a6c909160e02451b47f39bd5ffe64c4d25edf"
+        },
+        {
+          "name": "arg5",
+          "dtype": "torch.int32",
+          "shape": [
+            1,
+            11
+          ],
+          "sha256": "53bfb09a8803b408833184310d7a89203a1665bf87cc3bdf75e5cd512c94352d"
+        },
+        {
+          "name": "arg6",
+          "dtype": "torch.int32",
+          "shape": [
+            1
+          ],
+          "sha256": "e7528b96240e04e5f6d5491a561cd1bb1c0228d34d0d9dd307ad3a6941bef2b7"
+        },
+        {
+          "name": "arg11",
+          "dtype": "torch.float32",
+          "shape": [],
+          "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+        },
+        {
+          "name": "arg12",
+          "dtype": "torch.float32",
+          "shape": [],
+          "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+        },
+        {
+          "name": "arg40",
+          "dtype": "torch.int32",
+          "shape": [
+            2
+          ],
+          "sha256": "d1fbb0125fa6acef1c8f576c43b7511872038168162e6553af68ae10801d0f6a"
+        }
+      ],
+      "kernel": "kernel_unified_attention_2d",
+      "seconds": 3.2,
+      "cache": {
+        "objects": [
+          {
+            "object": "kernel_unified_attention_2d.hsaco",
+            "name": "kernel_unified_attention_2d",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 41,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    },
+    "candidate": {
+      "load_kernel_calls": 1,
+      "launches": 1,
+      "digest": "4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354",
+      "tensors": [
+        {
+          "name": "arg0",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            667,
+            64,
+            64
+          ],
+          "sha256": "3efca9fb7d7057d4eba117e4215bc27251b7cb549a8d6849b403671190567c53"
+        },
+        {
+          "name": "arg1",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            667,
+            64,
+            64
+          ],
+          "sha256": "e908b992b47140bd88f684f00d883b26533b233628e29ec28ea9fbe513877de4"
+        },
+        {
+          "name": "arg2",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            11,
+            64,
+            8,
+            64
+          ],
+          "sha256": "157a65c94f1abe1dbcec773fec52bc84206c698dffe0667adbbc8d81b3cb5a9f"
+        },
+        {
+          "name": "arg3",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            11,
+            64,
+            8,
+            64
+          ],
+          "sha256": "1a3616de413ca1a5a5d3499385ad1045a555150fe97ce1a9ece885e4ad305b67"
+        },
+        {
+          "name": "arg4",
+          "dtype": "torch.bfloat16",
+          "shape": [
+            64
+          ],
+          "sha256": "ce5b46af6d775a7ee71a2366845a6c909160e02451b47f39bd5ffe64c4d25edf"
+        },
+        {
+          "name": "arg5",
+          "dtype": "torch.int32",
+          "shape": [
+            1,
+            11
+          ],
+          "sha256": "53bfb09a8803b408833184310d7a89203a1665bf87cc3bdf75e5cd512c94352d"
+        },
+        {
+          "name": "arg6",
+          "dtype": "torch.int32",
+          "shape": [
+            1
+          ],
+          "sha256": "e7528b96240e04e5f6d5491a561cd1bb1c0228d34d0d9dd307ad3a6941bef2b7"
+        },
+        {
+          "name": "arg11",
+          "dtype": "torch.float32",
+          "shape": [],
+          "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+        },
+        {
+          "name": "arg12",
+          "dtype": "torch.float32",
+          "shape": [],
+          "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+        },
+        {
+          "name": "arg40",
+          "dtype": "torch.int32",
+          "shape": [
+            2
+          ],
+          "sha256": "d1fbb0125fa6acef1c8f576c43b7511872038168162e6553af68ae10801d0f6a"
+        }
+      ],
+      "kernel": "kernel_unified_attention_2d",
+      "seconds": 3.1,
+      "cache": {
+        "objects": [
+          {
+            "object": "kernel_unified_attention_2d.hsaco",
+            "name": "kernel_unified_attention_2d",
+            "instrumentation_mode": "fpsan",
+            "arch": "gfx950",
+            "triton_version": "3.8.0",
+            "fpsan_ttgir_ops": 41,
+            "instrumented": true
+          }
+        ],
+        "instrumented": true
+      }
+    }
+  },
+  "differing_tensors": [],
+  "result": {
+    "reference_digest": "4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354",
+    "candidate_digest": "4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354",
+    "reference_instrumented": true,
+    "candidate_instrumented": true,
+    "target": "gfx950"
+  },
+  "seconds": 6.3
+}

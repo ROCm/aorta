@@ -1,0 +1,2600 @@
+{
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "overall_verdict": "pass",
+  "execution_status": "complete",
+  "worklist": {
+    "schema": "aorta.kernel_worklist/0.1",
+    "requirement": "top_dispatch_count",
+    "top_n": 42,
+    "kernel_count": 42,
+    "kernels": [
+      {
+        "identity": {
+          "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__D3/dispatched.hsaco",
+          "code_object_sha256": "8b64fa68f36e5fa05a1480165b0531dfcc3ec45c8a23e08e866fce25b4483c7f",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__P3/dispatched.hsaco",
+          "code_object_sha256": "357789577b351b775dff67dc64cd505ee64f329cb750f48f5562ef424081019a",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rms_norm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__D1/dispatched.hsaco",
+          "code_object_sha256": "1dcf3e3765decbb59d282f51bdd9fb2950782c2d199055d0845af6a6d2004ec6",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rms_norm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__D2/dispatched.hsaco",
+          "code_object_sha256": "63fa64b777e23dc2b21db2827e0876cd6c36c66a5a6b4ea4d2993f5a497f33cb",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rms_norm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__D3/dispatched.hsaco",
+          "code_object_sha256": "e189a11509ceed64bc4d986c443cb49d525429e5857ed4a69f6907cc3f8ac1d8",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rms_norm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__D4/dispatched.hsaco",
+          "code_object_sha256": "e5d86d5d3e5ff3546ed14e05721633b2e5bc03c7733b13e7d6e59d9501741197",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rms_norm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__P1/dispatched.hsaco",
+          "code_object_sha256": "b6dcdd21dd47e5cc3f36accb538ed81ab8f63547c4cf0bcbff572777c26aefe2",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rms_norm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__P2/dispatched.hsaco",
+          "code_object_sha256": "ec7c47196f658c00d1b57330e44219049951ee7d8b46a78afd3a4f7b54e7e2b4",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rms_norm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__P3/dispatched.hsaco",
+          "code_object_sha256": "cca3ceda2fcc0c4589a8bec5d704504711a4c0cf98832c66c7effed6fe0dadf5",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__D1/dispatched.hsaco",
+          "code_object_sha256": "8f39bbd1bdf24a5dc2245a74339cc33ed3ace6b1f00ceb5fdac74d2887cc8428",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__D2/dispatched.hsaco",
+          "code_object_sha256": "44472db0691b807b53c49f4da0654873ce32e4ae3cabcfeb9a1dc2f9b8c525e5",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__D1/dispatched.hsaco",
+          "code_object_sha256": "02f9a6e283e68f084748081fff1baf8d70d48c7f7c47182df2d14fff86588992",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__D2/dispatched.hsaco",
+          "code_object_sha256": "6f9777410606a41f5b04c3686a7d88ab42747cdb46e50b4cf6fe7a73edc57012",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__D3/dispatched.hsaco",
+          "code_object_sha256": "d5458dc446e25aab98bdd40cfb51d76bb19d8e5d5682fbae69397a5468482ab4",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_swiglu_bf16xbf16_16x128",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__D1/dispatched.hsaco",
+          "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_topk_forward",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__D1/dispatched.hsaco",
+          "code_object_sha256": "5c4d4d519d314958c4826b1df67937cab393bcce831b399dd970bdcec8801c32",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_topk_forward",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__D2/dispatched.hsaco",
+          "code_object_sha256": "d46a6cefb739238e2c3852b203af2b01d5e273898976147c326083ddf2e7b78b",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_topk_topp_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__D1/dispatched.hsaco",
+          "code_object_sha256": "b7b68ee37bedb09f489d46a6ac6327fad488324af489770c4df867eb2d044f92",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_topk_topp_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__D2/dispatched.hsaco",
+          "code_object_sha256": "50fe4fea9d3b0e7681e75d479397d71e727a5f17cc39f758a068e89a08b74123",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "kernel_unified_attention_2d",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D1_full/dispatched.hsaco",
+          "code_object_sha256": "a5497ec8d06818986c61ac49686cbb04cc7093f477e0c20a59272b768879218b",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "kernel_unified_attention_2d",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D1_swa/dispatched.hsaco",
+          "code_object_sha256": "1e85e675524a5bc206ac7608f0d9253cc0dc9d1e415289bf813064097ed49054",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "kernel_unified_attention_2d",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P1_full/dispatched.hsaco",
+          "code_object_sha256": "699e09c798e2e50350b97bf031f3df424ad90dc51b7120eca0ca3d8d9e3226ab",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "kernel_unified_attention_2d",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P1_swa/dispatched.hsaco",
+          "code_object_sha256": "05e205ab8f84937c5f03e5191fc060b55fc5365f455f33ce41f0cb3b0400cb2c",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "kernel_unified_attention_2d",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P3_full/dispatched.hsaco",
+          "code_object_sha256": "7433030bb816a7249aa397e048404fe91d0c7eabeb260f1916f3caf23c3bc0b3",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "kernel_unified_attention_2d",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P3_swa/dispatched.hsaco",
+          "code_object_sha256": "6a27646a37aab3a96e8ce6bd90008f6a351f296abdd6fb6bc75033d6c3e7f816",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "kernel_unified_attention_3d",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_3d__X1_full/dispatched.hsaco",
+          "code_object_sha256": "6d038c64ca5b65f093c046115163d88d97d2175a47e7c8196e8a94ee4cab3e13",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "kernel_unified_attention_3d",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_3d__X2_full/dispatched.hsaco",
+          "code_object_sha256": "f437d8850aad898f73ba4b2ebe641752a57f351de63d50c4bd583e13cad109aa",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "reduce_segments",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/reduce_segments__X1_full/dispatched.hsaco",
+          "code_object_sha256": "7bcee0d9ae34fbb4b4e26bcd04972fc67a04ada1eff2685dcafa59e68d228886",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "reduce_segments",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/reduce_segments__X2_full/dispatched.hsaco",
+          "code_object_sha256": "53c2bad89831a14d672e39af393ba1a3b368c63c430ce08c705ae72318af97e0",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__D1/dispatched.hsaco",
+          "code_object_sha256": "136cc91e217d036e6a5532e748608e52bd050f37cc53f2ca8d619271f20829af",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__D2/dispatched.hsaco",
+          "code_object_sha256": "61903965e17f68ea384cb8356823ce8f08899f92f66adbe5c9a05610b1de8585",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__D3/dispatched.hsaco",
+          "code_object_sha256": "26b4c78f52ab406ed2208151091226136cca224b255e2ad8ab8058f384d579ac",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__D4/dispatched.hsaco",
+          "code_object_sha256": "28c7fc9948ae7b3557d257f0abcd8c408ec5e648b785ed57cb3b4166e0ff998f",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__P1/dispatched.hsaco",
+          "code_object_sha256": "b7cbcd5bb82b195a2f58c3332c20024227efb987b370040c7d9624667fba6093",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__P2/dispatched.hsaco",
+          "code_object_sha256": "0429ecf4ed391716e9c347ba9abb355a31607763a9c5bfe48a84bdf4b89f7f8e",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_kernel",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__P3/dispatched.hsaco",
+          "code_object_sha256": "df48165cc5a1088d89ff9df8ff26bedb63a7da2dd000151ce670717696994526",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_pad",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__D1/dispatched.hsaco",
+          "code_object_sha256": "494126cd1a31c02ee2e5e54e8a362e4a8c57c4a3ab4cb4f9f1b88143fa1da071",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_fused_add_rmsnorm_pad",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__D2/dispatched.hsaco",
+          "code_object_sha256": "dc6e5bea861bf450d2f2d2bc336bbd43452847af96d08c07814b735fd5582bb1",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__D1/dispatched.hsaco",
+          "code_object_sha256": "511118604650030cffc621e6b5d72d128fe776bb154ec972c46f8228fa92f363",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__D2/dispatched.hsaco",
+          "code_object_sha256": "02170daa86f629b0ea705f94033d775cf4d939c72e40c87b9744bb783ada493d",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1_swiglu",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__P3/dispatched.hsaco",
+          "code_object_sha256": "99783dba6bb344f6fe67718c04e8e54b53edc3220ed9573867d0020c3b44ede2",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      },
+      {
+        "identity": {
+          "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+          "target": "gfx950",
+          "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__D1/dispatched.hsaco",
+          "code_object_sha256": "b60dc71885aabd7a6f5f777ab0c60c6918e98f85dab6acebd7cb79753f07eb5a",
+          "code_object_index": 0,
+          "entry_offset": null
+        },
+        "total_time_ms": 0.0,
+        "dispatch_count": 1,
+        "sources": [
+          "kernel_list"
+        ]
+      }
+    ]
+  },
+  "checks": [
+    {
+      "sanitizer": "fpsan",
+      "state": "ran",
+      "verdict": "pass",
+      "reason": null,
+      "returncode": null,
+      "findings": [],
+      "kernel_results": [
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__D3/dispatched.hsaco",
+            "code_object_sha256": "8b64fa68f36e5fa05a1480165b0531dfcc3ec45c8a23e08e866fce25b4483c7f",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__D4/dispatched.hsaco",
+            "code_object_sha256": "8b64fa68f36e5fa05a1480165b0531dfcc3ec45c8a23e08e866fce25b4483c7f",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__P1/dispatched.hsaco",
+            "code_object_sha256": "8b64fa68f36e5fa05a1480165b0531dfcc3ec45c8a23e08e866fce25b4483c7f",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__P2/dispatched.hsaco",
+            "code_object_sha256": "8b64fa68f36e5fa05a1480165b0531dfcc3ec45c8a23e08e866fce25b4483c7f",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__P3/dispatched.hsaco",
+            "code_object_sha256": "357789577b351b775dff67dc64cd505ee64f329cb750f48f5562ef424081019a",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__P4/dispatched.hsaco",
+            "code_object_sha256": "357789577b351b775dff67dc64cd505ee64f329cb750f48f5562ef424081019a",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rms_norm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__D1/dispatched.hsaco",
+            "code_object_sha256": "1dcf3e3765decbb59d282f51bdd9fb2950782c2d199055d0845af6a6d2004ec6",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rms_norm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__D2/dispatched.hsaco",
+            "code_object_sha256": "63fa64b777e23dc2b21db2827e0876cd6c36c66a5a6b4ea4d2993f5a497f33cb",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rms_norm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__D3/dispatched.hsaco",
+            "code_object_sha256": "e189a11509ceed64bc4d986c443cb49d525429e5857ed4a69f6907cc3f8ac1d8",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rms_norm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__D4/dispatched.hsaco",
+            "code_object_sha256": "e5d86d5d3e5ff3546ed14e05721633b2e5bc03c7733b13e7d6e59d9501741197",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rms_norm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__P1/dispatched.hsaco",
+            "code_object_sha256": "b6dcdd21dd47e5cc3f36accb538ed81ab8f63547c4cf0bcbff572777c26aefe2",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rms_norm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__P2/dispatched.hsaco",
+            "code_object_sha256": "ec7c47196f658c00d1b57330e44219049951ee7d8b46a78afd3a4f7b54e7e2b4",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rms_norm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__P3/dispatched.hsaco",
+            "code_object_sha256": "cca3ceda2fcc0c4589a8bec5d704504711a4c0cf98832c66c7effed6fe0dadf5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rms_norm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rms_norm_kernel__P4/dispatched.hsaco",
+            "code_object_sha256": "cca3ceda2fcc0c4589a8bec5d704504711a4c0cf98832c66c7effed6fe0dadf5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__D1/dispatched.hsaco",
+            "code_object_sha256": "8f39bbd1bdf24a5dc2245a74339cc33ed3ace6b1f00ceb5fdac74d2887cc8428",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__D2/dispatched.hsaco",
+            "code_object_sha256": "44472db0691b807b53c49f4da0654873ce32e4ae3cabcfeb9a1dc2f9b8c525e5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__D3/dispatched.hsaco",
+            "code_object_sha256": "44472db0691b807b53c49f4da0654873ce32e4ae3cabcfeb9a1dc2f9b8c525e5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__D4/dispatched.hsaco",
+            "code_object_sha256": "44472db0691b807b53c49f4da0654873ce32e4ae3cabcfeb9a1dc2f9b8c525e5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__P1/dispatched.hsaco",
+            "code_object_sha256": "44472db0691b807b53c49f4da0654873ce32e4ae3cabcfeb9a1dc2f9b8c525e5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__P2/dispatched.hsaco",
+            "code_object_sha256": "44472db0691b807b53c49f4da0654873ce32e4ae3cabcfeb9a1dc2f9b8c525e5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__P3/dispatched.hsaco",
+            "code_object_sha256": "44472db0691b807b53c49f4da0654873ce32e4ae3cabcfeb9a1dc2f9b8c525e5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_fwd__P4/dispatched.hsaco",
+            "code_object_sha256": "44472db0691b807b53c49f4da0654873ce32e4ae3cabcfeb9a1dc2f9b8c525e5",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__D1/dispatched.hsaco",
+            "code_object_sha256": "02f9a6e283e68f084748081fff1baf8d70d48c7f7c47182df2d14fff86588992",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__D2/dispatched.hsaco",
+            "code_object_sha256": "6f9777410606a41f5b04c3686a7d88ab42747cdb46e50b4cf6fe7a73edc57012",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__D3/dispatched.hsaco",
+            "code_object_sha256": "d5458dc446e25aab98bdd40cfb51d76bb19d8e5d5682fbae69397a5468482ab4",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__D4/dispatched.hsaco",
+            "code_object_sha256": "d5458dc446e25aab98bdd40cfb51d76bb19d8e5d5682fbae69397a5468482ab4",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__P1/dispatched.hsaco",
+            "code_object_sha256": "d5458dc446e25aab98bdd40cfb51d76bb19d8e5d5682fbae69397a5468482ab4",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__P2/dispatched.hsaco",
+            "code_object_sha256": "d5458dc446e25aab98bdd40cfb51d76bb19d8e5d5682fbae69397a5468482ab4",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__P3/dispatched.hsaco",
+            "code_object_sha256": "d5458dc446e25aab98bdd40cfb51d76bb19d8e5d5682fbae69397a5468482ab4",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_rope_kernel_cached_thd_2c_gqa_onehead_fwd",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_rope_kernel_cached_thd_2c_gqa_onehead_fwd__P4/dispatched.hsaco",
+            "code_object_sha256": "d5458dc446e25aab98bdd40cfb51d76bb19d8e5d5682fbae69397a5468482ab4",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_swiglu_bf16xbf16_16x128",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__D1/dispatched.hsaco",
+            "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_swiglu_bf16xbf16_16x128",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__D2/dispatched.hsaco",
+            "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_swiglu_bf16xbf16_16x128",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__D3/dispatched.hsaco",
+            "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_swiglu_bf16xbf16_16x128",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__D4/dispatched.hsaco",
+            "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_swiglu_bf16xbf16_16x128",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__P1/dispatched.hsaco",
+            "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_swiglu_bf16xbf16_16x128",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__P2/dispatched.hsaco",
+            "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_swiglu_bf16xbf16_16x128",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__P3/dispatched.hsaco",
+            "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_swiglu_bf16xbf16_16x128",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_swiglu__P4/dispatched.hsaco",
+            "code_object_sha256": "6860ae4cbc95a4a5cdd58d34650863881f7b416a3e187934679e8556099e9d72",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_forward",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__D1/dispatched.hsaco",
+            "code_object_sha256": "5c4d4d519d314958c4826b1df67937cab393bcce831b399dd970bdcec8801c32",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_forward",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__D2/dispatched.hsaco",
+            "code_object_sha256": "d46a6cefb739238e2c3852b203af2b01d5e273898976147c326083ddf2e7b78b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_forward",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__D3/dispatched.hsaco",
+            "code_object_sha256": "d46a6cefb739238e2c3852b203af2b01d5e273898976147c326083ddf2e7b78b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_forward",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__D4/dispatched.hsaco",
+            "code_object_sha256": "d46a6cefb739238e2c3852b203af2b01d5e273898976147c326083ddf2e7b78b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_forward",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__P1/dispatched.hsaco",
+            "code_object_sha256": "d46a6cefb739238e2c3852b203af2b01d5e273898976147c326083ddf2e7b78b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_forward",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__P2/dispatched.hsaco",
+            "code_object_sha256": "d46a6cefb739238e2c3852b203af2b01d5e273898976147c326083ddf2e7b78b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_forward",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__P3/dispatched.hsaco",
+            "code_object_sha256": "d46a6cefb739238e2c3852b203af2b01d5e273898976147c326083ddf2e7b78b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_forward",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_forward__P4/dispatched.hsaco",
+            "code_object_sha256": "d46a6cefb739238e2c3852b203af2b01d5e273898976147c326083ddf2e7b78b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__D1/dispatched.hsaco",
+            "code_object_sha256": "b7b68ee37bedb09f489d46a6ac6327fad488324af489770c4df867eb2d044f92",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__D2/dispatched.hsaco",
+            "code_object_sha256": "50fe4fea9d3b0e7681e75d479397d71e727a5f17cc39f758a068e89a08b74123",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__D3/dispatched.hsaco",
+            "code_object_sha256": "50fe4fea9d3b0e7681e75d479397d71e727a5f17cc39f758a068e89a08b74123",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__D4/dispatched.hsaco",
+            "code_object_sha256": "50fe4fea9d3b0e7681e75d479397d71e727a5f17cc39f758a068e89a08b74123",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__P1/dispatched.hsaco",
+            "code_object_sha256": "b7b68ee37bedb09f489d46a6ac6327fad488324af489770c4df867eb2d044f92",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__P2/dispatched.hsaco",
+            "code_object_sha256": "b7b68ee37bedb09f489d46a6ac6327fad488324af489770c4df867eb2d044f92",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__P3/dispatched.hsaco",
+            "code_object_sha256": "b7b68ee37bedb09f489d46a6ac6327fad488324af489770c4df867eb2d044f92",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_topk_topp_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_topk_topp_kernel__P4/dispatched.hsaco",
+            "code_object_sha256": "50fe4fea9d3b0e7681e75d479397d71e727a5f17cc39f758a068e89a08b74123",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D1_full/dispatched.hsaco",
+            "code_object_sha256": "a5497ec8d06818986c61ac49686cbb04cc7093f477e0c20a59272b768879218b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D1_swa/dispatched.hsaco",
+            "code_object_sha256": "1e85e675524a5bc206ac7608f0d9253cc0dc9d1e415289bf813064097ed49054",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D2_full/dispatched.hsaco",
+            "code_object_sha256": "a5497ec8d06818986c61ac49686cbb04cc7093f477e0c20a59272b768879218b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D2_swa/dispatched.hsaco",
+            "code_object_sha256": "1e85e675524a5bc206ac7608f0d9253cc0dc9d1e415289bf813064097ed49054",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D3_full/dispatched.hsaco",
+            "code_object_sha256": "a5497ec8d06818986c61ac49686cbb04cc7093f477e0c20a59272b768879218b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D3_swa/dispatched.hsaco",
+            "code_object_sha256": "1e85e675524a5bc206ac7608f0d9253cc0dc9d1e415289bf813064097ed49054",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D4_full/dispatched.hsaco",
+            "code_object_sha256": "a5497ec8d06818986c61ac49686cbb04cc7093f477e0c20a59272b768879218b",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__D4_swa/dispatched.hsaco",
+            "code_object_sha256": "1e85e675524a5bc206ac7608f0d9253cc0dc9d1e415289bf813064097ed49054",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P1_full/dispatched.hsaco",
+            "code_object_sha256": "699e09c798e2e50350b97bf031f3df424ad90dc51b7120eca0ca3d8d9e3226ab",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P1_swa/dispatched.hsaco",
+            "code_object_sha256": "05e205ab8f84937c5f03e5191fc060b55fc5365f455f33ce41f0cb3b0400cb2c",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P2_full/dispatched.hsaco",
+            "code_object_sha256": "699e09c798e2e50350b97bf031f3df424ad90dc51b7120eca0ca3d8d9e3226ab",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P2_swa/dispatched.hsaco",
+            "code_object_sha256": "05e205ab8f84937c5f03e5191fc060b55fc5365f455f33ce41f0cb3b0400cb2c",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P3_full/dispatched.hsaco",
+            "code_object_sha256": "7433030bb816a7249aa397e048404fe91d0c7eabeb260f1916f3caf23c3bc0b3",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P3_swa/dispatched.hsaco",
+            "code_object_sha256": "6a27646a37aab3a96e8ce6bd90008f6a351f296abdd6fb6bc75033d6c3e7f816",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P4_full/dispatched.hsaco",
+            "code_object_sha256": "699e09c798e2e50350b97bf031f3df424ad90dc51b7120eca0ca3d8d9e3226ab",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__P4_swa/dispatched.hsaco",
+            "code_object_sha256": "05e205ab8f84937c5f03e5191fc060b55fc5365f455f33ce41f0cb3b0400cb2c",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__X1_swa/dispatched.hsaco",
+            "code_object_sha256": "1e85e675524a5bc206ac7608f0d9253cc0dc9d1e415289bf813064097ed49054",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_2d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_2d__X2_swa/dispatched.hsaco",
+            "code_object_sha256": "1e85e675524a5bc206ac7608f0d9253cc0dc9d1e415289bf813064097ed49054",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_3d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_3d__X1_full/dispatched.hsaco",
+            "code_object_sha256": "6d038c64ca5b65f093c046115163d88d97d2175a47e7c8196e8a94ee4cab3e13",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "kernel_unified_attention_3d",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/kernel_unified_attention_3d__X2_full/dispatched.hsaco",
+            "code_object_sha256": "f437d8850aad898f73ba4b2ebe641752a57f351de63d50c4bd583e13cad109aa",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "reduce_segments",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/reduce_segments__X1_full/dispatched.hsaco",
+            "code_object_sha256": "7bcee0d9ae34fbb4b4e26bcd04972fc67a04ada1eff2685dcafa59e68d228886",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "reduce_segments",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/reduce_segments__X2_full/dispatched.hsaco",
+            "code_object_sha256": "53c2bad89831a14d672e39af393ba1a3b368c63c430ce08c705ae72318af97e0",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__D1/dispatched.hsaco",
+            "code_object_sha256": "136cc91e217d036e6a5532e748608e52bd050f37cc53f2ca8d619271f20829af",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__D2/dispatched.hsaco",
+            "code_object_sha256": "61903965e17f68ea384cb8356823ce8f08899f92f66adbe5c9a05610b1de8585",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__D3/dispatched.hsaco",
+            "code_object_sha256": "26b4c78f52ab406ed2208151091226136cca224b255e2ad8ab8058f384d579ac",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__D4/dispatched.hsaco",
+            "code_object_sha256": "28c7fc9948ae7b3557d257f0abcd8c408ec5e648b785ed57cb3b4166e0ff998f",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__P1/dispatched.hsaco",
+            "code_object_sha256": "b7cbcd5bb82b195a2f58c3332c20024227efb987b370040c7d9624667fba6093",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__P2/dispatched.hsaco",
+            "code_object_sha256": "0429ecf4ed391716e9c347ba9abb355a31607763a9c5bfe48a84bdf4b89f7f8e",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__P3/dispatched.hsaco",
+            "code_object_sha256": "df48165cc5a1088d89ff9df8ff26bedb63a7da2dd000151ce670717696994526",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_kernel",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_kernel__P4/dispatched.hsaco",
+            "code_object_sha256": "df48165cc5a1088d89ff9df8ff26bedb63a7da2dd000151ce670717696994526",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_pad",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__D1/dispatched.hsaco",
+            "code_object_sha256": "494126cd1a31c02ee2e5e54e8a362e4a8c57c4a3ab4cb4f9f1b88143fa1da071",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_pad",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__D2/dispatched.hsaco",
+            "code_object_sha256": "dc6e5bea861bf450d2f2d2bc336bbd43452847af96d08c07814b735fd5582bb1",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_pad",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__D3/dispatched.hsaco",
+            "code_object_sha256": "dc6e5bea861bf450d2f2d2bc336bbd43452847af96d08c07814b735fd5582bb1",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_pad",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__D4/dispatched.hsaco",
+            "code_object_sha256": "dc6e5bea861bf450d2f2d2bc336bbd43452847af96d08c07814b735fd5582bb1",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_pad",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__P1/dispatched.hsaco",
+            "code_object_sha256": "dc6e5bea861bf450d2f2d2bc336bbd43452847af96d08c07814b735fd5582bb1",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_pad",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__P2/dispatched.hsaco",
+            "code_object_sha256": "dc6e5bea861bf450d2f2d2bc336bbd43452847af96d08c07814b735fd5582bb1",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_pad",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__P3/dispatched.hsaco",
+            "code_object_sha256": "dc6e5bea861bf450d2f2d2bc336bbd43452847af96d08c07814b735fd5582bb1",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_fused_add_rmsnorm_pad",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_fused_add_rmsnorm_pad__P4/dispatched.hsaco",
+            "code_object_sha256": "dc6e5bea861bf450d2f2d2bc336bbd43452847af96d08c07814b735fd5582bb1",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__D1/dispatched.hsaco",
+            "code_object_sha256": "511118604650030cffc621e6b5d72d128fe776bb154ec972c46f8228fa92f363",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__D2/dispatched.hsaco",
+            "code_object_sha256": "02170daa86f629b0ea705f94033d775cf4d939c72e40c87b9744bb783ada493d",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__D3/dispatched.hsaco",
+            "code_object_sha256": "02170daa86f629b0ea705f94033d775cf4d939c72e40c87b9744bb783ada493d",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__D4/dispatched.hsaco",
+            "code_object_sha256": "02170daa86f629b0ea705f94033d775cf4d939c72e40c87b9744bb783ada493d",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__P1/dispatched.hsaco",
+            "code_object_sha256": "02170daa86f629b0ea705f94033d775cf4d939c72e40c87b9744bb783ada493d",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1_swiglu",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__P2/dispatched.hsaco",
+            "code_object_sha256": "02170daa86f629b0ea705f94033d775cf4d939c72e40c87b9744bb783ada493d",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1_swiglu",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__P3/dispatched.hsaco",
+            "code_object_sha256": "99783dba6bb344f6fe67718c04e8e54b53edc3220ed9573867d0020c3b44ede2",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_64x256x128x1_swiglu",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs__P4/dispatched.hsaco",
+            "code_object_sha256": "99783dba6bb344f6fe67718c04e8e54b53edc3220ed9573867d0020c3b44ede2",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__D1/dispatched.hsaco",
+            "code_object_sha256": "b60dc71885aabd7a6f5f777ab0c60c6918e98f85dab6acebd7cb79753f07eb5a",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        },
+        {
+          "identity": {
+            "name": "_matmul_ogs_NNT_bf16xbf16xmxfp4_32x256x128x1",
+            "target": "gfx950",
+            "code_object": "/workspace/aorta/.sanitizer-nightly/model-survey-work/gpt-oss/cases/_matmul_ogs_w2__D2/dispatched.hsaco",
+            "code_object_sha256": "8b64fa68f36e5fa05a1480165b0531dfcc3ec45c8a23e08e866fce25b4483c7f",
+            "code_object_index": 0,
+            "entry_offset": null
+          },
+          "state": "ran",
+          "verdict": "pass",
+          "findings": [],
+          "reason": null,
+          "returncode": 0,
+          "diagnostics_truncated": false
+        }
+      ],
+      "coverage": [],
+      "backend": {
+        "_fused_add_rmsnorm_kernel/D1.candidate_digest": "6e37a322cfc6cce12e4767ea521e72f0b51de3407653af551e948d489f8a2f06",
+        "_fused_add_rmsnorm_kernel/D1.reference_digest": "6e37a322cfc6cce12e4767ea521e72f0b51de3407653af551e948d489f8a2f06",
+        "_fused_add_rmsnorm_kernel/D1.verdict": "pass",
+        "_fused_add_rmsnorm_kernel/D2.candidate_digest": "484446e57c0def4d208cf58b943804732b5d8b21d1ce3d2ff8c3f9452229654f",
+        "_fused_add_rmsnorm_kernel/D2.reference_digest": "484446e57c0def4d208cf58b943804732b5d8b21d1ce3d2ff8c3f9452229654f",
+        "_fused_add_rmsnorm_kernel/D2.verdict": "pass",
+        "_fused_add_rmsnorm_kernel/D3.candidate_digest": "5abfefc32c7193b6211a7e5839722ffb565297949c294ce0395f741134bc4c27",
+        "_fused_add_rmsnorm_kernel/D3.reference_digest": "5abfefc32c7193b6211a7e5839722ffb565297949c294ce0395f741134bc4c27",
+        "_fused_add_rmsnorm_kernel/D3.verdict": "pass",
+        "_fused_add_rmsnorm_kernel/D4.candidate_digest": "256ee9cb29e84124f44e08a36f91f78e17ae3bf2e0c58f8c467257c3f40cb96c",
+        "_fused_add_rmsnorm_kernel/D4.reference_digest": "256ee9cb29e84124f44e08a36f91f78e17ae3bf2e0c58f8c467257c3f40cb96c",
+        "_fused_add_rmsnorm_kernel/D4.verdict": "pass",
+        "_fused_add_rmsnorm_kernel/P1.candidate_digest": "ea63473d20507f8141b86da64174f2fca6caacd489c308657a05c6e1c35e8144",
+        "_fused_add_rmsnorm_kernel/P1.reference_digest": "ea63473d20507f8141b86da64174f2fca6caacd489c308657a05c6e1c35e8144",
+        "_fused_add_rmsnorm_kernel/P1.verdict": "pass",
+        "_fused_add_rmsnorm_kernel/P2.candidate_digest": "f6b48b854a126c8cee380585d103e5efd43d42ef9e1c112c892b0f766b63015c",
+        "_fused_add_rmsnorm_kernel/P2.reference_digest": "f6b48b854a126c8cee380585d103e5efd43d42ef9e1c112c892b0f766b63015c",
+        "_fused_add_rmsnorm_kernel/P2.verdict": "pass",
+        "_fused_add_rmsnorm_kernel/P3.candidate_digest": "cace856f0299123aaa014cbaaeea40f0a41a89e8d4715e023ee92f7769c64d12",
+        "_fused_add_rmsnorm_kernel/P3.reference_digest": "cace856f0299123aaa014cbaaeea40f0a41a89e8d4715e023ee92f7769c64d12",
+        "_fused_add_rmsnorm_kernel/P3.verdict": "pass",
+        "_fused_add_rmsnorm_kernel/P4.candidate_digest": "b2f72cffe35cad4ce759738253f27ad8e828b6c0c7d9ffd2520184914f4f09f6",
+        "_fused_add_rmsnorm_kernel/P4.reference_digest": "b2f72cffe35cad4ce759738253f27ad8e828b6c0c7d9ffd2520184914f4f09f6",
+        "_fused_add_rmsnorm_kernel/P4.verdict": "pass",
+        "_fused_add_rmsnorm_pad/D1.candidate_digest": "a787f850de78f8a34ea7178bf6f5cbb6b3e9786bb37fc33febbf0cf8d94a31df",
+        "_fused_add_rmsnorm_pad/D1.reference_digest": "a787f850de78f8a34ea7178bf6f5cbb6b3e9786bb37fc33febbf0cf8d94a31df",
+        "_fused_add_rmsnorm_pad/D1.verdict": "pass",
+        "_fused_add_rmsnorm_pad/D2.candidate_digest": "95df39f4d58cbd37a928128c3578d007e6048eb61aa0252f5fa118176d4f714d",
+        "_fused_add_rmsnorm_pad/D2.reference_digest": "95df39f4d58cbd37a928128c3578d007e6048eb61aa0252f5fa118176d4f714d",
+        "_fused_add_rmsnorm_pad/D2.verdict": "pass",
+        "_fused_add_rmsnorm_pad/D3.candidate_digest": "6014a3d0468da4bc5f7c4b1f4af5cdc555e4e0a8fdfd24a479d52c968f0d83ae",
+        "_fused_add_rmsnorm_pad/D3.reference_digest": "6014a3d0468da4bc5f7c4b1f4af5cdc555e4e0a8fdfd24a479d52c968f0d83ae",
+        "_fused_add_rmsnorm_pad/D3.verdict": "pass",
+        "_fused_add_rmsnorm_pad/D4.candidate_digest": "2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd",
+        "_fused_add_rmsnorm_pad/D4.reference_digest": "2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd",
+        "_fused_add_rmsnorm_pad/D4.verdict": "pass",
+        "_fused_add_rmsnorm_pad/P1.candidate_digest": "d38cce118057b3ae0343a299133a0761a480b2808de65841fdcb0f216c5719a6",
+        "_fused_add_rmsnorm_pad/P1.reference_digest": "d38cce118057b3ae0343a299133a0761a480b2808de65841fdcb0f216c5719a6",
+        "_fused_add_rmsnorm_pad/P1.verdict": "pass",
+        "_fused_add_rmsnorm_pad/P2.candidate_digest": "c2fe692abe5a500b85cd70c9da48c50a62d6bd6b15f13529db71ff8046a63f40",
+        "_fused_add_rmsnorm_pad/P2.reference_digest": "c2fe692abe5a500b85cd70c9da48c50a62d6bd6b15f13529db71ff8046a63f40",
+        "_fused_add_rmsnorm_pad/P2.verdict": "pass",
+        "_fused_add_rmsnorm_pad/P3.candidate_digest": "96162bf879bcfee28285f3d0766fb56fe837d9735ed754a10e59e4586ec2b985",
+        "_fused_add_rmsnorm_pad/P3.reference_digest": "96162bf879bcfee28285f3d0766fb56fe837d9735ed754a10e59e4586ec2b985",
+        "_fused_add_rmsnorm_pad/P3.verdict": "pass",
+        "_fused_add_rmsnorm_pad/P4.candidate_digest": "db1f23622bc6078feed5b312d9536b6f0cf53aaf7bfdcb3048489842c07d307b",
+        "_fused_add_rmsnorm_pad/P4.reference_digest": "db1f23622bc6078feed5b312d9536b6f0cf53aaf7bfdcb3048489842c07d307b",
+        "_fused_add_rmsnorm_pad/P4.verdict": "pass",
+        "_matmul_ogs/D1.candidate_digest": "5152594de1f4e53dbb8d236a31937c03adb61d665cd73adeab16e987efe311b2",
+        "_matmul_ogs/D1.reference_digest": "5152594de1f4e53dbb8d236a31937c03adb61d665cd73adeab16e987efe311b2",
+        "_matmul_ogs/D1.verdict": "pass",
+        "_matmul_ogs/D2.candidate_digest": "91b5096017a39a7985b223834ffd57fb891a4d2f191a2d59c7d4a327b91d793f",
+        "_matmul_ogs/D2.reference_digest": "91b5096017a39a7985b223834ffd57fb891a4d2f191a2d59c7d4a327b91d793f",
+        "_matmul_ogs/D2.verdict": "pass",
+        "_matmul_ogs/D3.candidate_digest": "b1e341807d3430194b9b08f18bcb5edc8ae5819872775aa9aced0ee336f05802",
+        "_matmul_ogs/D3.reference_digest": "b1e341807d3430194b9b08f18bcb5edc8ae5819872775aa9aced0ee336f05802",
+        "_matmul_ogs/D3.verdict": "pass",
+        "_matmul_ogs/D4.candidate_digest": "62c91d1188d407ac877ebacf5007ba409a2dd816b3f53233b1f5383629743d4c",
+        "_matmul_ogs/D4.reference_digest": "62c91d1188d407ac877ebacf5007ba409a2dd816b3f53233b1f5383629743d4c",
+        "_matmul_ogs/D4.verdict": "pass",
+        "_matmul_ogs/P1.candidate_digest": "da31c40c6f42a74cfb2ad84a06af7a70920e53198068468db7effd3758fa40d3",
+        "_matmul_ogs/P1.reference_digest": "da31c40c6f42a74cfb2ad84a06af7a70920e53198068468db7effd3758fa40d3",
+        "_matmul_ogs/P1.verdict": "pass",
+        "_matmul_ogs/P2.candidate_digest": "770ebaeb7f83970b6cd7f6bd145d361ab953ed04f25d9b421b7debbf7f333404",
+        "_matmul_ogs/P2.reference_digest": "770ebaeb7f83970b6cd7f6bd145d361ab953ed04f25d9b421b7debbf7f333404",
+        "_matmul_ogs/P2.verdict": "pass",
+        "_matmul_ogs/P3.candidate_digest": "3f8de647521441c63d6bb19c5238145e65dd3733e92beb666b820a7f20633158",
+        "_matmul_ogs/P3.reference_digest": "3f8de647521441c63d6bb19c5238145e65dd3733e92beb666b820a7f20633158",
+        "_matmul_ogs/P3.verdict": "pass",
+        "_matmul_ogs/P4.candidate_digest": "609c0a9d6f6f334da24ce34bd176ffd06725b14e48d61e9c3ecaf26fdcac27fb",
+        "_matmul_ogs/P4.reference_digest": "609c0a9d6f6f334da24ce34bd176ffd06725b14e48d61e9c3ecaf26fdcac27fb",
+        "_matmul_ogs/P4.verdict": "pass",
+        "_matmul_ogs@w2/D1.candidate_digest": "44c065a74eab8ca93ae1536506d0d94cf72df4c5a601c4f10cade643ba879d93",
+        "_matmul_ogs@w2/D1.reference_digest": "44c065a74eab8ca93ae1536506d0d94cf72df4c5a601c4f10cade643ba879d93",
+        "_matmul_ogs@w2/D1.verdict": "pass",
+        "_matmul_ogs@w2/D2.candidate_digest": "e9c04082588ba8ee5bae4387c53907f6ead8bdd1ce81f7ea4ac571bafda36cfc",
+        "_matmul_ogs@w2/D2.reference_digest": "e9c04082588ba8ee5bae4387c53907f6ead8bdd1ce81f7ea4ac571bafda36cfc",
+        "_matmul_ogs@w2/D2.verdict": "pass",
+        "_matmul_ogs@w2/D3.candidate_digest": "72b7585192ea410b0c2131e484253483d88e06e236750ced03ba2df3441a28b0",
+        "_matmul_ogs@w2/D3.reference_digest": "72b7585192ea410b0c2131e484253483d88e06e236750ced03ba2df3441a28b0",
+        "_matmul_ogs@w2/D3.verdict": "pass",
+        "_matmul_ogs@w2/D4.candidate_digest": "67dd7d1570208734c386bc46d9d4c45de6c91773dec55d8ef655554e36bb76da",
+        "_matmul_ogs@w2/D4.reference_digest": "67dd7d1570208734c386bc46d9d4c45de6c91773dec55d8ef655554e36bb76da",
+        "_matmul_ogs@w2/D4.verdict": "pass",
+        "_matmul_ogs@w2/P1.candidate_digest": "fb56e9d7c16007ab4cc15b1bc8c22ada7d894b0d26658abde741aabb48d292c3",
+        "_matmul_ogs@w2/P1.reference_digest": "fb56e9d7c16007ab4cc15b1bc8c22ada7d894b0d26658abde741aabb48d292c3",
+        "_matmul_ogs@w2/P1.verdict": "pass",
+        "_matmul_ogs@w2/P2.candidate_digest": "54cdc9e01e5f3aa6f8b19f08b1c1da1908764812b3f58b0570a8e4bfa2ccc8b4",
+        "_matmul_ogs@w2/P2.reference_digest": "54cdc9e01e5f3aa6f8b19f08b1c1da1908764812b3f58b0570a8e4bfa2ccc8b4",
+        "_matmul_ogs@w2/P2.verdict": "pass",
+        "_matmul_ogs@w2/P3.candidate_digest": "649be589cbe95faaf07e2270654a8caa4e702940338f1c10073e3e7773d3e0b1",
+        "_matmul_ogs@w2/P3.reference_digest": "649be589cbe95faaf07e2270654a8caa4e702940338f1c10073e3e7773d3e0b1",
+        "_matmul_ogs@w2/P3.verdict": "pass",
+        "_matmul_ogs@w2/P4.candidate_digest": "8021aca8d27474319c7462d68ea35fba857c2f13a043128fc6f8b5d073c3fecc",
+        "_matmul_ogs@w2/P4.reference_digest": "8021aca8d27474319c7462d68ea35fba857c2f13a043128fc6f8b5d073c3fecc",
+        "_matmul_ogs@w2/P4.verdict": "pass",
+        "_rms_norm_kernel/D1.candidate_digest": "e87ddeeef77354b0a3ce48bb148719be1d8db632d94e08ac4c8e14a832c341fe",
+        "_rms_norm_kernel/D1.reference_digest": "e87ddeeef77354b0a3ce48bb148719be1d8db632d94e08ac4c8e14a832c341fe",
+        "_rms_norm_kernel/D1.verdict": "pass",
+        "_rms_norm_kernel/D2.candidate_digest": "96d61b7bde70e1549171e76f72ba1b58edaf579d75b50d53c218f962b9f0851a",
+        "_rms_norm_kernel/D2.reference_digest": "96d61b7bde70e1549171e76f72ba1b58edaf579d75b50d53c218f962b9f0851a",
+        "_rms_norm_kernel/D2.verdict": "pass",
+        "_rms_norm_kernel/D3.candidate_digest": "5f4638701b557afe983e43d19357fb551f47d71ab700902d12b014a99ee13807",
+        "_rms_norm_kernel/D3.reference_digest": "5f4638701b557afe983e43d19357fb551f47d71ab700902d12b014a99ee13807",
+        "_rms_norm_kernel/D3.verdict": "pass",
+        "_rms_norm_kernel/D4.candidate_digest": "47a40d16778be8d5ed45ed193769f41e2590a01838397b560f59b6e53768874a",
+        "_rms_norm_kernel/D4.reference_digest": "47a40d16778be8d5ed45ed193769f41e2590a01838397b560f59b6e53768874a",
+        "_rms_norm_kernel/D4.verdict": "pass",
+        "_rms_norm_kernel/P1.candidate_digest": "073f18d1d51f7e274df314a79e6fea84e6cb8c70955284e54f7ec40ce191b4c3",
+        "_rms_norm_kernel/P1.reference_digest": "073f18d1d51f7e274df314a79e6fea84e6cb8c70955284e54f7ec40ce191b4c3",
+        "_rms_norm_kernel/P1.verdict": "pass",
+        "_rms_norm_kernel/P2.candidate_digest": "736b391d210c40bc18ab6d1646086fc899ca432d474667fb6ef2c26e5a8550f4",
+        "_rms_norm_kernel/P2.reference_digest": "736b391d210c40bc18ab6d1646086fc899ca432d474667fb6ef2c26e5a8550f4",
+        "_rms_norm_kernel/P2.verdict": "pass",
+        "_rms_norm_kernel/P3.candidate_digest": "8906f4ac708203f9f38e6e1ecde3ef0bba86bc21b9b0b801235ce1dcb8abfe72",
+        "_rms_norm_kernel/P3.reference_digest": "8906f4ac708203f9f38e6e1ecde3ef0bba86bc21b9b0b801235ce1dcb8abfe72",
+        "_rms_norm_kernel/P3.verdict": "pass",
+        "_rms_norm_kernel/P4.candidate_digest": "9f73ee1035bff333135e787fd9aff40d98a69a0527b13764f59e56509c0949f3",
+        "_rms_norm_kernel/P4.reference_digest": "9f73ee1035bff333135e787fd9aff40d98a69a0527b13764f59e56509c0949f3",
+        "_rms_norm_kernel/P4.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D1.candidate_digest": "32b682cd94c40b7d6cabd0dafe80bb8c7b3bb8a54343669f662e683a01eab374",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D1.reference_digest": "32b682cd94c40b7d6cabd0dafe80bb8c7b3bb8a54343669f662e683a01eab374",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D1.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D2.candidate_digest": "f30ac2598a7018aaa45b964218f2ff5934876fee034f636490ef00f8019dcc86",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D2.reference_digest": "f30ac2598a7018aaa45b964218f2ff5934876fee034f636490ef00f8019dcc86",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D2.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D3.candidate_digest": "6a3cd679f0705d8f5052ba8a89e20350fdc561af3e1ef9d393858957d86f80fb",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D3.reference_digest": "6a3cd679f0705d8f5052ba8a89e20350fdc561af3e1ef9d393858957d86f80fb",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D3.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D4.candidate_digest": "82756a77173cdfbe517ec3ef61945b465a953fc49f36e98851dac9027eae7d5b",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D4.reference_digest": "82756a77173cdfbe517ec3ef61945b465a953fc49f36e98851dac9027eae7d5b",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/D4.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P1.candidate_digest": "adf251cb45af58e69f7a2d5a9ead896f9cbe161e78fb4021996107a15e9a9c20",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P1.reference_digest": "adf251cb45af58e69f7a2d5a9ead896f9cbe161e78fb4021996107a15e9a9c20",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P1.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P2.candidate_digest": "32d43670b0a0f10419c60db6ecf148c39db73f34b854034b523e64f536e2d575",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P2.reference_digest": "32d43670b0a0f10419c60db6ecf148c39db73f34b854034b523e64f536e2d575",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P2.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P3.candidate_digest": "01ccf8d4dab5779f254c39904dbbd4ee88b8a7259662faae49b7c13dcf1f159c",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P3.reference_digest": "01ccf8d4dab5779f254c39904dbbd4ee88b8a7259662faae49b7c13dcf1f159c",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P3.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P4.candidate_digest": "c640b749f4288f021a90b84066c0bde14af30c60b6cc3618b41e571c118afe0a",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P4.reference_digest": "c640b749f4288f021a90b84066c0bde14af30c60b6cc3618b41e571c118afe0a",
+        "_rope_kernel_cached_thd_2c_gqa_fwd/P4.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D1.candidate_digest": "5b51de9b45ace5bdee828b2fb17d97c3a4baecf41c9bb5b24bb314c08f2a364c",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D1.reference_digest": "5b51de9b45ace5bdee828b2fb17d97c3a4baecf41c9bb5b24bb314c08f2a364c",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D1.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D2.candidate_digest": "ea63f21b9c92cecaf5bd9504ba2c801c4a21ec21cb46b5889ce5c6da321301ad",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D2.reference_digest": "ea63f21b9c92cecaf5bd9504ba2c801c4a21ec21cb46b5889ce5c6da321301ad",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D2.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D3.candidate_digest": "c259e259979796efb9fe7e4d38c94f7def4946ada82cb911d9ca23e1f9111249",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D3.reference_digest": "c259e259979796efb9fe7e4d38c94f7def4946ada82cb911d9ca23e1f9111249",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D3.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D4.candidate_digest": "ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D4.reference_digest": "ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D4.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P1.candidate_digest": "c3d1849bc5857585de73cc0c5e8f8d0aa1e0cdfc5363f18495b97d5c80ba24b5",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P1.reference_digest": "c3d1849bc5857585de73cc0c5e8f8d0aa1e0cdfc5363f18495b97d5c80ba24b5",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P1.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P2.candidate_digest": "76ea103292b9cf15a383f172910f55dbe9384a59bf4e0c0624e619065206800d",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P2.reference_digest": "76ea103292b9cf15a383f172910f55dbe9384a59bf4e0c0624e619065206800d",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P2.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P3.candidate_digest": "64903d518690f25c91a96c73b821ae88976eb9ea4d51a48a5f22f84ad362b09f",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P3.reference_digest": "64903d518690f25c91a96c73b821ae88976eb9ea4d51a48a5f22f84ad362b09f",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P3.verdict": "pass",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P4.candidate_digest": "ebb01513ea7009e472fff6a1369b0724b61311c0737d2cc09fc5f2d1667457c2",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P4.reference_digest": "ebb01513ea7009e472fff6a1369b0724b61311c0737d2cc09fc5f2d1667457c2",
+        "_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P4.verdict": "pass",
+        "_swiglu/D1.candidate_digest": "8c5a2f68f254bd4af9519eb0ff7c3800bba486f4c673a79374fb4b8437790c9f",
+        "_swiglu/D1.reference_digest": "8c5a2f68f254bd4af9519eb0ff7c3800bba486f4c673a79374fb4b8437790c9f",
+        "_swiglu/D1.verdict": "pass",
+        "_swiglu/D2.candidate_digest": "223c356e393a179b70bf105ecbd6246f97b4389d0c03e4774516a67d906c4714",
+        "_swiglu/D2.reference_digest": "223c356e393a179b70bf105ecbd6246f97b4389d0c03e4774516a67d906c4714",
+        "_swiglu/D2.verdict": "pass",
+        "_swiglu/D3.candidate_digest": "af07d9ece3e30c765ca507f4d6cbb1013d6eb8bfb9dbcf175ec9bcce9902ce43",
+        "_swiglu/D3.reference_digest": "af07d9ece3e30c765ca507f4d6cbb1013d6eb8bfb9dbcf175ec9bcce9902ce43",
+        "_swiglu/D3.verdict": "pass",
+        "_swiglu/D4.candidate_digest": "fa395db60e22d78a6cbc1b933c528aafe328146c8b4e42fa03ec52de7eb32629",
+        "_swiglu/D4.reference_digest": "fa395db60e22d78a6cbc1b933c528aafe328146c8b4e42fa03ec52de7eb32629",
+        "_swiglu/D4.verdict": "pass",
+        "_swiglu/P1.candidate_digest": "225fdade79c927c9e70f7ef2fd662bf51c92515c8c38a56466b10df3f7f13e1a",
+        "_swiglu/P1.reference_digest": "225fdade79c927c9e70f7ef2fd662bf51c92515c8c38a56466b10df3f7f13e1a",
+        "_swiglu/P1.verdict": "pass",
+        "_swiglu/P2.candidate_digest": "4390b81e125c66770431f31a9a7740d639180918921ff21d62e7e2b0112ddc37",
+        "_swiglu/P2.reference_digest": "4390b81e125c66770431f31a9a7740d639180918921ff21d62e7e2b0112ddc37",
+        "_swiglu/P2.verdict": "pass",
+        "_swiglu/P3.candidate_digest": "ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d",
+        "_swiglu/P3.reference_digest": "ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d",
+        "_swiglu/P3.verdict": "pass",
+        "_swiglu/P4.candidate_digest": "0642644a2c5b62a18f626ef3681e06b7a608a59239858e0aa9219ef5beaa4a4e",
+        "_swiglu/P4.reference_digest": "0642644a2c5b62a18f626ef3681e06b7a608a59239858e0aa9219ef5beaa4a4e",
+        "_swiglu/P4.verdict": "pass",
+        "_topk_forward/D1.candidate_digest": "f45486e386dc568394abc6304990af1f3f57fd2405d53ae3a04e0b5ab369562a",
+        "_topk_forward/D1.reference_digest": "f45486e386dc568394abc6304990af1f3f57fd2405d53ae3a04e0b5ab369562a",
+        "_topk_forward/D1.verdict": "pass",
+        "_topk_forward/D2.candidate_digest": "eadf2627e74b74020457b3969a9df9f4a0e5a7c8c862e685567cc4140efa3ef7",
+        "_topk_forward/D2.reference_digest": "eadf2627e74b74020457b3969a9df9f4a0e5a7c8c862e685567cc4140efa3ef7",
+        "_topk_forward/D2.verdict": "pass",
+        "_topk_forward/D3.candidate_digest": "e9977e13eba0680ee07a5867f411def959041369b103172c1e832885eafdfee4",
+        "_topk_forward/D3.reference_digest": "e9977e13eba0680ee07a5867f411def959041369b103172c1e832885eafdfee4",
+        "_topk_forward/D3.verdict": "pass",
+        "_topk_forward/D4.candidate_digest": "23b5e433ea6f5fc8eb34829ac57ef6b01f8b73efaf0a114ac0b8cc0d7db1f45f",
+        "_topk_forward/D4.reference_digest": "23b5e433ea6f5fc8eb34829ac57ef6b01f8b73efaf0a114ac0b8cc0d7db1f45f",
+        "_topk_forward/D4.verdict": "pass",
+        "_topk_forward/P1.candidate_digest": "f6b864c1b89cf8b793a64640b89da819ea8f8aa2b6d0a8a895434d4f91aba4f3",
+        "_topk_forward/P1.reference_digest": "f6b864c1b89cf8b793a64640b89da819ea8f8aa2b6d0a8a895434d4f91aba4f3",
+        "_topk_forward/P1.verdict": "pass",
+        "_topk_forward/P2.candidate_digest": "e4a29b8159f2677e112fee4c749bd277f88b44b22763653d32204333100df990",
+        "_topk_forward/P2.reference_digest": "e4a29b8159f2677e112fee4c749bd277f88b44b22763653d32204333100df990",
+        "_topk_forward/P2.verdict": "pass",
+        "_topk_forward/P3.candidate_digest": "252d48ee2bc97aa3c751f86bcfbf46aad5e3e43df57e01bec77482ca5823e68f",
+        "_topk_forward/P3.reference_digest": "252d48ee2bc97aa3c751f86bcfbf46aad5e3e43df57e01bec77482ca5823e68f",
+        "_topk_forward/P3.verdict": "pass",
+        "_topk_forward/P4.candidate_digest": "7739451c83e080f34a8b630ee877e00c77c91f2355f578f03b8ea3fcfe1d7f8b",
+        "_topk_forward/P4.reference_digest": "7739451c83e080f34a8b630ee877e00c77c91f2355f578f03b8ea3fcfe1d7f8b",
+        "_topk_forward/P4.verdict": "pass",
+        "_topk_topp_kernel/D1.candidate_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+        "_topk_topp_kernel/D1.reference_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+        "_topk_topp_kernel/D1.verdict": "pass",
+        "_topk_topp_kernel/D2.candidate_digest": "7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592",
+        "_topk_topp_kernel/D2.reference_digest": "7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592",
+        "_topk_topp_kernel/D2.verdict": "pass",
+        "_topk_topp_kernel/D3.candidate_digest": "174ad6c9c8604aefac634df2281fd1eff54e07fcdc33e6f21d3bf4fe84aa90c3",
+        "_topk_topp_kernel/D3.reference_digest": "174ad6c9c8604aefac634df2281fd1eff54e07fcdc33e6f21d3bf4fe84aa90c3",
+        "_topk_topp_kernel/D3.verdict": "pass",
+        "_topk_topp_kernel/D4.candidate_digest": "1a7f72e91b5eb2ade3ee98adc401abce6c444a57baecfaa82850c7a0d6059993",
+        "_topk_topp_kernel/D4.reference_digest": "1a7f72e91b5eb2ade3ee98adc401abce6c444a57baecfaa82850c7a0d6059993",
+        "_topk_topp_kernel/D4.verdict": "pass",
+        "_topk_topp_kernel/P1.candidate_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+        "_topk_topp_kernel/P1.reference_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+        "_topk_topp_kernel/P1.verdict": "pass",
+        "_topk_topp_kernel/P2.candidate_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+        "_topk_topp_kernel/P2.reference_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+        "_topk_topp_kernel/P2.verdict": "pass",
+        "_topk_topp_kernel/P3.candidate_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+        "_topk_topp_kernel/P3.reference_digest": "68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773",
+        "_topk_topp_kernel/P3.verdict": "pass",
+        "_topk_topp_kernel/P4.candidate_digest": "7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592",
+        "_topk_topp_kernel/P4.reference_digest": "7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592",
+        "_topk_topp_kernel/P4.verdict": "pass",
+        "kernel_unified_attention_2d/D1_full.candidate_digest": "1b183b97fcfd96576f2e03b01ff859c8ad577ae263b35369b710dd1ef28a2591",
+        "kernel_unified_attention_2d/D1_full.reference_digest": "1b183b97fcfd96576f2e03b01ff859c8ad577ae263b35369b710dd1ef28a2591",
+        "kernel_unified_attention_2d/D1_full.verdict": "pass",
+        "kernel_unified_attention_2d/D1_swa.candidate_digest": "e7fe4a149aa149d6008bf6a3ff9c8c414180238c3a192fd32345488e79e7fa5b",
+        "kernel_unified_attention_2d/D1_swa.reference_digest": "e7fe4a149aa149d6008bf6a3ff9c8c414180238c3a192fd32345488e79e7fa5b",
+        "kernel_unified_attention_2d/D1_swa.verdict": "pass",
+        "kernel_unified_attention_2d/D2_full.candidate_digest": "170e86d5d5b756e98dee391e04d45aa429ae18ecdde834e3bc4b0f799998d289",
+        "kernel_unified_attention_2d/D2_full.reference_digest": "170e86d5d5b756e98dee391e04d45aa429ae18ecdde834e3bc4b0f799998d289",
+        "kernel_unified_attention_2d/D2_full.verdict": "pass",
+        "kernel_unified_attention_2d/D2_swa.candidate_digest": "8e9dc2e68cac67aed10b72baf114ee60eb8355cc6d755be16a2c54d96f7b5135",
+        "kernel_unified_attention_2d/D2_swa.reference_digest": "8e9dc2e68cac67aed10b72baf114ee60eb8355cc6d755be16a2c54d96f7b5135",
+        "kernel_unified_attention_2d/D2_swa.verdict": "pass",
+        "kernel_unified_attention_2d/D3_full.candidate_digest": "8564266319eb7ac8bcccf57306a575f016203cb2f523a62a05d4ecae3d16e620",
+        "kernel_unified_attention_2d/D3_full.reference_digest": "8564266319eb7ac8bcccf57306a575f016203cb2f523a62a05d4ecae3d16e620",
+        "kernel_unified_attention_2d/D3_full.verdict": "pass",
+        "kernel_unified_attention_2d/D3_swa.candidate_digest": "f20f742563d2f6d656938d5ad15fe56439977c28539c691438047acf492ebd6e",
+        "kernel_unified_attention_2d/D3_swa.reference_digest": "f20f742563d2f6d656938d5ad15fe56439977c28539c691438047acf492ebd6e",
+        "kernel_unified_attention_2d/D3_swa.verdict": "pass",
+        "kernel_unified_attention_2d/D4_full.candidate_digest": "13ca5ce07e225bff4f83bec2587b16c036325816782b9860e0034005eadfbe75",
+        "kernel_unified_attention_2d/D4_full.reference_digest": "13ca5ce07e225bff4f83bec2587b16c036325816782b9860e0034005eadfbe75",
+        "kernel_unified_attention_2d/D4_full.verdict": "pass",
+        "kernel_unified_attention_2d/D4_swa.candidate_digest": "d3cf7f32a55b722ce962b3961b353a86f11a1d2e7b211f5851137d298079fdc5",
+        "kernel_unified_attention_2d/D4_swa.reference_digest": "d3cf7f32a55b722ce962b3961b353a86f11a1d2e7b211f5851137d298079fdc5",
+        "kernel_unified_attention_2d/D4_swa.verdict": "pass",
+        "kernel_unified_attention_2d/P1_full.candidate_digest": "5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a",
+        "kernel_unified_attention_2d/P1_full.reference_digest": "5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a",
+        "kernel_unified_attention_2d/P1_full.verdict": "pass",
+        "kernel_unified_attention_2d/P1_swa.candidate_digest": "5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a",
+        "kernel_unified_attention_2d/P1_swa.reference_digest": "5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a",
+        "kernel_unified_attention_2d/P1_swa.verdict": "pass",
+        "kernel_unified_attention_2d/P2_full.candidate_digest": "5ff7542e563ad82afc0d54aa27a2f26dd7885f155c2905da28aad827a6e69584",
+        "kernel_unified_attention_2d/P2_full.reference_digest": "5ff7542e563ad82afc0d54aa27a2f26dd7885f155c2905da28aad827a6e69584",
+        "kernel_unified_attention_2d/P2_full.verdict": "pass",
+        "kernel_unified_attention_2d/P2_swa.candidate_digest": "bad332baf8619815e0fa28e01f2580cf991374cf8041d5aea902541f7fbb4cc5",
+        "kernel_unified_attention_2d/P2_swa.reference_digest": "bad332baf8619815e0fa28e01f2580cf991374cf8041d5aea902541f7fbb4cc5",
+        "kernel_unified_attention_2d/P2_swa.verdict": "pass",
+        "kernel_unified_attention_2d/P3_full.candidate_digest": "320bad23dd01eb3c23317bc5458a6bac0034fd48bbedc9d5ac5925f64a6e1fb1",
+        "kernel_unified_attention_2d/P3_full.reference_digest": "320bad23dd01eb3c23317bc5458a6bac0034fd48bbedc9d5ac5925f64a6e1fb1",
+        "kernel_unified_attention_2d/P3_full.verdict": "pass",
+        "kernel_unified_attention_2d/P3_swa.candidate_digest": "4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354",
+        "kernel_unified_attention_2d/P3_swa.reference_digest": "4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354",
+        "kernel_unified_attention_2d/P3_swa.verdict": "pass",
+        "kernel_unified_attention_2d/P4_full.candidate_digest": "14b8d771899c62eadc21a1944ebdc22dd0e0a377db06a872077b0a5bc0a7d0f7",
+        "kernel_unified_attention_2d/P4_full.reference_digest": "14b8d771899c62eadc21a1944ebdc22dd0e0a377db06a872077b0a5bc0a7d0f7",
+        "kernel_unified_attention_2d/P4_full.verdict": "pass",
+        "kernel_unified_attention_2d/P4_swa.candidate_digest": "ca687daf4f52089f97c2028fdf1dde630d4e03b1ec955aed13fd7d8e7ad2aacd",
+        "kernel_unified_attention_2d/P4_swa.reference_digest": "ca687daf4f52089f97c2028fdf1dde630d4e03b1ec955aed13fd7d8e7ad2aacd",
+        "kernel_unified_attention_2d/P4_swa.verdict": "pass",
+        "kernel_unified_attention_2d/X1_swa.candidate_digest": "36a7faacb8498efcfccc137ade222068558d0f8ad4675970fdfc98fca6b5ae77",
+        "kernel_unified_attention_2d/X1_swa.reference_digest": "36a7faacb8498efcfccc137ade222068558d0f8ad4675970fdfc98fca6b5ae77",
+        "kernel_unified_attention_2d/X1_swa.verdict": "pass",
+        "kernel_unified_attention_2d/X2_swa.candidate_digest": "c48a1b82028a6e7c9dcc4183a03f803e14109460728192649a5859c64b656a86",
+        "kernel_unified_attention_2d/X2_swa.reference_digest": "c48a1b82028a6e7c9dcc4183a03f803e14109460728192649a5859c64b656a86",
+        "kernel_unified_attention_2d/X2_swa.verdict": "pass",
+        "kernel_unified_attention_3d/X1_full.candidate_digest": "3db05bc0633a42fee0e09a238a08a0cc2c18fd9c56dbeb5d39a85229f2916cc6",
+        "kernel_unified_attention_3d/X1_full.reference_digest": "3db05bc0633a42fee0e09a238a08a0cc2c18fd9c56dbeb5d39a85229f2916cc6",
+        "kernel_unified_attention_3d/X1_full.verdict": "pass",
+        "kernel_unified_attention_3d/X2_full.candidate_digest": "0c0cc9e1d04d22ff6be6edc1021cc41777bd3d523f134d5bc0371442cbddd06c",
+        "kernel_unified_attention_3d/X2_full.reference_digest": "0c0cc9e1d04d22ff6be6edc1021cc41777bd3d523f134d5bc0371442cbddd06c",
+        "kernel_unified_attention_3d/X2_full.verdict": "pass",
+        "reduce_segments/X1_full.candidate_digest": "f0ddc325ece16bdb2eef4bc83ec9d60f0904bf624bfbe9287c9649def447af55",
+        "reduce_segments/X1_full.reference_digest": "f0ddc325ece16bdb2eef4bc83ec9d60f0904bf624bfbe9287c9649def447af55",
+        "reduce_segments/X1_full.verdict": "pass",
+        "reduce_segments/X2_full.candidate_digest": "f67f4fb3f8614b74340987eca8c98555feac71d76f182bcb0c7a48b7e1d7215d",
+        "reduce_segments/X2_full.reference_digest": "f67f4fb3f8614b74340987eca8c98555feac71d76f182bcb0c7a48b7e1d7215d",
+        "reduce_segments/X2_full.verdict": "pass",
+        "result_marker": "AORTA_FPSAN_RESULT",
+        "triton_instrumentation_mode": "fpsan"
+      },
+      "diagnostics_truncated": false
+    }
+  ]
+}

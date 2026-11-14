@@ -1,0 +1,54 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "candidate_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+        "candidate_instrumented": "true",
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/fpsan/fpsan_match.py",
+        "command_sha256": "9c4b643874004a469230e7c78510ee6915be31ba429d0cb74b6ef8eb16a83e8a",
+        "reference_digest": "53b41a29b1abfb54fc74ec44947454297a4ea4aee00cb832b55331f894b42455",
+        "reference_instrumented": "true",
+        "reported_target": "gfx950",
+        "result_marker": "AORTA_FPSAN_RESULT",
+        "selected_kernels": "row_dot",
+        "triton_instrumentation_mode": "fpsan"
+      },
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [],
+      "reason": null,
+      "returncode": 0,
+      "sanitizer": "fpsan",
+      "state": "ran",
+      "verdict": "pass"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "pass",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": null,
+          "code_object_index": null,
+          "code_object_sha256": null,
+          "entry_offset": null,
+          "name": "row_dot",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}

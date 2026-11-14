@@ -1,0 +1,355 @@
+# Reproduce `fpsan-gpt-oss`
+
+Sanitizer case `fpsan-gpt-oss` from run `2026-11-14T140820-43593728804` of the AORTA sanitizer nightly. This directory is the run area for that one case: its report, the sanitizer output the verdict came from, and the provenance below. See `index.html` for every file actually published here.
+
+## Run
+
+- Commit: `617996f1cb0ee9fc9e9a38e437f3d93770d3c5c8`
+- Date: 2026-11-14 14:08:20 UTC
+- Target: `gfx950`
+- Class: survey (observed-only, non-gating)
+- Workflow run: https://github.com/ROCm/aorta/actions/runs/43593728804
+- Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
+- rocjitsu bundle: `d03c6fe410eed62b211d56bb7878dd1f494269fe` (https://github.com/ROCm/rocm-systems/actions/runs/43418385944)
+
+## Observed
+
+- Verdict: `pass`
+- Execution: `complete`
+- Findings: 0
+
+## Run it yourself
+
+First, the checkout this run used:
+
+```
+git clone https://github.com/ROCm/aorta && cd aorta
+git checkout 617996f1cb0ee9fc9e9a38e437f3d93770d3c5c8
+pip install -e .
+```
+
+`aorta` sets `TRITON_INSTRUMENTATION_MODE=fpsan` for you from the recipe.
+
+Finally, the sweep itself:
+
+```
+python3 scripts/sanitizers/model_survey.py run --sanitizers fpsan --inventory recipes/sanitizers/models/gpt-oss.yaml --out results
+```
+
+## Recorded digests
+
+| Key | Value |
+|---|---|
+| `_fused_add_rmsnorm_kernel/D1.candidate_digest` | `6e37a322cfc6cce12e4767ea521e72f0b51de3407653af551e948d489f8a2f06` |
+| `_fused_add_rmsnorm_kernel/D1.reference_digest` | `6e37a322cfc6cce12e4767ea521e72f0b51de3407653af551e948d489f8a2f06` |
+| `_fused_add_rmsnorm_kernel/D1.verdict` | `pass` |
+| `_fused_add_rmsnorm_kernel/D2.candidate_digest` | `484446e57c0def4d208cf58b943804732b5d8b21d1ce3d2ff8c3f9452229654f` |
+| `_fused_add_rmsnorm_kernel/D2.reference_digest` | `484446e57c0def4d208cf58b943804732b5d8b21d1ce3d2ff8c3f9452229654f` |
+| `_fused_add_rmsnorm_kernel/D2.verdict` | `pass` |
+| `_fused_add_rmsnorm_kernel/D3.candidate_digest` | `5abfefc32c7193b6211a7e5839722ffb565297949c294ce0395f741134bc4c27` |
+| `_fused_add_rmsnorm_kernel/D3.reference_digest` | `5abfefc32c7193b6211a7e5839722ffb565297949c294ce0395f741134bc4c27` |
+| `_fused_add_rmsnorm_kernel/D3.verdict` | `pass` |
+| `_fused_add_rmsnorm_kernel/D4.candidate_digest` | `256ee9cb29e84124f44e08a36f91f78e17ae3bf2e0c58f8c467257c3f40cb96c` |
+| `_fused_add_rmsnorm_kernel/D4.reference_digest` | `256ee9cb29e84124f44e08a36f91f78e17ae3bf2e0c58f8c467257c3f40cb96c` |
+| `_fused_add_rmsnorm_kernel/D4.verdict` | `pass` |
+| `_fused_add_rmsnorm_kernel/P1.candidate_digest` | `ea63473d20507f8141b86da64174f2fca6caacd489c308657a05c6e1c35e8144` |
+| `_fused_add_rmsnorm_kernel/P1.reference_digest` | `ea63473d20507f8141b86da64174f2fca6caacd489c308657a05c6e1c35e8144` |
+| `_fused_add_rmsnorm_kernel/P1.verdict` | `pass` |
+| `_fused_add_rmsnorm_kernel/P2.candidate_digest` | `f6b48b854a126c8cee380585d103e5efd43d42ef9e1c112c892b0f766b63015c` |
+| `_fused_add_rmsnorm_kernel/P2.reference_digest` | `f6b48b854a126c8cee380585d103e5efd43d42ef9e1c112c892b0f766b63015c` |
+| `_fused_add_rmsnorm_kernel/P2.verdict` | `pass` |
+| `_fused_add_rmsnorm_kernel/P3.candidate_digest` | `cace856f0299123aaa014cbaaeea40f0a41a89e8d4715e023ee92f7769c64d12` |
+| `_fused_add_rmsnorm_kernel/P3.reference_digest` | `cace856f0299123aaa014cbaaeea40f0a41a89e8d4715e023ee92f7769c64d12` |
+| `_fused_add_rmsnorm_kernel/P3.verdict` | `pass` |
+| `_fused_add_rmsnorm_kernel/P4.candidate_digest` | `b2f72cffe35cad4ce759738253f27ad8e828b6c0c7d9ffd2520184914f4f09f6` |
+| `_fused_add_rmsnorm_kernel/P4.reference_digest` | `b2f72cffe35cad4ce759738253f27ad8e828b6c0c7d9ffd2520184914f4f09f6` |
+| `_fused_add_rmsnorm_kernel/P4.verdict` | `pass` |
+| `_fused_add_rmsnorm_pad/D1.candidate_digest` | `a787f850de78f8a34ea7178bf6f5cbb6b3e9786bb37fc33febbf0cf8d94a31df` |
+| `_fused_add_rmsnorm_pad/D1.reference_digest` | `a787f850de78f8a34ea7178bf6f5cbb6b3e9786bb37fc33febbf0cf8d94a31df` |
+| `_fused_add_rmsnorm_pad/D1.verdict` | `pass` |
+| `_fused_add_rmsnorm_pad/D2.candidate_digest` | `95df39f4d58cbd37a928128c3578d007e6048eb61aa0252f5fa118176d4f714d` |
+| `_fused_add_rmsnorm_pad/D2.reference_digest` | `95df39f4d58cbd37a928128c3578d007e6048eb61aa0252f5fa118176d4f714d` |
+| `_fused_add_rmsnorm_pad/D2.verdict` | `pass` |
+| `_fused_add_rmsnorm_pad/D3.candidate_digest` | `6014a3d0468da4bc5f7c4b1f4af5cdc555e4e0a8fdfd24a479d52c968f0d83ae` |
+| `_fused_add_rmsnorm_pad/D3.reference_digest` | `6014a3d0468da4bc5f7c4b1f4af5cdc555e4e0a8fdfd24a479d52c968f0d83ae` |
+| `_fused_add_rmsnorm_pad/D3.verdict` | `pass` |
+| `_fused_add_rmsnorm_pad/D4.candidate_digest` | `2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd` |
+| `_fused_add_rmsnorm_pad/D4.reference_digest` | `2fb1efcb8ab6f7bd3a90f0e87ead2bfd55074e0e09a5413d982219ac96b9a7cd` |
+| `_fused_add_rmsnorm_pad/D4.verdict` | `pass` |
+| `_fused_add_rmsnorm_pad/P1.candidate_digest` | `d38cce118057b3ae0343a299133a0761a480b2808de65841fdcb0f216c5719a6` |
+| `_fused_add_rmsnorm_pad/P1.reference_digest` | `d38cce118057b3ae0343a299133a0761a480b2808de65841fdcb0f216c5719a6` |
+| `_fused_add_rmsnorm_pad/P1.verdict` | `pass` |
+| `_fused_add_rmsnorm_pad/P2.candidate_digest` | `c2fe692abe5a500b85cd70c9da48c50a62d6bd6b15f13529db71ff8046a63f40` |
+| `_fused_add_rmsnorm_pad/P2.reference_digest` | `c2fe692abe5a500b85cd70c9da48c50a62d6bd6b15f13529db71ff8046a63f40` |
+| `_fused_add_rmsnorm_pad/P2.verdict` | `pass` |
+| `_fused_add_rmsnorm_pad/P3.candidate_digest` | `96162bf879bcfee28285f3d0766fb56fe837d9735ed754a10e59e4586ec2b985` |
+| `_fused_add_rmsnorm_pad/P3.reference_digest` | `96162bf879bcfee28285f3d0766fb56fe837d9735ed754a10e59e4586ec2b985` |
+| `_fused_add_rmsnorm_pad/P3.verdict` | `pass` |
+| `_fused_add_rmsnorm_pad/P4.candidate_digest` | `db1f23622bc6078feed5b312d9536b6f0cf53aaf7bfdcb3048489842c07d307b` |
+| `_fused_add_rmsnorm_pad/P4.reference_digest` | `db1f23622bc6078feed5b312d9536b6f0cf53aaf7bfdcb3048489842c07d307b` |
+| `_fused_add_rmsnorm_pad/P4.verdict` | `pass` |
+| `_matmul_ogs/D1.candidate_digest` | `5152594de1f4e53dbb8d236a31937c03adb61d665cd73adeab16e987efe311b2` |
+| `_matmul_ogs/D1.reference_digest` | `5152594de1f4e53dbb8d236a31937c03adb61d665cd73adeab16e987efe311b2` |
+| `_matmul_ogs/D1.verdict` | `pass` |
+| `_matmul_ogs/D2.candidate_digest` | `91b5096017a39a7985b223834ffd57fb891a4d2f191a2d59c7d4a327b91d793f` |
+| `_matmul_ogs/D2.reference_digest` | `91b5096017a39a7985b223834ffd57fb891a4d2f191a2d59c7d4a327b91d793f` |
+| `_matmul_ogs/D2.verdict` | `pass` |
+| `_matmul_ogs/D3.candidate_digest` | `b1e341807d3430194b9b08f18bcb5edc8ae5819872775aa9aced0ee336f05802` |
+| `_matmul_ogs/D3.reference_digest` | `b1e341807d3430194b9b08f18bcb5edc8ae5819872775aa9aced0ee336f05802` |
+| `_matmul_ogs/D3.verdict` | `pass` |
+| `_matmul_ogs/D4.candidate_digest` | `62c91d1188d407ac877ebacf5007ba409a2dd816b3f53233b1f5383629743d4c` |
+| `_matmul_ogs/D4.reference_digest` | `62c91d1188d407ac877ebacf5007ba409a2dd816b3f53233b1f5383629743d4c` |
+| `_matmul_ogs/D4.verdict` | `pass` |
+| `_matmul_ogs/P1.candidate_digest` | `da31c40c6f42a74cfb2ad84a06af7a70920e53198068468db7effd3758fa40d3` |
+| `_matmul_ogs/P1.reference_digest` | `da31c40c6f42a74cfb2ad84a06af7a70920e53198068468db7effd3758fa40d3` |
+| `_matmul_ogs/P1.verdict` | `pass` |
+| `_matmul_ogs/P2.candidate_digest` | `770ebaeb7f83970b6cd7f6bd145d361ab953ed04f25d9b421b7debbf7f333404` |
+| `_matmul_ogs/P2.reference_digest` | `770ebaeb7f83970b6cd7f6bd145d361ab953ed04f25d9b421b7debbf7f333404` |
+| `_matmul_ogs/P2.verdict` | `pass` |
+| `_matmul_ogs/P3.candidate_digest` | `3f8de647521441c63d6bb19c5238145e65dd3733e92beb666b820a7f20633158` |
+| `_matmul_ogs/P3.reference_digest` | `3f8de647521441c63d6bb19c5238145e65dd3733e92beb666b820a7f20633158` |
+| `_matmul_ogs/P3.verdict` | `pass` |
+| `_matmul_ogs/P4.candidate_digest` | `609c0a9d6f6f334da24ce34bd176ffd06725b14e48d61e9c3ecaf26fdcac27fb` |
+| `_matmul_ogs/P4.reference_digest` | `609c0a9d6f6f334da24ce34bd176ffd06725b14e48d61e9c3ecaf26fdcac27fb` |
+| `_matmul_ogs/P4.verdict` | `pass` |
+| `_matmul_ogs@w2/D1.candidate_digest` | `44c065a74eab8ca93ae1536506d0d94cf72df4c5a601c4f10cade643ba879d93` |
+| `_matmul_ogs@w2/D1.reference_digest` | `44c065a74eab8ca93ae1536506d0d94cf72df4c5a601c4f10cade643ba879d93` |
+| `_matmul_ogs@w2/D1.verdict` | `pass` |
+| `_matmul_ogs@w2/D2.candidate_digest` | `e9c04082588ba8ee5bae4387c53907f6ead8bdd1ce81f7ea4ac571bafda36cfc` |
+| `_matmul_ogs@w2/D2.reference_digest` | `e9c04082588ba8ee5bae4387c53907f6ead8bdd1ce81f7ea4ac571bafda36cfc` |
+| `_matmul_ogs@w2/D2.verdict` | `pass` |
+| `_matmul_ogs@w2/D3.candidate_digest` | `72b7585192ea410b0c2131e484253483d88e06e236750ced03ba2df3441a28b0` |
+| `_matmul_ogs@w2/D3.reference_digest` | `72b7585192ea410b0c2131e484253483d88e06e236750ced03ba2df3441a28b0` |
+| `_matmul_ogs@w2/D3.verdict` | `pass` |
+| `_matmul_ogs@w2/D4.candidate_digest` | `67dd7d1570208734c386bc46d9d4c45de6c91773dec55d8ef655554e36bb76da` |
+| `_matmul_ogs@w2/D4.reference_digest` | `67dd7d1570208734c386bc46d9d4c45de6c91773dec55d8ef655554e36bb76da` |
+| `_matmul_ogs@w2/D4.verdict` | `pass` |
+| `_matmul_ogs@w2/P1.candidate_digest` | `fb56e9d7c16007ab4cc15b1bc8c22ada7d894b0d26658abde741aabb48d292c3` |
+| `_matmul_ogs@w2/P1.reference_digest` | `fb56e9d7c16007ab4cc15b1bc8c22ada7d894b0d26658abde741aabb48d292c3` |
+| `_matmul_ogs@w2/P1.verdict` | `pass` |
+| `_matmul_ogs@w2/P2.candidate_digest` | `54cdc9e01e5f3aa6f8b19f08b1c1da1908764812b3f58b0570a8e4bfa2ccc8b4` |
+| `_matmul_ogs@w2/P2.reference_digest` | `54cdc9e01e5f3aa6f8b19f08b1c1da1908764812b3f58b0570a8e4bfa2ccc8b4` |
+| `_matmul_ogs@w2/P2.verdict` | `pass` |
+| `_matmul_ogs@w2/P3.candidate_digest` | `649be589cbe95faaf07e2270654a8caa4e702940338f1c10073e3e7773d3e0b1` |
+| `_matmul_ogs@w2/P3.reference_digest` | `649be589cbe95faaf07e2270654a8caa4e702940338f1c10073e3e7773d3e0b1` |
+| `_matmul_ogs@w2/P3.verdict` | `pass` |
+| `_matmul_ogs@w2/P4.candidate_digest` | `8021aca8d27474319c7462d68ea35fba857c2f13a043128fc6f8b5d073c3fecc` |
+| `_matmul_ogs@w2/P4.reference_digest` | `8021aca8d27474319c7462d68ea35fba857c2f13a043128fc6f8b5d073c3fecc` |
+| `_matmul_ogs@w2/P4.verdict` | `pass` |
+| `_rms_norm_kernel/D1.candidate_digest` | `e87ddeeef77354b0a3ce48bb148719be1d8db632d94e08ac4c8e14a832c341fe` |
+| `_rms_norm_kernel/D1.reference_digest` | `e87ddeeef77354b0a3ce48bb148719be1d8db632d94e08ac4c8e14a832c341fe` |
+| `_rms_norm_kernel/D1.verdict` | `pass` |
+| `_rms_norm_kernel/D2.candidate_digest` | `96d61b7bde70e1549171e76f72ba1b58edaf579d75b50d53c218f962b9f0851a` |
+| `_rms_norm_kernel/D2.reference_digest` | `96d61b7bde70e1549171e76f72ba1b58edaf579d75b50d53c218f962b9f0851a` |
+| `_rms_norm_kernel/D2.verdict` | `pass` |
+| `_rms_norm_kernel/D3.candidate_digest` | `5f4638701b557afe983e43d19357fb551f47d71ab700902d12b014a99ee13807` |
+| `_rms_norm_kernel/D3.reference_digest` | `5f4638701b557afe983e43d19357fb551f47d71ab700902d12b014a99ee13807` |
+| `_rms_norm_kernel/D3.verdict` | `pass` |
+| `_rms_norm_kernel/D4.candidate_digest` | `47a40d16778be8d5ed45ed193769f41e2590a01838397b560f59b6e53768874a` |
+| `_rms_norm_kernel/D4.reference_digest` | `47a40d16778be8d5ed45ed193769f41e2590a01838397b560f59b6e53768874a` |
+| `_rms_norm_kernel/D4.verdict` | `pass` |
+| `_rms_norm_kernel/P1.candidate_digest` | `073f18d1d51f7e274df314a79e6fea84e6cb8c70955284e54f7ec40ce191b4c3` |
+| `_rms_norm_kernel/P1.reference_digest` | `073f18d1d51f7e274df314a79e6fea84e6cb8c70955284e54f7ec40ce191b4c3` |
+| `_rms_norm_kernel/P1.verdict` | `pass` |
+| `_rms_norm_kernel/P2.candidate_digest` | `736b391d210c40bc18ab6d1646086fc899ca432d474667fb6ef2c26e5a8550f4` |
+| `_rms_norm_kernel/P2.reference_digest` | `736b391d210c40bc18ab6d1646086fc899ca432d474667fb6ef2c26e5a8550f4` |
+| `_rms_norm_kernel/P2.verdict` | `pass` |
+| `_rms_norm_kernel/P3.candidate_digest` | `8906f4ac708203f9f38e6e1ecde3ef0bba86bc21b9b0b801235ce1dcb8abfe72` |
+| `_rms_norm_kernel/P3.reference_digest` | `8906f4ac708203f9f38e6e1ecde3ef0bba86bc21b9b0b801235ce1dcb8abfe72` |
+| `_rms_norm_kernel/P3.verdict` | `pass` |
+| `_rms_norm_kernel/P4.candidate_digest` | `9f73ee1035bff333135e787fd9aff40d98a69a0527b13764f59e56509c0949f3` |
+| `_rms_norm_kernel/P4.reference_digest` | `9f73ee1035bff333135e787fd9aff40d98a69a0527b13764f59e56509c0949f3` |
+| `_rms_norm_kernel/P4.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D1.candidate_digest` | `32b682cd94c40b7d6cabd0dafe80bb8c7b3bb8a54343669f662e683a01eab374` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D1.reference_digest` | `32b682cd94c40b7d6cabd0dafe80bb8c7b3bb8a54343669f662e683a01eab374` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D1.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D2.candidate_digest` | `f30ac2598a7018aaa45b964218f2ff5934876fee034f636490ef00f8019dcc86` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D2.reference_digest` | `f30ac2598a7018aaa45b964218f2ff5934876fee034f636490ef00f8019dcc86` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D2.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D3.candidate_digest` | `6a3cd679f0705d8f5052ba8a89e20350fdc561af3e1ef9d393858957d86f80fb` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D3.reference_digest` | `6a3cd679f0705d8f5052ba8a89e20350fdc561af3e1ef9d393858957d86f80fb` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D3.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D4.candidate_digest` | `82756a77173cdfbe517ec3ef61945b465a953fc49f36e98851dac9027eae7d5b` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D4.reference_digest` | `82756a77173cdfbe517ec3ef61945b465a953fc49f36e98851dac9027eae7d5b` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/D4.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P1.candidate_digest` | `adf251cb45af58e69f7a2d5a9ead896f9cbe161e78fb4021996107a15e9a9c20` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P1.reference_digest` | `adf251cb45af58e69f7a2d5a9ead896f9cbe161e78fb4021996107a15e9a9c20` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P1.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P2.candidate_digest` | `32d43670b0a0f10419c60db6ecf148c39db73f34b854034b523e64f536e2d575` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P2.reference_digest` | `32d43670b0a0f10419c60db6ecf148c39db73f34b854034b523e64f536e2d575` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P2.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P3.candidate_digest` | `01ccf8d4dab5779f254c39904dbbd4ee88b8a7259662faae49b7c13dcf1f159c` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P3.reference_digest` | `01ccf8d4dab5779f254c39904dbbd4ee88b8a7259662faae49b7c13dcf1f159c` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P3.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P4.candidate_digest` | `c640b749f4288f021a90b84066c0bde14af30c60b6cc3618b41e571c118afe0a` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P4.reference_digest` | `c640b749f4288f021a90b84066c0bde14af30c60b6cc3618b41e571c118afe0a` |
+| `_rope_kernel_cached_thd_2c_gqa_fwd/P4.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D1.candidate_digest` | `5b51de9b45ace5bdee828b2fb17d97c3a4baecf41c9bb5b24bb314c08f2a364c` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D1.reference_digest` | `5b51de9b45ace5bdee828b2fb17d97c3a4baecf41c9bb5b24bb314c08f2a364c` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D1.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D2.candidate_digest` | `ea63f21b9c92cecaf5bd9504ba2c801c4a21ec21cb46b5889ce5c6da321301ad` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D2.reference_digest` | `ea63f21b9c92cecaf5bd9504ba2c801c4a21ec21cb46b5889ce5c6da321301ad` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D2.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D3.candidate_digest` | `c259e259979796efb9fe7e4d38c94f7def4946ada82cb911d9ca23e1f9111249` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D3.reference_digest` | `c259e259979796efb9fe7e4d38c94f7def4946ada82cb911d9ca23e1f9111249` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D3.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D4.candidate_digest` | `ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D4.reference_digest` | `ca50fbc8bdc1df812e0ac1696c990c4afb1a98f6a0625f1385e0689e48e88fdd` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/D4.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P1.candidate_digest` | `c3d1849bc5857585de73cc0c5e8f8d0aa1e0cdfc5363f18495b97d5c80ba24b5` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P1.reference_digest` | `c3d1849bc5857585de73cc0c5e8f8d0aa1e0cdfc5363f18495b97d5c80ba24b5` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P1.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P2.candidate_digest` | `76ea103292b9cf15a383f172910f55dbe9384a59bf4e0c0624e619065206800d` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P2.reference_digest` | `76ea103292b9cf15a383f172910f55dbe9384a59bf4e0c0624e619065206800d` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P2.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P3.candidate_digest` | `64903d518690f25c91a96c73b821ae88976eb9ea4d51a48a5f22f84ad362b09f` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P3.reference_digest` | `64903d518690f25c91a96c73b821ae88976eb9ea4d51a48a5f22f84ad362b09f` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P3.verdict` | `pass` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P4.candidate_digest` | `ebb01513ea7009e472fff6a1369b0724b61311c0737d2cc09fc5f2d1667457c2` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P4.reference_digest` | `ebb01513ea7009e472fff6a1369b0724b61311c0737d2cc09fc5f2d1667457c2` |
+| `_rope_kernel_cached_thd_2c_gqa_onehead_fwd/P4.verdict` | `pass` |
+| `_swiglu/D1.candidate_digest` | `8c5a2f68f254bd4af9519eb0ff7c3800bba486f4c673a79374fb4b8437790c9f` |
+| `_swiglu/D1.reference_digest` | `8c5a2f68f254bd4af9519eb0ff7c3800bba486f4c673a79374fb4b8437790c9f` |
+| `_swiglu/D1.verdict` | `pass` |
+| `_swiglu/D2.candidate_digest` | `223c356e393a179b70bf105ecbd6246f97b4389d0c03e4774516a67d906c4714` |
+| `_swiglu/D2.reference_digest` | `223c356e393a179b70bf105ecbd6246f97b4389d0c03e4774516a67d906c4714` |
+| `_swiglu/D2.verdict` | `pass` |
+| `_swiglu/D3.candidate_digest` | `af07d9ece3e30c765ca507f4d6cbb1013d6eb8bfb9dbcf175ec9bcce9902ce43` |
+| `_swiglu/D3.reference_digest` | `af07d9ece3e30c765ca507f4d6cbb1013d6eb8bfb9dbcf175ec9bcce9902ce43` |
+| `_swiglu/D3.verdict` | `pass` |
+| `_swiglu/D4.candidate_digest` | `fa395db60e22d78a6cbc1b933c528aafe328146c8b4e42fa03ec52de7eb32629` |
+| `_swiglu/D4.reference_digest` | `fa395db60e22d78a6cbc1b933c528aafe328146c8b4e42fa03ec52de7eb32629` |
+| `_swiglu/D4.verdict` | `pass` |
+| `_swiglu/P1.candidate_digest` | `225fdade79c927c9e70f7ef2fd662bf51c92515c8c38a56466b10df3f7f13e1a` |
+| `_swiglu/P1.reference_digest` | `225fdade79c927c9e70f7ef2fd662bf51c92515c8c38a56466b10df3f7f13e1a` |
+| `_swiglu/P1.verdict` | `pass` |
+| `_swiglu/P2.candidate_digest` | `4390b81e125c66770431f31a9a7740d639180918921ff21d62e7e2b0112ddc37` |
+| `_swiglu/P2.reference_digest` | `4390b81e125c66770431f31a9a7740d639180918921ff21d62e7e2b0112ddc37` |
+| `_swiglu/P2.verdict` | `pass` |
+| `_swiglu/P3.candidate_digest` | `ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d` |
+| `_swiglu/P3.reference_digest` | `ce849354885a0484ba4f9ae6956812be13179f65908a7e9a7b4fb4c3fe90d69d` |
+| `_swiglu/P3.verdict` | `pass` |
+| `_swiglu/P4.candidate_digest` | `0642644a2c5b62a18f626ef3681e06b7a608a59239858e0aa9219ef5beaa4a4e` |
+| `_swiglu/P4.reference_digest` | `0642644a2c5b62a18f626ef3681e06b7a608a59239858e0aa9219ef5beaa4a4e` |
+| `_swiglu/P4.verdict` | `pass` |
+| `_topk_forward/D1.candidate_digest` | `f45486e386dc568394abc6304990af1f3f57fd2405d53ae3a04e0b5ab369562a` |
+| `_topk_forward/D1.reference_digest` | `f45486e386dc568394abc6304990af1f3f57fd2405d53ae3a04e0b5ab369562a` |
+| `_topk_forward/D1.verdict` | `pass` |
+| `_topk_forward/D2.candidate_digest` | `eadf2627e74b74020457b3969a9df9f4a0e5a7c8c862e685567cc4140efa3ef7` |
+| `_topk_forward/D2.reference_digest` | `eadf2627e74b74020457b3969a9df9f4a0e5a7c8c862e685567cc4140efa3ef7` |
+| `_topk_forward/D2.verdict` | `pass` |
+| `_topk_forward/D3.candidate_digest` | `e9977e13eba0680ee07a5867f411def959041369b103172c1e832885eafdfee4` |
+| `_topk_forward/D3.reference_digest` | `e9977e13eba0680ee07a5867f411def959041369b103172c1e832885eafdfee4` |
+| `_topk_forward/D3.verdict` | `pass` |
+| `_topk_forward/D4.candidate_digest` | `23b5e433ea6f5fc8eb34829ac57ef6b01f8b73efaf0a114ac0b8cc0d7db1f45f` |
+| `_topk_forward/D4.reference_digest` | `23b5e433ea6f5fc8eb34829ac57ef6b01f8b73efaf0a114ac0b8cc0d7db1f45f` |
+| `_topk_forward/D4.verdict` | `pass` |
+| `_topk_forward/P1.candidate_digest` | `f6b864c1b89cf8b793a64640b89da819ea8f8aa2b6d0a8a895434d4f91aba4f3` |
+| `_topk_forward/P1.reference_digest` | `f6b864c1b89cf8b793a64640b89da819ea8f8aa2b6d0a8a895434d4f91aba4f3` |
+| `_topk_forward/P1.verdict` | `pass` |
+| `_topk_forward/P2.candidate_digest` | `e4a29b8159f2677e112fee4c749bd277f88b44b22763653d32204333100df990` |
+| `_topk_forward/P2.reference_digest` | `e4a29b8159f2677e112fee4c749bd277f88b44b22763653d32204333100df990` |
+| `_topk_forward/P2.verdict` | `pass` |
+| `_topk_forward/P3.candidate_digest` | `252d48ee2bc97aa3c751f86bcfbf46aad5e3e43df57e01bec77482ca5823e68f` |
+| `_topk_forward/P3.reference_digest` | `252d48ee2bc97aa3c751f86bcfbf46aad5e3e43df57e01bec77482ca5823e68f` |
+| `_topk_forward/P3.verdict` | `pass` |
+| `_topk_forward/P4.candidate_digest` | `7739451c83e080f34a8b630ee877e00c77c91f2355f578f03b8ea3fcfe1d7f8b` |
+| `_topk_forward/P4.reference_digest` | `7739451c83e080f34a8b630ee877e00c77c91f2355f578f03b8ea3fcfe1d7f8b` |
+| `_topk_forward/P4.verdict` | `pass` |
+| `_topk_topp_kernel/D1.candidate_digest` | `68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773` |
+| `_topk_topp_kernel/D1.reference_digest` | `68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773` |
+| `_topk_topp_kernel/D1.verdict` | `pass` |
+| `_topk_topp_kernel/D2.candidate_digest` | `7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592` |
+| `_topk_topp_kernel/D2.reference_digest` | `7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592` |
+| `_topk_topp_kernel/D2.verdict` | `pass` |
+| `_topk_topp_kernel/D3.candidate_digest` | `174ad6c9c8604aefac634df2281fd1eff54e07fcdc33e6f21d3bf4fe84aa90c3` |
+| `_topk_topp_kernel/D3.reference_digest` | `174ad6c9c8604aefac634df2281fd1eff54e07fcdc33e6f21d3bf4fe84aa90c3` |
+| `_topk_topp_kernel/D3.verdict` | `pass` |
+| `_topk_topp_kernel/D4.candidate_digest` | `1a7f72e91b5eb2ade3ee98adc401abce6c444a57baecfaa82850c7a0d6059993` |
+| `_topk_topp_kernel/D4.reference_digest` | `1a7f72e91b5eb2ade3ee98adc401abce6c444a57baecfaa82850c7a0d6059993` |
+| `_topk_topp_kernel/D4.verdict` | `pass` |
+| `_topk_topp_kernel/P1.candidate_digest` | `68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773` |
+| `_topk_topp_kernel/P1.reference_digest` | `68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773` |
+| `_topk_topp_kernel/P1.verdict` | `pass` |
+| `_topk_topp_kernel/P2.candidate_digest` | `68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773` |
+| `_topk_topp_kernel/P2.reference_digest` | `68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773` |
+| `_topk_topp_kernel/P2.verdict` | `pass` |
+| `_topk_topp_kernel/P3.candidate_digest` | `68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773` |
+| `_topk_topp_kernel/P3.reference_digest` | `68d3b34339f5cfbbdae6194a17bc7bfdc08387d3a005d910605f2c8a653d5773` |
+| `_topk_topp_kernel/P3.verdict` | `pass` |
+| `_topk_topp_kernel/P4.candidate_digest` | `7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592` |
+| `_topk_topp_kernel/P4.reference_digest` | `7e9413c66234b3857ca42b61a37d464f7ab063211adcab452d381f8aeb80a592` |
+| `_topk_topp_kernel/P4.verdict` | `pass` |
+| `code_object:dispatched.hsaco` | `8b64fa68f36e5fa05a1480165b0531dfcc3ec45c8a23e08e866fce25b4483c7f` |
+| `kernel_unified_attention_2d/D1_full.candidate_digest` | `1b183b97fcfd96576f2e03b01ff859c8ad577ae263b35369b710dd1ef28a2591` |
+| `kernel_unified_attention_2d/D1_full.reference_digest` | `1b183b97fcfd96576f2e03b01ff859c8ad577ae263b35369b710dd1ef28a2591` |
+| `kernel_unified_attention_2d/D1_full.verdict` | `pass` |
+| `kernel_unified_attention_2d/D1_swa.candidate_digest` | `e7fe4a149aa149d6008bf6a3ff9c8c414180238c3a192fd32345488e79e7fa5b` |
+| `kernel_unified_attention_2d/D1_swa.reference_digest` | `e7fe4a149aa149d6008bf6a3ff9c8c414180238c3a192fd32345488e79e7fa5b` |
+| `kernel_unified_attention_2d/D1_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/D2_full.candidate_digest` | `170e86d5d5b756e98dee391e04d45aa429ae18ecdde834e3bc4b0f799998d289` |
+| `kernel_unified_attention_2d/D2_full.reference_digest` | `170e86d5d5b756e98dee391e04d45aa429ae18ecdde834e3bc4b0f799998d289` |
+| `kernel_unified_attention_2d/D2_full.verdict` | `pass` |
+| `kernel_unified_attention_2d/D2_swa.candidate_digest` | `8e9dc2e68cac67aed10b72baf114ee60eb8355cc6d755be16a2c54d96f7b5135` |
+| `kernel_unified_attention_2d/D2_swa.reference_digest` | `8e9dc2e68cac67aed10b72baf114ee60eb8355cc6d755be16a2c54d96f7b5135` |
+| `kernel_unified_attention_2d/D2_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/D3_full.candidate_digest` | `8564266319eb7ac8bcccf57306a575f016203cb2f523a62a05d4ecae3d16e620` |
+| `kernel_unified_attention_2d/D3_full.reference_digest` | `8564266319eb7ac8bcccf57306a575f016203cb2f523a62a05d4ecae3d16e620` |
+| `kernel_unified_attention_2d/D3_full.verdict` | `pass` |
+| `kernel_unified_attention_2d/D3_swa.candidate_digest` | `f20f742563d2f6d656938d5ad15fe56439977c28539c691438047acf492ebd6e` |
+| `kernel_unified_attention_2d/D3_swa.reference_digest` | `f20f742563d2f6d656938d5ad15fe56439977c28539c691438047acf492ebd6e` |
+| `kernel_unified_attention_2d/D3_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/D4_full.candidate_digest` | `13ca5ce07e225bff4f83bec2587b16c036325816782b9860e0034005eadfbe75` |
+| `kernel_unified_attention_2d/D4_full.reference_digest` | `13ca5ce07e225bff4f83bec2587b16c036325816782b9860e0034005eadfbe75` |
+| `kernel_unified_attention_2d/D4_full.verdict` | `pass` |
+| `kernel_unified_attention_2d/D4_swa.candidate_digest` | `d3cf7f32a55b722ce962b3961b353a86f11a1d2e7b211f5851137d298079fdc5` |
+| `kernel_unified_attention_2d/D4_swa.reference_digest` | `d3cf7f32a55b722ce962b3961b353a86f11a1d2e7b211f5851137d298079fdc5` |
+| `kernel_unified_attention_2d/D4_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/P1_full.candidate_digest` | `5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a` |
+| `kernel_unified_attention_2d/P1_full.reference_digest` | `5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a` |
+| `kernel_unified_attention_2d/P1_full.verdict` | `pass` |
+| `kernel_unified_attention_2d/P1_swa.candidate_digest` | `5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a` |
+| `kernel_unified_attention_2d/P1_swa.reference_digest` | `5023ad372afd0dcb3990698de16dc7cf0a50a44e678fd75bdbd479b8f980536a` |
+| `kernel_unified_attention_2d/P1_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/P2_full.candidate_digest` | `5ff7542e563ad82afc0d54aa27a2f26dd7885f155c2905da28aad827a6e69584` |
+| `kernel_unified_attention_2d/P2_full.reference_digest` | `5ff7542e563ad82afc0d54aa27a2f26dd7885f155c2905da28aad827a6e69584` |
+| `kernel_unified_attention_2d/P2_full.verdict` | `pass` |
+| `kernel_unified_attention_2d/P2_swa.candidate_digest` | `bad332baf8619815e0fa28e01f2580cf991374cf8041d5aea902541f7fbb4cc5` |
+| `kernel_unified_attention_2d/P2_swa.reference_digest` | `bad332baf8619815e0fa28e01f2580cf991374cf8041d5aea902541f7fbb4cc5` |
+| `kernel_unified_attention_2d/P2_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/P3_full.candidate_digest` | `320bad23dd01eb3c23317bc5458a6bac0034fd48bbedc9d5ac5925f64a6e1fb1` |
+| `kernel_unified_attention_2d/P3_full.reference_digest` | `320bad23dd01eb3c23317bc5458a6bac0034fd48bbedc9d5ac5925f64a6e1fb1` |
+| `kernel_unified_attention_2d/P3_full.verdict` | `pass` |
+| `kernel_unified_attention_2d/P3_swa.candidate_digest` | `4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354` |
+| `kernel_unified_attention_2d/P3_swa.reference_digest` | `4e23fd9fc586c11015ddb7d1154497112160521185a05a624b11856acf4d8354` |
+| `kernel_unified_attention_2d/P3_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/P4_full.candidate_digest` | `14b8d771899c62eadc21a1944ebdc22dd0e0a377db06a872077b0a5bc0a7d0f7` |
+| `kernel_unified_attention_2d/P4_full.reference_digest` | `14b8d771899c62eadc21a1944ebdc22dd0e0a377db06a872077b0a5bc0a7d0f7` |
+| `kernel_unified_attention_2d/P4_full.verdict` | `pass` |
+| `kernel_unified_attention_2d/P4_swa.candidate_digest` | `ca687daf4f52089f97c2028fdf1dde630d4e03b1ec955aed13fd7d8e7ad2aacd` |
+| `kernel_unified_attention_2d/P4_swa.reference_digest` | `ca687daf4f52089f97c2028fdf1dde630d4e03b1ec955aed13fd7d8e7ad2aacd` |
+| `kernel_unified_attention_2d/P4_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/X1_swa.candidate_digest` | `36a7faacb8498efcfccc137ade222068558d0f8ad4675970fdfc98fca6b5ae77` |
+| `kernel_unified_attention_2d/X1_swa.reference_digest` | `36a7faacb8498efcfccc137ade222068558d0f8ad4675970fdfc98fca6b5ae77` |
+| `kernel_unified_attention_2d/X1_swa.verdict` | `pass` |
+| `kernel_unified_attention_2d/X2_swa.candidate_digest` | `c48a1b82028a6e7c9dcc4183a03f803e14109460728192649a5859c64b656a86` |
+| `kernel_unified_attention_2d/X2_swa.reference_digest` | `c48a1b82028a6e7c9dcc4183a03f803e14109460728192649a5859c64b656a86` |
+| `kernel_unified_attention_2d/X2_swa.verdict` | `pass` |
+| `kernel_unified_attention_3d/X1_full.candidate_digest` | `3db05bc0633a42fee0e09a238a08a0cc2c18fd9c56dbeb5d39a85229f2916cc6` |
+| `kernel_unified_attention_3d/X1_full.reference_digest` | `3db05bc0633a42fee0e09a238a08a0cc2c18fd9c56dbeb5d39a85229f2916cc6` |
+| `kernel_unified_attention_3d/X1_full.verdict` | `pass` |
+| `kernel_unified_attention_3d/X2_full.candidate_digest` | `0c0cc9e1d04d22ff6be6edc1021cc41777bd3d523f134d5bc0371442cbddd06c` |
+| `kernel_unified_attention_3d/X2_full.reference_digest` | `0c0cc9e1d04d22ff6be6edc1021cc41777bd3d523f134d5bc0371442cbddd06c` |
+| `kernel_unified_attention_3d/X2_full.verdict` | `pass` |
+| `reduce_segments/X1_full.candidate_digest` | `f0ddc325ece16bdb2eef4bc83ec9d60f0904bf624bfbe9287c9649def447af55` |
+| `reduce_segments/X1_full.reference_digest` | `f0ddc325ece16bdb2eef4bc83ec9d60f0904bf624bfbe9287c9649def447af55` |
+| `reduce_segments/X1_full.verdict` | `pass` |
+| `reduce_segments/X2_full.candidate_digest` | `f67f4fb3f8614b74340987eca8c98555feac71d76f182bcb0c7a48b7e1d7215d` |
+| `reduce_segments/X2_full.reference_digest` | `f67f4fb3f8614b74340987eca8c98555feac71d76f182bcb0c7a48b7e1d7215d` |
+| `reduce_segments/X2_full.verdict` | `pass` |
+| `result_marker` | `AORTA_FPSAN_RESULT` |
+| `triton_instrumentation_mode` | `fpsan` |
+
+## Files here
+
+See `index.html` for the browsable list. Logs are gzipped; `sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document the dashboard renders from.
