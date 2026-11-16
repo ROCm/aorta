@@ -37,7 +37,9 @@ stand-in dataset, the stand-in check tools, a GPU).
 A test that cannot fail proves nothing, so the new code was mutated by hand and the tests rerun: each mutant must
 make a test fail. For the plugin registry: dropping the registry lookup in `component_source`, in the check-adapter
 factories, in the parse-adapter lookup, in the wiring's prompt pool, and the run plan's plugin record (5 of 5
-caught); the plugin self-test chats (1 of 1); the checkpoint export's tensors and its manifest check (2 of 2). The
+caught); the plugin self-test chats (1 of 1); the checkpoint export's tensors and its manifest check (2 of 2); the
+kernel example's read-only-input check, which arrays it covers, its bit-for-bit compare and bounds, the status, the
+verdict and the reward (12 of 12, each beside an equivalent rewrite that the tests still pass). The
 components merged before them recorded their own mutation runs in their pull requests. Reproduce one: make the edit,
 run the named test file, see it fail, revert.
 
