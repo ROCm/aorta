@@ -271,24 +271,15 @@ def model_files(cfg: RunConfig) -> dict[str, Path]:
     return out
 
 
-# What decides a sample's reward besides its reply, so that eval_compare can refuse two runs scored differently:
-# the profile's whole content, the reward function's version and code, and the run's reward settings. Where the
-# checks run (`remote`), whether results are cached (`cache`), how many workers run them (`sim_workers`) and whether
-# unneeded legs start early (`speculative_parallel`) do not change a result, so they are left out.
+# The run's reward settings that decide a result, recorded beside the reward port's own identity (`identity()`: the
+# profile and reward function it holds) so that eval_compare can refuse two runs scored differently. Where the checks
+# run (`remote`), whether results are cached (`cache`), how many workers run them (`sim_workers`) and whether unneeded
+# legs start early (`speculative_parallel`) do not change a result, so they are left out.
 REWARD_SETTINGS_IGNORED = ("cache", "remote", "sim_workers", "speculative_parallel")
 
 
-def reward_identity(cfg: RunConfig) -> dict:
-    from ..reward.profiles import load_profile
-    from ..reward.rewardfn.for_profile import standin_rewardfn
-
-    profile = load_profile(cfg.reward.profile)
-    fn = standin_rewardfn(profile)
-    content = config_mod.plain(profile)
-    settings = {k: v for k, v in config_mod.plain(cfg.reward).items() if k not in REWARD_SETTINGS_IGNORED}
-    return {"profile_content": content, "profile_sha256": sha256_json(content),
-            "reward_fn_identity": {k: getattr(fn, k, None) for k in ("name", "version", "code_sha256")},
-            "settings": settings}
+def reward_settings(cfg: RunConfig) -> dict:
+    return {k: v for k, v in config_mod.plain(cfg.reward).items() if k not in REWARD_SETTINGS_IGNORED}
 
 
 class Scorer:
@@ -485,6 +476,7 @@ class Scorer:
         cfg, r, o = self.cfg, self.cfg.rollout, self.cfg.orchestrator
         model = {k: v for k, v in (self.identity or {}).items() if k != "files"}
         checkers = self.reward.checkers() if callable(getattr(self.reward, "checkers", None)) else None
+        identity = self.reward.identity() if callable(getattr(self.reward, "identity", None)) else {}
         return {
             "run_id": self.run_id, "source": self.source,
             "written_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -499,7 +491,7 @@ class Scorer:
                          "compile_adapter": r.compile_adapter, "run_seed": o.run_seed,
                          "seed_rule": "ids.seed(run_seed, iteration, prompt_id, k, turn), one request per turn"},
             "reward": {"profile": cfg.reward.profile, "reward_fn": cfg.reward.reward_fn, "checkers": checkers,
-                       **reward_identity(cfg)},
+                       **identity, "settings": reward_settings(cfg)},
             "engines": {k: v for k, v in (self.engines or {}).items() if k != "self_tests"},
         }
 

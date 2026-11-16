@@ -273,27 +273,28 @@ def test_a_base_model_snapshot_revision_is_named_when_two_bases_differ():
 
 
 def test_runs_whose_reward_profile_content_differs_are_refused_whatever_its_name(tmp_path, capsys):
-    """The reward is compared by what it is: a profile edited under the same name (a leg's settings, a stage) is
-    refused, as is a reward setting or the reward function's code; the same profile under another name is not, and a
-    report that does not record the content is refused."""
+    """The reward is compared by what it is: a profile edited under the same name (its legs, its behaviour) is
+    refused, as is a reward setting, the reward function's code or its own settings; the same profile under another
+    name is not, and a report that does not record the content is refused."""
     base = score_run(tmp_path, "base")
     row = _run_row(base)["reward"]
-    assert row["profile_content"]["stages"] and row["reward_fn_identity"]["code_sha256"]
+    assert row["profile_content"]["legs"] and row["reward_fn_identity"]["code_sha256"]
+    assert "settings" in row["reward_fn_identity"] and row["settings"]["timeouts"]
 
     def reward(edit):
         return lambda r: dict(r, reward=edit(dict(r["reward"]))) if r["kind"] == "run" else r
 
-    def stages(r):
-        return dict(r, profile_content=dict(r["profile_content"], stages=r["profile_content"]["stages"][:-1]))
+    def content(**kw):
+        return lambda r: dict(r, profile_content=dict(r["profile_content"], **kw))
 
     for name, edit, where in (
-            ("stage", stages, "profile.stages"),
-            ("leg", lambda r: dict(r, profile_content=dict(r["profile_content"],
-                                                           leg_settings={"compile": {"timeout_s": 1}})),
-             "profile.leg_settings"),
+            ("leg", content(legs=row["profile_content"]["legs"][:-1]), "profile.legs"),
+            ("behaviour", content(config=dict(row["profile_content"]["config"], latency_s=1.0)), "profile.config"),
             ("setting", lambda r: dict(r, settings=dict(r["settings"], x_new_setting=1)), "settings.x_new_setting"),
             ("code", lambda r: dict(r, reward_fn_identity=dict(r["reward_fn_identity"], code_sha256="0" * 64)),
-             "reward_fn.code_sha256")):
+             "reward_fn.code_sha256"),
+            ("fnsettings", lambda r: dict(r, reward_fn_identity=dict(r["reward_fn_identity"], settings={"scale": 2})),
+             "reward_fn.settings")):
         other = score_run(tmp_path, name)
         _rewrite(other / "score" / "report.jsonl", reward(edit))
         assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2, name

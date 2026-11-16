@@ -45,8 +45,9 @@ kernel gate's read and its unknown-task check, the Q&A check's read, both versio
 and a score report naming each pool's checker and version (14 of 14, each beside an equivalent rewrite);
 `eval_compare` refusing two runs from different base models (the base files' hashes, the served and merged weights'
 hashes) or scored by a different reward (the profile's content, the reward function's identity, the settings, the
-report's record of them), and the Q&A check's normalising and version (15 of 15, each beside an equivalent rewrite). The
-components merged before them recorded their own mutation runs in their pull requests. Reproduce one: make the edit,
+report's record of them, taken from the reward adapter when it is made), and the Q&A check's normalising and version
+(18 of 18, each beside an equivalent rewrite). The components merged before them recorded their own mutation runs
+in their pull requests. Reproduce one: make the edit,
 run the named test file, see it fail, revert.
 
 ## 3. The checks every run makes on itself

@@ -335,6 +335,28 @@ def test_the_reward_adapter_runs_the_fake_profile_with_the_log_only_hook(tmp_pat
     assert not r.work_dir.exists()
 
 
+def test_the_reward_adapter_reports_the_profile_and_reward_function_it_holds(tmp_path, monkeypatch):
+    """A score report's reward identity is the adapter's own profile and reward function, its settings included,
+    taken when the adapter was made: a profile edited (or reloaded) afterwards is not what scored the run."""
+    from aorlta import config as config_mod
+    from aorlta.reward import profiles
+    from aorlta.reward.clock import Clock
+    from aorlta.spans import SpanRecorder
+
+    cfg = _cfg(tmp_path)
+    clock = Clock()
+    r = wiring.RewardAdapter(cfg, clock=clock, spans=SpanRecorder(monotonic=clock.now, wall=clock.wall))
+    got = r.identity()
+    assert got["profile_content"] == config_mod.plain(r.profile)
+    assert got["reward_fn_identity"] == {"name": r.rewardfn.name, "version": r.rewardfn.version,
+                                         "code_sha256": r.rewardfn.code_sha256,
+                                         "settings": config_mod.plain(dict(r.rewardfn.settings))}
+    assert got["reward_fn_identity"]["settings"]
+    monkeypatch.setattr(profiles, "load_profile", lambda name: (_ for _ in ()).throw(AssertionError("reloaded")))
+    r.rewardfn.settings["clean_repeats"] = 99
+    assert r.identity() == got
+
+
 def test_the_reward_adapter_returns_the_services_drain_report(tmp_path):
     """The loop and score mode record the legs a drain's deadline caught from the report `drain` returns."""
     from aorlta.reward.service import DrainReport
