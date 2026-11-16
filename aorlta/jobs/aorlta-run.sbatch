@@ -2,8 +2,25 @@
 # AORLTA: one run of the GRPO loop (`aorlta.orchestrator.run`) on one node, such as configs/standin.yaml's 3-iteration
 # stand-in run. The TokenSpeed image is built in-job if the node lacks it, then the trainer image from
 # docker/Dockerfile.trainer; an EXIT/TERM trap removes this job's containers, its /dev/shm slots and every image it
-# built or pulled. docker runs in the background with `wait`, so a TERM (scancel) runs the trap at once: bash defers
-# traps while a foreground command runs, and a killed docker client leaves its container running.
+# built or pulled that no other job on the node may be using. docker runs in the background with `wait`, so a TERM
+# (scancel) runs the trap at once: bash defers traps while a foreground command runs, and a killed docker client
+# leaves its container running.
+#
+# Two runs on one node. The job asks for the whole node (the --exclusive directive below); a command-line option
+# overrides it, so `sbatch --exclusive=user -w <node> ...` lets your own jobs share a node, on a partition that allows
+# it (one with OverSubscribe=EXCLUSIVE never puts two jobs on a node). Their configs must name
+# disjoint GPUs (rollout.engines, trainer.devices, reward.remote's GPUs, and any GPUs a task's own checks use), and
+# each its own run id and reward.remote.socket_dir. The job claims the GPUs and its two /dev/shm directories
+# (<sync.dir>/<run id> and the socket directory, by their canonical paths; neither may be inside the claims directory
+# or hold it, exit 95) in world-writable files under /dev/shm/aorlta-claims, so a later job of any user can take over
+# a claim a job left, and ends with exit 89 when a
+# job Slurm still runs holds one, or a directory inside or around one (a GPU a task's own checks use is not claimed:
+# the job cannot see it). Engine ports
+# need nothing with rollout.port_base null (the default: each engine start picks a free window); two runs that both
+# fix a port_base must give windows that do not overlap. A container or claim of a job Slurm no longer runs is what
+# a cancelled or killed job left: the job removes or takes it over, and never touches another live job's. A requeued
+# job keeps its id: the containers its earlier attempt left are removed before it starts its own (exit 97 if one
+# cannot be).
 #
 # With `reward.remote` in the config (the standin-gpu profile's ConSan and ASan legs), the checkers run in
 # rocm/dev-ubuntu-24.04:7.0.2 (glibc 2.39 for the ConSan hook, the ROCm 7.0.2 ASan runtime): first aorta's ASan
@@ -57,6 +74,8 @@
 #   AORLTA_EXCLUDE_NODES   default none. Nodes this job refuses to run on (exit 90), as a Slurm host list. #SBATCH
 #                          lines cannot read the environment, so give Slurm the same list when submitting:
 #                            sbatch --exclude="$AORLTA_EXCLUDE_NODES" jobs/aorlta-run.sbatch
+#   AORLTA_CLAIMS_DIR      default /dev/shm/aorlta-claims. Where jobs on this node claim GPUs and directories: node-
+#                          local, and the same for every job of the node, or two jobs cannot see each other's claims
 # A container sees each directory at its host path. Mounted besides the directories above: the package root, /dev/shm
 # (reward.remote.socket_dir must be under it, and sync.dir is by default), and from the config run.root,
 # model.base_dir and model.adapter_dir (the adapter read-only; for a Hugging Face snapshot, the model's whole cache
@@ -114,7 +133,158 @@ BUILT_TRAINER=0
 PULLED_CHK=0
 SOCK_DIR=
 VRAM_PID=
+CLAIMS=${AORLTA_CLAIMS_DIR:-/dev/shm/aorlta-claims}
+CLAIMED=()
+OWN_DIRS=0  # this job holds the claims on <sync.dir>/<run id> and the socket directory, so its trap may remove them
 stamp() { echo "=== [$(date -u +%FT%TZ)] $*"; }
+job_ended() {  # job_ended ID: Slurm no longer runs job ID: it does not know the job, or names a final state. Any other
+  # answer, and no answer at all (squeue missing, the controller unreachable), counts as running, so a live job's
+  # containers, images and claims are never taken for left-overs.
+  local out
+  if ! out=$(squeue -h -j "$1" -o %T 2>&1); then
+    grep -qi 'invalid job id' <<< "$out"
+    return
+  fi
+  case "$out" in
+    ''|BOOT_FAIL|CANCELLED|COMPLETED|DEADLINE|FAILED|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|REVOKED|SPECIAL_EXIT|TIMEOUT)
+      return 0 ;;
+  esac
+  return 1
+}
+stale_containers() {  # the aorlta-run-<job id>[-part] containers on this node whose job Slurm no longer runs
+  local name id
+  local -A ended=()
+  while read -r name; do
+    id=${name#aorlta-run-}
+    id=${id%%-*}
+    [ "$id" = "$SLURM_JOB_ID" ] && continue
+    if [ -z "${ended[$id]:-}" ]; then
+      if job_ended "$id"; then ended[$id]=1; else ended[$id]=0; fi
+    fi
+    [ "${ended[$id]}" = 1 ] && echo "$name"
+  done < <(docker ps -a --format '{{.Names}}' | grep -xE 'aorlta-run-[0-9]+(-[a-z]+)?')
+}
+own_containers() {  # this job's containers, aorlta-run-<job id>[-part], by exact name (not aorlta-run-<job id>5)
+  docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?"
+}
+clear_earlier_attempt() {  # remove this job's containers from an earlier attempt; fails if any is still there
+  # A requeued job keeps its id, and an attempt killed before its trap ran leaves its containers (the checkers run
+  # detached, and a killed docker client leaves its container running): they hold this job's container names, so the
+  # first container it starts by name would fail. stale_containers skips this job's id, since it runs.
+  local left
+  left=$(own_containers)
+  [ -z "$left" ] && return 0
+  stamp "removing this job's containers from an earlier attempt: $(echo $left)"
+  echo "$left" | xargs -r docker rm -f >/dev/null 2>&1
+  left=$(own_containers)
+  [ -z "$left" ] && return 0
+  echo "[guard] cannot remove this job's containers from an earlier attempt: $(echo $left)" >&2
+  return 1
+}
+other_jobs() {  # the other Slurm jobs running on this node, one per line; "unknown" if Slurm cannot say
+  local out
+  out=$(squeue -h -w "${SLURMD_NODENAME:-$(hostname -s)}" -o %i 2>/dev/null) || { echo unknown; return; }
+  grep -vxF -- "$SLURM_JOB_ID" <<< "$out" | grep .
+}
+remove_image() {  # remove_image IMAGE: remove an image this job built or pulled, unless another job may use it: a
+  # container of another job was made from it (or from an image built on it), or another job runs on this node (it
+  # may have found the image when it started and not have run it yet). A kept image is recorded under
+  # $CLAIMS/images, and every job's cleanup tries it again (retry_kept_images), so the last job to leave removes it.
+  # A job in its own cleanup (a leaving-<id> marker, written once its containers are gone) uses no image any more, so
+  # of two jobs cleaning up at once the one that decides last removes what both kept.
+  local users jobs rec
+  rec=$CLAIMS/images/$(printf %s "$1" | sha256sum | cut -c1-16)
+  users=$(docker ps -a --filter "ancestor=$1" --format '{{.Names}}' 2>/dev/null | grep -vxE "$CNAME(-[a-z]+)?")
+  jobs=$(other_jobs | while read -r id; do [ -e "$CLAIMS/leaving-$id" ] || echo "$id"; done)
+  if [ -n "$users$jobs" ]; then
+    echo "kept $1: another job may use it (containers: ${users:-none}; jobs on this node: ${jobs:-none})" | tr '\n' ' '
+    echo
+    mkdir -p "$CLAIMS/images" 2>/dev/null && chmod 1777 "$CLAIMS/images" 2>/dev/null
+    (umask 0111; printf '%s\n' "$1" > "$rec") 2>/dev/null  # any user's job may write it again, as a claim
+    return
+  fi
+  if docker rmi -f "$1" >/dev/null 2>&1; then
+    echo "removed $1"
+    rm -f "$rec"
+  elif ! docker image inspect "$1" >/dev/null 2>&1; then
+    rm -f "$rec"  # gone already
+  fi
+}
+retry_kept_images() {  # the images an earlier job built or pulled and kept for another job (remove_image)
+  local f img
+  for f in "$CLAIMS"/leaving-*; do  # a leaving marker outlives its job only until a later cleanup sees it ended
+    [ -f "$f" ] && job_ended "${f##*/leaving-}" && rm -f "$f"
+  done
+  for f in "$CLAIMS"/images/*; do
+    [ -f "$f" ] || continue
+    img=$(head -n 1 "$f")
+    if [ -z "$img" ] || ! docker image inspect "$img" >/dev/null 2>&1; then rm -f "$f"; continue; fi
+    remove_image "$img"
+  done
+}
+claim() {  # claim WHAT KEY...: hold each KEY for this job (a file under $CLAIMS naming its job id). A key held by a job
+  # Slurm still runs ends this job, exit 89; one whose job ended is taken over. A directory (WHAT "directory PATH",
+  # PATH canonical: canon_dir) also ends the job when a live job holds one inside it or one it is inside, since
+  # either job's cleanup removes its directory recursively. Under flock, so two jobs taking over the same left-over
+  # claim cannot both get it.
+  local what=$1 key f owner fd held mine other
+  shift
+  mkdir -p "$CLAIMS" && chmod 1777 "$CLAIMS" 2>/dev/null  # other users' jobs on a shared node claim here too
+  touch "$CLAIMS/.lock" 2>/dev/null && chmod 666 "$CLAIMS/.lock" 2>/dev/null
+  exec {fd}>>"$CLAIMS/.lock" && flock -w 60 "$fd" || { echo "[guard] cannot lock $CLAIMS/.lock" >&2; exit 89; }
+  for key in "$@"; do
+    f=$CLAIMS/$key
+    if [ "${what#directory /}" != "$what" ]; then
+      mine=${what#directory }
+      for held in "$CLAIMS"/dir-*; do
+        [ -f "$held" ] && [ "$held" != "$f" ] || continue
+        owner=$(cut -d' ' -f1 "$held" 2>/dev/null)
+        [ -n "$owner" ] && [ "$owner" != "$SLURM_JOB_ID" ] || continue
+        other=$(cut -d' ' -f3- "$held" 2>/dev/null)
+        case "$mine/" in "$other/"*) ;; *) case "$other/" in "$mine/"*) ;; *) continue ;; esac ;; esac
+        if ! job_ended "$owner"; then
+          echo "[guard] job $owner, which Slurm still runs (or Slurm cannot say), holds directory $other on this node," \
+            "which overlaps $mine: give this run another run id and socket directory" >&2
+          exec {fd}>&-
+          exit 89
+        fi
+      done
+    fi
+    owner=$(cut -d' ' -f1 "$f" 2>/dev/null)
+    if [ -n "$owner" ] && [ "$owner" != "$SLURM_JOB_ID" ]; then
+      if ! job_ended "$owner"; then
+        echo "[guard] job $owner, which Slurm still runs (or Slurm cannot say), holds $what on this node ($f):" \
+          "give this run other GPUs, or another run id and socket directory" >&2
+        exec {fd}>&-
+        exit 89
+      fi
+      stamp "taking over $key from job $owner, which has ended"
+    fi
+    # world-writable (umask 0111), so a later job of any user can take over a claim this job leaves: the directory's
+    # sticky bit lets only its owner remove the file, not overwrite it
+    if (umask 0111; echo "$SLURM_JOB_ID $what" > "$f") 2>/dev/null; then
+      CLAIMED+=("$f")
+    else
+      echo "[guard] cannot write $f${owner:+ (left by job $owner, owned by $(stat -c %U "$f" 2>/dev/null))}:" \
+        "its owner can remove it" >&2
+      exec {fd}>&-
+      exit 89
+    fi
+  done
+  exec {fd}>&-
+}
+canon_dir() { realpath -m -- "$1"; }  # one spelling per directory: symlinks resolved, no trailing slash, no . or ..
+dir_key() { echo "dir-$(canon_dir "$1" | tr -d '\n' | sha256sum | cut -c1-16)"; }
+claim_dir() {  # claim_dir PATH: PATH, canonical, for this job. Refused (exit 95) when it is inside the claims directory
+  # or holds it: the canary and the cleanup remove a claimed directory recursively, claims and lock with it.
+  local d c
+  d=$(canon_dir "$1")
+  c=$(canon_dir "$CLAIMS")
+  case "$d/" in "$c/"*) ;; *) case "$c/" in "$d/"*) ;; *) claim "directory $d" "$(dir_key "$d")"; return ;; esac ;; esac
+  echo "[guard] $d overlaps the claims directory $c (AORLTA_CLAIMS_DIR): give the run another sync.dir or" \
+    "reward.remote.socket_dir" >&2
+  exit 95
+}
 vram_sampler() {  # every 10 s, from sysfs (no GPU context): UTC seconds, PCI address, VRAM used and total in bytes
   local c
   while :; do
@@ -198,7 +368,9 @@ else
   IMG=$BASE
   REMOTE=()  # the fakes check nothing
 fi
-[ "${#REMOTE[@]}" -gt 0 ] && SOCK_DIR=${REMOTE[0]}
+# Canonical, so the directory this job claims is the one the canary empties and the cleanup removes: through a symlink
+# they would remove the link and leave the claimed directory's place to another job.
+[ "${#REMOTE[@]}" -gt 0 ] && SOCK_DIR=$(canon_dir "${REMOTE[0]}")
 if [ "$SMOKE" = checkers ] && [ -z "$SOCK_DIR" ]; then
   echo "[guard] SMOKE=checkers needs reward.remote in $CONFIG" >&2; exit 95
 fi
@@ -217,34 +389,82 @@ clean_img() {  # an image this node has, for removing root-owned files
   local i
   for i in "$BASE" "$CHK_IMG"; do docker image inspect "$i" >/dev/null 2>&1 && { echo "$i"; return; }; done
 }
-cleanup() {
+CLEANED=0
+cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by then this job's claims are released, so a
+  # second pass could remove the directories of a job that claimed them in between
+  [ "$CLEANED" = 1 ] && return
+  CLEANED=1
   [ -n "$VRAM_PID" ] && kill "$VRAM_PID" 2>/dev/null
-  docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?" | xargs -r docker rm -f >/dev/null 2>&1
+  own_containers | xargs -r docker rm -f >/dev/null 2>&1
+  # A container docker would not remove may still use this job's images, GPUs and directories: then the job keeps
+  # them all and is not leaving; a later job's stale_containers removes the container once Slurm has ended this job
+  local left own=$OWN_DIRS
+  left=$(own_containers)
+  [ -n "$left" ] && own=0
   find "$OUT" -maxdepth 3 -name 'gpucore.*' -type f -delete 2>/dev/null
   local img mounts=()
   img=$(clean_img)
   add_mounts mounts rw /dev/shm "$OUT" "$RUN_ROOT" 2>/dev/null
   # The GPU legs' logs, harnesses and the candidates' parsed sources (stand-in data) are kept, small, before the
   # node directory goes: they are how an unsettled ConSan or ASan leg is read afterwards.
+  # (a job that did not get its claims leaves the directories alone: another live job holds them)
   [ -n "$img" ] && docker run --rm --network none --ulimit core=0 "${mounts[@]}" --entrypoint bash "$img" -c \
-    "if cd '$SYNC_DIR/$RUN_ID/scratch/reward' 2>/dev/null; then
+    "if [ $own = 1 ] && cd '$SYNC_DIR/$RUN_ID/scratch/reward' 2>/dev/null; then
        find pkg \( -path '*/san.*' \( -name '*.log' -o -name aorlta_harness.hip -o -name '*.json' \) \
          -o -path '*/gate.parse-*' -name source.hip \) -size -2M -print0 | tar --null -czf '$OUT/gpu-leg-evidence.tgz' -T -;
        cd /; fi
-     rm -rf '$SYNC_DIR/$RUN_ID' ${SOCK_DIR:+'$SOCK_DIR'}; chown -R $(id -u):$(id -g) '$OUT';
+     [ $own = 1 ] && rm -rf '$SYNC_DIR/$RUN_ID' ${SOCK_DIR:+'$SOCK_DIR'}; chown -R $(id -u):$(id -g) '$OUT';
      [ -d '$RUN_DIR' ] && chown -R $(id -u):$(id -g) '$RUN_DIR'" >/dev/null 2>&1
-  [ "$BUILT_TRAINER" = 1 ] && docker rmi -f "$IMG" >/dev/null 2>&1 && echo "removed $IMG"
-  [ "$BUILT_BASE" = 1 ] && docker rmi -f "$BASE" >/dev/null 2>&1 && echo "removed $BASE"
-  [ "$PULLED_CHK" = 1 ] && docker rmi -f "$CHK_IMG" >/dev/null 2>&1 && echo "removed $CHK_IMG (pulled by this job)"
+  if [ -n "$left" ]; then
+    echo "[guard] cannot remove this job's containers: $(echo $left); its images, claims and directories are kept" >&2
+    echo "containers left: $(echo "$left" | wc -l)"
+    return
+  fi
+  # this job uses no image from here on (the helper above was its last container): before its first image decision,
+  # so another job cleaning up at once sees it
+  mkdir -p "$CLAIMS" 2>/dev/null && (umask 0111; : > "$CLAIMS/leaving-$SLURM_JOB_ID") 2>/dev/null
+  [ "$BUILT_TRAINER" = 1 ] && remove_image "$IMG"
+  [ "$BUILT_BASE" = 1 ] && remove_image "$BASE"
+  [ "$PULLED_CHK" = 1 ] && remove_image "$CHK_IMG"
+  retry_kept_images
+  local f
+  for f in "${CLAIMED[@]}"; do
+    [ "$(cut -d' ' -f1 "$f" 2>/dev/null)" = "$SLURM_JOB_ID" ] && rm -f "$f"
+  done
   echo "containers left: $(docker ps -a --format '{{.Names}}' | grep -cxE "$CNAME(-[a-z]+)?")"
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT
+# A job that keeps its id across a requeue must not start as leaving: other jobs' cleanups would not count it as an
+# image user; and its earlier attempt's containers go before it starts any of its own
+rm -f "$CLAIMS/leaving-$SLURM_JOB_ID" 2>/dev/null
+clear_earlier_attempt || exit 97
 
 stamp "node $(hostname -s) job $SLURM_JOB_ID run $RUN_ID config $CONFIG components $COMPONENTS resume $RESUME commit $COMMIT"
-# The node is exclusive: a container of this run left by an earlier, cancelled job is removed before starting.
-stale=$(docker ps -a --format '{{.Names}}' | grep -xE 'aorlta-run-[0-9]+(-[a-z]+)?')
-[ -n "$stale" ] && { stamp "removing stale containers"; echo "$stale" | xargs -r docker rm -f >/dev/null 2>&1; }
+# Before anything uses them (the checker canary empties the socket directory): this run's /dev/shm directories, and
+# the GPUs it uses on this node, which are the engines', the trainer ranks' own (with trainer.devices null they share
+# the engines') and the checker servers'. The fakes use no GPU.
+claim_dir "$SYNC_DIR/$RUN_ID"
+[ -n "$SOCK_DIR" ] && claim_dir "$SOCK_DIR"
+OWN_DIRS=1
+RUN_GPUS=()
+if [ "$COMPONENTS" = real ]; then
+  read -ra RUN_GPUS < <(PYTHONPATH="$CODE/src$XPATH" "$PY" -c "
+from aorlta.config import load_config
+c = load_config('$CODE/$CONFIG')
+gpus = set(c.rollout.engines)
+if c.orchestrator.mode != 'score':
+    gpus |= set(c.trainer.devices or ())
+if c.reward.remote is not None:
+    for name in c.reward.remote.adapters:
+        gpus |= set(c.reward.remote.gpus(name))
+print(*sorted(gpus))") || { echo "[guard] $CONFIG does not load" >&2; exit 94; }
+fi
+for g in "${RUN_GPUS[@]}"; do claim "GPU $g" "gpu$g"; done
+stamp "claimed GPUs ${RUN_GPUS[*]:-none} and the run's /dev/shm directories"
+# A container left by a job Slurm no longer runs (cancelled, killed) is removed; another live job's are left alone.
+stale=$(stale_containers)
+[ -n "$stale" ] && { stamp "removing stale containers: $(echo $stale)"; echo "$stale" | xargs -r docker rm -f >/dev/null 2>&1; }
 df -h /dev/shm | tail -1
 
 # --- the remote checkers, first: a node whose canary or pre-flight fails ends the job before anything is built ---

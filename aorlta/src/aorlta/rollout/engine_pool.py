@@ -11,9 +11,9 @@
 - `ideal_cached_tokens` is the longest prefix of a request this engine has already seen since its
   last flush: earlier inputs (from their submit) and earlier input + output (from their reply).
 - A dead or timed-out engine fails its in-flight requests (`engine_error`), is restarted with the same
-  kwargs, passes start-up and self-test again, and serves again only after the `on_restart` hook
-  (the reload and landing check of Section 6.5, owned by WP3/WP7) returns True. A second death in one
-  iteration stops the run.
+  kwargs (with `rollout.port_base` null, on a newly chosen window of ports), passes start-up and
+  self-test again, and serves again only after the `on_restart` hook (the reload and landing check of
+  Section 6.5, owned by WP3/WP7) returns True. A second death in one iteration stops the run.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..ids import seed
+from .ports import PORT_BASE, PORT_STRIDE, engine_port  # noqa: F401 - the fixed port layout, imported from here too
 from .templates import STOP_TOKEN_IDS
 
 SELF_TEST_PROMPTS = 4
@@ -33,7 +34,6 @@ SELF_TEST_TOKENS = 128
 SELF_TEST_TEMPERATURE = 0.7
 SELF_TEST_TOP_P = 0.95
 SELF_TEST_MIN_DIFFER = 3
-PORT_BASE, PORT_STRIDE = 20000, 2000
 
 
 class RolloutStop(RuntimeError):
@@ -195,7 +195,7 @@ def engine_kwargs(
     *, model_dir: str, dtype: str, P: int, K: int, n_engines: int, max_len: int, gpu_memory_utilization: float,
     run_seed: int, log_level: str = "warning", attention_backend: str | None = None,
 ) -> dict:
-    """The Section 6.1 engine kwargs, without `port` (set per engine)."""
+    """The Section 6.1 engine kwargs, without `port` (set per engine, or chosen at each start: rollout/ports.py)."""
     kw = {
         "model": model_dir, "tokenizer": model_dir, "dtype": dtype, "sampling_backend": "triton",
         "enable_output_logprobs": True, "enable_prefix_caching": True, "disable_kvstore": True,
@@ -205,10 +205,6 @@ def engine_kwargs(
     if attention_backend is not None:  # the model family's (model_family); else TokenSpeed's own choice
         kw["attention_backend"] = attention_backend
     return kw
-
-
-def engine_port(index: int) -> int:
-    return PORT_BASE + PORT_STRIDE * index
 
 
 def lpt_assign(estimates: Sequence[float], n_engines: int) -> list[int]:
@@ -245,7 +241,9 @@ class GenOutcome:
 
 
 class EnginePool:
-    """The engines one rollout manager drives. `handles` are EngineProc or InProcessEngine objects."""
+    """The engines one rollout manager drives. `handles` are EngineProc or InProcessEngine objects.
+    `on_ready(i, ready, restart)` gets each engine's ready message as soon as it has started, before its checks, at
+    start-up and after each restart, so the run can record every engine's ports."""
 
     def __init__(
         self,
@@ -257,6 +255,7 @@ class EnginePool:
         self_test_timeout_s: float = 300.0,
         on_restart: Callable[[int], bool] | None = None,
         make_handle: Callable[[int], Any] | None = None,
+        on_ready: Callable[[int, dict, bool], None] | None = None,
         clock: Callable[[], float] = time.time,
         stop_token_ids: Sequence[int] = STOP_TOKEN_IDS,  # the model's (templates.chat_format); Qwen3.5's by default
     ):
@@ -269,6 +268,7 @@ class EnginePool:
         self.self_test_timeout_s = self_test_timeout_s
         self.on_restart = on_restart
         self.make_handle = make_handle
+        self.on_ready = on_ready
         self.clock = clock
         self.stop_token_ids = tuple(stop_token_ids)
         self.prefix = [PrefixIndex() for _ in self.handles]
@@ -291,6 +291,10 @@ class EnginePool:
         handle = self.handles[i]
         ready = handle.start()
         self.ready[i] = ready
+        if self.on_ready is not None:
+            with self._lock:
+                restart = i in self._restarting
+            self.on_ready(i, ready, restart)
         problems = server_arg_problems(ready.get("info", {}), engine_expected(handle, self.expected))
         if problems:
             handle.stop()

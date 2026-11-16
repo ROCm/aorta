@@ -38,7 +38,7 @@ def test_the_run_starts_its_engines_with_the_base_familys_attention_kernels(tmp_
     base = _config_dir(tmp_path, model_type, arch)
     cfg = types.SimpleNamespace(  # what engine_handles reads of a RunConfig
         model=types.SimpleNamespace(base_dir=str(base), adapter_dir=None),
-        rollout=types.SimpleNamespace(P=4, K=2, engines=(0, 1), gpu_memory_utilization=0.45),
+        rollout=types.SimpleNamespace(P=4, K=2, engines=(0, 1), gpu_memory_utilization=0.45, port_base=None),
         orchestrator=types.SimpleNamespace(run_seed=5))
     handles = wiring.engine_handles(cfg, 4096)
     assert [h.engine_kwargs.get("attention_backend") for h in handles] == [backend, backend]

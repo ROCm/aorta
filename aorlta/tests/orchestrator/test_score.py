@@ -3,6 +3,7 @@ the entry point and the run job. Nothing trains and nothing is published; an uns
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -433,7 +434,7 @@ def test_the_run_job_prints_a_score_runs_summary_and_says_it_is_never_resumed():
     post = text[text.index("Every committed iteration's summary"):]
     branch = post[post.index('if cfg.orchestrator.mode == "score":'):post.index("for n in complete_iterations")]
     assert "REPORT_DIR, SUMMARY_NAME" in branch and "sys.exit(0)" in branch
-    header = text[:text.index("#SBATCH")]
+    header = text[:re.search(r"^#SBATCH", text, re.M).start()]  # up to the first directive, not a mention of one
     assert "orchestrator.mode: score" in header and "never resumed" in header
 
 
@@ -494,7 +495,8 @@ def orchestrator_mounts(tmp_path, data: dict) -> list[str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AORLTA_", "SLURM"))}
     env.update(PATH=f"{bin_dir}:{env['PATH']}", SLURM_JOB_ID="4242", SLURM_SUBMIT_DIR=str(pkg),
                CONFIG="configs/score.yaml", COMPONENTS="fake", AORLTA_VENV=str(venv),
-               AORLTA_TMPDIR=str(tmp_path / "tmpdir"), AORLTA_HF_HOME=str(tmp_path / "hf"))
+               AORLTA_TMPDIR=str(tmp_path / "tmpdir"), AORLTA_HF_HOME=str(tmp_path / "hf"),
+               AORLTA_CLAIMS_DIR=str(tmp_path / "claims"))
     proc = subprocess.run(["bash", str(REPO / "jobs" / "aorlta-run.sbatch")], cwd=pkg, env=env, capture_output=True,
                           text=True, timeout=300)
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
