@@ -24,7 +24,7 @@ names its pull request.
 | node software | Docker, and Slurm | `jobs/aorlta-run.sbatch` refuses to run outside a Slurm job (exit 91). The docker daemon must be able to read the checkout and every data directory at the paths the job sees them: not a root-squashed network home, and not a Slurm job's private `/tmp`. |
 | Python | 3.12 | For the CPU tests and for the job, which reads the config on the host. Many cluster hosts have an older `python3`; `uv venv --seed -p 3.12 <dir>` (uv fetches a 3.12 if it has to), or any CPython 3.12, will do. |
 | images | built by the job | TokenSpeed at commit `3b684074c0ef79bc8bc00b31cda8dc2850e4b71f` (`git clone https://github.com/lightseekorg/tokenspeed && git -C tokenspeed checkout 3b684074c0ef79bc8bc00b31cda8dc2850e4b71f`, then `TS_SRC=$PWD/tokenspeed`), built by the job from its `docker/Dockerfile.amd`; and the trainer image on top of it from `docker/Dockerfile.trainer`. |
-| model | `Qwen/Qwen3.5-4B` at revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` | The job runs offline, so download it first: `HF_HOME=<cache> hf download Qwen/Qwen3.5-4B --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`. `model.base_dir` is the snapshot directory under `<cache>/hub/`. Only the Qwen3.5 family works as it stands: the turn templates use Qwen3.5's control-token ids (`rollout/templates.py`), and the trainer needs transformers' Qwen3.5 linear-attention fast path (`trainer.require_fast_path`). Another Qwen3.5 size, or a fine-tune of it, is the supported change. |
+| model | `Qwen/Qwen3.5-4B` at revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` | The job runs offline, so download it first: `HF_HOME=<cache> hf download Qwen/Qwen3.5-4B --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`. `model.base_dir` is the snapshot directory under `<cache>/hub/`. Another Qwen3.5 size or a fine-tune of one, or a dense Qwen3 (`configs/arith-*-qwen3-*.yaml`), is the supported change: the family is read from the snapshot's `config.json` (`model_family.py`), and the control tokens from its tokenizer and chat template. |
 | prompts | a pool of your own | The stand-in configs read a kernel dataset (`kernels.json` and `listings/`) that is not published. `examples/standin-pool/` shows its format but is too small for a run: the stand-in landing check alone picks 40 kernels of 60 to 400 instructions. |
 | stand-in check tools | only for the stand-in profiles | `standin-static` runs rocjitsu's `rj_waitcheck` (ROCm/rocm-systems branch `shared/rocjitsu/sanitizers`, built from source, with a libstdc++ that has GLIBCXX_3.4.31); `standin-gpu` adds ConSan (`librocjitsu_dbi_hooks.so` from the same build) and ASan (the ROCm 7.0.2 `*-asan` packages' `lib/asan`), through aorta's sanitizer backends. None of these is packaged; a task with checks of its own needs none of them. |
 | aorta checkout | every GPU run | aorta at commit `d22f6116235c05395a0241a83d6f7e952a988454`, at `AORLTA_AORTA_ROOT` (default `/opt/aorta`). The job's import pre-flight loads two of its sanitizer backends whatever the check profile (`jobs/aorlta-imports-check.py`), and stops with exit 99 if it cannot, so a task with checks of its own needs it too for now; with [#611](https://github.com/ROCm/aorta/pull/611) the pre-flight loads them only when the profile names an aorta adapter. The stand-in checks also use it at run time. |
@@ -198,11 +198,11 @@ cancelled job left behind. The job asks Slurm for the whole node (`--exclusive`)
 
 - **The model** is `model.base_dir`: a Hugging Face snapshot directory (weights, config and tokenizer), read
   offline. To switch, download the model (`hf download <repo> --revision <rev>`) and point `model.base_dir` at its
-  snapshot. Today that must be a Qwen3.5-family model (another size, or a fine-tune of one): the turn templates use
-  Qwen3.5's control-token ids, the trainer checks for Qwen3.5's linear-attention kernels
-  (`trainer.require_fast_path`), and the weight sync and the merge tool expect Qwen3.5's checkpoint layout
-  (`model.language_model.layers.N...`). A Qwen3 model such as Qwen3-0.6B needs those three generalised first; it is
-  the most requested change.
+  snapshot. It may be a Qwen3.5-family model (another size, or a fine-tune of one) or a dense Qwen3 (0.6B and 8B
+  have been run): the family is read from the snapshot's `config.json` (`src/aorlta/model_family.py`), and the control
+  tokens from its tokenizer and chat template. `configs/arith-{score,train}-qwen3-{0.6b,8b}.yaml` are the
+  arithmetic example on Qwen3. A dense Qwen3's engines run TokenSpeed's Triton attention kernels (the README's
+  base-model entry says why). Any other family is refused at start.
 - **Checkpoints** are written to `<run.root>/<run.source>/<run.run_id>/ckpt/iter-<n>/` after every iteration, and the
   last `orchestrator.keep_ckpts` (2) are kept; older ones are deleted by the run. Each holds the fp32 LoRA, the Adam
   state and the RNG states (a few hundred MB for Qwen3.5-4B, an estimate from its 130 MB fp32 LoRA). Delete a

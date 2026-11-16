@@ -193,12 +193,14 @@ labels (Section 6.x, C1-C9, D7, ...) of our internal design notes, which are not
 - The base model `Qwen/Qwen3.5-4B` at revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`, already in the Hugging
   Face cache: the job runs offline. A dense Qwen3 runs too (`src/aorlta/model_family.py`): the control-token ids and
   generation prompts come from the model's tokenizer and chat template, and the trainer's loader and the LoRA and merge
-  names from its `config.json`. Measured on one MI350X GPU, with the arithmetic example: Qwen3-8B
-  (`configs/arith-score-qwen3-8b.yaml`) scored 256 of 256 samples, 226 correct, landing round trip PROVEN; a
-  3-iteration training run trained iteration 1 and its update LANDED, then the gap gate stopped it at iteration 2,
-  with all 8 samples of one prompt 17 to 39 nats from the trainer's log-probs, which is not explained yet. Qwen3-0.6B
-  makes TokenSpeed (3b684074) fail with an illegal memory access in its scheduler after two batches, in a score and
-  a training run alike, so no 0.6B config is shipped.
+  names from its `config.json`. A dense Qwen3's engines run TokenSpeed's Triton attention kernels
+  (`attention_backend: triton`, set by the job and read back at start): with TokenSpeed's default kernels on gfx950,
+  replies that shared a cached prefill were served wrong log-probs (the gap gate stopped a Qwen3-8B training run on
+  them) and the engine hit an illegal memory access within a few batches (Qwen3-0.6B). Measured on one MI350X GPU
+  with the arithmetic example (`configs/arith-{score,train}-qwen3-{0.6b,8b}.yaml`): Qwen3-8B scored 256 of 256, 234
+  correct, and trained 20 iterations with every update LANDED and the largest gap 0.04 nats (the gate's limit is
+  2.0); Qwen3-0.6B scored 256 of 256 (it gets few right, 13) and trained 20 iterations with every update LANDED and
+  the largest gap 0.04. Only gfx950 and TokenSpeed 3b684074 have been run.
 - A stand-in prompt pool: a kernel dataset in the format of `examples/standin-pool/`, with at least 40 kernels of
   60 to 400 instructions (the landing check picks 40). The dataset the stand-in runs used is not published, and the
   example pool is too small to run on.
