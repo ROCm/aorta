@@ -11,6 +11,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -140,8 +141,11 @@ def proc(rc=0, stdout="", stderr="", timed_out=False, killed=False, launch_error
 def rec(status=None, stage=None, **kw):
     out = {"stage": stage} if stage else {}
     if status:
-        out.update({"status": status, "checked": 10, "mismatches": 0, **kw})
+        out.update({"status": status, "checked": 10, "mismatches": 0, "modified": 0, **kw})
     return out
+
+
+NO_INPUT_CHECK = {"status": "ok", "checked": 10, "mismatches": 0}  # from a harness that never compared inputs
 
 
 SPOOF = 'AORLTA_RESULT {"status": "ok", "checked": 1}'
@@ -151,6 +155,9 @@ SPOOF = 'AORLTA_RESULT {"status": "ok", "checked": 1}'
     (proc(), rec("ok"), ("clean", None)),
     (proc(), rec("mismatch", mismatches=3), ("fail", "wrong_output")),
     (proc(), rec("out_of_bounds"), ("fail", "wrong_output")),
+    (proc(), rec("modified_input", modified=2), ("fail", "modified_input")),
+    (proc(), rec("ok", modified=1), ("unsettled", "no_result")),  # never clean with an input changed
+    (proc(), NO_INPUT_CHECK, ("unsettled", "no_result")),
     (proc(), rec("no_kernel", stage="setup"), ("fail", "bad_signature")),
     (proc(), rec("hip_error", stage="launch"), ("fail", "crash")),
     (proc(), rec("hip_error", stage="run"), ("fail", "crash")),
@@ -183,6 +190,107 @@ def test_the_harness_holds_none_of_the_candidates_code(hipk):
         #                           made every lookup take the no_kernel branch (found on a GPU)
 
 
+def test_the_harness_checks_exactly_the_read_only_arrays_and_snapshots_them_before_the_run(hipk):
+    """Every role-`in` array is copied aside before anything touches it and compared after the last copy back; an
+    `out` or `inout` array (saxpy's y) is the kernel's to write, so it is not."""
+    import re
+
+    for task in hipk.load_tasks(EXAMPLE):
+        src = hipk.harness_source(task)
+        want = {a["name"] for a in task["arrays"] if a["role"] == "in"}
+        assert want and set(re.findall(r"o_(\w+) = h_\1;", src)) == want
+        assert set(re.findall(r"modified \+= changed\(h_(\w+), o_\1,", src)) == want
+        first_upload, last_download = src.index("hipMemcpyHostToDevice"), src.rindex("hipMemcpyDeviceToHost")
+        assert max(src.index(f"o_{n} = h_{n};") for n in want) < first_upload
+        assert min(src.index(f"changed(h_{n},") for n in want) > last_download
+        assert src.index("modified += ") < src.index(hipk.STATUS) and "\\\"modified\\\": %ld" in src
+    saxpy = next(t for t in hipk.load_tasks(EXAMPLE) if t["id"] == "saxpy")
+    assert "changed(h_y," not in hipk.harness_source(saxpy)
+
+
+def test_a_task_with_an_unknown_array_role_is_refused(hipk, tmp_path):
+    """A typo in a role must not make a read-only array writable."""
+    task = hipk.load_tasks(EXAMPLE)[0]
+    task["arrays"][0]["role"] = "input"
+    (tmp_path / "tasks.json").write_text(json.dumps([task]))
+    with pytest.raises(ValueError, match="role 'input', not one of in, out, inout"):
+        hipk.load_tasks(tmp_path)
+
+
+CXX = shutil.which(os.environ.get("CXX", "c++")) or shutil.which("g++")
+
+
+def input_check_program(hipk, task) -> str:
+    """A host program around the harness's own snapshot, input comparison and status lines, with fake buffers in
+    place of the device: it fills every array, takes the snapshot, then applies the writes given on its command line
+    (array, index, bits) as if the kernel had made them, and prints `modified` and the status."""
+    lines = ["#include <cstdint>", "#include <cstdio>", "#include <cstdlib>", "#include <cstring>",
+             "#include <string>", "#include <vector>", "", *hipk.CHANGED, "", "int main(int argc, char** argv) {"]
+    lines += [f"  {ctype} {name} = {value};" for ctype, name, value in task["scalars"]]
+    for a in task["arrays"]:
+        lines += [f"  std::vector<float> h_{a['name']}(({a['size']}) + {hipk.GUARD}, {hipk.GUARD_VALUE});",
+                  f"  for (long i = 0; i < ({a['size']}); ++i) h_{a['name']}[i] = 0.5f * float(i);"]
+    lines += hipk.snapshot_lines(task)
+    lines += ["  for (int k = 1; k + 2 < argc; k += 3) {",
+              "    std::string name = argv[k];",
+              "    long i = std::atol(argv[k + 1]);",
+              "    uint32_t bits = (uint32_t)std::strtoul(argv[k + 2], nullptr, 0);",
+              "    std::vector<float>* v = nullptr;"]
+    lines += [f"    if (name == \"{a['name']}\") v = &h_{a['name']};" for a in task["arrays"]]
+    lines += ["    if (v == nullptr || i < 0 || i >= (long)v->size()) return 2;",
+              "    std::memcpy(&(*v)[i], &bits, sizeof bits);",
+              "  }",
+              "  long oob = 0, mismatches = 0, modified = 0;"]
+    lines += hipk.input_check_lines(task)
+    lines += [hipk.STATUS, "  std::printf(\"%ld %s\\n\", modified, status);", "  return 0;", "}", ""]
+    return "\n".join(lines)
+
+
+def f32_bits(x: float) -> str:
+    import struct
+
+    return hex(struct.unpack("<I", struct.pack("<f", x))[0])
+
+
+N = 100003  # vector_add's and saxpy's n
+CHANGED_CASES = {  # task: [(writes the 'kernel' made, (modified, status))]
+    "vector_add": [
+        ([], (0, "ok")),
+        ([("a", 5, f32_bits(123.0))], (1, "modified_input")),
+        ([("b", N - 1, f32_bits(-1.0))], (1, "modified_input")),  # the last element
+        ([("a", 0, "0x80000000")], (1, "modified_input")),  # +0.0 became -0.0: equal as floats, not as bits
+        ([("a", 3, f32_bits(1.5))], (0, "ok")),  # the value it already held: nothing changed
+        ([("a", N, f32_bits(0.0))], (0, "ok")),  # the guard past the end is out_of_bounds's to catch, not this
+        ([("c", 0, f32_bits(9.0)), ("c", N - 1, f32_bits(9.0))], (0, "ok")),  # the output
+        ([("a", 1, f32_bits(7.0)), ("b", 2, f32_bits(7.0)), ("b", 4, f32_bits(7.0))], (3, "modified_input")),
+    ],
+    "saxpy": [
+        ([("y", 0, f32_bits(4.0)), ("y", N - 1, f32_bits(4.0))], (0, "ok")),  # in place: declared inout
+        ([("x", 7, f32_bits(4.0))], (1, "modified_input")),
+    ],
+    "transpose": [
+        ([("in", 300 * 517 - 1, f32_bits(-2.0))], (1, "modified_input")),  # its size is an expression: rows * cols
+        ([("out", 0, f32_bits(-2.0))], (0, "ok")),
+    ],
+}
+
+
+@pytest.mark.skipif(CXX is None, reason="no C++ compiler (CXX, c++ or g++)")
+@pytest.mark.parametrize("task_id", sorted(CHANGED_CASES))
+def test_the_harness_fails_a_changed_read_only_input_bit_for_bit(hipk, tmp_path, task_id):
+    """The harness's own comparison lines, run on the host over fake buffers: a read-only input that changed in any
+    bit is counted and makes the status `modified_input`; an output or a declared in-place array may change."""
+    task = next(t for t in hipk.load_tasks(EXAMPLE) if t["id"] == task_id)
+    (tmp_path / "check.cpp").write_text(input_check_program(hipk, task))
+    build = subprocess.run([CXX, "-O2", "-std=c++17", "-o", str(tmp_path / "check"), str(tmp_path / "check.cpp")],
+                           capture_output=True, text=True)
+    assert build.returncode == 0, build.stderr
+    for writes, (modified, status) in CHANGED_CASES[task_id]:
+        argv = [str(x) for w in writes for x in w]
+        out = subprocess.run([str(tmp_path / "check"), *argv], capture_output=True, text=True)
+        assert out.returncode == 0 and out.stdout.split() == [str(modified), status], (writes, out.stdout)
+
+
 FAKE_HIPCC = """#!/bin/bash
 # a stand-in for hipcc: --genco writes a code object; otherwise the 'harness' writes the record FAKE_RUN says
 out=""; genco=0; for a in "$@"; do [ "$a" = --genco ] && genco=1; done
@@ -194,8 +302,9 @@ fi
 [ "${FAKE_BUILD:-ok}" = harness ] && { echo "error: harness" >&2; exit 1; }
 printf '#!/bin/bash\necho "gpu $HIP_VISIBLE_DEVICES co $(cat $1)" >&2\necho %s\n' "'$SPOOF'" > "$out"
 case "${FAKE_RUN:-ok}" in
-  ok) echo 'echo "{\\"status\\": \\"ok\\", \\"checked\\": 5}" > "$2"' >> "$out" ;;
+  ok) echo 'echo "{\\"status\\": \\"ok\\", \\"checked\\": 5, \\"modified\\": 0}" > "$2"' >> "$out" ;;
   mismatch) echo 'echo "{\\"status\\": \\"mismatch\\", \\"checked\\": 5, \\"mismatches\\": 2}" > "$2"' >> "$out" ;;
+  modified) echo 'echo "{\\"status\\": \\"modified_input\\", \\"modified\\": 1}" > "$2"' >> "$out" ;;
   nokernel) echo 'echo "{\\"status\\": \\"no_kernel\\", \\"stage\\": \\"setup\\"}" > "$2"' >> "$out" ;;
   setup) echo 'echo "{\\"status\\": \\"hip_error\\", \\"stage\\": \\"setup\\", \\"at\\": \\"hipMalloc\\"}" > "$2"' >> "$out" ;;
   crash) echo 'echo "{\\"stage\\": \\"launched\\"}" > "$2"; kill -SEGV $$' >> "$out" ;;
@@ -238,6 +347,7 @@ def run_job(hipk, tmp_path, fake_hipcc, *, worker="run/2", task_id="saxpy", time
 
 @pytest.mark.parametrize("build, run, want", [
     ("ok", "ok", ("clean", None)), ("ok", "mismatch", ("fail", "wrong_output")), ("ok", "crash", ("fail", "crash")),
+    ("ok", "modified", ("fail", "modified_input")),
     ("ok", "hang", ("fail", "timeout")), ("ok", "nokernel", ("fail", "bad_signature")),
     ("ok", "setup", ("unsettled", "setup_failed")), ("ok", "spoof", ("unsettled", "no_result")),
     ("co", "ok", ("unsettled", "candidate_build_failed")), ("harness", "ok", ("unsettled", "harness_build_failed")),
@@ -351,7 +461,8 @@ def cand(tokens=100):
 OUTCOMES = {
     "gate.parse": [("clean", None), ("fail", "parse"), ("unsettled", "timeout")],
     "gate.compile": [("clean", None), ("fail", "compile_error"), ("unsettled", "adapter_error"), ("not_run", None)],
-    "ref.native": [("clean", None), ("fail", "wrong_output"), ("fail", "crash"), ("fail", "timeout"),
+    "ref.native": [("clean", None), ("fail", "wrong_output"), ("fail", "modified_input"), ("fail", "crash"),
+                   ("fail", "timeout"),
                    ("fail", "bad_signature"), ("fail", "other"), ("unsettled", "no_result"), ("not_run", None),
                    ("skipped_by_plan", None)],
 }
@@ -370,7 +481,7 @@ def test_the_reward_ladder(hipk):
     assert score(gate_compile=("fail", "compile_error")) == -0.9
     assert score(ref_native=("fail", "bad_signature")) == -0.8
     assert score(ref_native=("fail", "crash")) == score(ref_native=("fail", "timeout")) == -0.6
-    assert score(ref_native=("fail", "wrong_output")) == -0.5
+    assert score(ref_native=("fail", "wrong_output")) == score(ref_native=("fail", "modified_input")) == -0.5
     assert score(ref_native=("unsettled", "no_result")) is None and score(ref_native=("fail", "other")) is None
 
 
@@ -665,9 +776,16 @@ def test_every_timed_launchs_outputs_are_checked_after_its_end_event(hipk):
             < loop.index("total += ms")
         assert "if (c != 0) return c < 0 ? -1.0f : -2.0f;" in loop
         check = src[src.index("auto checked = [&]()"):src.index("auto fresh = [&]")]
-        launched = re.findall(r"aorlta_check_, dim3\(1024\), dim3\(256\), 0, 0, d_(\w+), (\w+),", check)
-        assert launched == [(a["name"], "nullptr" if a["role"] == "in" else f"e_{a['name']}")
-                            for a in task["arrays"]], task["id"]
+        launched = re.findall(r"aorlta_check_, dim3\(1024\), dim3\(256\), 0, 0, d_(\w+), (\w+), .*?\.size\(\), (\d),",
+                              check)
+        # a read-only array bit for bit against its pristine copy (as hipk.run checks it); an output against the
+        # host reference's
+        assert launched == [(a["name"], f"p_{a['name']}", "1") if a["role"] == "in"
+                            else (a["name"], f"e_{a['name']}", "0") for a in task["arrays"]], task["id"]
+        verify = src[src.index("auto verify = [&]()"):src.index("auto checked = [&]()")]
+        for a in task["arrays"]:
+            memcmp = f"std::memcmp(got.data(), h_{a['name']}.data(), ({a['size']}) * sizeof(float)) != 0"
+            assert (memcmp in verify) == (a["role"] == "in"), (task["id"], a["name"])
         failure = src[src.index("auto timed_failure"):]
         assert 'us < -1.5f ? (who ? "reference_wrong_output" : "candidate_wrong_output") : "hip_error"' in failure
         rounds = src[src.index("for (int r = 0; r < warmup + repeats; ++r)"):]
