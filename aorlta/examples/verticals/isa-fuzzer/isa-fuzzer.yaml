@@ -1,0 +1,12 @@
+# `isa-fuzzer`: one leg, `ref.program`, on the CPU: the reply's last fenced block against the toy grammar
+# (examples/verticals/isa-fuzzer/isa_fuzzer.py). No compile and no sanitizer leg.
+name: isa-fuzzer
+reward_fn: isa-fuzzer.v1
+clean_repeats: 1
+materialize: true
+pools:
+  check: {resource: local_cpu, adapter: isa-fuzzer.check, timeout: gate, workers: 4}
+stages:
+  - {name: S0, pool: check, legs: [ref.program]}
+adapters:
+  isa-fuzzer.check: {}   # {tool: [/path/to/your-tool, args...]} decides the programs that pass the toy grammar

@@ -58,6 +58,10 @@ reward:
 - **The candidate is not trusted.** Its verdict must come from code it cannot change: the example never runs the
   answer's host code and reads only the harness's own record file. A check's `version` must change whenever its
   verdict could (the example's names its compiler and its own file), because cached legs are keyed by it.
+- **The reward reads the reply as the rollout did.** A chain whose last reply the parse rejected still ends scored
+  (`no_code_block`), so a check that reads the reply must use the parse's own rule and the run's thinking flag
+  (`ctx.thinking`): the example's `hipk.gate` and `hipk.parse` share `read_answer`, and `qa.match` and `qa.parse`
+  share `reply_answer`. Otherwise the reward could pay for a reply the rollout rejected.
 - **The reward's parts.** `compute` returns `(reward, {"base", "broke_healthy", "length"})`, which add up to the
   reward, within [-1.55, 1.0]; an unscored sample is `(None, {"reason": ...})` and is never counted clean. `decide`
   answers early only when no pending leg could change the answer. The service recomputes and checks all of this,

@@ -324,6 +324,9 @@ def test_the_reward_adapter_runs_the_fake_profile_with_the_log_only_hook(tmp_pat
         r.stats()
         assert r.plan_log.is_file()
         assert r.work_dir.is_relative_to(wiring.scratch_dir(cfg))
+        # what a score report records, so runs whose checkers differ are not compared
+        assert r.checkers() == r.service().checkers() and r.checkers()
+        assert all(set(c) == {"adapter", "version"} and c["version"] for c in r.checkers().values())
         # D7's retry reaches the service's resubmit (a malformed candidate is unscored there, never a default)
         res = r.resubmit(types.SimpleNamespace(candidate_id="w/1/p/0")).result(timeout=30)
         assert (res.status, res.reason) == ("unscored", "bad_candidate")

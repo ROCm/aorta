@@ -491,6 +491,9 @@ class FakeReward:
         for st in open_:
             st["future"].set_result(self._unscored(st["cand"], "service_closed", {}))
 
+    def checkers(self) -> dict:
+        return {"fake": {"adapter": "fake", "version": FAKES_SCHEMA}}
+
     def claims_clean(self, result: RewardResult) -> bool:
         """As standin.v11: clean exactly when the base is positive (+1.0 or +0.5)."""
         return result.status == "scored" and isinstance(result.parts, dict) and result.parts.get("base", 0.0) > 0.0

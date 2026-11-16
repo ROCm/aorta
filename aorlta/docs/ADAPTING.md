@@ -26,6 +26,9 @@ Code paths are relative to `src/aorlta/`; commands and the `configs/`, `examples
    adapter** on the same set and compare.
 8. **Write your two-line summary:** what the model is post-trained on, and how its answers are checked.
 
+Starters to copy for three verticals (an ISA fuzzer, a Q&A expert, sanitizer triage), each a plugin package with its
+configs and a CPU test, are in `examples/verticals/`.
+
 ## Your own task, as a plugin
 
 A task of your own (its prompts, how an answer is read, its repair turns, its checks and its reward) does not need
@@ -56,7 +59,7 @@ The module is imported before the rest of the config is checked, so every name a
 | `rollout.compile_adapter` | `register_compile_adapter(name, factory)` | `factory(workdir, evidence=..., structure=...)` returns a compiler |
 | `reward.profile` | `register_profile(name, path)` | a profile YAML file ("Checks and profiles" below) |
 | `reward.reward_fn` | `register_reward_fn(name, factory)` | `factory(profile)` returns a `RewardFn` ("Your own reward function") |
-| a profile pool's `adapter` | `register_check_adapter(name, factory)` | `factory(ctx)` returns a `CheckAdapter` for one worker; `ctx` (`plugins.CheckContext`) holds its profile settings, worker id, clock, timeout and the run's pool paths |
+| a profile pool's `adapter` | `register_check_adapter(name, factory)` | `factory(ctx)` returns a `CheckAdapter` for one worker; `ctx` (`plugins.CheckContext`) holds its profile settings, worker id, clock, timeout, the run's pool paths and its `rollout.thinking` |
 
 Where each one hooks into a run, and what it receives and returns. Blue boxes are yours; grey boxes are the
 framework, which calls them:
@@ -85,7 +88,7 @@ flowchart TD
     profile["profile: register_profile(name, path to YAML)<br/>pools (adapter, resource, timeout, workers), stages, requires,<br/>leg_settings, adapters' settings, reward_fn, clean_repeats"]
     profile -. "configures" .-> service
     service -- "a LegJob per leg: leg, task_sha256, inputs (the response, parsed files),<br/>package, output_dir, leg_settings" --> check
-    check["check adapter: register_check_adapter(name, factory)<br/>factory(ctx: settings, worker_id, clock, timeout_s, pools) returns one per worker;<br/>run(job) returns a LegResult and never raises: clean, finding or fail (settled),<br/>or unsettled; with reason and findings. Also controls() and health()"]
+    check["check adapter: register_check_adapter(name, factory)<br/>factory(ctx: settings, worker_id, clock, timeout_s, pools, thinking) returns one per worker;<br/>run(job) returns a LegResult and never raises: clean, finding or fail (settled),<br/>or unsettled; with reason and findings. Also controls() and health()"]
     check -- "LegResult" --> service
     service -- "the legs finished so far, the candidate" --> rfn
     rfn["reward function: register_reward_fn(name, factory); factory(profile)<br/>decide(partial, cand) returns NeedMore(legs), Decided(reward, parts) or Unscored(reason);<br/>compute(legs, cand) returns (reward, parts) or (None, reason); claims_clean(reward, parts)"]
@@ -210,6 +213,7 @@ and in-process engines; it is the template for testing a new source without a GP
 
 ## Your own reward function
 
+The checks and reward functions that already exist, and how to compose them, are listed in [REWARDS.md](REWARDS.md).
 The interface is `RewardFn` in `reward/rewardfn/base.py`:
 
 ```python

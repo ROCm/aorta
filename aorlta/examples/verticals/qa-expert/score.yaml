@@ -1,0 +1,39 @@
+# Score a model on the qa-expert starter's 4 held-out placeholder questions, 4 samples each
+# (orchestrator.mode: score).
+# One GPU: one TokenSpeed engine on GPU 0; the answer check runs on the CPU.
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir (and
+# model.adapter_dir to score a trained adapter) and data.prompt_pools[0].path, which is this checkout's
+# aorlta/examples/verticals/qa-expert/pool/heldout.
+plugins: [examples/verticals/qa-expert/qa_expert.py]
+run:
+  run_id: qa-expert-score
+  source: standin
+  root: /scratch/aorlta/runs
+model:
+  base_dir: /data/hf/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  source: standin
+data:
+  prompt_pools:
+    - path: /opt/aorlta/examples/verticals/qa-expert/pool/heldout
+      source: standin
+      task: qa-expert
+rollout:
+  engines: [0]
+  K: 4
+  P: 4
+  max_repair_turns: 1
+  thinking: "off"
+  temperature: 0.7
+  max_new_tokens: 512
+  compile_adapter: none
+  parse_adapter: qa-expert.parse
+  feedback_template: qa-expert.feedback
+  # few prompts, each with a short answer, can give a group K identical replies with a sound sampler
+  # (the engines' start-up self-test checks that), so only stop when most groups do
+  identical_groups_stop: 0.75
+reward:
+  profile: qa-expert
+  reward_fn: qa-expert.v1
+orchestrator:
+  mode: score
+  run_seed: 20261113
