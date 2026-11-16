@@ -4,10 +4,11 @@
 For every adapter module, W' = bf16(W.float() + (alpha/r) * B.float() @ A.float()), in fp32 on the CPU, cast with
 round-to-nearest-even. That is `aorlta.sync.merge.merge_all`, the formula the trainer and the weight sync use. The
 modules go through WP3's name map (`aorlta.sync.writer.name_map`), so the merged set is exactly the base's LoRA target
-keys (248 for Qwen3.5-4B). On top of it, an adapter module must be named `model.layers.N.<name>` (the text-only
-model) or `model.language_model.layers.N.<name>` (the checkpoint), and nothing but lora_A/lora_B pairs may be in the
-adapter: an embedding, head or other tensor is refused, as is any adapter_config field the plain formula does not
-cover (DoRA, rsLoRA, rank or alpha patterns, modules_to_save, ...).
+keys (248 for Qwen3.5-4B, 196 for Qwen3-0.6B). On top of it, an adapter module must be named `model.layers.N.<name>`
+or `model.language_model.layers.N.<name>`, and map to the base's own key for that layer (under
+`model.language_model.` in a Qwen3.5 checkpoint, `model.` in a Qwen3 one). Nothing but lora_A/lora_B pairs may be in
+the adapter: an embedding, head or other tensor is refused, as is any adapter_config field the plain formula does
+not cover (DoRA, rsLoRA, rank or alpha patterns, modules_to_save, ...).
 
 The output keeps the base's layout byte for byte. Every base file is copied, and only the target tensors' data ranges
 inside the shards are rewritten, so the shard names, the safetensors headers, the tensor offsets and the index are
@@ -224,15 +225,17 @@ def load_adapter(path: str | Path) -> Adapter:
 
 def checkpoint_keys(adapter: Adapter, base_keys: list[str]) -> dict[str, str]:
     """module -> base checkpoint key, through WP3's name map (exactly the base's target keys, one to one), and the
-    stricter rule that the key is `model.language_model.` + the module's `layers.N.<name>` + `.weight`."""
+    stricter rule that the key is the base's decoder prefix (`model.language_model.` in a Qwen3.5 checkpoint,
+    `model.` in a Qwen3 one) + the module's `layers.N.<name>` + `.weight`."""
     try:
         mapping = name_map(adapter.modules, base_keys)
     except SyncError as exc:
         raise Refused(f"name map: {exc}") from exc
+    prefix = "model.language_model." if any(k.startswith("model.language_model.") for k in mapping.values()) else "model."
     for module, key in mapping.items():
         tail = MODULE_RE.fullmatch(module).group("tail")
-        if key != f"model.language_model.{tail}.weight":
-            raise Refused(f"{module} mapped to {key}, not model.language_model.{tail}.weight")
+        if key != f"{prefix}{tail}.weight":
+            raise Refused(f"{module} mapped to {key}, not {prefix}{tail}.weight")
     return mapping
 
 

@@ -1,9 +1,11 @@
 """C5 steps 2, 3 and 7: the name map, the slot writer, slot cleanup (design Section 6.5).
 
 TokenSpeed's Qwen3.5 `load_weights` silently skips a tensor name it does not know, yet counts it as read
-(Appendix A, A5/A6). So every name written must be a base-index key, and the written set must be exactly the
-target keys (partial checkpoint, D11) or exactly every base key (full checkpoint). Anything else stops the run
-before a byte is written.
+(Appendix A, A5/A6). Its Qwen3 `load_weights` fails on an unknown name instead, and with tied embeddings
+(Qwen3-0.6B to 4B) skips the checkpoint's `lm_head.weight` but counts it too: a full checkpoint writes that tensor
+unchanged, since no LoRA target touches it. So every name written must be a base-index key, and the written set
+must be exactly the target keys (partial checkpoint, D11) or exactly every base key (full checkpoint). Anything
+else stops the run before a byte is written.
 
 A slot is `<sync.dir>/<run_id>/w{n mod slots}`: safetensors shards of at most 4 GiB, a
 `model.safetensors.index.json` for those names, the base directory's config and tokenizer files, and
@@ -93,7 +95,13 @@ def read_base_index(base_dir: str | Path) -> dict[str, str]:
 
 
 def target_keys(base_keys: Iterable[str]) -> frozenset[str]:
-    return frozenset(k for k in base_keys if TARGET_KEY_RE.fullmatch(k))
+    """The base keys that are LoRA targets (`merge.TARGET_KEY_RE`), all under one decoder prefix: a base holding
+    both `model.language_model.layers.N` and `model.layers.N` targets is refused."""
+    targets = frozenset(k for k in base_keys if TARGET_KEY_RE.fullmatch(k))
+    prefixes = sorted({_LAYER_RE.split(k, 1)[0] for k in targets})
+    if len(prefixes) > 1:
+        raise NameMapError(f"the base's target keys are under more than one decoder prefix: {prefixes}")
+    return targets
 
 
 def module_key(module_name: str, targets: frozenset[str]) -> str:
@@ -136,7 +144,8 @@ def name_map(module_names: Iterable[str], base_keys: Iterable[str]) -> dict[str,
 
 
 def expected_count(base_keys: Iterable[str], *, partial: bool) -> int:
-    """The tensor count a reload of a slot must report: 248 (partial) or 738 (full) for Qwen3.5-4B."""
+    """The tensor count a reload of a slot must report, from the base's own keys: 248 (partial) or 738 (full) for
+    Qwen3.5-4B, 196 or 311 for Qwen3-0.6B, 252 or 399 for Qwen3-8B."""
     base_keys = list(base_keys)
     return len(target_keys(base_keys)) if partial else len(set(base_keys))
 

@@ -1,0 +1,4 @@
+{"id": "placeholder-1", "report": "[placeholder report, synthetic] toy-checker 0.0: toy_case_1 finished, 0 findings.", "label": "no_issue"}
+{"id": "placeholder-2", "report": "[placeholder report, synthetic] toy-checker 0.0: toy_case_2 finished, 1 finding of kind TOY-MEMORY.", "label": "memory"}
+{"id": "placeholder-3", "report": "[placeholder report, synthetic] toy-checker 0.0: toy_case_3 finished, 1 finding of kind TOY-RACE.", "label": "race"}
+{"id": "placeholder-4", "report": "[placeholder report, synthetic] toy-checker 0.0: toy_case_4 finished, 1 finding of kind TOY-NAN.", "label": "numeric"}

@@ -1,0 +1,4 @@
+{"id": "placeholder-1", "goal": "PLACEHOLDER goal 1: any toy program that uses ADD.", "min_lines": 2, "max_lines": 4, "must_use": ["ADD"]}
+{"id": "placeholder-2", "goal": "PLACEHOLDER goal 2: any toy program that uses XOR.", "min_lines": 2, "max_lines": 5, "must_use": ["XOR"]}
+{"id": "placeholder-3", "goal": "PLACEHOLDER goal 3: any toy program that uses MOV and MUL.", "min_lines": 3, "max_lines": 6, "must_use": ["MOV", "MUL"]}
+{"id": "placeholder-4", "goal": "PLACEHOLDER goal 4: any toy program that uses NOP.", "min_lines": 1, "max_lines": 3, "must_use": ["NOP"]}
