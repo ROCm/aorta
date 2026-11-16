@@ -7,13 +7,18 @@ ids, which are sent as they are. Either way the ids must hash to the record's `p
 A repair turn is built one of two ways (`rollout.repair_turn_ids`). `append`, the stand-ins' default, is a
 token-level append:
 
-    ids_t = ids_{t-1} + reply_{t-1} + ([248046] if reply_{t-1} does not end in 248046 else []) + tok(SUFFIX_t)
+    ids_t = ids_{t-1} + reply_{t-1} + ([IM_END] if reply_{t-1} does not end in IM_END else []) + tok(SUFFIX_t)
     SUFFIX_t = "\\n<|im_start|>user\\n" + FEEDBACK_t + "<|im_end|>\\n<|im_start|>assistant\\n" + THINK_PREFIX
 
 `rerender` renders the whole conversation again with the chat
 template, each reply as an assistant turn (its decoded text) and each feedback as a user turn
-(`rerendered_turn_ids`). The two differ: Qwen3.5's template drops the think block of every assistant turn before
-the last user turn, trims every turn, and re-tokenises the reply's text. C1.T2 pins the first difference.
+(`rerendered_turn_ids`). The two differ: Qwen3.5's template (and Qwen3's) drops the think block of every assistant
+turn before the last user turn, trims every turn, and re-tokenises the reply's text. C1.T2 pins the first difference.
+
+The control-token ids and THINK_PREFIX are the model's (`ChatFormat`), read from its tokenizer and chat template:
+IM_END is 248046 for Qwen3.5 and 151645 for Qwen3, and with thinking on Qwen3.5's generation prompt opens the think
+block (`<think>\\n`) while Qwen3's leaves it to the model. A tokenizer that does not carry a format of its own (the
+tests' stand-ins) is taken to have Qwen3.5's.
 
 The stand-in prompts are the original listings of a kernel dataset (`kernels.json` and `listings/<kid>.json`;
 `examples/standin-pool/` shows the format) plus a plain "fix this kernel" instruction (Section 6.10 item 7).
@@ -25,12 +30,14 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from ..ids import sha256_file, sha256_ids, standin_prompt_id
 from ..schemas import PromptRecord, TaskRef
 
+# Qwen3.5's control-token ids (`QWEN3_5` below); a run uses its own model's (`chat_format`).
 ENDOFTEXT_ID = 248044
 IM_START_ID = 248045
 IM_END_ID = 248046  # <|im_end|>: the engine stops on it (Appendix C)
@@ -41,6 +48,12 @@ CONTROL_TEXTS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "<think>", "</th
 STOP_TOKEN_IDS = (IM_END_ID,)
 
 THINK_PREFIX = {"off": "<think>\n\n</think>\n\n", "on": "<think>\n"}
+ASSISTANT_OPEN = "<|im_start|>assistant\n"
+# The generation prompt after ASSISTANT_OPEN that a chat template may produce for each thinking flag: thinking off
+# must close an empty think block, or the flag would not be honoured; thinking on may open the block or leave it to
+# the model.
+THINK_PREFIXES_KNOWN = {"off": ("<think>\n\n</think>\n\n",), "on": ("<think>\n", "")}
+_PROBE_CHAT = ({"role": "system", "content": "s"}, {"role": "user", "content": "u"})
 
 # The stand-in texts (the earlier prototype's, unchanged).
 STANDIN_SYSTEM = "You are an expert AMD GPU kernel engineer."
@@ -56,6 +69,69 @@ STANDIN_MIN_INSNS, STANDIN_MAX_INSNS = 60, 400
 
 class TemplateError(ValueError):
     """A turn sequence cannot be built exactly as Appendix C specifies."""
+
+
+@dataclass(frozen=True)
+class ChatFormat:
+    """A model's five control tokens and the think prefix its chat template puts after ASSISTANT_OPEN for each
+    thinking flag."""
+
+    endoftext_id: int
+    im_start_id: int
+    im_end_id: int
+    think_open_id: int
+    think_close_id: int
+    think_prefix_off: str
+    think_prefix_on: str
+
+    @property
+    def control_ids(self) -> frozenset[int]:
+        return frozenset({self.endoftext_id, self.im_start_id, self.im_end_id, self.think_open_id,
+                          self.think_close_id})
+
+    @property
+    def stop_token_ids(self) -> tuple[int, ...]:
+        return (self.im_end_id,)
+
+    def think_prefix(self, thinking: str) -> str:
+        _thinking_on(thinking)
+        return self.think_prefix_off if thinking == "off" else self.think_prefix_on
+
+    @classmethod
+    def derive(cls, tokenizer: Tokenizer) -> ChatFormat:
+        """Read the format from a tokenizer: each control text must encode to exactly one id, the five ids distinct,
+        and the chat template's generation prompt for each thinking flag must be ASSISTANT_OPEN followed by one of
+        THINK_PREFIXES_KNOWN. Anything else is refused: the turn rules below are only right for such a model."""
+        ids = {}
+        for text in CONTROL_TEXTS:
+            enc = tokenizer.encode(text)
+            if len(enc) != 1:
+                raise TemplateError(f"the tokenizer encodes {text!r} to {len(enc)} ids, not one control token")
+            ids[text] = int(enc[0])
+        if len(set(ids.values())) != len(ids):
+            raise TemplateError(f"the tokenizer's control tokens are not distinct: {ids}")
+        prefixes = {}
+        for thinking in ("off", "on"):
+            base = tokenizer.render(list(_PROBE_CHAT), thinking, add_generation_prompt=False)
+            full = tokenizer.render(list(_PROBE_CHAT), thinking, add_generation_prompt=True)
+            gen = full[len(base):] if full.startswith(base) else None
+            prefix = gen[len(ASSISTANT_OPEN):] if gen is not None and gen.startswith(ASSISTANT_OPEN) else None
+            if prefix not in THINK_PREFIXES_KNOWN[thinking]:
+                raise TemplateError(f"the chat template's thinking-{thinking} generation prompt is {gen!r}, not "
+                                    f"{ASSISTANT_OPEN!r} + one of {THINK_PREFIXES_KNOWN[thinking]}")
+            prefixes[thinking] = prefix
+        return cls(ids["<|endoftext|>"], ids["<|im_start|>"], ids["<|im_end|>"], ids["<think>"], ids["</think>"],
+                   prefixes["off"], prefixes["on"])
+
+
+QWEN3_5 = ChatFormat(ENDOFTEXT_ID, IM_START_ID, IM_END_ID, THINK_OPEN_ID, THINK_CLOSE_ID, THINK_PREFIX["off"],
+                     THINK_PREFIX["on"])
+
+
+def chat_format(tokenizer: Tokenizer) -> ChatFormat:
+    """The tokenizer's own format (`HFTokenizer` reads it from the model's tokenizer), else Qwen3.5's."""
+    fmt = getattr(tokenizer, "chat_format", None)
+    return QWEN3_5 if fmt is None else fmt
 
 
 class Tokenizer(Protocol):
@@ -76,6 +152,14 @@ class HFTokenizer:
 
     def __init__(self, tok: Any):
         self.tok = tok
+        self._format: ChatFormat | None = None
+
+    @property
+    def chat_format(self) -> ChatFormat:
+        """The model's control tokens and generation prompts, read from this tokenizer (`ChatFormat.derive`)."""
+        if self._format is None:
+            self._format = ChatFormat.derive(self)
+        return self._format
 
     @classmethod
     def load(cls, model_dir: str | Path) -> HFTokenizer:
@@ -108,9 +192,8 @@ def _thinking_on(thinking: str) -> bool:
     return thinking == "on"
 
 
-def generation_prompt(thinking: str) -> str:
-    _thinking_on(thinking)
-    return "<|im_start|>assistant\n" + THINK_PREFIX[thinking]
+def generation_prompt(thinking: str, fmt: ChatFormat = QWEN3_5) -> str:
+    return ASSISTANT_OPEN + fmt.think_prefix(thinking)
 
 
 def _check_messages(messages: Any) -> list[dict]:
@@ -140,7 +223,7 @@ def render_turn0(tokenizer: Tokenizer, messages: Sequence[Mapping[str, Any]], th
     """`apply_chat_template(messages, add_generation_prompt=True, enable_thinking=...)`, tokenised with
     add_special_tokens=False. The ids must end in the generation prompt for the thinking flag."""
     msgs = _check_messages(messages)
-    tail = tokenizer.encode(generation_prompt(thinking))
+    tail = tokenizer.encode(generation_prompt(thinking, chat_format(tokenizer)))
     ids = tokenizer.encode(tokenizer.render(msgs, thinking))
     if len(ids) <= len(tail) or ids[-len(tail):] != tail:
         raise TemplateError(f"the rendered turn 0 does not end in the thinking-{thinking} generation prompt")
@@ -164,13 +247,14 @@ def turn0_ids(prompt: PromptRecord, tokenizer: Tokenizer, thinking: str) -> list
     return ids
 
 
-def repair_suffix(feedback: str, thinking: str) -> str:
-    return "\n<|im_start|>user\n" + feedback + "<|im_end|>\n" + generation_prompt(thinking)
+def repair_suffix(feedback: str, thinking: str, fmt: ChatFormat = QWEN3_5) -> str:
+    return "\n<|im_start|>user\n" + feedback + "<|im_end|>\n" + generation_prompt(thinking, fmt)
 
 
-def _expected_suffix_controls(thinking: str) -> list[int]:
-    think = [THINK_OPEN_ID, THINK_CLOSE_ID] if thinking == "off" else [THINK_OPEN_ID]
-    return [IM_START_ID, IM_END_ID, IM_START_ID, *think]
+def _expected_suffix_controls(thinking: str, fmt: ChatFormat) -> list[int]:
+    known = {"<think>": fmt.think_open_id, "</think>": fmt.think_close_id}
+    think = [known[t] for t in ("<think>", "</think>") if t in fmt.think_prefix(thinking)]
+    return [fmt.im_start_id, fmt.im_end_id, fmt.im_start_id, *think]
 
 
 def next_turn_ids(
@@ -183,12 +267,13 @@ def next_turn_ids(
         raise TemplateError("feedback must be a non-empty str")
     if any(t in feedback for t in CONTROL_TEXTS):
         raise TemplateError("feedback contains the text of a control token")
+    fmt = chat_format(tokenizer)
     ids = [int(t) for t in prev_ids] + [int(t) for t in reply_ids]
-    if not reply_ids or int(reply_ids[-1]) != IM_END_ID:
-        ids.append(IM_END_ID)
-    suffix = tokenizer.encode(repair_suffix(feedback, thinking))
-    controls = [t for t in suffix if t in CONTROL_IDS]
-    if controls != _expected_suffix_controls(thinking):
+    if not reply_ids or int(reply_ids[-1]) != fmt.im_end_id:
+        ids.append(fmt.im_end_id)
+    suffix = tokenizer.encode(repair_suffix(feedback, thinking, fmt))
+    controls = [t for t in suffix if t in fmt.control_ids]
+    if controls != _expected_suffix_controls(thinking, fmt):
         raise TemplateError(f"the repair suffix tokenised to control ids {controls}")
     return ids + suffix
 
@@ -214,7 +299,7 @@ def rerendered_turn_ids(
     if not isinstance(reply, str):
         raise TemplateError("the reply must be a str")
     msgs = _check_messages([*messages, {"role": "assistant", "content": reply}, {"role": "user", "content": feedback}])
-    tail = tokenizer.encode(generation_prompt(thinking))
+    tail = tokenizer.encode(generation_prompt(thinking, chat_format(tokenizer)))
     ids = tokenizer.encode(tokenizer.render(msgs, thinking))
     if len(ids) <= len(tail) or ids[-len(tail):] != tail:
         raise TemplateError(f"the rebuilt repair turn does not end in the thinking-{thinking} generation prompt")

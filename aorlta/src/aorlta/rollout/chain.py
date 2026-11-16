@@ -60,7 +60,7 @@ from .compile_check import Compiler, ParseOutcome, parse_code
 from .engine_pool import EnginePool, RolloutStop, logprobs_aligned, lpt_assign
 from .feedback import Feedback, build_feedback
 from .templates import (
-    IM_END_ID, STOP_TOKEN_IDS, TemplateError, Tokenizer, next_turn_ids, rerendered_turn_ids, turn0_ids,
+    IM_END_ID, STOP_TOKEN_IDS, TemplateError, Tokenizer, chat_format, next_turn_ids, rerendered_turn_ids, turn0_ids,
 )
 
 SCORED_ENDS = frozenset({"compiled", "no_change", "no_code_block", "turns_exhausted", "context_limit", "logprob_error"})
@@ -78,7 +78,8 @@ class LeakCheck(Protocol):
 
 class ParseAdapter(Protocol):
     name: str
-    reply_stops: tuple[int, ...]  # the stop tokens dropped from the end of a reply before it is read
+    # optional: reply_stops, the stop tokens dropped from the end of a reply before it is read. Without it the
+    # model's own stop tokens are dropped; with it, it must hold them.
 
     def check_prompts(self, prompts: Sequence[PromptRecord], thinking: str, max_repair_turns: int) -> None:
         ...  # raises ValueError
@@ -101,7 +102,6 @@ class StandinParse:
     the chain (no repair turn)."""
 
     name = "standin.parse"
-    reply_stops = (IM_END_ID,)
 
     def check_prompts(self, prompts: Sequence[PromptRecord], thinking: str, max_repair_turns: int = 0) -> None:
         return None
@@ -218,10 +218,11 @@ class RolloutSettings:
             identical_groups_stop=r.identical_groups_stop,
         )
 
-    def sampling_params(self, seed: int) -> dict:
-        """Section 6.1, Sampling: one request per chain per turn, with its own seed."""
+    def sampling_params(self, seed: int, stop_token_ids: Sequence[int] = STOP_TOKEN_IDS) -> dict:
+        """Section 6.1, Sampling: one request per chain per turn, with its own seed, stopping on the model's stop
+        tokens."""
         return {"temperature": self.temperature, "top_p": self.top_p, "top_k": self.top_k,
-                "max_new_tokens": self.max_new_tokens, "seed": seed, "stop_token_ids": list(STOP_TOKEN_IDS)}
+                "max_new_tokens": self.max_new_tokens, "seed": seed, "stop_token_ids": list(stop_token_ids)}
 
 
 @dataclass
@@ -305,7 +306,12 @@ class RolloutManager:
                 raise RolloutStop(f"the {kind} given is {got!r}, the settings name {want!r}")
         if settings.repair_turn_ids not in REPAIR_TURN_IDS:
             raise RolloutStop(f"repair_turn_ids must be one of {REPAIR_TURN_IDS}, got {settings.repair_turn_ids!r}")
-        self.reply_stops = tuple(self.parse_adapter.reply_stops)
+        self.stop_token_ids = chat_format(tokenizer).stop_token_ids
+        stops = getattr(self.parse_adapter, "reply_stops", None)
+        self.reply_stops = self.stop_token_ids if stops is None else tuple(stops)
+        if not set(self.stop_token_ids) <= set(self.reply_stops):
+            raise RolloutStop(f"the parse adapter's reply_stops {self.reply_stops} do not hold the model's stop tokens "
+                              f"{self.stop_token_ids}")
         self.spans = spans if spans is not None else SpanRecorder()
         self.compile_workers = compile_workers
         self.mean_response_tokens = (
@@ -366,7 +372,7 @@ class RolloutManager:
                 end, cut = "engine_error", True  # the generation deadline: no further turn starts
                 break
             turn_seed = seeds.seed_for(prompt.prompt_id, k, t)
-            sp = s.sampling_params(turn_seed)
+            sp = s.sampling_params(turn_seed, self.stop_token_ids)
             span = self.spans.start("gen.turn0" if t == 0 else "gen.repair", iteration, chain_id=cid,
                                     engine_id=engine, turn=t, input_len=len(ids))
             out = self.pool.generate(engine, ids, sp)

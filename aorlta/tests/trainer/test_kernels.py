@@ -203,12 +203,40 @@ def test_layer_with_a_missing_kernel_attribute_is_caught():
     assert not kernels.check_model(model, mod).available
 
 
-def test_model_without_linear_attention_layers_is_not_available():
+@pytest.mark.parametrize("layer_types", [["linear_attention"] * 3 + ["full_attention"], None])
+def test_model_without_linear_attention_layers_is_not_available(layer_types):
+    # its config declares linear-attention layers, or does not say: a model where none is found is refused
     mod = fake_modeling()
-    rep = kernels.check_model(FakeModel([], layer_types=["full_attention"] * 4), mod)
-    assert not rep.available
+    rep = kernels.check_model(FakeModel([], layer_types=layer_types), mod)
+    assert not rep.available and rep.applies
     assert rep.linear_attention_layers == 0
     assert any("no Qwen3.5 linear-attention layers" in r for r in rep.reasons)
+    with pytest.raises(kernels.FastPathUnavailable):
+        kernels.ensure_fast_path(True, FakeModel([], layer_types=layer_types), modeling=mod)
+
+
+@pytest.mark.parametrize("nested", [True, False])
+def test_the_check_does_not_apply_to_a_model_with_full_attention_only(nested):
+    # dense Qwen3: the config lists its layer types, none linear, and no module is linear attention
+    model = FakeModel([], layer_types=["full_attention"] * 4, nested=nested)
+    for mod in (fake_modeling(), fake_modeling(conv=False, fla=False)):
+        rep = kernels.ensure_fast_path(True, model, modeling=mod)
+        assert rep.available and not rep.applies and rep.reasons == ()
+        assert rep.to_dict()["applies"] is False
+    assert kernels.without_linear_attention(model)
+    assert kernels.honours_packing(model, fake_modeling(conv=False, fla=False))
+    watcher = kernels.FallbackLogWatcher()
+    watcher.fallback_logged = True  # a Qwen3.5 build elsewhere in the process logged it: it says nothing here
+    assert kernels.ensure_fast_path(True, model, modeling=fake_modeling(), watcher=watcher).available
+
+
+def test_a_linear_attention_module_keeps_the_check_whatever_the_config_says():
+    mod = fake_modeling(fla=False)
+    model = FakeModel([mod.Qwen3_5GatedDeltaNet()], layer_types=["full_attention"] * 4)  # config and modules disagree
+    assert not kernels.without_linear_attention(model)
+    with pytest.raises(kernels.FastPathUnavailable):
+        kernels.ensure_fast_path(True, model, modeling=mod)
+    assert kernels.check_model(fast_model(fake_modeling()), fake_modeling()).to_dict().get("applies", True)
 
 
 def test_layer_count_must_match_the_config():
@@ -367,7 +395,7 @@ def test_an_unknown_layout_does_not_honour_packing(name):
 
 def test_an_import_failure_does_not_honour_packing(monkeypatch):
     monkeypatch.setattr(kernels, "MODELING", "aorlta_no_such_package.modeling_qwen3_5")
-    assert not kernels.honours_packing(FakeModel([]))
+    assert not kernels.honours_packing(FakeModel([object()]))  # a linear_attn module: the check applies
 
 
 # --- the real module ---------------------------------------------------------------------------------------

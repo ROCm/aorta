@@ -27,6 +27,7 @@ from typing import Any
 
 from ..ids import seed
 from .ports import PORT_BASE, PORT_STRIDE, engine_port  # noqa: F401 - the fixed port layout, imported from here too
+from .templates import STOP_TOKEN_IDS
 
 SELF_TEST_PROMPTS = 4
 SELF_TEST_TOKENS = 128
@@ -111,6 +112,13 @@ def expected_server_args(dtype: str = "bfloat16") -> dict:
             "dtype": dtype}
 
 
+def engine_expected(handle: Any, expected: dict) -> dict:
+    """`expected`, plus the `attention_backend` the handle's engine was started with, if it names one (an
+    `EngineProc` keeps its `engine_kwargs`): what AORLTA set is what the engine must report."""
+    asked = (getattr(handle, "engine_kwargs", None) or {}).get("attention_backend")
+    return expected if asked is None else {**expected, "attention_backend": asked}
+
+
 def server_arg_problems(info: dict, expected: dict) -> list[str]:
     """Each read-back setting that differs from what AORLTA set (a missing one counts)."""
     return [f"{k} is {info.get(k, '<missing>')!r}, expected {v!r}" for k, v in expected.items() if info.get(k) != v]
@@ -148,7 +156,8 @@ class SelfTest:
                 "requests": self.requests, "seconds": round(self.seconds, 3), "errors": self.errors}
 
 
-def run_self_test(engine: Any, prompts: Sequence[Sequence[int]], run_seed: int, timeout_s: float) -> SelfTest:
+def run_self_test(engine: Any, prompts: Sequence[Sequence[int]], run_seed: int, timeout_s: float,
+                  stop_token_ids: Sequence[int] = STOP_TOKEN_IDS) -> SelfTest:
     if len(prompts) < SELF_TEST_PROMPTS:
         raise ValueError(f"the self-test needs {SELF_TEST_PROMPTS} prompts, got {len(prompts)}")
     t0 = time.monotonic()
@@ -158,7 +167,7 @@ def run_self_test(engine: Any, prompts: Sequence[Sequence[int]], run_seed: int, 
         outs = []
         for s in self_test_seeds(run_seed, i):  # one at a time
             sp = {"temperature": SELF_TEST_TEMPERATURE, "top_p": SELF_TEST_TOP_P, "top_k": -1,
-                  "max_new_tokens": SELF_TEST_TOKENS, "seed": s, "stop_token_ids": [248046]}
+                  "max_new_tokens": SELF_TEST_TOKENS, "seed": s, "stop_token_ids": list(stop_token_ids)}
             res = engine.generate(list(ids), sp, timeout_s=timeout_s)
             requests += 1
             if "error" in res:
@@ -184,15 +193,18 @@ def max_model_len(max_prompt: int, max_new: int, max_feedback_tokens: int, repai
 
 def engine_kwargs(
     *, model_dir: str, dtype: str, P: int, K: int, n_engines: int, max_len: int, gpu_memory_utilization: float,
-    run_seed: int, log_level: str = "warning",
+    run_seed: int, log_level: str = "warning", attention_backend: str | None = None,
 ) -> dict:
     """The Section 6.1 engine kwargs, without `port` (set per engine, or chosen at each start: rollout/ports.py)."""
-    return {
+    kw = {
         "model": model_dir, "tokenizer": model_dir, "dtype": dtype, "sampling_backend": "triton",
         "enable_output_logprobs": True, "enable_prefix_caching": True, "disable_kvstore": True,
         "disable_autotune": True, "max_num_seqs": math.ceil(P * K / n_engines), "max_model_len": max_len,
         "gpu_memory_utilization": gpu_memory_utilization, "seed": run_seed, "log_level": log_level,
     }
+    if attention_backend is not None:  # the model family's (model_family); else TokenSpeed's own choice
+        kw["attention_backend"] = attention_backend
+    return kw
 
 
 def lpt_assign(estimates: Sequence[float], n_engines: int) -> list[int]:
@@ -245,6 +257,7 @@ class EnginePool:
         make_handle: Callable[[int], Any] | None = None,
         on_ready: Callable[[int, dict, bool], None] | None = None,
         clock: Callable[[], float] = time.time,
+        stop_token_ids: Sequence[int] = STOP_TOKEN_IDS,  # the model's (templates.chat_format); Qwen3.5's by default
     ):
         if not handles:
             raise ValueError("an engine pool needs at least one engine")
@@ -257,6 +270,7 @@ class EnginePool:
         self.make_handle = make_handle
         self.on_ready = on_ready
         self.clock = clock
+        self.stop_token_ids = tuple(stop_token_ids)
         self.prefix = [PrefixIndex() for _ in self.handles]
         self.available = [False] * len(self.handles)
         self.self_tests: list[dict] = []
@@ -281,11 +295,11 @@ class EnginePool:
             with self._lock:
                 restart = i in self._restarting
             self.on_ready(i, ready, restart)
-        problems = server_arg_problems(ready.get("info", {}), self.expected)
+        problems = server_arg_problems(ready.get("info", {}), engine_expected(handle, self.expected))
         if problems:
             handle.stop()
             raise RolloutStop(f"engine {i} refused: " + "; ".join(problems))
-        test = run_self_test(handle, selftest_prompts, self.run_seed, self.self_test_timeout_s)
+        test = run_self_test(handle, selftest_prompts, self.run_seed, self.self_test_timeout_s, self.stop_token_ids)
         with self._lock:
             self.self_tests.append(test.to_dict())
         if not test.passed:
