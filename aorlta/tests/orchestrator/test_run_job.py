@@ -50,7 +50,7 @@ exit 0
 
 def test_cleanup_removes_this_jobs_containers_and_not_another_jobs_whose_name_extends_it(tmp_path):
     funcs = "".join(re.search(rf"^{name}\(\) \{{.*?^\}}\n", JOB, re.M | re.S).group(0)
-                    for name in ("add_mounts", "clean_img", "cleanup"))
+                    for name in ("own_containers", "add_mounts", "clean_img", "cleanup"))
     stub = tmp_path / "bin" / "docker"
     stub.parent.mkdir()
     stub.write_text(DOCKER)
@@ -310,7 +310,8 @@ def test_claims_and_kept_image_records_are_world_writable_so_any_users_later_job
 
 
 def _cleanup(tmp_path, own: int, built: int = 1, calls: str = "cleanup", **env) -> subprocess.CompletedProcess:
-    funcs = _functions("job_ended", "add_mounts", "clean_img", "other_jobs", "remove_image", "retry_kept_images")
+    funcs = _functions("job_ended", "own_containers", "add_mounts", "clean_img", "other_jobs", "remove_image",
+                       "retry_kept_images")
     funcs += re.search(r"^CLEANED=0\ncleanup\(\) \{.*?^\}\n", JOB, re.M | re.S).group(0)
     state = (f"CNAME=aorlta-run-{env.get('SLURM_JOB_ID', '123')} VRAM_PID= OUT={tmp_path}/out RUN_ROOT={tmp_path}/runs "
              f"SYNC_DIR={tmp_path}/shm RUN_ID=r SOCK_DIR={tmp_path}/shm/sockets RUN_DIR={tmp_path}/runs/r "
@@ -407,6 +408,30 @@ def test_the_import_pre_flight_loads_aorta_only_for_a_profile_that_uses_it(tmp_p
         report = json.loads(subprocess.run(check + extra, capture_output=True, text=True, env=env).stdout)
         assert report["aorta"] == extra
         assert sorted(k for k in report["failed"] if k.startswith("aorta.")) == aorta
+
+
+@pytest.mark.parametrize("stuck", [True, False])
+def test_a_container_that_will_not_go_keeps_the_jobs_images_claims_and_directories(tmp_path, stuck):
+    """The leaving marker tells another job's cleanup this job uses no image, and a dropped claim frees its GPUs and
+    directories: neither may happen while one of this job's containers is still there."""
+    images = tmp_path / "images"
+    images.mkdir()
+    for name in ("trainer_1", "b"):  # b: the image the cleanup's helper runs from
+        (images / name).write_text("")
+    for d in ("out", "runs", "shm/r", "shm/sockets", "claims"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "claims" / "gpu0").write_text("123 GPU 0\n")
+    names = "aorlta-run-123-checkers aorlta-run-1234" if stuck else "aorlta-run-1234"  # the stub never removes one
+    out = _cleanup(tmp_path, 1, NODE_JOBS="123", JOBS="123:RUNNING", CONTAINERS=names, IMAGES_DIR=str(images))
+    kept = [(tmp_path / "claims" / "leaving-123").exists(), (tmp_path / "claims" / "gpu0").exists(),
+            (images / "trainer_1").exists(), (tmp_path / "shm" / "r").exists(), (tmp_path / "shm" / "sockets").exists()]
+    if stuck:
+        assert kept == [False, True, True, True, True], out.stdout + out.stderr
+        assert "[guard] cannot remove this job's containers: aorlta-run-123-checkers" in out.stderr
+        assert "containers left: 1" in out.stdout
+    else:
+        assert kept == [True, False, False, False, False], out.stdout + out.stderr
+        assert "[guard]" not in out.stderr and "containers left: 0" in out.stdout
 
 
 def test_cleanup_runs_once_so_a_second_pass_never_removes_directories_claimed_since(tmp_path):

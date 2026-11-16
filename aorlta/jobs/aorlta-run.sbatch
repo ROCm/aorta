@@ -395,7 +395,12 @@ cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by the
   [ "$CLEANED" = 1 ] && return
   CLEANED=1
   [ -n "$VRAM_PID" ] && kill "$VRAM_PID" 2>/dev/null
-  docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?" | xargs -r docker rm -f >/dev/null 2>&1
+  own_containers | xargs -r docker rm -f >/dev/null 2>&1
+  # A container docker would not remove may still use this job's images, GPUs and directories: then the job keeps
+  # them all and is not leaving; a later job's stale_containers removes the container once Slurm has ended this job
+  local left own=$OWN_DIRS
+  left=$(own_containers)
+  [ -n "$left" ] && own=0
   find "$OUT" -maxdepth 3 -name 'gpucore.*' -type f -delete 2>/dev/null
   local img mounts=()
   img=$(clean_img)
@@ -404,12 +409,17 @@ cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by the
   # node directory goes: they are how an unsettled ConSan or ASan leg is read afterwards.
   # (a job that did not get its claims leaves the directories alone: another live job holds them)
   [ -n "$img" ] && docker run --rm --network none --ulimit core=0 "${mounts[@]}" --entrypoint bash "$img" -c \
-    "if [ $OWN_DIRS = 1 ] && cd '$SYNC_DIR/$RUN_ID/scratch/reward' 2>/dev/null; then
+    "if [ $own = 1 ] && cd '$SYNC_DIR/$RUN_ID/scratch/reward' 2>/dev/null; then
        find pkg \( -path '*/san.*' \( -name '*.log' -o -name aorlta_harness.hip -o -name '*.json' \) \
          -o -path '*/gate.parse-*' -name source.hip \) -size -2M -print0 | tar --null -czf '$OUT/gpu-leg-evidence.tgz' -T -;
        cd /; fi
-     [ $OWN_DIRS = 1 ] && rm -rf '$SYNC_DIR/$RUN_ID' ${SOCK_DIR:+'$SOCK_DIR'}; chown -R $(id -u):$(id -g) '$OUT';
+     [ $own = 1 ] && rm -rf '$SYNC_DIR/$RUN_ID' ${SOCK_DIR:+'$SOCK_DIR'}; chown -R $(id -u):$(id -g) '$OUT';
      [ -d '$RUN_DIR' ] && chown -R $(id -u):$(id -g) '$RUN_DIR'" >/dev/null 2>&1
+  if [ -n "$left" ]; then
+    echo "[guard] cannot remove this job's containers: $(echo $left); its images, claims and directories are kept" >&2
+    echo "containers left: $(echo "$left" | wc -l)"
+    return
+  fi
   # this job uses no image from here on (the helper above was its last container): before its first image decision,
   # so another job cleaning up at once sees it
   mkdir -p "$CLAIMS" 2>/dev/null && (umask 0111; : > "$CLAIMS/leaving-$SLURM_JOB_ID") 2>/dev/null
