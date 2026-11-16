@@ -114,11 +114,23 @@ def test_two_sides_each_within_max_rel_mad_but_a_noise_floor_of_one_or_more_are_
     (series(flat(8.0)[:-1] + [-1.0]), series(flat(10.0)), "invalid"),
     (series(flat(8.0)[:-1] + [True]), series(flat(10.0)), "invalid"),
     ([1000.0, float("nan")] + flat(8.0, 33), series(flat(10.0)), "invalid"),  # a warm-up sample is checked too
+    ([1e-300] * 35, [1e100] * 35, "invalid"),  # the speedup overflows to inf
+    ([1e300] * 35, [1e-300] * 35, "invalid"),  # the speedup underflows to 0
+    ([1.7e308] * 35, series(flat(10.0)), "invalid"),  # the median of 30 kept samples overflows
+    (series(flat(10.0)), [1.7e308] * 35, "invalid"),
 ])
 def test_too_few_or_impossible_samples_are_not_decided(cand_, ref_, verdict):
     sp = timing.judge(cand_, ref_, POLICY)
     assert sp.verdict == verdict and sp.speedup is None
     assert timing.leg_outcome(sp) == ("unsettled", f"timing_{verdict}", [])
+
+
+def test_extreme_samples_whose_statistics_stay_finite_still_decide_and_read_back():
+    for cand_, ref_, verdict in (([1e-150] * 35, [1e150] * 35, "faster"), ([1e150] * 35, [1e-150] * 35, "not_faster"),
+                                 ([1.7e308] * 36, series(flat(10.0)), "not_faster")):  # 31 kept: an odd median
+        sp = timing.judge(cand_, ref_, POLICY)
+        state, _, findings = timing.leg_outcome(sp)
+        assert sp.verdict == verdict and timing.measurement(leg("ref.speedup", state, findings=findings)) is not None
 
 
 @pytest.mark.parametrize("kw", [dict(ratio=0), dict(ratio=-1.0), dict(ratio=float("nan")), dict(ratio=True),

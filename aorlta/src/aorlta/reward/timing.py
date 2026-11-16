@@ -13,7 +13,8 @@ From the rest:
   `not_faster` when `s <= ratio * (1 - floor)`, and `within_noise` in between, where the noise could decide it.
 
 Only `faster` is a clean leg and only `not_faster` is settled (`fail`, reason `not_faster`); everything else,
-including too few samples or a sample that is not a positive finite number, is unsettled, never clean. A settled
+including too few samples, a sample that is not a positive finite number, or a median or speedup that overflows or
+underflows, is unsettled, never clean. A settled
 verdict carries a measurement record among its findings (kind `measurement`, which `adapters/base.py` allows on a
 clean leg, as it allows a trusted build fact); `measurement` reads it back and `speedup_base` grades it.
 
@@ -126,6 +127,8 @@ def judge(candidate: Sequence[float], reference: Sequence[float], policy: Timing
     if floor >= 1.0:  # each side under max_rel_mad, yet together too noisy: no `not_faster` exists, and no record
         return Speedup("noisy", ratio, **common)
     s = mr / mc
+    if not (math.isfinite(s) and s > 0):  # an overflowed median or ratio: no record reads back
+        return Speedup("invalid", ratio, samples=n)
     if s >= ratio * (1.0 + floor):
         verdict = "faster"
     elif s <= ratio * (1.0 - floor):
