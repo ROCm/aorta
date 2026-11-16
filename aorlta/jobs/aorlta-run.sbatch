@@ -18,7 +18,9 @@
 # the job cannot see it). Engine ports
 # need nothing with rollout.port_base null (the default: each engine start picks a free window); two runs that both
 # fix a port_base must give windows that do not overlap. A container or claim of a job Slurm no longer runs is what
-# a cancelled or killed job left: the job removes or takes it over, and never touches another live job's.
+# a cancelled or killed job left: the job removes or takes it over, and never touches another live job's. A requeued
+# job keeps its id: the containers its earlier attempt left are removed before it starts its own (exit 97 if one
+# cannot be).
 #
 # With `reward.remote` in the config (the standin-gpu profile's ConSan and ASan legs), the checkers run in
 # rocm/dev-ubuntu-24.04:7.0.2 (glibc 2.39 for the ConSan hook, the ROCm 7.0.2 ASan runtime): first aorta's ASan
@@ -161,6 +163,23 @@ stale_containers() {  # the aorlta-run-<job id>[-part] containers on this node w
     fi
     [ "${ended[$id]}" = 1 ] && echo "$name"
   done < <(docker ps -a --format '{{.Names}}' | grep -xE 'aorlta-run-[0-9]+(-[a-z]+)?')
+}
+own_containers() {  # this job's containers, aorlta-run-<job id>[-part], by exact name (not aorlta-run-<job id>5)
+  docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?"
+}
+clear_earlier_attempt() {  # remove this job's containers from an earlier attempt; fails if any is still there
+  # A requeued job keeps its id, and an attempt killed before its trap ran leaves its containers (the checkers run
+  # detached, and a killed docker client leaves its container running): they hold this job's container names, so the
+  # first `docker run --name` would fail. stale_containers skips this job's id, since it runs.
+  local left
+  left=$(own_containers)
+  [ -z "$left" ] && return 0
+  stamp "removing this job's containers from an earlier attempt: $(echo $left)"
+  echo "$left" | xargs -r docker rm -f >/dev/null 2>&1
+  left=$(own_containers)
+  [ -z "$left" ] && return 0
+  echo "[guard] cannot remove this job's containers from an earlier attempt: $(echo $left)" >&2
+  return 1
 }
 other_jobs() {  # the other Slurm jobs running on this node, one per line; "unknown" if Slurm cannot say
   local out
@@ -407,8 +426,9 @@ cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by the
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT
 # A job that keeps its id across a requeue must not start as leaving: other jobs' cleanups would not count it as an
-# image user
+# image user; and its earlier attempt's containers go before it starts any of its own
 rm -f "$CLAIMS/leaving-$SLURM_JOB_ID" 2>/dev/null
+clear_earlier_attempt || exit 97
 
 stamp "node $(hostname -s) job $SLURM_JOB_ID run $RUN_ID config $CONFIG components $COMPONENTS resume $RESUME commit $COMMIT"
 # Before anything uses them (the checker canary empties the socket directory): this run's /dev/shm directories, and

@@ -478,6 +478,72 @@ def test_a_job_is_leaving_only_after_its_last_container_and_never_from_an_earlie
         < JOB.index('stamp "BUILD $BASE"')
 
 
+DOCKER_NAMES = r"""#!/bin/bash
+# docker ps -a --format ...: the names in $NAMES_FILE; docker rm -f NAME...: each name leaves the file, except one
+# named in $STUCK (a container docker cannot remove)
+echo "$*" >> "$DOCKER_LOG"
+case "$1" in
+  ps) cat "$NAMES_FILE" ;;
+  rm) shift; [ "$1" = -f ] && shift
+      for n in "$@"; do
+        echo "removed $n" >> "$DOCKER_LOG"
+        case " ${STUCK:-} " in
+          *" $n "*) ;;
+          *) grep -vxF -- "$n" "$NAMES_FILE" > "$NAMES_FILE.new"; mv "$NAMES_FILE.new" "$NAMES_FILE" ;;
+        esac
+      done ;;
+esac
+exit 0
+"""
+
+
+def _earlier_attempt(tmp_path, names: str, **env) -> subprocess.CompletedProcess:
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    (tmp_path / "bin" / "docker").write_text(DOCKER_NAMES)
+    (tmp_path / "bin" / "docker").chmod(0o755)
+    (tmp_path / "names").write_text("".join(f"{n}\n" for n in names.split()))
+    script = (f"{_functions('stamp', 'own_containers', 'clear_earlier_attempt')}CNAME=aorlta-run-$SLURM_JOB_ID\n"
+              "clear_earlier_attempt && echo cleared || echo refused")
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                          env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "DOCKER_LOG": str(tmp_path / "docker.log"),
+                               "NAMES_FILE": str(tmp_path / "names"), "SLURM_JOB_ID": "123", **env})
+
+
+def test_a_requeued_job_removes_its_earlier_attempts_containers_and_no_other_jobs(tmp_path):
+    """A requeue keeps the job id, and an attempt killed before its trap ran leaves aorlta-run-<id>[-part] behind, so
+    the new attempt's first `docker run --name` would fail. Only this job's names go: not a job whose id extends
+    this one's, and not another live job's."""
+    names = ("aorlta-run-123 aorlta-run-123-checkers aorlta-run-123-canary aorlta-run-1234 aorlta-run-1234-checkers "
+             "aorlta-run-12 aorlta-run-12-checkers aorlta-run-456")
+    out = _earlier_attempt(tmp_path, names)
+    assert out.stdout.strip().endswith("cleared"), out.stdout + out.stderr
+    assert _removed(tmp_path) == ["aorlta-run-123", "aorlta-run-123-canary", "aorlta-run-123-checkers"]
+    assert (tmp_path / "names").read_text().split() == ["aorlta-run-1234", "aorlta-run-1234-checkers",
+                                                        "aorlta-run-12", "aorlta-run-12-checkers", "aorlta-run-456"]
+    assert "earlier attempt: aorlta-run-123 aorlta-run-123-checkers aorlta-run-123-canary" in out.stdout
+
+
+def test_a_first_attempt_removes_nothing_and_a_container_that_stays_refuses_the_job(tmp_path):
+    first = _earlier_attempt(tmp_path, "aorlta-run-1234 aorlta-run-456")
+    assert first.stdout.strip() == "cleared" and _removed(tmp_path) == [], first.stdout + first.stderr
+    (tmp_path / "docker.log").unlink()
+    stuck = _earlier_attempt(tmp_path, "aorlta-run-123 aorlta-run-123-checkers", STUCK="aorlta-run-123-checkers")
+    assert stuck.stdout.strip().endswith("refused"), stuck.stdout + stuck.stderr
+    assert "[guard] cannot remove this job's containers from an earlier attempt: aorlta-run-123-checkers" \
+        in stuck.stderr
+
+
+def test_the_earlier_attempts_containers_go_before_the_job_starts_any_container():
+    """After the traps (a refusal still runs the cleanup), and before the first container or image build of this
+    attempt; a refusal ends the job."""
+    call = "clear_earlier_attempt || exit 97\n"
+    assert JOB.count(call) == 1
+    at = JOB.index(call)
+    assert JOB.index("trap cleanup EXIT") < at < JOB.index('--name "$CNAME-canary"')
+    assert at < JOB.index('stamp "BUILD $BASE"') and at < JOB.index('--name "$CNAME-imports"')
+    assert JOB.index("docker run", JOB.index("trap 'cleanup; exit 143' TERM INT")) > at
+
+
 def test_a_leaving_marker_is_dropped_once_its_job_has_ended_and_kept_while_it_runs(tmp_path):
     for d in ("out", "runs", "claims"):
         (tmp_path / d).mkdir(exist_ok=True)
