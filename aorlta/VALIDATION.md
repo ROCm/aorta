@@ -204,9 +204,10 @@ in the reward, which is not done yet.
 - **The 93-task set of section 6 is not in the repository**, and the kernel example's check handles float tasks only.
 - **The examples' checks are cheap stand-ins** for the checks a real vertical would run (a full test suite, a
   sanitizer on a real workload, a simulator); section 6's check compares outputs and does not time them.
-- **Only Qwen3.5-4B, only gfx950, only one node.** Other Qwen3.5 sizes should work and have not been run; Qwen3
-  models (such as Qwen3-0.6B) need the changes listed under "Models" in GETTING-STARTED.md; fewer than 8 GPUs has run
-  only in the 1-GPU arithmetic and Q&A layouts; MI300X and MI355X have not been run.
+- **Learning shown only on Qwen3.5-4B, only gfx950, only one node.** Other Qwen3.5 sizes should work and have not
+  been run; dense Qwen3-0.6B and Qwen3-8B score and train 20 iterations with every update landed (the README's
+  base-model entry), on TokenSpeed's Triton attention kernels, but no held-out improvement has been measured for
+  them; fewer than 8 GPUs has run only in the 1-GPU arithmetic and Q&A layouts; MI300X and MI355X have not been run.
 - **Long runs**: the longest training run here is 40 iterations. Stability over hundreds of iterations, and resuming
   one on real hardware beyond the kill-and-resume drill, are not shown.
 - **Multi-turn episodes beyond compile-repair**, an evaluation exporter during a run, and runs outside Slurm.

@@ -8,6 +8,11 @@ refuses to train when `require_fast_path` is set and the fast path is missing.
 
 Detection is fail-closed: an import error, an unknown transformers layout, a model with no (or too few)
 linear-attention layers, or a probe that raises all count as "not available".
+
+The check applies only to a model that has linear attention. A model whose config declares its layer types and
+none of them `linear_attention`, and which holds no linear-attention module (dense Qwen3, say), runs full attention
+only: there is no fast path to miss, and the report says the check does not apply (`applies` False). A model whose
+config does not declare its layer types is checked as before.
 """
 
 from __future__ import annotations
@@ -61,15 +66,19 @@ class FastPathReport:
     components: dict = field(default_factory=dict)
     linear_attention_layers: int | None = None
     versions: dict = field(default_factory=dict)
+    applies: bool = True  # False: the model has no linear attention, so there is no fast path to check
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "available": self.available,
             "reasons": list(self.reasons),
             "components": dict(self.components),
             "linear_attention_layers": self.linear_attention_layers,
             "versions": dict(self.versions),
         }
+        if not self.applies:
+            out["applies"] = False
+        return out
 
 
 class FastPathUnavailable(RuntimeError):
@@ -119,6 +128,18 @@ def _expected_linear_layers(model) -> int | None:
     return None
 
 
+def without_linear_attention(model) -> bool:
+    """True only when the model positively has no linear attention: its config (or text config) lists its layer
+    types and none is `linear_attention`, and no module is a linear-attention layer (named `linear_attn`, or of a
+    class whose name holds `GatedDeltaNet`). Anything less certain is False, so the fast-path check runs."""
+    if _expected_linear_layers(model) != 0:
+        return False
+    for name, m in model.named_modules():
+        if name.rsplit(".", 1)[-1] == "linear_attn" or "GatedDeltaNet" in type(m).__name__:
+            return False
+    return True
+
+
 def _torch_path(layer, mod) -> list[str]:
     """The kernels `layer` runs on transformers' torch path (a missing one included)."""
     bad = []
@@ -154,6 +175,13 @@ def _model_reasons(model, mod) -> tuple[list[str], int]:
 
 def _check(model, modeling) -> FastPathReport:
     versions = installed_versions()
+    if model is not None:
+        try:
+            dense = without_linear_attention(model)
+        except Exception as exc:
+            return FastPathReport(False, (f"fast-path probe failed: {exc!r}",), versions=versions)
+        if dense:
+            return FastPathReport(True, (), {}, 0, versions, applies=False)
     try:
         mod = modeling if modeling is not None else importlib.import_module(MODELING)
     except Exception as exc:
@@ -182,8 +210,11 @@ def check_model(model, modeling=None) -> FastPathReport:
 def honours_packing(model, modeling=None) -> bool:
     """Whether a packed row's sequences stay apart in `model`'s linear-attention layers: no layer runs one of
     `PACKING_KERNELS` on the torch path, which runs the row as one sequence (each sequence after the first starts
-    from the state the earlier ones left). Fail-closed: an import error or an unknown layout counts as not."""
+    from the state the earlier ones left). A model without linear attention (`without_linear_attention`) does.
+    Fail-closed: an import error or an unknown layout counts as not."""
     try:
+        if without_linear_attention(model):
+            return True
         mod = modeling if modeling is not None else importlib.import_module(MODELING)
         if not (hasattr(mod, "Qwen3_5GatedDeltaNet") and hasattr(mod, TORCH_FALLBACKS["chunk_gated_delta_rule"])):
             return False
@@ -237,6 +268,9 @@ def ensure_fast_path(
 ) -> FastPathReport:
     """Check the fast path; raise `FastPathUnavailable` if it is missing and `require_fast_path` is set."""
     report = check_model(model, modeling) if model is not None else check_environment(modeling)
+    if not report.applies:
+        log.info("the model has no linear-attention layers: the fast-path check does not apply")
+        return report
     if watcher is not None and watcher.fallback_logged:
         report = FastPathReport(
             False,

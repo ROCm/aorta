@@ -99,10 +99,10 @@ class TwinEngine:
 
     CHUNK = 32
 
-    def __init__(self, base_dir: Path, fake: FakeEngineConfig, engine_id: int):
+    def __init__(self, base_dir: Path, fake: FakeEngineConfig, engine_id: int, loader=None):
         self.fake = FakeEngine(fake, engine_id=engine_id, **ENGINE_KW)
         self.tokenizer_manager = self.fake.tokenizer_manager
-        self.model = load_tiny(base_dir)
+        self.model = (loader or load_tiny)(base_dir)
         self.params = dict(self.model.named_parameters())
         self.reloads: list[str] = []
         self._lock = threading.Lock()

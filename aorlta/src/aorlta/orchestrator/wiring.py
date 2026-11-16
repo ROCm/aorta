@@ -319,14 +319,17 @@ def startup_max_len(cfg: RunConfig, tokenizer, records: Sequence, selftest_messa
 
 
 def engine_handles(cfg: RunConfig, max_len: int) -> list:
-    """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`."""
+    """One TokenSpeed engine process per configured GPU, as WP2's harness starts them, on `served_model_dir`, with
+    the attention kernels of the base's family (`model_family.engine_attention_backend`)."""
+    from ..model_family import engine_attention_backend
     from ..rollout.engine_pool import engine_kwargs, engine_port
     from ..rollout.engine_proc import EngineProc
 
     r = cfg.rollout
     kw = engine_kwargs(model_dir=str(served_model_dir(cfg)), dtype="bfloat16", P=r.P, K=r.K, n_engines=len(r.engines),
                        max_len=max_len, gpu_memory_utilization=r.gpu_memory_utilization,
-                       run_seed=cfg.orchestrator.run_seed)
+                       run_seed=cfg.orchestrator.run_seed,
+                       attention_backend=engine_attention_backend(cfg.model.base_dir))
     return [EngineProc(i, str(g), dict(kw, port=engine_port(i))) for i, g in enumerate(r.engines)]
 
 
@@ -346,13 +349,15 @@ class RolloutAdapter:
     def __init__(self, cfg: RunConfig, tokenizer, handles: Sequence[Any], *, max_len: int, spans, compiler,
                  on_shutdown: Sequence[Callable[[], None]] = (), clock=None, selftest_messages: Sequence | None = None):
         from ..rollout.engine_pool import EnginePool
+        from ..rollout.templates import chat_format
 
         self.cfg, self.tok, self.spans, self.max_len, self.compiler = cfg, tokenizer, spans, max_len, compiler
         self.selftest_messages = None if selftest_messages is None else list(selftest_messages)  # else the prompts
         self.clock = clock  # the orchestrator's clock: its deadlines are read on it
         self.handles = [CountedHandle(h) for h in handles]
         self.pool = EnginePool(self.handles, run_seed=cfg.orchestrator.run_seed,
-                               request_timeout_s=cfg.rollout.request_timeout_s, clock=spans.now)
+                               request_timeout_s=cfg.rollout.request_timeout_s, clock=spans.now,
+                               stop_token_ids=chat_format(tokenizer).stop_token_ids)
         self.manager = None
         self._on_shutdown = list(on_shutdown)
 
@@ -1283,6 +1288,13 @@ def build(cfg: RunConfig, *, config_path=None, commit: str | None = None, parts:
     task = None if pool_cfg.task == "standin" else plugins.task(pool_cfg.task)
     if task is None and (parts.pool is None or parts.probes is None):  # the prompts and probes come from the dataset
         dataset = standin_dataset_dir(pool_cfg.path)
+    if cfg.orchestrator.mode != "score" and parts.load_model is None:  # the trainer loads the base by its family
+        from ..model_family import ModelFamilyError, read_family
+
+        try:
+            read_family(cfg.model.base_dir)
+        except ModelFamilyError as exc:
+            raise WiringError(f"model.base_dir: {exc}") from None
     tok = parts.tokenizer or HFTokenizer.load(cfg.model.base_dir)
     if parts.pool is not None:
         pool = parts.pool
