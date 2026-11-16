@@ -170,7 +170,7 @@ own_containers() {  # this job's containers, aorlta-run-<job id>[-part], by exac
 clear_earlier_attempt() {  # remove this job's containers from an earlier attempt; fails if any is still there
   # A requeued job keeps its id, and an attempt killed before its trap ran leaves its containers (the checkers run
   # detached, and a killed docker client leaves its container running): they hold this job's container names, so the
-  # first `docker run --name` would fail. stale_containers skips this job's id, since it runs.
+  # first container it starts by name would fail. stale_containers skips this job's id, since it runs.
   local left
   left=$(own_containers)
   [ -z "$left" ] && return 0
