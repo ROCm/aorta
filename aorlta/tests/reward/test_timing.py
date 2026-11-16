@@ -174,6 +174,18 @@ def test_a_clean_leg_may_carry_its_measurement_and_nothing_else():
     assert checked_result(job(), other, 0, 1).reason == "clean_with_findings"
 
 
+@pytest.mark.parametrize("kind", [[], {}, ["measurement"], None, 7])
+def test_a_clean_leg_whose_finding_kind_is_not_a_name_is_unsettled_and_never_cached(kind):
+    """A finding's `kind` is the adapter's to fill, so an unhashable one (a list, a dict) must be rejected by the
+    validator, not raise from it: `checked_result` and both cache gates call it outside any exception handler."""
+    from aorlta.reward.cache import cacheable_leg
+
+    bad = make_result(job(), "clean", findings=[{"kind": kind}], t_start=0, t_end=1)
+    checked = checked_result(job(), bad, 0, 1)
+    assert (checked.state, checked.reason) == ("unsettled", "clean_with_findings")
+    assert not cacheable_leg(bad, bracketed=False)
+
+
 @pytest.mark.parametrize("change", [
     {"kind": "other"}, {"metric": "throughput"}, {"speedup": 0.0}, {"speedup": float("nan")}, {"speedup": None},
     {"speedup": True}, {"ratio": -1.0}, {"noise_floor": 1.0}, {"noise_floor": -0.1}, {"noise_floor": "0.02"},

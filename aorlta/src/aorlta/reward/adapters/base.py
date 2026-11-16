@@ -124,8 +124,8 @@ def inconsistency(result: LegResult) -> str | None:
     (a trusted build fact or a measurement is a record, not a finding)."""
     if result.state == "finding" and not result.findings:
         return "finding_without_findings"
-    if result.state == "clean" and any(not (isinstance(f, dict) and f.get("kind") in RECORD_KINDS)
-                                       for f in result.findings):
+    if result.state == "clean" and any(not (isinstance(f, dict) and isinstance(f.get("kind"), str)
+                                            and f["kind"] in RECORD_KINDS) for f in result.findings):
         return "clean_with_findings"
     return None
 
