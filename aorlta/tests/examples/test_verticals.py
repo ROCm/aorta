@@ -286,6 +286,21 @@ def test_the_qa_answer_is_the_last_answer_lines_own_value(load):
     assert mod.final_answer("Answer: 4\nthinking...\nAnswer: 5") == "5" and mod.final_answer("no marker") is None
 
 
+@pytest.mark.parametrize("answer", ['"Five".', '"Five."', "**Five**.", "**Five.**", "`five`.", "Five", " 'Five' . "])
+def test_a_qa_answer_in_quotes_or_bold_matches_with_its_full_stop_inside_or_outside(load, answer):
+    """Wrappers and a full stop come off until none is left, in whichever order the model wrote them."""
+    mod = load(QA)
+    assert mod.normalise(answer) == "five"
+
+
+def test_the_triage_prompt_states_the_rationales_length_limit(load):
+    """The check's character limit on a rationale is in the model's prompt, not only in the checker."""
+    mod = load(TRIAGE)
+    assert f"at most {mod.MAX_RATIONALE_CHARS} characters" in mod.USER
+    for n, ok in ((mod.MAX_RATIONALE_CHARS, True), (mod.MAX_RATIONALE_CHARS + 1, False)):
+        assert (mod.verdict_problem({"category": "memory", "rationale": "x" * n}) is None) == ok
+
+
 def test_the_isa_prompt_states_the_immediates_the_check_accepts(load):
     """The check's six-digit limit on an immediate is in the model's prompt, not only in the checker."""
     mod = load(ISA)

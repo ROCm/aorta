@@ -27,7 +27,8 @@ KEYS = ("category", "rationale")
 MAX_RATIONALE_CHARS = 400
 SYSTEM = "You triage reports from a checking tool."
 USER = ("Report:\n{report}\n\nReply with one JSON object with exactly the keys \"category\" and \"rationale\": the "
-        "category is one of " + ", ".join(CATEGORIES) + ", and the rationale is one or two sentences.")
+        "category is one of " + ", ".join(CATEGORIES) + ", and the rationale is one or two sentences, at most "
+        f"{MAX_RATIONALE_CHARS} characters in all.")
 
 
 def load_rows(pool_dir) -> list[dict]:

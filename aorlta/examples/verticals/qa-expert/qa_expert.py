@@ -40,10 +40,12 @@ def row_sha256(row: dict) -> str:
 
 
 def normalise(text: str) -> str:
-    """PLACEHOLDER normalisation: NFKC, lower case, surrounding quotes, backticks and asterisks, a trailing full stop
-    and runs of space removed. A real expert task may want more (units, numeric tolerance, synonyms) or a judge."""
+    """PLACEHOLDER normalisation: NFKC, lower case, surrounding quotes, backticks and asterisks and a trailing full stop
+    removed until none is left (so `"Five".` and `"Five."` alike are `five`), and runs of space made one. A real
+    expert task may want more (units, numeric tolerance, synonyms) or a judge."""
     t = unicodedata.normalize("NFKC", text).strip().lower()
-    t = t.strip("*`'\" ").rstrip(".").strip()
+    while (s := t.strip("*`'\" ").rstrip(".").strip()) != t:
+        t = s
     return re.sub(r"\s+", " ", t)
 
 
