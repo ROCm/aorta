@@ -1,0 +1,39 @@
+# Score a model on the isa-fuzzer starter's 4 held-out placeholder goals, 4 samples each
+# (orchestrator.mode: score).
+# One GPU: one TokenSpeed engine on GPU 0; the check runs on the CPU.
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir (and
+# model.adapter_dir to score a trained adapter) and data.prompt_pools[0].path, which is this checkout's
+# aorlta/examples/verticals/isa-fuzzer/pool/heldout.
+plugins: [examples/verticals/isa-fuzzer/isa_fuzzer.py]
+run:
+  run_id: isa-fuzzer-score
+  source: standin
+  root: /scratch/aorlta/runs
+model:
+  base_dir: /data/hf/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  source: standin
+data:
+  prompt_pools:
+    - path: /opt/aorlta/examples/verticals/isa-fuzzer/pool/heldout
+      source: standin
+      task: isa-fuzzer
+rollout:
+  engines: [0]
+  K: 4
+  P: 4
+  max_repair_turns: 1
+  thinking: "off"
+  temperature: 0.7
+  max_new_tokens: 512
+  compile_adapter: none
+  parse_adapter: isa-fuzzer.parse
+  feedback_template: isa-fuzzer.feedback
+  # few prompts, each with a short answer, can give a group K identical replies with a sound sampler
+  # (the engines' start-up self-test checks that), so only stop when most groups do
+  identical_groups_stop: 0.75
+reward:
+  profile: isa-fuzzer
+  reward_fn: isa-fuzzer.v1
+orchestrator:
+  mode: score
+  run_seed: 20261113
