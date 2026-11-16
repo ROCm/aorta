@@ -48,12 +48,13 @@ def row_sha256(row: dict) -> str:
 
 
 def normalise(text: str) -> str:
-    """Lower case, NFKC, outer quotes, backticks, a trailing full stop, commas between digits and runs of space
-    removed: `**Answer:** "1,024."` and `answer: 1024` are one answer."""
+    """Lower case, NFKC, outer quotes, backticks and asterisks and a trailing full stop removed until none is left,
+    commas between digits and runs of space removed: `**Answer:** "1,024."`, `**Five**.` and `answer: 1024` are
+    each one answer, `1024` and `five`."""
     t = unicodedata.normalize("NFKC", text).strip().lower()
-    t = t.strip("*`'\" ")
+    while (s := t.strip("*`'\" ").rstrip(".").strip()) != t:
+        t = s
     t = re.sub(r"(?<=\d),(?=\d)", "", t)
-    t = t.rstrip(".").strip()
     return re.sub(r"\s+", " ", t)
 
 
@@ -149,7 +150,7 @@ class QaMatch:
         self.judge_timeout_s = float(ctx.settings.get("judge_timeout_s", 60.0))
         self.thinking = ctx.thinking
         # cached legs are keyed by it: the thinking flag decides the read, and the judge can turn a mismatch clean
-        self.version = f"3+thinking-{self.thinking}"
+        self.version = f"4+thinking-{self.thinking}"
         if self.judge:
             files = {a: file_identity(a) for a in self.judge if isinstance(a, str) and Path(a).is_file()}
             exe = shutil.which(self.judge[0]) if isinstance(self.judge[0], str) else None  # as PATH finds it, if bare
