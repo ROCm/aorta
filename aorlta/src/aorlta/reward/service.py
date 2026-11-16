@@ -339,6 +339,12 @@ class RewardService:
             self._draining = False
             self._drain_deadline = None
 
+    def checkers(self) -> dict[str, dict[str, str]]:
+        """Each pool's adapter name and version, as its workers reported them: a changed checker (a judge, a
+        compiler, a thinking flag) is a new version even where the profile's name is unchanged."""
+        return {name: {"adapter": pool.checker[0], "version": pool.checker[1]}
+                for name, pool in sorted(self._pools.items())}
+
     def stats(self) -> ServiceStats:
         with self._lock:
             runs: dict[str, dict[str, int]] = {}

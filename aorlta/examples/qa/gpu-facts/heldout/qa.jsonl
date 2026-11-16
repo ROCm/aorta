@@ -1,0 +1,8 @@
+{"id": "warp-size", "question": "How many threads are in a warp on NVIDIA GPUs?", "answer": "32", "aliases": ["32 threads"]}
+{"id": "free", "question": "Which HIP runtime function frees memory allocated with hipMalloc?", "answer": "hipFree", "aliases": ["hipFree()"]}
+{"id": "blockdim", "question": "In a HIP kernel, which built-in variable holds the number of threads in each dimension of a block?", "answer": "blockDim"}
+{"id": "rocm", "question": "What is the name of AMD's open software platform for GPU computing?", "answer": "ROCm"}
+{"id": "stream", "question": "Which HIP runtime function creates a new stream?", "answer": "hipStreamCreate", "aliases": ["hipStreamCreate()"]}
+{"id": "half-bytes", "question": "How many bytes does one 16-bit floating-point value occupy?", "answer": "2", "aliases": ["2 bytes", "two"]}
+{"id": "griddim", "question": "In a HIP kernel, which built-in variable holds the number of blocks in each dimension of the grid?", "answer": "gridDim"}
+{"id": "memset", "question": "Which HIP runtime function sets a range of device memory to a byte value?", "answer": "hipMemset", "aliases": ["hipMemset()"]}

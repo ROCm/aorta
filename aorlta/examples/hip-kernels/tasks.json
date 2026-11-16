@@ -1,0 +1,99 @@
+[
+  {
+    "id": "vector_add",
+    "kernel": "vector_add",
+    "signature": "__global__ void vector_add(const float* a, const float* b, float* c, int n)",
+    "description": "c[i] = a[i] + b[i] for every 0 <= i < n",
+    "launch": "with blockDim.x = 256 and gridDim.x = (n + 255) / 256, one thread per element",
+    "scalars": [["int", "n", "100003"]],
+    "arrays": [{"name": "a", "size": "n", "role": "in"}, {"name": "b", "size": "n", "role": "in"},
+               {"name": "c", "size": "n", "role": "out"}],
+    "grid": "dim3((n + 255) / 256)", "block": "dim3(256)", "args": ["a", "b", "c", "n"],
+    "reference": "for (int i = 0; i < n; ++i) c[i] = a[i] + b[i];",
+    "rtol": 0.0, "atol": 0.0
+  },
+  {
+    "id": "saxpy",
+    "kernel": "saxpy",
+    "signature": "__global__ void saxpy(float alpha, const float* x, float* y, int n)",
+    "description": "y[i] = alpha * x[i] + y[i] for every 0 <= i < n, in place",
+    "launch": "with blockDim.x = 256 and gridDim.x = (n + 255) / 256, one thread per element",
+    "scalars": [["int", "n", "100003"], ["float", "alpha", "2.5f"]],
+    "arrays": [{"name": "x", "size": "n", "role": "in"}, {"name": "y", "size": "n", "role": "inout"}],
+    "grid": "dim3((n + 255) / 256)", "block": "dim3(256)", "args": ["alpha", "x", "y", "n"],
+    "reference": "for (int i = 0; i < n; ++i) y[i] = alpha * x[i] + y[i];",
+    "rtol": 1e-05, "atol": 1e-06
+  },
+  {
+    "id": "relu",
+    "kernel": "relu",
+    "signature": "__global__ void relu(const float* x, float* y, int n)",
+    "description": "y[i] = max(x[i], 0) for every 0 <= i < n",
+    "launch": "with blockDim.x = 256 and gridDim.x = (n + 255) / 256, one thread per element",
+    "scalars": [["int", "n", "100003"]],
+    "arrays": [{"name": "x", "size": "n", "role": "in"}, {"name": "y", "size": "n", "role": "out"}],
+    "grid": "dim3((n + 255) / 256)", "block": "dim3(256)", "args": ["x", "y", "n"],
+    "reference": "for (int i = 0; i < n; ++i) y[i] = x[i] > 0.0f ? x[i] : 0.0f;",
+    "rtol": 0.0, "atol": 0.0
+  },
+  {
+    "id": "scale_shift",
+    "kernel": "scale_shift",
+    "signature": "__global__ void scale_shift(const float* x, float* y, float scale, float shift, int n)",
+    "description": "y[i] = x[i] * scale + shift for every 0 <= i < n",
+    "launch": "with blockDim.x = 256 and gridDim.x = (n + 255) / 256, one thread per element",
+    "scalars": [["int", "n", "100003"], ["float", "scale", "-1.75f"], ["float", "shift", "0.25f"]],
+    "arrays": [{"name": "x", "size": "n", "role": "in"}, {"name": "y", "size": "n", "role": "out"}],
+    "grid": "dim3((n + 255) / 256)", "block": "dim3(256)", "args": ["x", "y", "scale", "shift", "n"],
+    "reference": "for (int i = 0; i < n; ++i) y[i] = x[i] * scale + shift;",
+    "rtol": 1e-05, "atol": 1e-06
+  },
+  {
+    "id": "clamp",
+    "kernel": "clamp",
+    "signature": "__global__ void clamp(const float* x, float* y, float lo, float hi, int n)",
+    "description": "y[i] = min(max(x[i], lo), hi) for every 0 <= i < n",
+    "launch": "with blockDim.x = 256 and gridDim.x = (n + 255) / 256, one thread per element",
+    "scalars": [["int", "n", "100003"], ["float", "lo", "-0.5f"], ["float", "hi", "0.75f"]],
+    "arrays": [{"name": "x", "size": "n", "role": "in"}, {"name": "y", "size": "n", "role": "out"}],
+    "grid": "dim3((n + 255) / 256)", "block": "dim3(256)", "args": ["x", "y", "lo", "hi", "n"],
+    "reference": "for (int i = 0; i < n; ++i) y[i] = x[i] < lo ? lo : (x[i] > hi ? hi : x[i]);",
+    "rtol": 0.0, "atol": 0.0
+  },
+  {
+    "id": "reverse",
+    "kernel": "reverse",
+    "signature": "__global__ void reverse(const float* x, float* y, int n)",
+    "description": "y[i] = x[n - 1 - i] for every 0 <= i < n",
+    "launch": "with blockDim.x = 256 and gridDim.x = (n + 255) / 256, one thread per element",
+    "scalars": [["int", "n", "100003"]],
+    "arrays": [{"name": "x", "size": "n", "role": "in"}, {"name": "y", "size": "n", "role": "out"}],
+    "grid": "dim3((n + 255) / 256)", "block": "dim3(256)", "args": ["x", "y", "n"],
+    "reference": "for (int i = 0; i < n; ++i) y[i] = x[n - 1 - i];",
+    "rtol": 0.0, "atol": 0.0
+  },
+  {
+    "id": "block_sum",
+    "kernel": "block_sum",
+    "signature": "__global__ void block_sum(const float* x, float* out, int n)",
+    "description": "out[b] = the sum of x[i] over b * 256 <= i < min((b + 1) * 256, n), for every block b",
+    "launch": "with blockDim.x = 256 and gridDim.x = (n + 255) / 256, one block per 256 elements",
+    "scalars": [["int", "n", "100003"], ["int", "blocks", "(n + 255) / 256"]],
+    "arrays": [{"name": "x", "size": "n", "role": "in"}, {"name": "out", "size": "blocks", "role": "out"}],
+    "grid": "dim3(blocks)", "block": "dim3(256)", "args": ["x", "out", "n"],
+    "reference": "for (int b = 0; b < blocks; ++b) { double s = 0.0; for (int i = b * 256; i < (b + 1) * 256 && i < n; ++i) s += x[i]; out[b] = (float)s; }",
+    "rtol": 0.0001, "atol": 0.002
+  },
+  {
+    "id": "transpose",
+    "kernel": "transpose",
+    "signature": "__global__ void transpose(const float* in, float* out, int rows, int cols)",
+    "description": "out[c * rows + r] = in[r * cols + c] for every 0 <= r < rows and 0 <= c < cols: `in` is a rows x cols row-major matrix and `out` its cols x rows transpose",
+    "launch": "with blockDim = (16, 16) and gridDim = ((cols + 15) / 16, (rows + 15) / 16), where threadIdx.x and blockIdx.x run along the columns of `in`",
+    "scalars": [["int", "rows", "300"], ["int", "cols", "517"]],
+    "arrays": [{"name": "in", "size": "rows * cols", "role": "in"}, {"name": "out", "size": "rows * cols", "role": "out"}],
+    "grid": "dim3((cols + 15) / 16, (rows + 15) / 16)", "block": "dim3(16, 16)", "args": ["in", "out", "rows", "cols"],
+    "reference": "for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c) out[c * rows + r] = in[r * cols + c];",
+    "rtol": 0.0, "atol": 0.0
+  }
+]

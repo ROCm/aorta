@@ -1,0 +1,16 @@
+{"id": "global-kw", "question": "In HIP, which keyword marks a function that runs on the GPU and is launched from the host?", "answer": "__global__"}
+{"id": "wave-cdna", "question": "How many threads make up one wavefront on AMD CDNA GPUs such as the MI300 series?", "answer": "64", "aliases": ["64 threads"]}
+{"id": "lds", "question": "On AMD GPUs, what does the abbreviation LDS stand for?", "answer": "local data share"}
+{"id": "memcpy", "question": "Which HIP runtime function copies memory between host and device?", "answer": "hipMemcpy", "aliases": ["hipMemcpy()"]}
+{"id": "malloc", "question": "Which HIP runtime function allocates device memory?", "answer": "hipMalloc", "aliases": ["hipMalloc()"]}
+{"id": "devsync", "question": "Which HIP runtime function blocks the host until all previously issued work on the current device has finished?", "answer": "hipDeviceSynchronize", "aliases": ["hipDeviceSynchronize()"]}
+{"id": "syncthreads", "question": "Which HIP device function makes every thread of a block wait until all threads of that block reach it?", "answer": "__syncthreads", "aliases": ["__syncthreads()"]}
+{"id": "threadidx", "question": "In a HIP kernel, which built-in variable holds a thread's index within its block?", "answer": "threadIdx"}
+{"id": "shared-kw", "question": "Which HIP keyword declares a variable in memory shared by all threads of a block?", "answer": "__shared__"}
+{"id": "hipcc", "question": "What is the name of ROCm's compiler driver for HIP source files?", "answer": "hipcc"}
+{"id": "lasterror", "question": "Which HIP runtime function returns the last error produced by a HIP runtime call?", "answer": "hipGetLastError", "aliases": ["hipGetLastError()"]}
+{"id": "atomicadd", "question": "Which HIP device function adds a value to a location in memory atomically?", "answer": "atomicAdd", "aliases": ["atomicAdd()"]}
+{"id": "float-bytes", "question": "How many bytes does one 32-bit floating-point value occupy?", "answer": "4", "aliases": ["4 bytes", "four"]}
+{"id": "gfx942", "question": "What is the LLVM target name (gfx number) of the AMD Instinct MI300X GPU?", "answer": "gfx942"}
+{"id": "blockidx", "question": "In a HIP kernel, which built-in variable holds the index of the current block within the grid?", "answer": "blockIdx"}
+{"id": "device-kw", "question": "Which HIP keyword marks a function that runs on the GPU and can be called only from GPU code?", "answer": "__device__"}

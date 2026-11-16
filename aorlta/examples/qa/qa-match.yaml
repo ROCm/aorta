@@ -1,0 +1,12 @@
+# `qa-match`: one leg, `ref.answer`, on the CPU: the reply's last `Answer:` line against the reference
+# (examples/qa/qa_task.py). No compile and no sanitizer leg: a profile holds only the checks its task needs.
+name: qa-match
+reward_fn: qa.v1
+clean_repeats: 1
+materialize: true
+pools:
+  match: {resource: local_cpu, adapter: qa.match, timeout: gate, workers: 4}
+stages:
+  - {name: S0, pool: match, legs: [ref.answer]}
+adapters:
+  qa.match: {}   # {judge: [/path/to/judge, args...]} asks a command about answers that do not match

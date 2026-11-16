@@ -1,0 +1,41 @@
+# Train on the example task of docs/TUTORIAL.md (examples/hip-kernels): 3 iterations of the 8 kernels x 8 samples,
+# one LoRA rank beside engine 0, the kernels run on GPUs 4-7 (hipk-gpu.yaml). A starting point to copy, not a result:
+# 8 prompts are far too few to learn from.
+# Site-specific paths, to edit here or to set in a site file (AORLTA_SITE): run.root, model.base_dir and
+# data.prompt_pools[0].path, which is this checkout's aorlta/examples/hip-kernels.
+plugins: [examples/hip-kernels/hip_kernels.py]
+run:
+  run_id: hipk-train
+  source: standin
+  root: /scratch/aorlta/runs
+model:
+  base_dir: /data/hf/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  source: standin
+data:
+  prompt_pools:
+    - path: /opt/aorlta/examples/hip-kernels
+      source: standin
+      task: hipk
+rollout:
+  engines: [0, 1, 2, 3]
+  K: 8
+  P: 8
+  max_repair_turns: 2
+  thinking: "off"
+  temperature: 0.7
+  max_new_tokens: 2048
+  compile_adapter: standin.hipcc
+  parse_adapter: hipk.parse
+  feedback_template: hipk.feedback
+  # a short kernel can have one obvious answer: 8 identical answers to one prompt is not a broken sampler here
+  # (the engines' self-test checks that), and with 8 prompts one such group is 12.5% of them
+  identical_groups_stop: 0.5
+reward:
+  profile: hipk-gpu
+  reward_fn: hipk.v1
+orchestrator:
+  iterations: 3
+  run_seed: 20261112
+trainer:
+  ranks: 1
+  micro_batch_tokens: 20480
