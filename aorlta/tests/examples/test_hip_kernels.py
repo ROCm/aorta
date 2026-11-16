@@ -763,6 +763,30 @@ def test_every_timed_launch_runs_on_freshly_reset_buffers(hipk):
             loop.index("hipEventRecord(t1)")
 
 
+def test_every_launch_runs_on_a_freshly_loaded_module(hipk):
+    """A kernel keeps state in a device global across launches of one module, so it could compute on an untimed
+    launch and copy the result on the timed ones. Each launch, timed or not, loads its kernel's module again first
+    (outside the timed interval), and a load unloads the module before it; one load per batch would still let
+    every launch after a batch's first copy what the first kept."""
+    for task in hipk.load_tasks(EXAMPLE):
+        src = hipk.timing_source(task)
+        load = src[src.index("auto load = [&](int who)"):]
+        load = load[:load.index("\n  };")]
+        assert load.index("hipModuleUnload(mod_[who])") < load.index("hipModuleLoadData(&mod_[who], code_[who].data())")
+        body = src[src.index("auto batch = [&](int who)"):]
+        body = body[:body.index("\n  };")]
+        head, loop = body.split("for (int l = 0; l < launches; ++l) {")
+        assert "load(" not in head
+        assert loop.count("load(who)") == 1 and loop.count("launch(who)") == 1
+        assert loop.index("load(who)") < loop.index("hipEventRecord(t0)") < loop.index("launch(who)")
+        fresh = src[src.index("auto fresh = [&](int who)"):]
+        fresh = fresh[:fresh.index("\n  };")]
+        assert fresh.count("load(who)") == 1 and fresh.index("load(who)") < fresh.index("launch(who)")
+        # the kernel is launched nowhere else
+        rest = src.replace(loop, "").replace(fresh, "")
+        assert "launch(who)" not in rest.replace("auto launch = [&](int who)", "")
+
+
 def test_every_timed_launchs_outputs_are_checked_after_its_end_event(hipk):
     """Resetting the buffers leaves a kernel's own device globals alone, so a kernel could do its work only on the
     launches that are checked: each timed launch's outputs and guards are checked after its end event (outside its
@@ -809,8 +833,8 @@ def test_every_timing_harness_compiles(hipk, tmp_path):
 
 
 # Correct when it is checked, idle otherwise: each block counts its own launches in a device global, which resetting
-# the buffers does not touch, and computes only on launches 1, 22, 43, ...: with 20 launches per timed batch, the ones
-# the harness checked before each round's batch.
+# the buffers does not touch, and computes only on launches 1, 22, 43, ... of one loaded module: with 20 launches per
+# timed batch, the ones the harness checked before each round's batch, had it loaded the module only once.
 STATEFUL_VECTOR_ADD = """#include <hip/hip_runtime.h>
 __device__ unsigned calls_[1 << 20];
 __global__ void vector_add(const float* a, const float* b, float* c, int n) {
@@ -827,10 +851,11 @@ __global__ void vector_add(const float* a, const float* b, float* c, int n) {
 @pytest.mark.skipif(not os.environ.get("AORLTA_HIPK_GPU") or not os.environ.get("SLURM_JOB_ID")
                     or not Path(HIPCC).exists(),
                     reason="GPU test: runs only in a Slurm job that names a GPU in AORLTA_HIPK_GPU")
-def test_on_a_gpu_a_kernel_idle_on_unchecked_launches_is_timing_wrong_output(hipk, tmp_path):
-    """The stateful kernel above passes the correctness check (it computes on its first launch) and every check
-    before a round; only the check after each timed launch sees it, so its timing leg is wrong output, never a
-    speedup. The reference against itself is the control: measured, not faster."""
+def test_on_a_gpu_a_kernel_idle_on_unchecked_launches_never_times_as_faster(hipk, tmp_path):
+    """The stateful kernel above passes the correctness check (it computes on its first launch). Each launch now
+    loads its module afresh, so its counter starts at zero every time and it computes on every launch (measured as
+    what it is); were its state to survive, the check after each timed launch would make it wrong output. Never a
+    speedup either way. The reference against itself is the control: measured, not faster."""
     gpu = os.environ["AORLTA_HIPK_GPU"]
     cand = tmp_path / "vector_add.hip"
     cand.write_text(STATEFUL_VECTOR_ADD)
@@ -841,7 +866,8 @@ def test_on_a_gpu_a_kernel_idle_on_unchecked_launches_is_timing_wrong_output(hip
                            env=dict(os.environ, TMPDIR=str(tmp_path)))
         assert p.returncode == 0, p.stderr[-2000:]
         rows.append(json.loads(p.stdout.splitlines()[-1]))
-    assert (rows[0]["state"], rows[0]["reason"]) == ("unsettled", "timing_wrong_output"), rows[0]
+    assert (rows[0]["state"], rows[0]["reason"]) in {("unsettled", "timing_wrong_output"), ("fail", "not_faster")}, \
+        rows[0]
     assert (rows[1]["state"], rows[1]["reason"]) == ("fail", "not_faster"), rows[1]
 
 
@@ -950,7 +976,7 @@ def test_the_timing_harness_holds_none_of_the_candidates_code(hipk):
     to the record file."""
     for task in hipk.load_tasks(EXAMPLE):
         src = hipk.timing_source(task)
-        assert "hipModuleLoad(&mod, argv[1 + who])" in src and " printf(" not in src and "g_path = argv[3];" in src
+        assert 'std::fopen(argv[1 + who], "rb")' in src and " printf(" not in src and "g_path = argv[3];" in src
         assert f"__builtin_get_device_side_mangled_name({task['kernel']})" in src and "<<<" not in src
 
 

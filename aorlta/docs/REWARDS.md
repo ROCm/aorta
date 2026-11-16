@@ -94,8 +94,10 @@ reaches the timing code. The harness (`timing_source`) is built from the task al
 the task's kernel in each by its exact mangled signature, and writes its result to a record file the adapter reads
 (stdout is never read). It runs each kernel once on fresh inputs and compares the outputs with the host reference; times one batch of each and stops if the projected GPU time is over `gpu_budget_s`; then takes `warmup +
 repeats` rounds, each a fresh checked run of the candidate and one batch of `launches` launches of each kernel, the
-order alternating by round; every launch runs on buffers reset just before it and is timed alone (hipEvents around
-the launch, the reset outside), so a launch cannot skip work an earlier one did.
+order alternating by round; every launch runs on buffers reset just before it and on its kernel's code object loaded
+afresh just before it, and is timed alone (hipEvents around the launch, the reset and the load outside), so a launch
+cannot skip work an earlier one did, nor copy a result an earlier one kept in a device global. After each timed
+launch, outside its interval, the harness checks its outputs, its read-only inputs and the guards on the GPU.
 
 How it decides (`timing.judge`). The first `warmup` samples of each side are dropped. Of the rest: each side's median
 and relative MAD (`median(|x - median|) / median`); `noisy` if either relative MAD is above `max_rel_mad`; the noise

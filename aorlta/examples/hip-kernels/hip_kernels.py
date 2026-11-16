@@ -599,11 +599,13 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
     once on fresh inputs and compares the outputs with the host reference (`reference_wrong_output`,
     `candidate_wrong_output`); times one batch of each to project the run's GPU time, and stops if that exceeds the
     budget (`too_slow`); then takes `warmup + repeats` rounds, each a fresh checked run of the candidate and then one
-    batch of `launches` launches of each kernel, in an order that alternates by round. Every launch runs on buffers
-    reset just before it, outside its timed interval, so a launch cannot skip work an earlier one did; and its outputs,
-    its read-only inputs (bit for bit, as `harness_source` checks them) and the guards are checked after it, outside
-    the interval too (by a check kernel of the harness's own), so a kernel that keeps state of its own, in a device
-    global say, cannot do its work only on the launches that are checked (`candidate_wrong_output`, or
+    batch of `launches` launches of each kernel, in an order that alternates by round. Every launch, timed or not,
+    runs on buffers reset just before it and on its kernel's code object loaded afresh just before it (read from the
+    file once), both outside its timed interval, so a launch cannot skip work an earlier one did, nor reuse work an
+    earlier one kept in a device global (one reload per batch would leave all but a batch's first launch free to copy
+    what the first kept); and its outputs, its read-only inputs (bit for bit, as `harness_source` checks them) and the
+    guards are checked after it, outside the interval too (by a check kernel of the harness's own), so a kernel that
+    keeps state anywhere else cannot do its work only on the launches that are checked (`candidate_wrong_output`, or
     `reference_wrong_output`). Its record (the file, written whole, never stdout): `ok` with every batch's time per
     launch in microseconds, warm-up rounds included; or `hip_error` and the call that failed. `scalars` gives some of
     the task's scalars other values (C++ expressions) for the timing alone, so that the kernels run long enough to
@@ -690,15 +692,38 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
               '  if (hipMalloc(&d_bad_, sizeof(unsigned)) != hipSuccess) return say("hip_error");']
     names = {a["name"] for a in arrays}
     args = ", ".join(f"&d_{x}" if x in names else f"&{x}" for x in task["args"])
-    lines += ["  hipFunction_t fn_[2];",
+    lines += ["  // Each code object is read once and loaded afresh before every launch of its kernel, outside any",
+              "  // timed interval: a module's device globals start as its code object defines them, so no launch can",
+              "  // use work another launch kept there.",
+              "  std::vector<char> code_[2];",
               "  for (int who = 0; who < 2; ++who) {",
-              "    hipModule_t mod;",
-              '    if (hipModuleLoad(&mod, argv[1 + who]) != hipSuccess) return say("hip_error");',
-              f"    hipError_t gf = hipModuleGetFunction(&fn_[who], mod, __builtin_get_device_side_mangled_name("
+              '    FILE* f = std::fopen(argv[1 + who], "rb");',
+              '    if (f == nullptr) return say("hip_error");',
+              "    char b[65536];",
+              "    for (size_t k; (k = std::fread(b, 1, sizeof b, f)) > 0;)",
+              "      code_[who].insert(code_[who].end(), b, b + k);",
+              "    const bool read_ok = !std::ferror(f);",
+              "    std::fclose(f);",
+              '    if (!read_ok || code_[who].empty()) return say("hip_error");',
+              "  }",
+              "  hipModule_t mod_[2] = {nullptr, nullptr};",
+              "  hipFunction_t fn_[2];",
+              "  auto load = [&](int who) -> int {  // 0: loaded; 1: no such kernel; -1: hip error",
+              "    if (mod_[who] != nullptr && hipModuleUnload(mod_[who]) != hipSuccess) return -1;",
+              "    mod_[who] = nullptr;",
+              "    if (hipModuleLoadData(&mod_[who], code_[who].data()) != hipSuccess) {",
+              "      mod_[who] = nullptr;",
+              "      return -1;",
+              "    }",
+              f"    hipError_t gf = hipModuleGetFunction(&fn_[who], mod_[who], __builtin_get_device_side_mangled_name("
               f"{task['kernel']}));",
-              "    if (gf == hipErrorNotFound || gf == hipErrorInvalidDeviceFunction)",
-              '      return say(who ? "reference_no_kernel" : "candidate_no_kernel");',
-              '    if (gf != hipSuccess) return say("hip_error");',
+              "    if (gf == hipErrorNotFound || gf == hipErrorInvalidDeviceFunction) return 1;",
+              "    return gf == hipSuccess ? 0 : -1;",
+              "  };",
+              "  for (int who = 0; who < 2; ++who) {",
+              "    const int got = load(who);",
+              '    if (got > 0) return say(who ? "reference_no_kernel" : "candidate_no_kernel");',
+              '    if (got < 0) return say("hip_error");',
               "  }",
               f"  void* args_[] = {{{args}}};",
               f"  dim3 grid_ = {task['grid']};", f"  dim3 block_ = {task['block']};"]
@@ -739,19 +764,21 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
               "    return bad ? 1 : 0;",
               "  };",
               "  auto fresh = [&](int who) -> const char* {",
-              '    if (!reset() || !launch(who) || hipDeviceSynchronize() != hipSuccess) return "hip_error";',
+              '    if (!reset() || load(who) != 0 || !launch(who) || hipDeviceSynchronize() != hipSuccess) '
+              'return "hip_error";',
               "    return verify();",
               "  };",
               "  hipEvent_t t0, t1;",
               "  if (hipEventCreate(&t0) != hipSuccess || hipEventCreate(&t1) != hipSuccess)",
               '    return say("hip_error");',
-              "  // each launch on freshly reset buffers, timed alone, and its outputs and guards checked after its end",
-              "  // event, outside the timed interval: -1 is a hip error, -2 a launch whose outputs were wrong",
+              "  // each launch on freshly reset buffers and a freshly loaded module, timed alone, and its outputs and",
+              "  // guards checked after its end event, outside the timed interval: -1 is a hip error, -2 a launch",
+              "  // whose outputs were wrong",
               "  auto batch = [&](int who) -> float {",
               "    float total = 0.0f;",
               "    for (int l = 0; l < launches; ++l) {",
-              "      if (!reset() || hipDeviceSynchronize() != hipSuccess || hipEventRecord(t0) != hipSuccess) "
-              "return -1.0f;",
+              "      if (!reset() || load(who) != 0 || hipDeviceSynchronize() != hipSuccess || hipEventRecord(t0) != "
+              "hipSuccess) return -1.0f;",
               "      if (!launch(who) || hipEventRecord(t1) != hipSuccess || hipEventSynchronize(t1) != hipSuccess) "
               "return -1.0f;",
               "      float ms = 0.0f;",
