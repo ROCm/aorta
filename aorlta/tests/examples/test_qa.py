@@ -109,6 +109,27 @@ def test_the_parse_gives_a_repair_turn_to_a_reply_without_an_answer(qa):
     assert make_compiler("none", Path("/nonexistent")).check(good.code, "c0-0-t0").ok
 
 
+@pytest.mark.parametrize("reply, want", [
+    ("**Answer:**", None), ("**Answer:**  ", None), ("4\n**Answer:**", None), ("**Answer：**", None),
+    ("**Answer:** 5", "5"), ("Answer: **5**", "5"), ("**Answer**: 7", "7"),
+])
+def test_a_bold_answer_marker_is_the_markers_and_an_empty_one_is_no_answer(qa, reply, want):
+    """`**Answer:**` with nothing after it is a reply with no answer (a repair turn, then `no_answer`), not the
+    answer `**`."""
+    got = qa.final_answer(reply)
+    assert (got if got is None else qa.normalise(got)) == want
+
+
+def test_an_empty_bold_marker_gets_the_repair_turn_and_no_answer(qa, tmp_path):
+    from aorlta.rollout.chain import make_parse_adapter
+
+    out = make_parse_adapter("qa.parse").check("It is 64 lanes.\n**Answer:**", "off", None)
+    assert out.kind == "rejected" and out.rejection[1] == "no_answer"
+    row = next(r for r in qa.load_rows(QA / "gpu-facts" / "train") if r["id"] == "wave-cdna")
+    res = adapter(qa).run(job_for(qa, tmp_path, row, "It is 64 lanes.\n**Answer:**"))
+    assert (res.state, res.reason) == ("fail", "no_answer")
+
+
 def job_for(qa, tmp_path, row, reply):
     from aorlta.schemas import LegJob
 
