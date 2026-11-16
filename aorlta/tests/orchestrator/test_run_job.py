@@ -464,6 +464,20 @@ def test_of_two_jobs_cleaning_up_at_once_the_one_that_decides_last_removes_the_i
     assert "kept trainer:1" in kept.stdout and (images / "trainer_1").exists()
 
 
+def test_a_job_is_leaving_only_after_its_last_container_and_never_from_an_earlier_attempt():
+    """The marker says this job uses no image: it goes up after the cleanup's own helper container (whose image another
+    leaving job could otherwise remove first) and before the first image decision; and a job that keeps its id across
+    a requeue removes its old marker before it claims, builds or runs anything."""
+    body = re.search(r"^cleanup\(\) \{.*?^\}\n", JOB, re.M | re.S).group(0)
+    mark = ': > "$CLAIMS/leaving-$SLURM_JOB_ID"'
+    assert body.count(mark) == 1 and JOB.count(mark) == 1
+    assert body.index('--entrypoint bash "$img" -c') < body.index(mark) < body.index('remove_image "$IMG"') \
+        < body.index("retry_kept_images")
+    unmark = 'rm -f "$CLAIMS/leaving-$SLURM_JOB_ID"'
+    assert JOB.index("trap cleanup EXIT") < JOB.index(unmark) < JOB.index('claim_dir "$SYNC_DIR/$RUN_ID"') \
+        < JOB.index('stamp "BUILD $BASE"')
+
+
 def test_a_leaving_marker_is_dropped_once_its_job_has_ended_and_kept_while_it_runs(tmp_path):
     for d in ("out", "runs", "claims"):
         (tmp_path / d).mkdir(exist_ok=True)

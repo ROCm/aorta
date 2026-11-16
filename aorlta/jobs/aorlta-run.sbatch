@@ -377,8 +377,6 @@ cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by the
   CLEANED=1
   [ -n "$VRAM_PID" ] && kill "$VRAM_PID" 2>/dev/null
   docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?" | xargs -r docker rm -f >/dev/null 2>&1
-  # this job uses no image from here on: before any image decision, so another job cleaning up at once sees it
-  mkdir -p "$CLAIMS" 2>/dev/null && (umask 0111; : > "$CLAIMS/leaving-$SLURM_JOB_ID") 2>/dev/null
   find "$OUT" -maxdepth 3 -name 'gpucore.*' -type f -delete 2>/dev/null
   local img mounts=()
   img=$(clean_img)
@@ -393,6 +391,9 @@ cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by the
        cd /; fi
      [ $OWN_DIRS = 1 ] && rm -rf '$SYNC_DIR/$RUN_ID' ${SOCK_DIR:+'$SOCK_DIR'}; chown -R $(id -u):$(id -g) '$OUT';
      [ -d '$RUN_DIR' ] && chown -R $(id -u):$(id -g) '$RUN_DIR'" >/dev/null 2>&1
+  # this job uses no image from here on (the helper above was its last container): before its first image decision,
+  # so another job cleaning up at once sees it
+  mkdir -p "$CLAIMS" 2>/dev/null && (umask 0111; : > "$CLAIMS/leaving-$SLURM_JOB_ID") 2>/dev/null
   [ "$BUILT_TRAINER" = 1 ] && remove_image "$IMG"
   [ "$BUILT_BASE" = 1 ] && remove_image "$BASE"
   [ "$PULLED_CHK" = 1 ] && remove_image "$CHK_IMG"
@@ -405,6 +406,9 @@ cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by the
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT
+# A job that keeps its id across a requeue must not start as leaving: other jobs' cleanups would not count it as an
+# image user
+rm -f "$CLAIMS/leaving-$SLURM_JOB_ID" 2>/dev/null
 
 stamp "node $(hostname -s) job $SLURM_JOB_ID run $RUN_ID config $CONFIG components $COMPONENTS resume $RESUME commit $COMMIT"
 # Before anything uses them (the checker canary empties the socket directory): this run's /dev/shm directories, and
