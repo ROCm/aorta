@@ -10,6 +10,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -649,6 +650,81 @@ def test_every_timed_launch_runs_on_freshly_reset_buffers(hipk):
         loop = body[body.index("for (int l = 0; l < launches; ++l) {"):]
         assert loop.index("reset()") < loop.index("hipEventRecord(t0)") < loop.index("launch(who)") < \
             loop.index("hipEventRecord(t1)")
+
+
+def test_every_timed_launchs_outputs_are_checked_after_its_end_event(hipk):
+    """Resetting the buffers leaves a kernel's own device globals alone, so a kernel could do its work only on the
+    launches that are checked: each timed launch's outputs and guards are checked after its end event (outside its
+    timed interval) by the harness's check kernel, every array of the task, and a mismatch is the kernel's wrong
+    output, not a hip error."""
+    for task in hipk.load_tasks(EXAMPLE):
+        src = hipk.timing_source(task)
+        body = src[src.index("auto batch = [&](int who)"):]
+        loop = body[body.index("for (int l = 0; l < launches; ++l) {"):body.index("\n  };")]
+        assert loop.index("hipEventSynchronize(t1)") < loop.index("hipEventElapsedTime") < loop.index("checked()") \
+            < loop.index("total += ms")
+        assert "if (c != 0) return c < 0 ? -1.0f : -2.0f;" in loop
+        check = src[src.index("auto checked = [&]()"):src.index("auto fresh = [&]")]
+        launched = re.findall(r"aorlta_check_, dim3\(1024\), dim3\(256\), 0, 0, d_(\w+), (\w+),", check)
+        assert launched == [(a["name"], "nullptr" if a["role"] == "in" else f"e_{a['name']}")
+                            for a in task["arrays"]], task["id"]
+        failure = src[src.index("auto timed_failure"):]
+        assert 'us < -1.5f ? (who ? "reference_wrong_output" : "candidate_wrong_output") : "hip_error"' in failure
+        rounds = src[src.index("for (int r = 0; r < warmup + repeats; ++r)"):]
+        assert "if (us < 0.0f) return timed_failure(us, who);" in rounds
+        assert "if (pc < 0.0f) return timed_failure(pc, 0);" in src and "if (pr < 0.0f) return timed_failure(pr, 1);" \
+            in src
+
+
+@pytest.mark.skipif(not Path(HIPCC).exists(), reason=f"no hipcc at {HIPCC} (HIPCC)")
+def test_every_timing_harness_compiles(hipk, tmp_path):
+    """The timing harness of each task, at hipk-speed.yaml's timing sizes, CPU only: nothing is run."""
+    from aorlta.config import parse_yaml
+
+    scalars = parse_yaml((EXAMPLE / "hipk-speed.yaml").read_bytes())["leg_settings"]["ref.speedup"]["scalars"]
+    for task in hipk.load_tasks(EXAMPLE):
+        src = tmp_path / f"{task['id']}.hip"
+        src.write_text(hipk.timing_source(task, {k: str(v) for k, v in scalars.items()}))
+        p = subprocess.run([HIPCC, "--offload-arch=gfx950", "-O2", "-o", str(tmp_path / task["id"]), str(src)],
+                           capture_output=True, text=True)
+        assert p.returncode == 0, (task["id"], p.stderr[-2000:])
+
+
+# Correct when it is checked, idle otherwise: each block counts its own launches in a device global, which resetting
+# the buffers does not touch, and computes only on launches 1, 22, 43, ...: with 20 launches per timed batch, the ones
+# the harness checked before each round's batch.
+STATEFUL_VECTOR_ADD = """#include <hip/hip_runtime.h>
+__device__ unsigned calls_[1 << 20];
+__global__ void vector_add(const float* a, const float* b, float* c, int n) {
+  __shared__ unsigned seen;
+  if (threadIdx.x == 0) seen = calls_[blockIdx.x]++;
+  __syncthreads();
+  if (seen % 21 != 0) return;
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) c[i] = a[i] + b[i];
+}
+"""
+
+
+@pytest.mark.skipif(not os.environ.get("AORLTA_HIPK_GPU") or not os.environ.get("SLURM_JOB_ID")
+                    or not Path(HIPCC).exists(),
+                    reason="GPU test: runs only in a Slurm job that names a GPU in AORLTA_HIPK_GPU")
+def test_on_a_gpu_a_kernel_idle_on_unchecked_launches_is_timing_wrong_output(hipk, tmp_path):
+    """The stateful kernel above passes the correctness check (it computes on its first launch) and every check
+    before a round; only the check after each timed launch sees it, so its timing leg is wrong output, never a
+    speedup. The reference against itself is the control: measured, not faster."""
+    gpu = os.environ["AORLTA_HIPK_GPU"]
+    cand = tmp_path / "vector_add.hip"
+    cand.write_text(STATEFUL_VECTOR_ADD)
+    rows = []
+    for extra in (["--candidate", str(cand)], []):
+        p = subprocess.run([sys.executable, str(EXAMPLE / "hip_kernels.py"), "timecheck", "--task", "vector_add",
+                            "--hipcc", HIPCC, "--gpu", gpu, *extra], capture_output=True, text=True,
+                           env=dict(os.environ, TMPDIR=str(tmp_path)))
+        assert p.returncode == 0, p.stderr[-2000:]
+        rows.append(json.loads(p.stdout.splitlines()[-1]))
+    assert (rows[0]["state"], rows[0]["reason"]) == ("unsettled", "timing_wrong_output"), rows[0]
+    assert (rows[1]["state"], rows[1]["reason"]) == ("fail", "not_faster"), rows[1]
 
 
 def test_the_timing_checkers_version_names_where_it_measures(hipk, monkeypatch):

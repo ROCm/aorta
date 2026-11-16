@@ -557,7 +557,10 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
     `candidate_wrong_output`); times one batch of each to project the run's GPU time, and stops if that exceeds the
     budget (`too_slow`); then takes `warmup + repeats` rounds, each a fresh checked run of the candidate and then one
     batch of `launches` launches of each kernel, in an order that alternates by round. Every launch runs on buffers
-    reset just before it, outside its timed interval, so a launch cannot skip work an earlier one did. Its record (the file, written whole, never stdout): `ok` with every batch's time per
+    reset just before it, outside its timed interval, so a launch cannot skip work an earlier one did; and its outputs
+    and guards are checked after it, outside the interval too (by a check kernel of the harness's own, against the host
+    reference's outputs), so a kernel that keeps state of its own, in a device global say, cannot do its work only on
+    the launches that are checked (`candidate_wrong_output`, or `reference_wrong_output`). Its record (the file, written whole, never stdout): `ok` with every batch's time per
     launch in microseconds, warm-up rounds included; or `hip_error` and the call that failed. `scalars` gives some of
     the task's scalars other values (C++ expressions) for the timing alone, so that the kernels run long enough to
     time. No code of the candidate's runs on the host."""
@@ -566,6 +569,21 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
              "#include <cstdlib>", "#include <cstring>", "#include <string>", "#include <vector>", "",
              "// The task's kernel, defined here only to name it: what runs is loaded from the two code objects.",
              f"{task['signature']} {{}}", "",
+             "// The harness's own check after each timed launch, on the GPU: counts the elements of `got` that differ",
+             "// from `want` (past `n`, from the guard value; below it, beyond the task's tolerance, unless only the",
+             "// guard is checked), with the host check's float arithmetic.",
+             "__global__ void aorlta_check_(const float* got, const float* want, long n, long total, int values, "
+             "float atol, float rtol, unsigned* bad) {",
+             "#pragma clang fp contract(off)",
+             "  for (long i = blockIdx.x * (long)blockDim.x + threadIdx.x; i < total; i += (long)gridDim.x * "
+             "blockDim.x) {",
+             "    const float g = got[i];",
+             f"    bool ok = i >= n ? g == {GUARD_VALUE} : !values;",
+             "    if (i < n && values) { const float w = want[i]; "
+             "ok = (isnan(g) && isnan(w)) || fabsf(g - w) <= atol + rtol * fabsf(w); }",
+             "    if (!ok) atomicAdd(bad, 1u);",
+             "  }",
+             "}", "",
              "static const char* g_path = nullptr;",
              "static void put(const std::string& json) {  // written aside, then renamed over the record",
              '  std::string tmp = std::string(g_path) + ".partial";',
@@ -616,6 +634,13 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
                   f"  if (hipMalloc(&d_{x}, bytes_{x}) != hipSuccess || hipMalloc(&p_{x}, bytes_{x}) != hipSuccess",
                   f"      || hipMemcpy(p_{x}, h_{x}.data(), bytes_{x}, hipMemcpyHostToDevice) != hipSuccess)",
                   '    return say("hip_error");']
+        if a["role"] != "in":  # the host reference's outputs, for the check after each timed launch
+            lines += [f"  float* e_{x} = nullptr;",
+                      f"  if (hipMalloc(&e_{x}, bytes_{x}) != hipSuccess",
+                      f"      || hipMemcpy(e_{x}, r_{x}.data(), bytes_{x}, hipMemcpyHostToDevice) != hipSuccess)",
+                      '    return say("hip_error");']
+    lines += ["  unsigned* d_bad_ = nullptr;",
+              '  if (hipMalloc(&d_bad_, sizeof(unsigned)) != hipSuccess) return say("hip_error");']
     names = {a["name"] for a in arrays}
     args = ", ".join(f"&d_{x}" if x in names else f"&{x}" for x in task["args"])
     lines += ["  hipFunction_t fn_[2];",
@@ -652,6 +677,18 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
                       f'{_f(task["rtol"])} * std::fabs(w))) return "wrong";',
                       "    }"]
     lines += ["    return nullptr;", "  };",
+              "  auto checked = [&]() -> int {  // 0: every array as the host reference has it; 1: not; -1: hip error",
+              "    unsigned bad = 0;",
+              "    if (hipMemset(d_bad_, 0, sizeof(unsigned)) != hipSuccess) return -1;"]
+    for a in arrays:
+        x, n = a["name"], a["size"]
+        want = f"e_{x}" if a["role"] != "in" else "nullptr"
+        lines += [f"    hipLaunchKernelGGL(aorlta_check_, dim3(1024), dim3(256), 0, 0, d_{x}, {want}, (long)({n}), "
+                  f"(long)h_{x}.size(), {int(a['role'] != 'in')}, {_f(task['atol'])}, {_f(task['rtol'])}, d_bad_);"]
+    lines += ["    if (hipGetLastError() != hipSuccess || hipDeviceSynchronize() != hipSuccess",
+              "        || hipMemcpy(&bad, d_bad_, sizeof(unsigned), hipMemcpyDeviceToHost) != hipSuccess) return -1;",
+              "    return bad ? 1 : 0;",
+              "  };",
               "  auto fresh = [&](int who) -> const char* {",
               '    if (!reset() || !launch(who) || hipDeviceSynchronize() != hipSuccess) return "hip_error";',
               "    return verify();",
@@ -659,7 +696,9 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
               "  hipEvent_t t0, t1;",
               "  if (hipEventCreate(&t0) != hipSuccess || hipEventCreate(&t1) != hipSuccess)",
               '    return say("hip_error");',
-              "  auto batch = [&](int who) -> float {  // each launch on freshly reset buffers, timed alone",
+              "  // each launch on freshly reset buffers, timed alone, and its outputs and guards checked after its end",
+              "  // event, outside the timed interval: -1 is a hip error, -2 a launch whose outputs were wrong",
+              "  auto batch = [&](int who) -> float {",
               "    float total = 0.0f;",
               "    for (int l = 0; l < launches; ++l) {",
               "      if (!reset() || hipDeviceSynchronize() != hipSuccess || hipEventRecord(t0) != hipSuccess) "
@@ -668,17 +707,24 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
               "return -1.0f;",
               "      float ms = 0.0f;",
               "      if (hipEventElapsedTime(&ms, t0, t1) != hipSuccess) return -1.0f;",
+              "      const int c = checked();",
+              "      if (c != 0) return c < 0 ? -1.0f : -2.0f;",
               "      total += ms;",
               "    }",
               "    return 1000.0f * total / launches;",
+              "  };",
+              "  auto timed_failure = [&](float us, int who) -> int {",
+              '    return say(us < -1.5f ? (who ? "reference_wrong_output" : "candidate_wrong_output") : "hip_error");',
               "  };",
               "  for (int who = 1; who >= 0; --who) {",
               "    const char* bad = fresh(who);",
               '    if (bad) return say(!strcmp(bad, "hip_error") ? "hip_error" : '
               '(who ? "reference_wrong_output" : "candidate_wrong_output"));',
               "  }",
-              "  const float pc = batch(0), pr = batch(1);",
-              '  if (pc < 0.0f || pr < 0.0f) return say("hip_error");',
+              "  const float pc = batch(0);",
+              "  if (pc < 0.0f) return timed_failure(pc, 0);",
+              "  const float pr = batch(1);",
+              "  if (pr < 0.0f) return timed_failure(pr, 1);",
               "  if ((pc + pr) / 1000.0 * launches * (warmup + repeats) > budget_ms) {",
               "    char b[160];",
               '    std::snprintf(b, sizeof b, "{\\"status\\": \\"too_slow\\", \\"candidate_us\\": %.6g, '
@@ -693,7 +739,7 @@ def timing_source(task: dict, scalars: dict | None = None) -> str:
               "    for (int k = 0; k < 2; ++k) {",
               "      const int who = (r + k) % 2;",
               "      const float us = batch(who);",
-              '      if (us < 0.0f) return say("hip_error");',
+              "      if (us < 0.0f) return timed_failure(us, who);",
               "      (who ? tr : tc).push_back(us);",
               "    }",
               "  }",
