@@ -18,11 +18,11 @@ from .profiles import Profile, tool_root
 
 def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, float] | None = None,
                       check_s: dict[str, float] | None = None,
-                      pools: tuple[str, ...] = ()) -> dict[str, Callable[[str], Any]]:
+                      pools: tuple[str, ...] = (), thinking: str = "off") -> dict[str, Callable[[str], Any]]:
     """Factories for every `standin.*` adapter the profile names, and every adapter it names that a plugin registered
-    (plugins.py; `pools` are the run's prompt pool paths, which such an adapter is given). An adapter's own subprocess
-    timeout sits a little under the watchdog's, so the adapter reports first when it can. `check_s` is
-    `reward.gpu_check_s`: the GPU legs' per-check limit, by leg, inside that bound."""
+    (plugins.py; `pools` are the run's prompt pool paths and `thinking` its `rollout.thinking`, which such an adapter
+    is given). An adapter's own subprocess timeout sits a little under the watchdog's, so the adapter reports first
+    when it can. `check_s` is `reward.gpu_check_s`: the GPU legs' per-check limit, by leg, inside that bound."""
     from .. import plugins
 
     timeouts = timeouts or {}
@@ -68,5 +68,5 @@ def standin_factories(profile: Profile, clock: Clock, *, timeouts: dict[str, flo
     for name in sorted(names & set(plugins.CHECK_ADAPTERS)):
         out[name] = lambda wid, name=name: plugins.CHECK_ADAPTERS[name](plugins.CheckContext(
             name=name, worker_id=wid, settings=dict(cfg.get(name, {})), clock=clock.wall, timeout_s=own(name),
-            pools=tuple(pools), check_s=dict(check_s)))
+            pools=tuple(pools), check_s=dict(check_s), thinking=thinking))
     return out

@@ -30,7 +30,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SYSTEM = "You are a helpful assistant."
 USER = "{question}\n\nEnd your reply with a line of the form 'Answer: <your answer>'."
-ANSWER_RE = re.compile(r"^[ \t]*\**[ \t]*answer[ \t]*\**[ \t]*[:：][ \t]*(.*?)[ \t]*$", re.IGNORECASE)  # one line
+# one line; a bold marker's closing asterisks (`**Answer:** 5`) are the marker's, so `**Answer:**` alone is no answer
+ANSWER_RE = re.compile(r"^[ \t]*\**[ \t]*answer[ \t]*\**[ \t]*[:：][ \t]*\**[ \t]*(.*?)[ \t]*$", re.IGNORECASE)
 
 
 def load_rows(pool_dir) -> list[dict]:
@@ -61,6 +62,13 @@ def final_answer(reply: str) -> str | None:
     next line as its answer, and the last marker decides, an empty one included."""
     found = [m.group(1) for line in reply.splitlines() if (m := ANSWER_RE.match(line))]
     return (found[-1] or None) if found else None
+
+
+def reply_answer(text: str, thinking: str) -> str | None:
+    """`final_answer` of the reply as the rollout's parse reads it: after the last `</think>` when thinking is on,
+    the whole reply when it is off. `qa.parse` and `qa.match` both read a reply with it, so the reward never scores a
+    reply the rollout rejected, nor fails one it accepted."""
+    return final_answer(text.rsplit("</think>", 1)[-1] if thinking == "on" else text)
 
 
 def messages(row: dict) -> list[dict]:
@@ -96,8 +104,7 @@ class QaParse:
     def check(self, text, thinking, prompt):
         from aorlta.rollout.compile_check import ParseOutcome
 
-        reply = text.rsplit("</think>", 1)[-1] if thinking == "on" else text
-        answer = final_answer(reply)
+        answer = reply_answer(text, thinking)
         if answer is None:
             return ParseOutcome("rejected", rejection=(
                 "Your reply has no final line of the form 'Answer: <your answer>'. Give your answer on such a line.",
@@ -135,7 +142,9 @@ class QaMatch:
         self.name, self.ctx = ctx.name, ctx
         self.judge = ctx.settings.get("judge")
         self.judge_timeout_s = float(ctx.settings.get("judge_timeout_s", 60.0))
-        self.version = "2"  # cached legs are keyed by it: the judge, which can turn a mismatch clean, is part of it
+        self.thinking = ctx.thinking
+        # cached legs are keyed by it: the thinking flag decides the read, and the judge can turn a mismatch clean
+        self.version = f"3+thinking-{self.thinking}"
         if self.judge:
             files = {a: file_identity(a) for a in self.judge if isinstance(a, str) and Path(a).is_file()}
             exe = shutil.which(self.judge[0]) if isinstance(self.judge[0], str) else None  # as PATH finds it, if bare
@@ -143,7 +152,7 @@ class QaMatch:
                 files[f"exe:{self.judge[0]}"] = f"{os.path.realpath(exe)}:{file_identity(exe)}"
             ident = json.dumps({"judge": list(self.judge), "timeout_s": self.judge_timeout_s, "files": files},
                                sort_keys=True)
-            self.version = f"2+judge-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
+            self.version += f"+judge-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
         self.runner = ProcessRunner()  # kills the judge's whole process group on a timeout or at close()
         self.rows = {}
         for pool in ctx.pools:
@@ -160,7 +169,7 @@ class QaMatch:
             response = job.inputs.get("response")
             if job.leg != "ref.answer" or row is None or not response:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
-            answer = final_answer(Path(response).read_text(encoding="utf-8").rsplit("</think>", 1)[-1])
+            answer = reply_answer(Path(response).read_text(encoding="utf-8"), self.thinking)
             if answer is None:
                 return make_result(job, "fail", "no_answer", t_start=t0, t_end=self.ctx.clock())
             wanted = {normalise(a) for a in [row["answer"], *row.get("aliases", [])]}

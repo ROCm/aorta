@@ -819,3 +819,16 @@ def test_reusing_the_rollout_compile_is_refused_until_it_can_be_proven():
     section = dataclasses.replace(reward_section(), reuse_rollout_compile=True)
     with pytest.raises(ValueError, match="reuse_rollout_compile"):
         fake_rig(None, reward=section)
+
+
+def test_the_service_names_each_pools_checker_and_version(tmp_path):
+    """What a score report records so that two runs scored by different checkers are not compared."""
+    rig = fake_rig(tmp_path, adapter=FakeAdapterConfig(version="7"))
+    try:
+        checkers = rig.service.checkers()
+        prof = load_profile("fake")
+        assert set(checkers) == set(prof.pools)
+        plain = [name for name, spec in prof.pools.items() if spec.adapter == "fake"]
+        assert plain and all(checkers[name] == {"adapter": "fake.checker", "version": "7"} for name in plain)
+    finally:
+        rig.close()

@@ -58,6 +58,25 @@ def test_the_example_configs_load_with_the_plugin(tmp_path, registry, name):  # 
     wiring.check_supported(cfg)
 
 
+@pytest.mark.parametrize("thinking", ["off", "on"])
+def test_the_checks_are_given_the_runs_thinking_flag(tmp_path, hipk, monkeypatch, thinking):
+    """In-process and in the checker servers (`remote serve`), the parse gate is built with `rollout.thinking`."""
+    from aorlta.orchestrator import wiring
+    from aorlta.reward.clock import Clock
+    from aorlta.reward.remote import standin_factory
+
+    data = parse_yaml((ROOT / "configs" / "hipk-score.yaml").read_bytes())
+    data["rollout"]["thinking"] = thinking
+    (tmp_path / "run.yaml").write_text(json.dumps(data))
+    site_config(tmp_path, "hipk-score")
+    monkeypatch.setenv("AORLTA_SITE", str(tmp_path / "site.yaml"))
+    cfg = load_config(tmp_path / "run.yaml")
+    assert cfg.rollout.thinking == thinking
+    in_process = wiring.RewardAdapter(cfg, clock=Clock(), spans=None).factories["hipk.gate"]("gates/1")
+    assert in_process.thinking == thinking and in_process.kernels
+    assert standin_factory(str(tmp_path / "run.yaml"), "hipk.gate")("gates/1").thinking == thinking
+
+
 def test_the_tasks_give_prompts_and_probes(tmp_path, hipk):
     from aorlta.orchestrator import wiring
 
@@ -402,28 +421,65 @@ def test_the_checker_version_names_the_compiler_and_this_file(hipk, fake_hipcc, 
             x.close()
 
 
-def test_the_reward_parse_gate_reads_the_answer_as_the_rollout_does(hipk, tmp_path):
-    """A final reply whose last ```cpp block never closes is no answer to the rollout; the stand-in gate would score
-    the earlier, complete block in its place."""
+SAXPY = "__global__ void saxpy(float a, const float* x, float* y, int n) {}"
+GATE_CASES = [  # (thinking, final reply)
+    ("off", f"```cpp\n{SAXPY}\n```\n"),
+    ("off", f"Here:\n```cpp\n{SAXPY}\n```\nBetter:\n```cpp\n__global__ void saxpy(float a, const"),
+    ("off", "```cpp\n#define K saxpy\n__global__ void K(float a, const float* x, float* y, int n) {}\n```\n"),
+    ("off", "```cpp\n__global__ void axpy(float a, const float* x, float* y, int n) {}\n```\n"),
+    ("off", f"Draft:\n```cpp\n{SAXPY}\n```\n</think>\nNo code here."),
+    ("on", f"Let me think.\n</think>\n```cpp\n{SAXPY}\n```\n"),
+    ("on", f"A draft:\n```cpp\n{SAXPY}\n```\nand the thinking never ends"),
+    ("on", f"A draft:\n```cpp\n{SAXPY}\n```\n</think>\nI could not finish it."),
+    ("on", "Let me think.\n</think>\n```cpp\n#define K saxpy\n__global__ void K(float a) {}\n```\n"),
+]
+
+
+@pytest.mark.parametrize("thinking, text", GATE_CASES)
+def test_the_reward_parse_gate_reads_the_answer_as_the_rollout_does(hipk, tmp_path, thinking, text):
+    """The reward's parse gate passes exactly the final replies `hipk.parse` accepted, read with the run's thinking
+    flag: a rejected reply is still scored (its chain ends `no_code_block`), and must score as a parse failure, not
+    on a block the rollout never accepted (one before a cut-off block, one in the thinking, or one that does not
+    define the kernel), all of which the stand-in gate passes."""
     from aorlta.reward.adapters.standin_parse import StandinParse
-    from aorlta.rollout.compile_check import ParseOutcome  # noqa: F401
     from aorlta.schemas import LegJob
 
-    cut = ("Here:\n```cpp\n__global__ void saxpy(float a, const float* x, float* y, int n) {}\n```\n"
-           "Better:\n```cpp\n__global__ void saxpy(float a, const")
-    whole = "```cpp\n__global__ void saxpy(float a, const float* x, float* y, int n) {}\n```\n"
-    gate = plugins.CHECK_ADAPTERS["hipk.gate"](plugins.CheckContext(name="hipk.gate", worker_id="gates/1",
-                                                                    settings={}, clock=lambda: 0.0, timeout_s=5.0))
-    for i, (text, want) in enumerate([(cut, ("fail", "parse")), (whole, ("clean", None))]):
-        (tmp_path / f"r{i}.txt").write_text(text)
-        job = LegJob(job_id="j", leg="gate.parse", candidate_id="c", control_id=None, source_sha256="s" * 64,
-                     task_sha256="t" * 64, inputs={"response": str(tmp_path / f"r{i}.txt")},
-                     output_dir=str(tmp_path / f"o{i}"))
-        res = gate.run(job)
-        assert (res.state, res.reason) == want
-        assert (tmp_path / f"o{i}" / "source.hip").exists() == (want[0] == "clean")
-        assert StandinParse().run(dataclasses.replace(job, output_dir=str(tmp_path / f"s{i}"))).state == "clean"
-    assert hipk.HipkParse().check(cut, "off", None).kind == "rejected"
+    p = prompt(hipk)
+    gate = plugins.CHECK_ADAPTERS["hipk.gate"](plugins.CheckContext(
+        name="hipk.gate", worker_id="gates/1", settings={}, clock=lambda: 0.0, timeout_s=5.0, pools=(str(EXAMPLE),),
+        thinking=thinking))
+    (tmp_path / "r.txt").write_text(text)
+    job = LegJob(job_id="j", leg="gate.parse", candidate_id="c", control_id=None, source_sha256="s" * 64,
+                 task_sha256=p.task.task_sha256, inputs={"response": str(tmp_path / "r.txt")},
+                 output_dir=str(tmp_path / "o"))
+    accepted = hipk.HipkParse().check(text, thinking, p).kind == "edits"
+    res = gate.run(job)
+    assert (res.state, res.reason) == (("clean", None) if accepted else ("fail", "parse"))
+    assert (tmp_path / "o" / "source.hip").exists() == accepted
+    assert StandinParse().run(dataclasses.replace(job, output_dir=str(tmp_path / "s"))).state == "clean"
+
+
+def test_the_parse_gate_cases_cover_both_answers(hipk):
+    p = prompt(hipk)
+    kinds = [hipk.HipkParse().check(text, thinking, p).kind for thinking, text in GATE_CASES]
+    assert kinds == ["edits", "rejected", "rejected", "rejected", "edits", "edits", "rejected", "rejected", "rejected"]
+
+
+def test_the_parse_gate_is_unsettled_for_a_task_it_does_not_know_and_versioned_by_thinking(hipk, tmp_path):
+    from aorlta.schemas import LegJob
+
+    def gate(thinking):
+        return plugins.CHECK_ADAPTERS["hipk.gate"](plugins.CheckContext(
+            name="hipk.gate", worker_id="gates/1", settings={}, clock=lambda: 0.0, timeout_s=5.0,
+            pools=(str(EXAMPLE),), thinking=thinking))
+
+    (tmp_path / "r.txt").write_text(f"```cpp\n{SAXPY}\n```\n")
+    job = LegJob(job_id="j", leg="gate.parse", candidate_id="c", control_id=None, source_sha256="s" * 64,
+                 task_sha256="0" * 64, inputs={"response": str(tmp_path / "r.txt")}, output_dir=str(tmp_path / "o"))
+    assert (gate("off").run(job).state, gate("off").run(job).reason) == ("unsettled", "adapter_error")
+    (tmp_path / "r.txt").write_text("No code.")  # not a parse failure either: the task is unknown, not the reply bad
+    assert (gate("off").run(job).state, gate("off").run(job).reason) == ("unsettled", "adapter_error")
+    assert gate("off").version != gate("on").version
 
 
 def test_a_task_the_check_does_not_know_is_unsettled(hipk, tmp_path, fake_hipcc):
@@ -582,7 +638,8 @@ class _CpuLeg:
 @pytest.mark.heavy
 def test_the_example_trains_on_cpu_through_the_real_wiring(tmp_path, hipk, tiny_base):
     """The example's prompts, parse, feedback, profile and reward in the real loop, with test_wiring_e2e's tiny model
-    and engines. The fake engine never writes the kernel asked for, so every chain gets hipk.parse's repair turn."""
+    and engines. The fake engine never writes the kernel asked for, so every chain gets hipk.parse's repair turn, and
+    the reward scores the rejected final replies as the rollout read them."""
     from aorlta.orchestrator import wiring
     from aorlta.rollout.engine_proc import InProcessEngine
 
@@ -597,7 +654,9 @@ def test_the_example_trains_on_cpu_through_the_real_wiring(tmp_path, hipk, tiny_
     data["sync"] = {"dir": str(tmp_path / "shm")}
     cfg = config_from_dict(data)
     engines = [E.TwinEngine(tiny_base, E.FAKE, i) for i in range(2)]
-    factories = {"hipk.gate": lambda w: hipk.HipkGate(), "standin.hipcc": lambda w: _CpuLeg("standin.hipcc",
+    gate_ctx = plugins.CheckContext(name="hipk.gate", worker_id="gates/1", settings={}, clock=lambda: 0.0,
+                                    timeout_s=5.0, pools=(str(EXAMPLE),), thinking=cfg.rollout.thinking)
+    factories = {"hipk.gate": lambda w: hipk.HipkGate(gate_ctx), "standin.hipcc": lambda w: _CpuLeg("standin.hipcc",
                                                                                                  "gate.compile"),
                  "hipk.run": lambda w: _CpuLeg("hipk.run", "ref.native")}
     parts = wiring.Parts(tokenizer=E.ByteTokenizer(), handles=[InProcessEngine(i, e) for i, e in enumerate(engines)],
@@ -611,5 +670,6 @@ def test_the_example_trains_on_cpu_through_the_real_wiring(tmp_path, hipk, tiny_
     eps = E.episodes(cfg, 1)
     assert {e["prompt_id"].split(":")[0] for e in eps} == {"hipk"}
     assert all(len(e["turns"]) == 3 and e["end_reason"] == "no_code_block" for e in eps if e["end_reason"] != "engine_error")
-    bases = {round(e["reward"] + 0.05, 1) for e in eps if e["status"] == "scored"}  # base, give or take the length term
-    assert bases <= {1.0, -0.5, -1.0} and {1.0, -0.5} <= bases  # correct, wrong output, and no code block at all
+    scored = [e for e in eps if e["status"] == "scored"]
+    # every final reply was rejected, so each scores as a parse failure (-1.0, give or take the length term)
+    assert scored and all(e["legs"]["gate.parse"] == "fail" and -1.05 <= e["reward"] <= -1.0 for e in scored)
