@@ -527,6 +527,64 @@ def test_a_base_saved_as_one_file_without_an_index_merges_to_the_same_tensors(ti
     assert run("verify", "--base", str(base), "--adapter", str(tiny.text), "--merged", str(out)) == 0
 
 
+QWEN3_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+
+def test_a_dense_qwen3_merges_under_model_layers_and_keeps_its_one_file_layout_and_tied_head(tmp_path):
+    """A dense Qwen3 (tied embeddings, saved as one `model.safetensors` with a stored `lm_head.weight`, as Qwen3-0.6B
+    is): the adapter's `model.layers.N.*` modules map to the checkpoint's `model.layers.N.*` keys, the merge equals
+    PEFT's own fp32 merge bit for bit, only those keys change (the embedding and the stored head keep their bytes),
+    and the output is one file with no index, like the base."""
+    from peft import LoraConfig, PeftModel, get_peft_model
+    from safetensors.torch import load_file, save_file
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    from aorlta.sync.writer import read_base_index, target_keys
+
+    torch.manual_seed(1234)
+    base = tmp_path / "base"
+    cfg = Qwen3Config(hidden_size=64, intermediate_size=96, num_hidden_layers=2, num_attention_heads=2,
+                      num_key_value_heads=1, head_dim=32, vocab_size=256, max_position_embeddings=512,
+                      tie_word_embeddings=True, rms_norm_eps=1e-6)
+    Qwen3ForCausalLM(cfg).to(torch.bfloat16).save_pretrained(str(base), safe_serialization=True)
+    tensors = load_file(str(base / "model.safetensors"))
+    tensors["lm_head.weight"] = tensors["model.embed_tokens.weight"].clone()
+    save_file(tensors, str(base / "model.safetensors"), metadata={"format": "pt"})
+    assert not (base / M.INDEX_NAME).exists()
+    model = Qwen3ForCausalLM.from_pretrained(str(base), dtype=torch.float32)
+    pm = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, lora_dropout=0.0, target_modules=QWEN3_TARGETS,
+                                          bias="none"))
+    g = torch.Generator().manual_seed(7)
+    with torch.no_grad():
+        for n, p in pm.named_parameters():
+            if "lora_A" in n:
+                p.copy_((torch.rand(p.shape, generator=g) * 2 - 1) / p.shape[1] ** 0.5)
+            elif "lora_B" in n:
+                p.copy_(torch.randn(p.shape, generator=g) * 0.05)
+    adapter = tmp_path / "adapter"
+    pm.save_pretrained(str(adapter))
+    assert all(k.startswith(TEXT_PREFIX) for k in load_file(str(adapter / M.ADAPTER_WEIGHTS)))
+    targets = sorted(target_keys(read_base_index(base)))
+    assert len(targets) == 7 * 2 and all(k.startswith("model.layers.") for k in targets)
+    out = tmp_path / "out"
+    assert run("merge", "--base", str(base), "--adapter", str(adapter), "--out", str(out), "--expect-scale", "2.0",
+               "--expect-modules", str(len(targets))) == 0
+    assert sorted(p.name for p in out.iterdir()) == sorted([p.name for p in base.iterdir()] + [M.MANIFEST_NAME])
+    assert not (out / M.INDEX_NAME).exists()
+    assert header_bytes(out / "model.safetensors") == header_bytes(base / "model.safetensors")
+    got, was = load_file(str(out / "model.safetensors")), load_file(str(base / "model.safetensors"))
+    changed = {k for k in was if not torch.equal(got[k].view(torch.uint8), was[k].view(torch.uint8))}
+    assert changed == set(targets)
+    assert {"lm_head.weight", "model.embed_tokens.weight"} <= set(was) - changed
+    fresh = Qwen3ForCausalLM.from_pretrained(str(base), dtype=torch.float32)
+    ref = PeftModel.from_pretrained(fresh, str(adapter)).merge_and_unload().state_dict()
+    for k in targets:
+        assert torch.equal(u16(ref[k].to(torch.bfloat16)), u16(got[k])), k
+    man = json.loads((out / M.MANIFEST_NAME).read_text())
+    assert man["pass"] is True and man["adapter"]["naming"] == "model.layers.N"
+    assert run("verify", "--base", str(base), "--adapter", str(adapter), "--merged", str(out)) == 0
+
+
 def test_an_adapter_whose_weights_cannot_be_read_is_refused(tiny, tmp_path, capsys):
     adapter = tmp_path / "adapter"
     shutil.copytree(tiny.text, adapter)

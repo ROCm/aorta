@@ -3,7 +3,8 @@
 `FakeEngine.generate` takes the arguments AORLTA passes to TokenSpeed's `Engine.generate` and
 returns the same shape: `{"text", "output_ids", "meta_info"}`, with `meta_info` carrying
 `finish_reason` ({"type": "stop", "matched": 248046} or {"type": "length", "length": N}, as
-measured on the engine), token counts, `cached_tokens` and, when asked for and enabled,
+measured on the engine; the stop is the request's first `stop_token_ids` entry, 248046 if it names none), token
+counts, `cached_tokens` and, when asked for and enabled,
 `output_token_logprobs` as (logprob, token_id, None) triples, which is what TokenSpeed returns at
 3b684074 (`engine/logprobs.py:255-259`).
 
@@ -20,6 +21,7 @@ tokenizer's ids can be sent.
 from __future__ import annotations
 
 import math
+import socket
 import threading
 import time
 import types
@@ -28,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..ids import INT32_MAX, HashRng, sha256_ids
+from .ports import CLUSTER_OFFSETS
 
 STOP_TOKEN_ID = 248046  # <|im_end|>, the token the engine stops on (F2, Appendix C)
 BYTE_TOKEN_BASE = 10_000  # ByteTokenizer: token id = BYTE_TOKEN_BASE + byte value
@@ -131,6 +134,10 @@ class FakeEngineConfig:
     # since the last flush(), at most len(input) - 1, as measured on TokenSpeed (F15). It depends on
     # request order, so it is off by default and the responses themselves never depend on it.
     prefix_cache: bool = False
+    # Bind the ports a one-node TokenSpeed engine binds for its `port` (rollout/ports.py) on 127.0.0.1 until
+    # shutdown(), so a taken port fails the start with "Address already in use", as on the engine. Off: the ports
+    # are only reported (`port_args`).
+    bind_ports: bool = False
 
     def __post_init__(self) -> None:
         if not (isinstance(self.seed, int) and not isinstance(self.seed, bool)):
@@ -164,6 +171,7 @@ class FakeServerArgs:
     port: int = 8000
     seed: int | None = None
     log_level: str = "info"
+    attention_backend: str | None = None
 
     def __post_init__(self) -> None:
         if self.sampling_backend is None:
@@ -207,6 +215,22 @@ class FakeEngine:
         self.engine_id = engine_id
         self.server_args = FakeServerArgs(**engine_kwargs)
         self.tokenizer_manager = types.SimpleNamespace(server_args=self.server_args)
+        d = self.server_args.port + CLUSTER_OFFSETS[0]
+        self.port_args = types.SimpleNamespace(  # as TokenSpeed's PortArgs when none of the ports is taken
+            dist_init_addr=f"127.0.0.1:{d}", tokenizer_ipc_name=f"tcp://127.0.0.1:{d + 1}",
+            rpc_ipc_name=f"tcp://127.0.0.1:{d + 3}", metrics_ipc_name=f"tcp://127.0.0.1:{d + 4}",
+            scheduler_input_ipc_name=f"tcp://127.0.0.1:{d + 5}", nccl_port=self.server_args.port + 100)
+        self._sockets: list[socket.socket] = []
+        if self.fake.bind_ports:
+            try:
+                for p in (d, d + 1, d + 3, d + 4, d + 5):
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self._sockets.append(s)
+                    s.bind(("127.0.0.1", p))
+                    s.listen(1)
+            except OSError:
+                self._close_sockets()
+                raise
         self.tokenizer = ByteTokenizer()
         self.requests: list[FakeRequest] = []
         self._sleep = sleep
@@ -236,6 +260,12 @@ class FakeEngine:
 
     def shutdown(self) -> None:
         self._alive = False
+        self._close_sockets()
+
+    def _close_sockets(self) -> None:
+        for s in self._sockets:
+            s.close()
+        self._sockets = []
 
     def flush_prefix_cache(self) -> None:
         with self._lock:
@@ -307,9 +337,10 @@ class FakeEngine:
 
         content = self.tokenizer.encode(self._answer_text(rng))
         max_new = sp["max_new_tokens"]
+        stop_id = (sp.get("stop_token_ids") or [STOP_TOKEN_ID])[0]  # the model's stop token, as the request names it
         if len(content) + 1 <= max_new:
-            output_ids = content + [STOP_TOKEN_ID]
-            finish = {"type": "stop", "matched": STOP_TOKEN_ID}
+            output_ids = content + [stop_id]
+            finish = {"type": "stop", "matched": stop_id}
         else:
             output_ids = content[:max_new]
             finish = {"type": "length", "length": max_new}
@@ -328,8 +359,8 @@ class FakeEngine:
             meta["output_token_logprobs"] = self._logprobs(rng, output_ids)
         log("ok", len(output_ids))
         self._wait(latency)
-        return {"text": self.tokenizer.decode(output_ids, skip_special_tokens=True), "output_ids": output_ids,
-                "meta_info": meta}
+        text = self.tokenizer.decode(output_ids[:-1] if finish["type"] == "stop" else output_ids, skip_special_tokens=True)
+        return {"text": text, "output_ids": output_ids, "meta_info": meta}
 
     def _check_sampling(self, sampling_params: Any) -> dict:
         if not isinstance(sampling_params, dict):

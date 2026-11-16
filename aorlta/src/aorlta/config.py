@@ -33,6 +33,7 @@ import yaml
 
 from .atomic import atomic_write_json, is_partial
 from .ids import IdError, sha256_file, sha256_json, validate_run_id
+from .rollout.ports import PORT_STRIDE
 
 Source = Literal["standin"]  # the stand-in data source; a new source adds a value here
 RUN_PLAN_SCHEMA = "aorlta.run_plan/1"
@@ -439,9 +440,19 @@ class RolloutSection(_Section):
     # with near-unique answers and few prompts may raise it: one such group in 8 is 12.5%. The engines' start-up
     # self-test checks the sampler on its own.
     identical_groups_stop: float = 0.05
+    # the engines' host ports. null: each engine start picks a free window of 2000 ports at random, outside the
+    # kernel's ephemeral range, and tries another if one is taken before the engine binds it (rollout/ports.py), so
+    # two runs can share a node. An int in [1024, 65536 - 2000 x engines]: engine i on port_base + 2000 i, started
+    # once; 20000 is the layout every run used before this key. The ports used are in <run_dir>/engines.jsonl.
+    port_base: int | None = None
 
     def _validate(self) -> None:
         _check(len(self.engines) >= 1, "engines: at least one engine GPU is needed")
+        if self.port_base is not None:
+            top = 65536 - PORT_STRIDE * len(self.engines)
+            _check(1024 <= self.port_base <= top,
+                   f"port_base: must be null or in [1024, {top}] ({len(self.engines)} engines, {PORT_STRIDE} ports "
+                   f"each), got {self.port_base}")
         _check(all(g >= 0 for g in self.engines), f"engines: GPU indices must be >= 0, got {list(self.engines)}")
         _check(len(set(self.engines)) == len(self.engines), f"engines: a GPU is listed twice: {list(self.engines)}")
         _check(self.K >= 2, f"K: must be >= 2 so a group can have an advantage, got {self.K}")
