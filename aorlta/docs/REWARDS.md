@@ -106,7 +106,7 @@ floor `max(min_noise_floor, MAD_candidate + MAD_reference)`; the speedup `s = me
 | `s >= ratio * (1 + floor)` | `clean`, with a measurement record (kind `measurement`: the speedup, the ratio, the floor, the medians and MADs) |
 | `s <= ratio * (1 - floor)` (measured, correct, not faster by the ratio) | `fail` `not_faster`, with its record |
 | in between | `unsettled` `timing_within_noise` |
-| either side too spread | `unsettled` `timing_noisy` |
+| either side too spread, or a floor of 1 or more (no `not_faster` is possible there) | `unsettled` `timing_noisy` |
 | fewer than `repeats` samples, or one that is not a positive finite number | `unsettled` `timing_too_few`, `timing_invalid` |
 | wrong output under the timing harness | `unsettled` `timing_wrong_output` (`reference_wrong_output` for the reference) |
 | over the GPU budget, a timeout, a crash, a HIP error | `unsettled` `too_slow_to_measure`, `timing_timeout`, `timing_crash`, `timing_hip_error` |

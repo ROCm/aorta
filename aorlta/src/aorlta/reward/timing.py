@@ -7,7 +7,8 @@ From the rest:
 
 - each side's median, and its relative median absolute deviation, `median(|x - median|) / median`;
 - `noisy` when either side's relative MAD is above `max_rel_mad`: the GPU was not quiet enough to compare on;
-- the noise floor, the larger of `min_noise_floor` and the two relative MADs added;
+- the noise floor, the larger of `min_noise_floor` and the two relative MADs added; `noisy` too when it is 1 or more,
+  where no speedup could be `not_faster` (a settled verdict's record needs a floor below 1, `measurement`);
 - the speedup `s = reference median / candidate median`, which is `faster` when `s >= ratio * (1 + floor)`,
   `not_faster` when `s <= ratio * (1 - floor)`, and `within_noise` in between, where the noise could decide it.
 
@@ -122,6 +123,8 @@ def judge(candidate: Sequence[float], reference: Sequence[float], policy: Timing
     if dc > policy.max_rel_mad or dr > policy.max_rel_mad:
         return Speedup("noisy", ratio, **common)
     floor = max(policy.min_noise_floor, dc + dr)
+    if floor >= 1.0:  # each side under max_rel_mad, yet together too noisy: no `not_faster` exists, and no record
+        return Speedup("noisy", ratio, **common)
     s = mr / mc
     if s >= ratio * (1.0 + floor):
         verdict = "faster"

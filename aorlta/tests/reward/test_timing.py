@@ -92,6 +92,18 @@ def test_a_noisy_series_is_not_decided():
     assert timing.judge(series(flat(5.0)), series(edge), POLICY).verdict == "faster"  # 0.05 is allowed
 
 
+def test_two_sides_each_within_max_rel_mad_but_a_noise_floor_of_one_or_more_are_not_decided():
+    """Each side's relative MAD is 0.6 under a max_rel_mad of 0.7, so the floor is 1.2: no speedup could be
+    `not_faster` there, and a record with that floor does not read back, so the leg is unsettled rather than a clean
+    leg whose reward is never scored."""
+    p = timing.TimingPolicy(warmup=0, repeats=30, max_rel_mad=0.7)
+    sp = timing.judge([2.0, 8.0] * 15, [8.0, 32.0] * 15, p)
+    assert (sp.verdict, sp.speedup) == ("noisy", None)
+    assert timing.leg_outcome(sp) == ("unsettled", "timing_noisy", [])
+    just = timing.judge([2.0, 3.0] * 15, [8.0, 12.0] * 15, timing.TimingPolicy(warmup=0, repeats=30, max_rel_mad=0.7))
+    assert just.verdict == "faster" and just.noise_floor == pytest.approx(0.4)  # below 1 it decides as before
+
+
 @pytest.mark.parametrize("cand_, ref_, verdict", [
     (series(flat(8.0, 29)), series(flat(10.0)), "too_few"),
     (series(flat(8.0)), series(flat(10.0, 29)), "too_few"),
@@ -194,11 +206,13 @@ def restated(cand_, ref_, p):
     if max(dc, dr) > p.max_rel_mad:
         return "noisy"
     floor, s = max(p.min_noise_floor, dc + dr), mr / mc
+    if floor >= 1:
+        return "noisy"
     return "faster" if s >= p.ratio * (1 + floor) else "not_faster" if s <= p.ratio * (1 - floor) else "within_noise"
 
 
 @PROPERTY
-@given(SAMPLES, SAMPLES, st.floats(0.5, 2.0), st.floats(0.01, 0.3), st.floats(0.0, 0.1))
+@given(SAMPLES, SAMPLES, st.floats(0.5, 2.0), st.floats(0.01, 0.99), st.floats(0.0, 0.1))
 def test_the_verdict_matches_the_rule_and_only_a_cleared_ratio_is_clean(c, r, ratio, max_mad, min_floor):
     p = timing.TimingPolicy(ratio=ratio, warmup=5, repeats=30, max_rel_mad=max_mad, min_noise_floor=min_floor)
     sp = timing.judge(c, r, p)
