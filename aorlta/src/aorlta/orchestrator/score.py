@@ -464,6 +464,7 @@ class Scorer:
     def header(self) -> dict:
         cfg, r, o = self.cfg, self.cfg.rollout, self.cfg.orchestrator
         model = {k: v for k, v in (self.identity or {}).items() if k != "files"}
+        checkers = self.reward.checkers() if callable(getattr(self.reward, "checkers", None)) else None
         return {
             "run_id": self.run_id, "source": self.source,
             "written_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -477,7 +478,7 @@ class Scorer:
                          "parse_adapter": r.parse_adapter, "feedback_template": r.feedback_template,
                          "compile_adapter": r.compile_adapter, "run_seed": o.run_seed,
                          "seed_rule": "ids.seed(run_seed, iteration, prompt_id, k, turn), one request per turn"},
-            "reward": {"profile": cfg.reward.profile, "reward_fn": cfg.reward.reward_fn},
+            "reward": {"profile": cfg.reward.profile, "reward_fn": cfg.reward.reward_fn, "checkers": checkers},
             "engines": {k: v for k, v in (self.engines or {}).items() if k != "self_tests"},
         }
 

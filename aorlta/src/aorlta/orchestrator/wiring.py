@@ -550,6 +550,9 @@ class RewardAdapter:
         self._write_plan_log()
         return svc.stats()
 
+    def checkers(self) -> dict:
+        return self.service().checkers()
+
     def claims_clean(self, result) -> bool:
         """A score run's clean: a scored result whose reward function claims the clean reward."""
         return result.status == "scored" and bool(self.rewardfn.claims_clean(result.reward, result.parts))

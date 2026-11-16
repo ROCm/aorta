@@ -10,10 +10,10 @@ It prints the pass rate (the share of samples whose reward claims clean: a corre
 scored fraction of each, and the per-prompt change, and writes `<out>/eval-compare.json` and `<out>/eval-compare.md`.
 The markdown holds, for the prompts that changed most, one sample of each model: its reward, its checks' states and,
 with `--tokenizer`, its final reply decoded. It refuses two runs that did not score the same prompts in the same
-order, with the same sampling settings, batch layout, task hashes, first prompts and seeds, reward code and plugin
-files, since their numbers would not be comparable, and a run whose run plan is missing or whose committed episode
-records do not cover every sample of its report, since those checks would have nothing to read. An unscored sample is
-never counted as passing.
+order, with the same sampling settings, batch layout, checkers (each check pool's adapter and version, which names a
+Q&A judge), task hashes, first prompts and seeds, reward code and plugin files, since their numbers would not be
+comparable, and a run whose run plan is missing or whose committed episode records do not cover every sample of its
+report, since those checks would have nothing to read. An unscored sample is never counted as passing.
 """
 
 from __future__ import annotations
