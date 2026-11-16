@@ -7,7 +7,7 @@ whose code does not define the kernel, gets a repair turn that says so (this mod
 service then runs three legs: this module's parse gate (the rollout's own parse rule) and the stand-in compile gate,
 and `ref.native`, this module's check, which compiles the candidate alone into a device code object, runs its kernel
 on a GPU from a host program built from the task alone, and compares every output element with a host reference
-computed from the same inputs. The reward is `hipk.v1` (below).
+computed from the same inputs, and every read-only input with what was copied in. The reward is `hipk.v1` (below).
 
 Registered names: task `hipk`; parse `hipk.parse`; feedback `hipk.feedback`; profile `hipk-gpu` (hipk-gpu.yaml);
 check adapters `hipk.gate` and `hipk.run`; reward function `hipk.v1`.
@@ -41,6 +41,9 @@ USER = (
 SENTINEL = "-7777.0f"  # what an output element holds before the kernel runs: one it never writes is a mismatch
 GUARD = 256  # elements past the end of every device array, which the kernel must leave alone
 GUARD_VALUE = "31337.0f"
+# An array's role: "in" is read-only (after the run it must equal, bit for bit, what was copied in); "out" starts as
+# SENTINEL and "inout" as an input, and both are compared with the host reference.
+ROLES = ("in", "out", "inout")
 
 
 # --- the tasks -------------------------------------------------------------------------------------
@@ -52,6 +55,11 @@ def load_tasks(pool_dir: str | Path) -> list[dict]:
     ids = [t["id"] for t in tasks]
     if len(set(ids)) != len(ids):
         raise ValueError(f"{pool_dir}/tasks.json lists a task id twice")
+    for t in tasks:
+        for a in t["arrays"]:
+            if a.get("role") not in ROLES:
+                raise ValueError(f"{pool_dir}/tasks.json: task {t['id']!r}, array {a.get('name')!r} has role "
+                                 f"{a.get('role')!r}, not one of {', '.join(ROLES)}")
     return tasks
 
 
@@ -161,16 +169,44 @@ def _f(x) -> str:
     return f"{float(x)!r}f"
 
 
+# The harness's comparison of a read-only array with its copy from before the run: bit for bit, so a NaN's payload
+# or a zero's sign counts as a change.
+CHANGED = ["static long changed(const std::vector<float>& now, const std::vector<float>& was, long n) {",
+           "  long k = 0;",
+           "  for (long i = 0; i < n; ++i) if (std::memcmp(&now[i], &was[i], sizeof(float)) != 0) ++k;",
+           "  return k;",
+           "}"]
+STATUS = ("  const char* status = oob ? \"out_of_bounds\" : (modified ? \"modified_input\" : "
+          "(mismatches ? \"mismatch\" : \"ok\"));")
+
+
+def readonly_arrays(task: dict) -> list[dict]:
+    """The task's read-only arrays: role `in`."""
+    return [a for a in task["arrays"] if a["role"] == "in"]
+
+
+def snapshot_lines(task: dict) -> list[str]:
+    """C++ that copies each read-only array `h_<name>` to `o_<name>` once it is filled, before anything runs."""
+    return [f"  const std::vector<float> o_{a['name']} = h_{a['name']};" for a in readonly_arrays(task)]
+
+
+def input_check_lines(task: dict) -> list[str]:
+    """C++ that adds to `modified` the elements of each read-only array that differ from its copy, once the array
+    has been copied back from the device."""
+    return [f"  modified += changed(h_{a['name']}, o_{a['name']}, ({a['size']}));" for a in readonly_arrays(task)]
+
+
 def harness_source(task: dict) -> str:
     """The task's host program, which holds none of the candidate's code: it loads the candidate's device code object
     (argv[1]), fills the inputs, runs the task's kernel from it once and compares every output element with a host
-    reference. It writes its record to the file argv[2], replacing it whole each time: `{"stage": "setup"}` at the
-    start, `{"stage": "launched"}` just before the kernel runs, then one with a `status`: `ok`, `mismatch` (an output
-    element differs from the host reference beyond the tolerance), `out_of_bounds` (a write past the end of an
-    array), `no_kernel` (the code object has no kernel of the task's exact signature) or `hip_error` (with the
-    `stage` it failed in)."""
+    reference and every read-only input, bit for bit, with what was copied in. It writes its record to the file
+    argv[2], replacing it whole each time: `{"stage": "setup"}` at the start, `{"stage": "launched"}` just before the
+    kernel runs, then one with a `status`: `ok`, `mismatch` (an output element differs from the host reference beyond
+    the tolerance), `modified_input` (an element of a read-only array changed), `out_of_bounds` (a write past the
+    end of an array), `no_kernel` (the code object has no kernel of the task's exact signature) or `hip_error` (with
+    the `stage` it failed in). A finished record also carries `modified`, the count of changed input elements."""
     lines = ["#include <hip/hip_runtime.h>", "#include <cmath>", "#include <cstdint>", "#include <cstdio>",
-             "#include <string>", "#include <vector>", "",
+             "#include <cstring>", "#include <string>", "#include <vector>", "",
              "// The task's kernel, defined here only to name it (__builtin_get_device_side_mangled_name): the code",
              "// that runs is the candidate's, from the code object in argv[1].",
              f"{task['signature']} {{}}", "",
@@ -185,7 +221,7 @@ def harness_source(task: dict) -> str:
              "static void fill(std::vector<float>& v, uint32_t seed, float lo, float hi) {",
              "  for (auto& x : v) { seed = seed * 1664525u + 1013904223u; "
              "x = lo + (hi - lo) * float(seed >> 8) / 16777216.0f; }",
-             "}", "",
+             "}", "", *CHANGED, "",
              "#define CHECK(stage, call) do { hipError_t e_ = (call); if (e_ != hipSuccess) { char b_[512]; "
              "std::snprintf(b_, sizeof b_, \"{\\\"status\\\": \\\"hip_error\\\", \\\"stage\\\": \\\"%s\\\", "
              "\\\"at\\\": \\\"%s\\\", \\\"error\\\": \\\"%s\\\"}\", stage, #call, hipGetErrorName(e_)); put(b_); "
@@ -206,6 +242,7 @@ def harness_source(task: dict) -> str:
             lines.append(f"  {{ std::vector<float> v({n}); fill(v, {1000 + 17 * i}u, {_f(a.get('lo', -1.0))}, "
                          f"{_f(a.get('hi', 1.0))}); for (long i = 0; i < ({n}); ++i) h_{a['name']}[i] = v[i]; }}")
         lines.append(f"  std::vector<float> r_{a['name']} = h_{a['name']};")
+    lines += snapshot_lines(task)
     lines.append("  {")
     for a in arrays:
         lines.append(f"    float* {a['name']} = r_{a['name']}.data();")
@@ -235,7 +272,7 @@ def harness_source(task: dict) -> str:
               "  CHECK(\"launch\", hipModuleLaunchKernel(fn_, grid_.x, grid_.y, grid_.z, block_.x, block_.y, block_.z, 0, "
               "nullptr, args_, nullptr));",
               "  CHECK(\"run\", hipDeviceSynchronize());",
-              "  long checked = 0, mismatches = 0, first = -1, oob = 0;"]
+              "  long checked = 0, mismatches = 0, first = -1, oob = 0, modified = 0;"]
     for a in arrays:
         n = a["size"]
         lines += [f"  CHECK(\"run\", hipMemcpy(h_{a['name']}.data(), d_{a['name']}, h_{a['name']}.size() * "
@@ -250,11 +287,12 @@ def harness_source(task: dict) -> str:
                       "    ++checked;",
                       "    if (!same) { if (first < 0) first = checked - 1; ++mismatches; }",
                       "  }"]
-    lines += ["  const char* status = oob ? \"out_of_bounds\" : (mismatches ? \"mismatch\" : \"ok\");",
+    lines += input_check_lines(task)
+    lines += [STATUS,
               "  char b_[512];",
               "  std::snprintf(b_, sizeof b_, \"{\\\"status\\\": \\\"%s\\\", \\\"checked\\\": %ld, "
-              "\\\"mismatches\\\": %ld, \\\"first\\\": %ld, \\\"out_of_bounds\\\": %ld}\", status, checked, "
-              "mismatches, first, oob);",
+              "\\\"mismatches\\\": %ld, \\\"first\\\": %ld, \\\"out_of_bounds\\\": %ld, \\\"modified\\\": %ld}\", "
+              "status, checked, mismatches, first, oob, modified);",
               "  put(b_);", "  return 0;", "}", ""]
     return "\n".join(lines)
 
@@ -271,9 +309,10 @@ def read_record(path: str | Path) -> dict | None:
 def verdict(run, record) -> tuple[str, str | None, list[dict]]:
     """A leg's (state, reason, findings) from the harness's run (a ProcResult) and its record (read_record). The
     verdict comes only from the record the harness writes, never from the candidate's output, and only what is the
-    candidate's is blamed on it: a code object without the task's kernel (bad_signature), a wrong output, and a crash
-    or a hang once the kernel was launched. A failure before the launch (an allocation, the first copy, loading the
-    code object) is the node's, and leaves the leg unsettled, never clean."""
+    candidate's is blamed on it: a code object without the task's kernel (bad_signature), a wrong output, a changed
+    read-only input (modified_input), and a crash or a hang once the kernel was launched. A failure before the launch
+    (an allocation, the first copy, loading the code object) is the node's, and leaves the leg unsettled, never
+    clean. `ok` is clean only from a record that says it checked the outputs and found no input changed."""
     if run.launch_error or run.killed:
         return "unsettled", "run_not_started", []
     record = record or {}
@@ -284,9 +323,11 @@ def verdict(run, record) -> tuple[str, str | None, list[dict]]:
         return ("unsettled", "setup_failed", []) if stage == "setup" else ("fail", "crash", [])
     if status in ("mismatch", "out_of_bounds"):
         return "fail", "wrong_output", []
+    if status == "modified_input":
+        return "fail", "modified_input", []
     if status == "ok":
         if run.returncode == 0 and not run.timed_out and isinstance(record.get("checked"), int) \
-                and record["checked"] > 0:
+                and record["checked"] > 0 and isinstance(record.get("modified"), int) and record["modified"] == 0:
             return "clean", None, []
         return "unsettled", "no_result", []
     if stage == "launched":
@@ -328,7 +369,8 @@ class HipkRun:
     `hipcc`, leg setting `target`), so none of its host code is built or run; the task's harness, built from the task
     alone, loads it and runs its kernel on this worker's GPU (settings `gpus`, leased to live workers: see
     `lease_gpu`; by HIP_VISIBLE_DEVICES) for at most `run_timeout_s`, and compares its outputs with the host reference.
-    Clean only when every output element matches and nothing was written past an array's end. `version` names the
+    Clean only when every output element matches, no read-only input changed and nothing was written past an array's
+    end. `version` names the
     compiler hipcc runs and this file, so a leg cached under another compiler or harness is not reused."""
 
     legs = ("ref.native",)
@@ -473,7 +515,8 @@ class HipkGate:
 
 class HipkV1:
     """`hipk.v1`: -1.0 when the parse gate fails, -0.9 for a compile error, -0.8 when the kernel's signature is not
-    the one asked for, -0.6 for a crash or a hang, -0.5 for a wrong output, +1.0 when every output matches; then
+    the one asked for, -0.6 for a crash or a hang, -0.5 for a wrong output or a changed read-only input, +1.0 when
+    every output matches and no input changed; then
     -0.05 x the share of the token budget the answer used. A leg that did not settle leaves the sample unscored:
     an unscored sample is never counted clean. The parts are the service's (`base`, `broke_healthy` (always 0),
     `length`), so the reward stays within its range."""
@@ -481,7 +524,7 @@ class HipkV1:
     name = "hipk.v1"
     version = "1"
     legs = ("gate.parse", "gate.compile", "ref.native")
-    RUN = {"wrong_output": -0.5, "crash": -0.6, "timeout": -0.6, "bad_signature": -0.8}
+    RUN = {"wrong_output": -0.5, "modified_input": -0.5, "crash": -0.6, "timeout": -0.6, "bad_signature": -0.8}
 
     def __init__(self, profile=None):
         from aorlta.reward.rewardfn.base import code_sha256

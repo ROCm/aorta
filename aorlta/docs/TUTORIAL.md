@@ -15,7 +15,7 @@ Paths are relative to `aorlta/`. The commands assume the environment from the RE
 | the prompts | `examples/hip-kernels/tasks.json`, and `records()` in `hip_kernels.py` | one prompt record per task: the chat, its prompt id, and a hash of what the checks read for it |
 | how an answer is read | `HipkParse` and `HipkFeedback` | the last ```cpp block is the answer; no block, or no definition of the kernel asked for, gets a repair turn that says so; a compile error gets one with the compiler's errors |
 | the checks | `HipkGate`, `HipkRun` and `examples/hip-kernels/hipk-gpu.yaml` | a parse gate with the rollout's own rule and the stand-in compile gate, then `ref.native`: compile the answer alone into a code object, run its kernel on a GPU from a harness built from the task, compare |
-| the reward | `HipkV1` | -1.0 no parsable answer, -0.9 compile error, -0.8 wrong signature, -0.6 crash or hang, -0.5 wrong output, +1.0 correct, minus 0.05 x the share of the token budget used |
+| the reward | `HipkV1` | -1.0 no parsable answer, -0.9 compile error, -0.8 wrong signature, -0.6 crash or hang, -0.5 wrong output or a changed input, +1.0 correct, minus 0.05 x the share of the token budget used |
 
 The module registers each part under a name (`register()` at its end):
 
@@ -90,7 +90,9 @@ fixed seed, runs the task's kernel once with the launch the prompt states, and c
 the task's `reference` loop (host C++), within `atol + rtol * |want|`. It writes its verdict to a file the reward
 reads; nothing the candidate prints is read, and a failure before the launch (an allocation, the first copy) leaves
 the check unsettled rather than blaming the candidate. Output elements start as a sentinel, so an element the kernel never
-writes is a mismatch, and every array has a guard region past its end, so a write past the end is caught too.
+writes is a mismatch, and every array has a guard region past its end, so a write past the end is caught too. An
+array of role `in` is read-only: after the run it must equal, bit for bit, what was copied in, or the answer fails as
+`modified_input` (scored as a wrong output); `out` and `inout` arrays are the ones the kernel may write.
 
 ## 2. Run the tests
 
