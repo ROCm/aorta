@@ -81,6 +81,28 @@ def test_runs_with_another_batch_layout_or_reward_are_refused(tmp_path, capsys):
     assert "differ in reward" in capsys.readouterr().err
 
 
+def test_runs_whose_checkers_differ_are_refused(tmp_path, capsys):
+    """The report records each check pool's adapter and version; a checker that changed under the same profile name
+    (a Q&A judge turned on or edited, another compiler) scores another thing, so the runs are not compared."""
+    base = score_run(tmp_path, "base")
+    run_row = next(json.loads(x) for x in (base / "score" / "report.jsonl").read_text().splitlines()
+                   if json.loads(x)["kind"] == "run")
+    checkers = run_row["reward"]["checkers"]
+    assert checkers and all(set(c) == {"adapter", "version"} and c["version"] for c in checkers.values())
+    other = score_run(tmp_path, "judge")
+    pool = sorted(checkers)[0]
+
+    def bump(r):
+        if r["kind"] != "run":
+            return r
+        moved = dict(r["reward"]["checkers"], **{pool: dict(r["reward"]["checkers"][pool], version="2+judge-x")})
+        return dict(r, reward=dict(r["reward"], checkers=moved))
+
+    _rewrite(other / "score" / "report.jsonl", bump)
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+    assert "differ in reward" in capsys.readouterr().err
+
+
 def _rewrite(report: Path, edit) -> None:
     rows = [json.loads(x) for x in report.read_text().splitlines()]
     report.write_text("".join(json.dumps(edit(r)) + "\n" for r in rows))

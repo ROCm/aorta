@@ -68,7 +68,8 @@ class CheckContext:
     """What a registered check adapter's factory is given, once per worker: its `settings` (the profile's
     `adapters:` entry under its name, with `${...}` tool roots expanded), the worker id, the service's wall clock,
     `timeout_s` (a little under its pool's timeout, so the adapter reports before the watchdog), the run's prompt pool
-    directories, and `reward.gpu_check_s`."""
+    directories, `reward.gpu_check_s`, and `rollout.thinking`, so a check that reads the reply reads it as the
+    rollout's parse did."""
 
     name: str
     worker_id: str
@@ -77,6 +78,7 @@ class CheckContext:
     timeout_s: float
     pools: tuple[str, ...] = ()
     check_s: Mapping[str, float] = field(default_factory=dict)
+    thinking: str = "off"
 
 
 TASKS: dict[str, Task] = {}

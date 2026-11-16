@@ -505,7 +505,8 @@ class RewardAdapter:
 
                 factories = standin_factories(self.profile, clock, timeouts=dataclasses.asdict(cfg.reward.timeouts),
                                               check_s=cfg.reward.gpu_check_s,
-                                              pools=tuple(p.path for p in cfg.data.prompt_pools))
+                                              pools=tuple(p.path for p in cfg.data.prompt_pools),
+                                              thinking=cfg.rollout.thinking)
             factories.update(remote_factories(cfg, clock))
         missing = sorted({p.adapter for p in self.profile.pools.values()} - set(factories))
         if missing:
@@ -548,6 +549,9 @@ class RewardAdapter:
         svc = self.service()
         self._write_plan_log()
         return svc.stats()
+
+    def checkers(self) -> dict:
+        return self.service().checkers()
 
     def claims_clean(self, result) -> bool:
         """A score run's clean: a scored result whose reward function claims the clean reward."""

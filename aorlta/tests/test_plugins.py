@@ -367,10 +367,12 @@ def test_every_lookup_finds_the_registered_component(tmp_path, plugin, monkeypat
         def wall():
             return 5.0
 
-    factories = standin_factories(profile, Clock(), timeouts={"compile": 100.0}, pools=("/pool/a",))
+    factories = standin_factories(profile, Clock(), timeouts={"compile": 100.0}, pools=("/pool/a",), thinking="on")
     adapter = factories["toy.check"]("w3")
     ctx = adapter.ctx
-    assert (ctx.name, ctx.worker_id, ctx.pools, ctx.timeout_s) == ("toy.check", "w3", ("/pool/a",), 90.0)
+    assert (ctx.name, ctx.worker_id, ctx.pools, ctx.timeout_s, ctx.thinking) == ("toy.check", "w3", ("/pool/a",), 90.0,
+                                                                                 "on")
+    assert standin_factories(profile, Clock())["toy.check"]("w4").ctx.thinking == "off"
     assert ctx.settings["gpus"] == [4, 5] and ctx.clock() == 5.0
 
 
