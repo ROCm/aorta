@@ -494,6 +494,14 @@ class FakeReward:
     def checkers(self) -> dict:
         return {"fake": {"adapter": "fake", "version": FAKES_SCHEMA}}
 
+    def identity(self) -> dict:
+        """What scores a fake run: its legs and its configured behaviour, and the fake reward function."""
+        config = {f.name: sorted(v) if isinstance(v, (set, frozenset)) else v
+                  for f in dataclasses.fields(self.c) for v in (getattr(self.c, f.name),)}
+        content = {"name": "fake", "legs": list(self.legs), "config": json.loads(json.dumps(config, default=repr))}
+        return {"profile_content": content, "profile_sha256": sha256_json(content),
+                "reward_fn_identity": dict(REWARD_FN, settings={})}
+
     def claims_clean(self, result: RewardResult) -> bool:
         """As standin.v11: clean exactly when the base is positive (+1.0 or +0.5)."""
         return result.status == "scored" and isinstance(result.parts, dict) and result.parts.get("base", 0.0) > 0.0

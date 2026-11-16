@@ -111,7 +111,7 @@ def test_the_parse_gives_a_repair_turn_to_a_reply_without_an_answer(qa):
 
 @pytest.mark.parametrize("reply, want", [
     ("**Answer:**", None), ("**Answer:**  ", None), ("4\n**Answer:**", None), ("**Answer：**", None),
-    ("**Answer:** 5", "5"), ("Answer: **5**", "5"), ("**Answer**: 7", "7"),
+    ("**Answer:** 5", "5"), ("Answer: **5**", "5"), ("**Answer**: 7", "7"), ("**Answer:** **Five**.", "five"),
 ])
 def test_a_bold_answer_marker_is_the_markers_and_an_empty_one_is_no_answer(qa, reply, want):
     """`**Answer:**` with nothing after it is a reply with no answer (a repair turn, then `no_answer`), not the
@@ -259,7 +259,7 @@ def test_the_judge_is_part_of_the_checkers_identity(qa, tmp_path):
     versions = [adapter(qa).version, adapter(qa, {"judge": [str(judge)]}).version,
                 adapter(qa, {"judge": [str(judge), "--strict"]}).version,
                 adapter(qa, {"judge": [str(judge)], "judge_timeout_s": 5}).version]
-    assert len(set(versions)) == 4 and versions[0] == "3+thinking-off"
+    assert len(set(versions)) == 4 and versions[0] == "4+thinking-off"
     assert adapter(qa, thinking="on").version != versions[0]
     assert adapter(qa, {"judge": [str(judge)]}).version == versions[1]
     judge.write_text("#!/bin/bash\necho '{\"verdict\": \"wrong\"}'\n")
@@ -309,3 +309,17 @@ def test_a_judge_found_through_path_is_part_of_the_checkers_identity(qa, tmp_pat
     second = adapter(qa, {"judge": ["my-judge"]}).version
     monkeypatch.setenv("PATH", f"{bins[1]}:/usr/bin:/bin")
     assert len({first, second, adapter(qa, {"judge": ["my-judge"]}).version}) == 3
+
+
+@pytest.mark.parametrize("answer", ['"Five".', '"Five."', "**Five**.", "**Five.**", "`five`.", "Five", " 'Five' . ",
+                                    "**`Five`**."])
+def test_an_answer_in_quotes_or_bold_matches_with_its_full_stop_inside_or_outside(qa, answer):
+    """Wrappers and a full stop are stripped until none is left: the closing quote of `"Five".` shows only after the
+    full stop comes off."""
+    assert qa.normalise(answer) == "five"
+
+
+@pytest.mark.parametrize("answer, want", [("1,024.", "1024"), ("**1,024**.", "1024"), ("3.5", "3.5"),
+                                          ("v1.2.", "v1.2"), ("a  b", "a b")])
+def test_normalising_keeps_what_is_inside_the_wrappers(qa, answer, want):
+    assert qa.normalise(answer) == want

@@ -508,6 +508,18 @@ def remote_factories(cfg: RunConfig, clock) -> dict:
     return out
 
 
+def reward_identity(profile, rewardfn) -> dict:
+    """A profile's whole content and the reward function's name, version, code hash and own settings (which the
+    reward cache keys on too), as JSON."""
+    from .. import config as config_mod
+    from ..ids import sha256_json
+
+    content = config_mod.plain(profile)
+    fn = {k: getattr(rewardfn, k, None) for k in ("name", "version", "code_sha256")}
+    fn["settings"] = config_mod.plain(dict(getattr(rewardfn, "settings", None) or {}))
+    return {"profile_content": content, "profile_sha256": sha256_json(content), "reward_fn_identity": fn}
+
+
 class RewardAdapter:
     """C2 behind the RewardPort, with C3's log-only hook inside it. The service starts its workers (and the
     pools' controls) when it is made, so it is made on the first `reopen`, after the run plan is written."""
@@ -540,6 +552,7 @@ class RewardAdapter:
         if missing:
             raise WiringError(f"profile {self.profile.name!r} needs adapters with no factory: {missing}")
         self.factories = factories
+        self._identity = reward_identity(self.profile, self.rewardfn)
         self.work_dir = scratch_dir(cfg) / "reward"
         self.plan_log = cfg.run_dir / "selector" / "plan_log.jsonl"
         self._svc = None
@@ -580,6 +593,11 @@ class RewardAdapter:
 
     def checkers(self) -> dict:
         return self.service().checkers()
+
+    def identity(self) -> dict:
+        """What scores this run, as held when the adapter was made: a profile edited on disk during the run is not
+        what scored it."""
+        return json.loads(json.dumps(self._identity))
 
     def claims_clean(self, result) -> bool:
         """A score run's clean: a scored result whose reward function claims the clean reward."""
