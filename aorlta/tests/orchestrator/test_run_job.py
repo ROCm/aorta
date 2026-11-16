@@ -1,8 +1,10 @@
 """jobs/aorlta-run.sbatch, read as text: the image it builds is the one the trainer image starts from, and the
 containers that load a profile or the config get the site's tool roots and site file."""
 
+import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -253,6 +255,58 @@ def test_a_directory_inside_or_around_a_live_jobs_directory_is_refused(tmp_path,
     assert ended.returncode == 0, ended.stderr
     own = _bash(tmp_path, _claim_script(tmp_path, f'claim_dir "{mine}"'), SLURM_JOB_ID="456", JOBS="456:RUNNING")
     assert own.returncode == 0, own.stderr  # a job's own claims never stop it
+
+
+@pytest.mark.parametrize("mine, refused", [("claims", True), ("claims/", True), ("claims/sockets", True),
+                                           ("alias/claims/x", True), (".", True), ("claims2", False),
+                                           ("shm/sockets", False)])
+def test_a_directory_inside_or_around_the_claims_directory_is_refused(tmp_path, mine, refused):
+    """The canary and the cleanup remove a claimed directory recursively: one that is the claims directory, inside
+    it or around it (through a symlink too) would take every job's claims and the lock with it."""
+    (tmp_path / "claims").mkdir()
+    (tmp_path / "claims" / "gpu0").write_text("456 GPU 0\n")
+    (tmp_path / "alias").symlink_to(tmp_path)
+    out = _bash(tmp_path, _claim_script(tmp_path, f'claim_dir "{tmp_path}/{mine}"'), SLURM_JOB_ID="789",
+                JOBS="456:RUNNING")
+    assert out.returncode == (95 if refused else 0), out.stdout + out.stderr
+    dirs = [p for p in (tmp_path / "claims").iterdir() if p.name.startswith("dir-")]
+    assert len(dirs) == (0 if refused else 1) and (tmp_path / "claims" / "gpu0").read_text() == "456 GPU 0\n"
+    if refused:
+        assert "overlaps the claims directory" in out.stderr
+
+
+def test_the_socket_directory_is_canonical_before_it_is_claimed_emptied_or_removed(tmp_path):
+    """Through a symlink, the claim named the target while the canary removed the link and made a directory, nobody's
+    claim, in its place: the job takes the canonical path once, and the claim, the canary and the cleanup use it."""
+    assert JOB.count("REMOTE[0]") == 1
+    take = 'SOCK_DIR=$(canon_dir "${REMOTE[0]}")'
+    assert JOB.index(take) < JOB.index('claim_dir "$SOCK_DIR"') < JOB.index("rm -rf '$SOCK_DIR'; mkdir -p")
+    (tmp_path / "shm" / "real").mkdir(parents=True)
+    (tmp_path / "shm" / "link").symlink_to(tmp_path / "shm" / "real")
+    out = _bash(tmp_path, f"{_functions('canon_dir')}REMOTE=({tmp_path}/shm/link/ x)\n"
+                f'[ "${{#REMOTE[@]}}" -gt 0 ] && {take}\necho "$SOCK_DIR"')
+    assert out.stdout.strip() == str(tmp_path / "shm" / "real"), out.stderr
+
+
+def test_claims_and_kept_image_records_are_world_writable_so_any_users_later_job_takes_them_over(tmp_path):
+    """The claims directory is sticky (only a file's owner removes it), so a claim another user's job left must be
+    writable for a later job to take it over; one that is not is refused with who owns it."""
+    out = _bash(tmp_path, "umask 022\n" + _claim_script(tmp_path, 'claim "GPU 0" gpu0\nclaim_dir /x/shm/r'))
+    assert out.returncode == 0, out.stderr
+    for f in (tmp_path / "claims").iterdir():
+        if f.name != ".lock":
+            assert stat.S_IMODE(f.stat().st_mode) == 0o666, f.name
+    kept = _bash(tmp_path, f"umask 022\n{_functions('other_jobs', 'remove_image')}CNAME=aorlta-run-123\n"
+                 f"CLAIMS={tmp_path}/claims\nremove_image img:1", NODE_JOBS="123 456")
+    rec, = (tmp_path / "claims" / "images").iterdir()
+    assert "kept img:1" in kept.stdout and stat.S_IMODE(rec.stat().st_mode) == 0o666
+    (tmp_path / "claims" / "gpu1").write_text("456 GPU 1\n")
+    (tmp_path / "claims" / "gpu1").chmod(0o444)  # as another user's 0644 claim is to this job
+    if os.access(tmp_path / "claims" / "gpu1", os.W_OK):
+        pytest.skip("running as a user who can write any file")
+    over = _bash(tmp_path, _claim_script(tmp_path, 'claim "GPU 1" gpu1'), SLURM_JOB_ID="789", JOBS="456:CANCELLED")
+    assert over.returncode == 89 and "cannot write" in over.stderr and "left by job 456" in over.stderr, over.stderr
+    assert (tmp_path / "claims" / "gpu1").read_text() == "456 GPU 1\n"
 
 
 def _cleanup(tmp_path, own: int, built: int = 1, calls: str = "cleanup", **env) -> subprocess.CompletedProcess:

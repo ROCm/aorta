@@ -11,7 +11,9 @@
 # it (one with OverSubscribe=EXCLUSIVE never puts two jobs on a node). Their configs must name
 # disjoint GPUs (rollout.engines, trainer.devices, reward.remote's GPUs, and any GPUs a task's own checks use), and
 # each its own run id and reward.remote.socket_dir. The job claims the GPUs and its two /dev/shm directories
-# (<sync.dir>/<run id> and the socket directory) in files under /dev/shm/aorlta-claims, and ends with exit 89 when a
+# (<sync.dir>/<run id> and the socket directory, by their canonical paths; neither may be inside the claims directory
+# or hold it, exit 95) in world-writable files under /dev/shm/aorlta-claims, so a later job of any user can take over
+# a claim a job left, and ends with exit 89 when a
 # job Slurm still runs holds one, or a directory inside or around one (a GPU a task's own checks use is not claimed:
 # the job cannot see it). Engine ports
 # need nothing with rollout.port_base null (the default: each engine start picks a free window); two runs that both
@@ -177,7 +179,7 @@ remove_image() {  # remove_image IMAGE: remove an image this job built or pulled
     echo "kept $1: another job may use it (containers: ${users:-none}; jobs on this node: ${jobs:-none})" | tr '\n' ' '
     echo
     mkdir -p "$CLAIMS/images" 2>/dev/null && chmod 1777 "$CLAIMS/images" 2>/dev/null
-    printf '%s\n' "$1" > "$rec" 2>/dev/null
+    (umask 0111; printf '%s\n' "$1" > "$rec") 2>/dev/null  # any user's job may write it again, as a claim
     return
   fi
   if docker rmi -f "$1" >/dev/null 2>&1; then
@@ -234,13 +236,31 @@ claim() {  # claim WHAT KEY...: hold each KEY for this job (a file under $CLAIMS
       fi
       stamp "taking over $key from job $owner, which has ended"
     fi
-    echo "$SLURM_JOB_ID $what" > "$f" && CLAIMED+=("$f") || { echo "[guard] cannot write $f" >&2; exec {fd}>&-; exit 89; }
+    # world-writable (umask 0111), so a later job of any user can take over a claim this job leaves: the directory's
+    # sticky bit lets only its owner remove the file, not overwrite it
+    if (umask 0111; echo "$SLURM_JOB_ID $what" > "$f") 2>/dev/null; then
+      CLAIMED+=("$f")
+    else
+      echo "[guard] cannot write $f${owner:+ (left by job $owner, owned by $(stat -c %U "$f" 2>/dev/null))}:" \
+        "its owner can remove it" >&2
+      exec {fd}>&-
+      exit 89
+    fi
   done
   exec {fd}>&-
 }
 canon_dir() { realpath -m -- "$1"; }  # one spelling per directory: symlinks resolved, no trailing slash, no . or ..
 dir_key() { echo "dir-$(canon_dir "$1" | tr -d '\n' | sha256sum | cut -c1-16)"; }
-claim_dir() { local d; d=$(canon_dir "$1"); claim "directory $d" "$(dir_key "$d")"; }
+claim_dir() {  # claim_dir PATH: PATH, canonical, for this job. Refused (exit 95) when it is inside the claims directory
+  # or holds it: the canary and the cleanup remove a claimed directory recursively, claims and lock with it.
+  local d c
+  d=$(canon_dir "$1")
+  c=$(canon_dir "$CLAIMS")
+  case "$d/" in "$c/"*) ;; *) case "$c/" in "$d/"*) ;; *) claim "directory $d" "$(dir_key "$d")"; return ;; esac ;; esac
+  echo "[guard] $d overlaps the claims directory $c (AORLTA_CLAIMS_DIR): give the run another sync.dir or" \
+    "reward.remote.socket_dir" >&2
+  exit 95
+}
 vram_sampler() {  # every 10 s, from sysfs (no GPU context): UTC seconds, PCI address, VRAM used and total in bytes
   local c
   while :; do
@@ -324,7 +344,9 @@ else
   IMG=$BASE
   REMOTE=()  # the fakes check nothing
 fi
-[ "${#REMOTE[@]}" -gt 0 ] && SOCK_DIR=${REMOTE[0]}
+# Canonical, so the directory this job claims is the one the canary empties and the cleanup removes: through a symlink
+# they would remove the link and leave the claimed directory's place to another job.
+[ "${#REMOTE[@]}" -gt 0 ] && SOCK_DIR=$(canon_dir "${REMOTE[0]}")
 if [ "$SMOKE" = checkers ] && [ -z "$SOCK_DIR" ]; then
   echo "[guard] SMOKE=checkers needs reward.remote in $CONFIG" >&2; exit 95
 fi
