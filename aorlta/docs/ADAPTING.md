@@ -26,6 +26,9 @@ Code paths are relative to `src/aorlta/`; commands and the `configs/`, `examples
    adapter** on the same set and compare.
 8. **Write your two-line summary:** what the model is post-trained on, and how its answers are checked.
 
+Starters to copy for three verticals (an ISA fuzzer, a Q&A expert, sanitizer triage), each a plugin package with its
+configs and a CPU test, are in `examples/verticals/`.
+
 ## Your own task, as a plugin
 
 A task of your own (its prompts, how an answer is read, its repair turns, its checks and its reward) does not need
@@ -210,6 +213,7 @@ and in-process engines; it is the template for testing a new source without a GP
 
 ## Your own reward function
 
+The checks and reward functions that already exist, and how to compose them, are listed in [REWARDS.md](REWARDS.md).
 The interface is `RewardFn` in `reward/rewardfn/base.py`:
 
 ```python
