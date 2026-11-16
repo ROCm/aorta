@@ -39,7 +39,10 @@ make a test fail. For the plugin registry: dropping the registry lookup in `comp
 factories, in the parse-adapter lookup, in the wiring's prompt pool, and the run plan's plugin record (5 of 5
 caught); the plugin self-test chats (1 of 1); the checkpoint export's tensors and its manifest check (2 of 2); the
 kernel example's read-only-input check, which arrays it covers, its bit-for-bit compare and bounds, the status, the
-verdict and the reward (12 of 12, each beside an equivalent rewrite that the tests still pass). The
+verdict and the reward (12 of 12, each beside an equivalent rewrite that the tests still pass); the reward reading a
+reply as the rollout's parse did (the run's thinking flag through the wiring, the remote worker and the factories, the
+kernel gate's read and its unknown-task check, the Q&A check's read, both versions, the empty bold `Answer:` marker),
+and a score report naming each pool's checker and version (14 of 14, each beside an equivalent rewrite). The
 components merged before them recorded their own mutation runs in their pull requests. Reproduce one: make the edit,
 run the named test file, see it fail, revert.
 
