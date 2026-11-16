@@ -286,6 +286,16 @@ def test_the_qa_answer_is_the_last_answer_lines_own_value(load):
     assert mod.final_answer("Answer: 4\nthinking...\nAnswer: 5") == "5" and mod.final_answer("no marker") is None
 
 
+@pytest.mark.parametrize("reply, want", [("**Answer:**", None), ("**Answer:**  ", None), ("4\n**Answer:**", None),
+                                         ("**Answer:** 5", "5"), ("**Answer:** **Five**.", "five"),
+                                         ("Answer: **5**", "5"), ("**Answer**: 7", "7")])
+def test_a_bold_answer_marker_is_the_markers_and_an_empty_one_is_no_answer(load, reply, want):
+    """`**Answer:**` with nothing after it gets the repair turn of a reply with no answer, not a wrong answer `**`."""
+    mod = load(QA)
+    got = mod.final_answer(reply)
+    assert (got if got is None else mod.normalise(got)) == want
+
+
 @pytest.mark.parametrize("answer", ['"Five".', '"Five."', "**Five**.", "**Five.**", "`five`.", "Five", " 'Five' . "])
 def test_a_qa_answer_in_quotes_or_bold_matches_with_its_full_stop_inside_or_outside(load, answer):
     """Wrappers and a full stop come off until none is left, in whichever order the model wrote them."""
