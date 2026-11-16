@@ -310,7 +310,7 @@ def test_claims_and_kept_image_records_are_world_writable_so_any_users_later_job
 
 
 def _cleanup(tmp_path, own: int, built: int = 1, calls: str = "cleanup", **env) -> subprocess.CompletedProcess:
-    funcs = _functions("add_mounts", "clean_img", "other_jobs", "remove_image", "retry_kept_images")
+    funcs = _functions("job_ended", "add_mounts", "clean_img", "other_jobs", "remove_image", "retry_kept_images")
     funcs += re.search(r"^CLEANED=0\ncleanup\(\) \{.*?^\}\n", JOB, re.M | re.S).group(0)
     state = (f"CNAME=aorlta-run-{env.get('SLURM_JOB_ID', '123')} VRAM_PID= OUT={tmp_path}/out RUN_ROOT={tmp_path}/runs "
              f"SYNC_DIR={tmp_path}/shm RUN_ID=r SOCK_DIR={tmp_path}/shm/sockets RUN_DIR={tmp_path}/runs/r "
@@ -440,3 +440,34 @@ def test_an_image_kept_for_another_job_is_removed_by_the_last_job_to_leave(tmp_p
     (tmp_path / "claims" / "images" / "x").write_text("gone:1\n")
     _cleanup(tmp_path, 0, built=0, SLURM_JOB_ID="789", NODE_JOBS="789", IMAGES_DIR=str(images))
     assert list((tmp_path / "claims" / "images").iterdir()) == [] and _removed(tmp_path) == ["trainer:1"]
+
+
+def test_of_two_jobs_cleaning_up_at_once_the_one_that_decides_last_removes_the_image(tmp_path):
+    """Both jobs still run in Slurm's eyes while they clean up: each must not keep the image for the other, which is
+    leaving too, or neither removes it. A job in its cleanup marks itself leaving before its first image decision."""
+    images = tmp_path / "images"
+    images.mkdir()
+    (images / "trainer_1").write_text("")
+    for d in ("out", "runs", "claims"):
+        (tmp_path / d).mkdir(exist_ok=True)
+    first = _cleanup(tmp_path, 0, NODE_JOBS="123 456", JOBS="123:RUNNING 456:RUNNING", IMAGES_DIR=str(images))
+    assert "kept trainer:1" in first.stdout and _removed(tmp_path) == [], first.stdout + first.stderr
+    assert (tmp_path / "claims" / "leaving-123").exists()
+    last = _cleanup(tmp_path, 0, SLURM_JOB_ID="456", NODE_JOBS="123 456", JOBS="123:COMPLETING 456:RUNNING",
+                    IMAGES_DIR=str(images))
+    assert _removed(tmp_path) == ["trainer:1"] and "removed trainer:1" in last.stdout, last.stdout + last.stderr
+    assert not (images / "trainer_1").exists() and list((tmp_path / "claims" / "images").iterdir()) == []
+    # a job that is on the node and not leaving still keeps it
+    (images / "trainer_1").write_text("")
+    kept = _cleanup(tmp_path, 0, SLURM_JOB_ID="789", NODE_JOBS="789 999", JOBS="999:RUNNING",
+                    IMAGES_DIR=str(images))
+    assert "kept trainer:1" in kept.stdout and (images / "trainer_1").exists()
+
+
+def test_a_leaving_marker_is_dropped_once_its_job_has_ended_and_kept_while_it_runs(tmp_path):
+    for d in ("out", "runs", "claims"):
+        (tmp_path / d).mkdir(exist_ok=True)
+    for j in ("111", "222"):
+        (tmp_path / "claims" / f"leaving-{j}").write_text("")
+    _cleanup(tmp_path, 0, built=0, SLURM_JOB_ID="333", NODE_JOBS="333", JOBS="111:COMPLETED 222:RUNNING 333:RUNNING")
+    assert sorted(p.name for p in (tmp_path / "claims").glob("leaving-*")) == ["leaving-222", "leaving-333"]

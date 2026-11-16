@@ -171,10 +171,12 @@ remove_image() {  # remove_image IMAGE: remove an image this job built or pulled
   # container of another job was made from it (or from an image built on it), or another job runs on this node (it
   # may have found the image when it started and not have run it yet). A kept image is recorded under
   # $CLAIMS/images, and every job's cleanup tries it again (retry_kept_images), so the last job to leave removes it.
+  # A job in its own cleanup (a leaving-<id> marker, written once its containers are gone) uses no image any more, so
+  # of two jobs cleaning up at once the one that decides last removes what both kept.
   local users jobs rec
   rec=$CLAIMS/images/$(printf %s "$1" | sha256sum | cut -c1-16)
   users=$(docker ps -a --filter "ancestor=$1" --format '{{.Names}}' 2>/dev/null | grep -vxE "$CNAME(-[a-z]+)?")
-  jobs=$(other_jobs)
+  jobs=$(other_jobs | while read -r id; do [ -e "$CLAIMS/leaving-$id" ] || echo "$id"; done)
   if [ -n "$users$jobs" ]; then
     echo "kept $1: another job may use it (containers: ${users:-none}; jobs on this node: ${jobs:-none})" | tr '\n' ' '
     echo
@@ -191,6 +193,9 @@ remove_image() {  # remove_image IMAGE: remove an image this job built or pulled
 }
 retry_kept_images() {  # the images an earlier job built or pulled and kept for another job (remove_image)
   local f img
+  for f in "$CLAIMS"/leaving-*; do  # a leaving marker outlives its job only until a later cleanup sees it ended
+    [ -f "$f" ] && job_ended "${f##*/leaving-}" && rm -f "$f"
+  done
   for f in "$CLAIMS"/images/*; do
     [ -f "$f" ] || continue
     img=$(head -n 1 "$f")
@@ -372,6 +377,8 @@ cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by the
   CLEANED=1
   [ -n "$VRAM_PID" ] && kill "$VRAM_PID" 2>/dev/null
   docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?" | xargs -r docker rm -f >/dev/null 2>&1
+  # this job uses no image from here on: before any image decision, so another job cleaning up at once sees it
+  mkdir -p "$CLAIMS" 2>/dev/null && (umask 0111; : > "$CLAIMS/leaving-$SLURM_JOB_ID") 2>/dev/null
   find "$OUT" -maxdepth 3 -name 'gpucore.*' -type f -delete 2>/dev/null
   local img mounts=()
   img=$(clean_img)
