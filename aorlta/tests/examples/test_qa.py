@@ -118,9 +118,9 @@ def job_for(qa, tmp_path, row, reply):
                   task_sha256=qa.row_sha256(row), inputs={"response": str(resp)}, output_dir=str(tmp_path))
 
 
-def adapter(qa, settings=None):
+def adapter(qa, settings=None, thinking="off"):
     ctx = plugins.CheckContext(name="qa.match", worker_id="match/1", settings=settings or {}, clock=lambda: 0.0,
-                               timeout_s=30.0, pools=(str(QA / "gpu-facts" / "train"),))
+                               timeout_s=30.0, pools=(str(QA / "gpu-facts" / "train"),), thinking=thinking)
     return plugins.CHECK_ADAPTERS["qa.match"](ctx)
 
 
@@ -132,6 +132,29 @@ def test_the_check_matches_the_reference_and_its_aliases(qa, tmp_path, reply, wa
     row = next(r for r in qa.load_rows(QA / "gpu-facts" / "train") if r["id"] == "wave-cdna")
     res = adapter(qa).run(job_for(qa, tmp_path, row, reply))
     assert (res.state, res.reason) == want
+
+
+@pytest.mark.parametrize("thinking, reply, read", [
+    ("off", "Answer: 64\n</think>\nThat is all.", "64"), ("off", "</think>\nAnswer: 32", "32"),
+    ("off", "Answer: 64", "64"), ("on", "Answer: 64\n</think>\nThat is all.", None),
+    ("on", "I think 32.\n</think>\nAnswer: 64", "64"), ("on", "Working.\nAnswer: 64", "64"),
+    ("on", "Answer: 32\n</think>\nAnswer:", None),
+])
+def test_the_check_reads_a_reply_as_the_parse_does(qa, tmp_path, thinking, reply, read):
+    """The reward reads the reply with the run's thinking flag, as `qa.parse` did: a reply the rollout rejected is
+    `no_answer`, and one it accepted is matched on the answer the rollout read. With thinking off a `</think>` is
+    just text."""
+    from aorlta.rollout.chain import make_parse_adapter
+
+    row = next(r for r in qa.load_rows(QA / "gpu-facts" / "train") if r["id"] == "wave-cdna")
+    parsed = make_parse_adapter("qa.parse").check(reply, thinking, None)
+    assert (parsed.code if parsed.kind == "edits" else None) == read
+    res = adapter(qa, thinking=thinking).run(job_for(qa, tmp_path, row, reply))
+    if parsed.kind == "rejected":
+        assert (res.state, res.reason) == ("fail", "no_answer")
+    else:
+        want = ("clean", None) if parsed.code.startswith("64") else ("fail", "wrong_answer")
+        assert (res.state, res.reason) == want
 
 
 @pytest.mark.parametrize("judge_out, want", [
@@ -215,7 +238,8 @@ def test_the_judge_is_part_of_the_checkers_identity(qa, tmp_path):
     versions = [adapter(qa).version, adapter(qa, {"judge": [str(judge)]}).version,
                 adapter(qa, {"judge": [str(judge), "--strict"]}).version,
                 adapter(qa, {"judge": [str(judge)], "judge_timeout_s": 5}).version]
-    assert len(set(versions)) == 4 and versions[0] == "2"
+    assert len(set(versions)) == 4 and versions[0] == "3+thinking-off"
+    assert adapter(qa, thinking="on").version != versions[0]
     assert adapter(qa, {"judge": [str(judge)]}).version == versions[1]
     judge.write_text("#!/bin/bash\necho '{\"verdict\": \"wrong\"}'\n")
     assert adapter(qa, {"judge": [str(judge)]}).version != versions[1]

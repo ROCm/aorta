@@ -99,14 +99,33 @@ def defines_kernel(source: str, kernel: str) -> bool:
                      source) is not None
 
 
+def signature_kernel(text: str) -> str | None:
+    """The name of the first __global__ function declared in `text`."""
+    found = re.search(r"__global__\s+(?:__launch_bounds__\s*\([^)]*\)\s*)?void\s+(\w+)\s*\(", text)
+    return found.group(1) if found else None
+
+
 def prompt_kernel(prompt) -> str | None:
     """The kernel a prompt asks for, read from the signature in its user message: a task's id names the task and
     need not be its kernel's name (shape variants of one kernel have their own ids)."""
     for m in getattr(prompt, "messages", None) or ():
         if m.get("role") == "user":
-            found = re.search(r"__global__\s+(?:__launch_bounds__\s*\([^)]*\)\s*)?void\s+(\w+)\s*\(", m["content"])
-            return found.group(1) if found else None
+            return signature_kernel(m["content"])
     return None
+
+
+def read_answer(text: str, thinking: str, kernel: str) -> tuple[str | None, str | None]:
+    """A final reply's source and, when it has none, why: the last complete ```cpp block (after the last `</think>`
+    when thinking is on, the stand-in `parse_code`), which must define `kernel`. `hipk.parse` and `hipk.gate` both
+    read a reply with it, so the reward never scores a reply the rollout rejected."""
+    from aorlta.rollout.compile_check import parse_code
+
+    code = parse_code(text, thinking)
+    if code is None:
+        return None, "no_code_block"
+    if not defines_kernel(code, kernel):
+        return None, "no_kernel"
+    return code, None
 
 
 class HipkParse:
@@ -130,15 +149,15 @@ class HipkParse:
     def check(self, text, thinking, prompt):
         from aorlta.rollout.compile_check import ParseOutcome, parse_code
 
-        code = parse_code(text, thinking)
-        if code is None:
+        if parse_code(text, thinking) is None:
             return ParseOutcome("rejected", rejection=(
                 "Your reply has no complete ```cpp code block. Reply with the whole HIP source in one ```cpp block.",
                 "no_code_block"))
         kernel = prompt_kernel(prompt)
         if kernel is None:
             raise ValueError(f"{prompt.prompt_id}: its user message has no __global__ signature to name the kernel")
-        if not defines_kernel(code, kernel):
+        code, why = read_answer(text, thinking, kernel)
+        if why == "no_kernel":
             return ParseOutcome("rejected", rejection=(
                 f"Your source does not define the kernel `{kernel}`. Define it as a __global__ function with exactly "
                 f"the signature asked for, and reply with the whole source in one ```cpp block.", "no_kernel"))
@@ -470,30 +489,37 @@ class HipkRun:
 
 
 class HipkGate:
-    """`hipk.gate`, leg `gate.parse`: the reward's parse gate with the rollout's own rule (`hipk.parse`, which is
-    the stand-in `parse_code`): the last ```cpp block, and none when a later block never closes. The stand-in gate
-    takes the last complete block, so a final reply whose last block was cut off would be scored on an earlier one
-    the rollout had rejected. Writes `source.hip` as the stand-in gate does."""
+    """`hipk.gate`, leg `gate.parse`: the reward's parse gate with the rollout's own rule (`read_answer`, which
+    `hipk.parse` uses, read with the run's `rollout.thinking`): the last ```cpp block, none when a later block never
+    closes, and it must define the task's kernel. The stand-in gate takes the last complete block of the whole reply,
+    so it would score a reply the rollout had rejected: a block cut off after a complete one, code only inside the
+    thinking, or a block that does not define the kernel. Fails `parse` on those; unsettled for a task it does not
+    know. Writes `source.hip` as the stand-in gate does."""
 
     name = "hipk.gate"
-    version = "1"
     legs = ("gate.parse",)
     resource = "local_cpu"
 
-    def __init__(self, ctx=None):
-        self._clock = ctx.clock if ctx is not None else time.time
+    def __init__(self, ctx):
+        self._clock, self.thinking = ctx.clock, ctx.thinking
+        self.version = f"2+thinking-{self.thinking}"  # cached legs are keyed by it: the thinking flag decides the read
+        self.kernels = {}
+        for pool in ctx.pools:
+            if (Path(pool) / "tasks.json").is_file():
+                for task in load_tasks(pool):
+                    self.kernels[task_sha256(task)] = signature_kernel(task["signature"])
 
     def run(self, job):
         from aorlta.atomic import atomic_write_bytes
         from aorlta.reward.adapters.base import make_result, unsettled
-        from aorlta.rollout.compile_check import parse_code
 
         t0 = self._clock()
         try:
             response = job.inputs.get("response") or (str(Path(job.package) / "response.txt") if job.package else None)
-            if job.leg != "gate.parse" or not response or not job.output_dir:
+            kernel = self.kernels.get(job.task_sha256)
+            if job.leg != "gate.parse" or not response or not job.output_dir or kernel is None:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self._clock())
-            source = parse_code(Path(response).read_text(encoding="utf-8"), "off")
+            source, _ = read_answer(Path(response).read_text(encoding="utf-8"), self.thinking, kernel)
             if source is None:
                 return make_result(job, "fail", "parse", t_start=t0, t_end=self._clock())
             out = Path(job.output_dir)
