@@ -76,7 +76,9 @@ def test_runs_with_another_batch_layout_or_reward_are_refused(tmp_path, capsys):
     assert "differ in options" in capsys.readouterr().err
     other = score_run(tmp_path, "rfn")
     _rewrite(other / "score" / "report.jsonl",
-             lambda r: dict(r, reward=dict(r["reward"], reward_fn="other.v1")) if r["kind"] == "run" else r)
+             lambda r: dict(r, reward=dict(r["reward"], reward_fn_identity=dict(r["reward"]["reward_fn_identity"],
+                                                                                 version="other.v1")))
+             if r["kind"] == "run" else r)
     assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
     assert "differ in reward" in capsys.readouterr().err
 
@@ -230,3 +232,100 @@ def test_runs_whose_prompts_seeds_reward_code_or_plugins_differ_are_refused(tmp_
     (other / "run_plan.json").write_text(json.dumps(plan))
     assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
     assert "different plugin files" in capsys.readouterr().err
+
+
+def _run_row(run_dir: Path) -> dict:
+    return next(json.loads(x) for x in (run_dir / "score" / "report.jsonl").read_text().splitlines()
+                if json.loads(x)["kind"] == "run")
+
+
+def test_runs_that_did_not_start_from_the_same_base_model_are_refused(tmp_path, capsys):
+    """Two runs of one config on two different base models (other weights under the same kind and file names) are
+    not a base and its trained checkpoint; a run whose served model is not the base its plan hashed is refused too.
+    Two bases with the same files in different directories are the same base."""
+    base = score_run(tmp_path, "base")
+    same = score_run(tmp_path, "same")  # its own base directory, the same bytes
+    assert X.main(["--base", str(base), "--trained", str(same), "--out", str(tmp_path / "out")]) == 0
+    (tmp_path / "other" / "base").mkdir(parents=True)
+    (tmp_path / "other" / "base" / "model.safetensors").write_bytes(b"\x01" * 64)
+    other = score_run(tmp_path, "other")
+    assert _run_row(other)["model"]["kind"] == _run_row(base)["model"]["kind"]
+    assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2
+    err = capsys.readouterr().err
+    assert "same base model" in err and "model.safetensors" in err and "config.json" not in err
+    served = score_run(tmp_path, "served")
+    _rewrite(served / "score" / "report.jsonl",
+             lambda r: dict(r, model=dict(r["model"], files_sha256="0" * 64)) if r["kind"] == "run" else r)
+    assert X.main(["--base", str(base), "--trained", str(served), "--out", str(tmp_path / "out")]) == 2
+    assert "not the base its run plan hashed" in capsys.readouterr().err
+    unhashed = score_run(tmp_path, "unhashed")
+    plan = json.loads((unhashed / "run_plan.json").read_text())
+    plan["extra_files"] = {k: v for k, v in plan["extra_files"].items() if not k.startswith("base/")}
+    (unhashed / "run_plan.json").write_text(json.dumps(plan))
+    assert X.main(["--base", str(base), "--trained", str(unhashed), "--out", str(tmp_path / "out")]) == 2
+    assert "hashes no base model files" in capsys.readouterr().err
+
+
+def test_a_base_model_snapshot_revision_is_named_when_two_bases_differ():
+    files = {"base/model.safetensors": {"path": "/hub/models--m/snapshots/" + "a" * 40 + "/model.safetensors"}}
+    assert X.SNAPSHOT.search(files["base/model.safetensors"]["path"]).group(1) == "a" * 40
+    assert X.SNAPSHOT.search("/models/m/model.safetensors") is None
+
+
+def test_runs_whose_reward_profile_content_differs_are_refused_whatever_its_name(tmp_path, capsys):
+    """The reward is compared by what it is: a profile edited under the same name (a leg's settings, a stage) is
+    refused, as is a reward setting or the reward function's code; the same profile under another name is not, and a
+    report that does not record the content is refused."""
+    base = score_run(tmp_path, "base")
+    row = _run_row(base)["reward"]
+    assert row["profile_content"]["stages"] and row["reward_fn_identity"]["code_sha256"]
+
+    def reward(edit):
+        return lambda r: dict(r, reward=edit(dict(r["reward"]))) if r["kind"] == "run" else r
+
+    def stages(r):
+        return dict(r, profile_content=dict(r["profile_content"], stages=r["profile_content"]["stages"][:-1]))
+
+    for name, edit, where in (
+            ("stage", stages, "profile.stages"),
+            ("leg", lambda r: dict(r, profile_content=dict(r["profile_content"],
+                                                           leg_settings={"compile": {"timeout_s": 1}})),
+             "profile.leg_settings"),
+            ("setting", lambda r: dict(r, settings=dict(r["settings"], x_new_setting=1)), "settings.x_new_setting"),
+            ("code", lambda r: dict(r, reward_fn_identity=dict(r["reward_fn_identity"], code_sha256="0" * 64)),
+             "reward_fn.code_sha256")):
+        other = score_run(tmp_path, name)
+        _rewrite(other / "score" / "report.jsonl", reward(edit))
+        assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2, name
+        err = capsys.readouterr().err
+        assert "differ in reward" in err and where in err, (name, err)
+    renamed = score_run(tmp_path, "renamed")
+    _rewrite(renamed / "score" / "report.jsonl", reward(lambda r: dict(
+        r, profile="other-name", profile_content=dict(r["profile_content"], name="other-name"),
+        settings=dict(r["settings"], profile="other-name"))))
+    assert X.main(["--base", str(base), "--trained", str(renamed), "--out", str(tmp_path / "out")]) == 0
+    old = score_run(tmp_path, "old")
+    _rewrite(old / "score" / "report.jsonl", reward(lambda r: {k: v for k, v in r.items() if k != "profile_content"}))
+    assert X.main(["--base", str(base), "--trained", str(old), "--out", str(tmp_path / "out")]) == 2
+    assert "does not record what scored it" in capsys.readouterr().err
+
+
+def test_a_merged_run_must_record_its_merged_weights_hash(tmp_path, capsys):
+    """A run that merged an adapter is checked by its merged weights: the merge's tensor digest must be recorded and
+    the files it served must hash to the report's `files_sha256`."""
+    base = score_run(tmp_path, "base")
+
+    def merged(**merge):
+        return lambda r: dict(r, model=dict(r["model"], kind="base_plus_adapter", merge=merge)) if r["kind"] == "run" \
+            else r
+
+    ok = score_run(tmp_path, "merged")
+    _rewrite(ok / "score" / "report.jsonl", merged(tensor_digest="1" * 64))
+    assert X.main(["--base", str(base), "--trained", str(ok), "--out", str(tmp_path / "out")]) == 0
+    for name, edit in (("nodigest", merged()),
+                       ("otherfiles", lambda r: merged(tensor_digest="1" * 64)(
+                           dict(r, model=dict(r["model"], files_sha256="0" * 64)) if r["kind"] == "run" else r))):
+        other = score_run(tmp_path, name)
+        _rewrite(other / "score" / "report.jsonl", edit)
+        assert X.main(["--base", str(base), "--trained", str(other), "--out", str(tmp_path / "out")]) == 2, name
+        assert "merged weights' hash" in capsys.readouterr().err

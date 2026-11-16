@@ -42,7 +42,10 @@ kernel example's read-only-input check, which arrays it covers, its bit-for-bit 
 verdict and the reward (12 of 12, each beside an equivalent rewrite that the tests still pass); the reward reading a
 reply as the rollout's parse did (the run's thinking flag through the wiring, the remote worker and the factories, the
 kernel gate's read and its unknown-task check, the Q&A check's read, both versions, the empty bold `Answer:` marker),
-and a score report naming each pool's checker and version (14 of 14, each beside an equivalent rewrite). The
+and a score report naming each pool's checker and version (14 of 14, each beside an equivalent rewrite);
+`eval_compare` refusing two runs from different base models (the base files' hashes, the served and merged weights'
+hashes) or scored by a different reward (the profile's content, the reward function's identity, the settings, the
+report's record of them), and the Q&A check's normalising and version (15 of 15, each beside an equivalent rewrite). The
 components merged before them recorded their own mutation runs in their pull requests. Reproduce one: make the edit,
 run the named test file, see it fail, revert.
 

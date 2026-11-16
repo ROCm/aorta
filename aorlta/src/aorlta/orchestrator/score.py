@@ -271,6 +271,26 @@ def model_files(cfg: RunConfig) -> dict[str, Path]:
     return out
 
 
+# What decides a sample's reward besides its reply, so that eval_compare can refuse two runs scored differently:
+# the profile's whole content, the reward function's version and code, and the run's reward settings. Where the
+# checks run (`remote`), whether results are cached (`cache`), how many workers run them (`sim_workers`) and whether
+# unneeded legs start early (`speculative_parallel`) do not change a result, so they are left out.
+REWARD_SETTINGS_IGNORED = ("cache", "remote", "sim_workers", "speculative_parallel")
+
+
+def reward_identity(cfg: RunConfig) -> dict:
+    from ..reward.profiles import load_profile
+    from ..reward.rewardfn.for_profile import standin_rewardfn
+
+    profile = load_profile(cfg.reward.profile)
+    fn = standin_rewardfn(profile)
+    content = config_mod.plain(profile)
+    settings = {k: v for k, v in config_mod.plain(cfg.reward).items() if k not in REWARD_SETTINGS_IGNORED}
+    return {"profile_content": content, "profile_sha256": sha256_json(content),
+            "reward_fn_identity": {k: getattr(fn, k, None) for k in ("name", "version", "code_sha256")},
+            "settings": settings}
+
+
 class Scorer:
     """The score run over the same ports as the training loop, without the trainer and the sync: the rollout, the
     reward service (which must also say whether a result is clean, and which legs its reward function did not need),
@@ -478,7 +498,8 @@ class Scorer:
                          "parse_adapter": r.parse_adapter, "feedback_template": r.feedback_template,
                          "compile_adapter": r.compile_adapter, "run_seed": o.run_seed,
                          "seed_rule": "ids.seed(run_seed, iteration, prompt_id, k, turn), one request per turn"},
-            "reward": {"profile": cfg.reward.profile, "reward_fn": cfg.reward.reward_fn, "checkers": checkers},
+            "reward": {"profile": cfg.reward.profile, "reward_fn": cfg.reward.reward_fn, "checkers": checkers,
+                       **reward_identity(cfg)},
             "engines": {k: v for k, v in (self.engines or {}).items() if k != "self_tests"},
         }
 

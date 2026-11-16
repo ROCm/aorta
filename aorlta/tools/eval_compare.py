@@ -10,8 +10,10 @@ It prints the pass rate (the share of samples whose reward claims clean: a corre
 scored fraction of each, and the per-prompt change, and writes `<out>/eval-compare.json` and `<out>/eval-compare.md`.
 The markdown holds, for the prompts that changed most, one sample of each model: its reward, its checks' states and,
 with `--tokenizer`, its final reply decoded. It refuses two runs that did not score the same prompts in the same
-order, with the same sampling settings, batch layout, checkers (each check pool's adapter and version, which names a
-Q&A judge), task hashes, first prompts and seeds, reward code and plugin files, since their numbers would not be
+order, from the same base model (every base file's sha256 as the run plans hashed it, and the served or merged
+weights' hash), with the same sampling settings, batch layout, reward (the profile's content, not its name, the reward
+function's version and code hash, the reward settings, and each check pool's adapter and version, which names a Q&A
+judge), task hashes, first prompts and seeds, reward code and plugin files, since their numbers would not be
 comparable, and a run whose run plan is missing or whose committed episode records do not cover every sample of its
 report, since those checks would have nothing to read. An unscored sample is never counted as passing.
 """
@@ -19,6 +21,7 @@ report, since those checks would have nothing to read. An unscored sample is nev
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -117,6 +120,81 @@ def _plugin_hashes(run_dir: Path) -> dict:
     return {k: (v or {}).get("sha256") for k, v in sorted((plan.get("plugins") or {}).items())}
 
 
+def reward_content(run_dir: Path, rep: dict) -> dict:
+    """What scored the run, by content and not by name: the profile (its stages and legs, pools, requirements, leg
+    and adapter settings, clean repeats), the reward function's name, version and code hash, the run's reward
+    settings, and each check pool's adapter and version. The profile's name is left out: two names for one profile
+    score alike, and one name for two profiles does not."""
+    r = rep["run"].get("reward") or {}
+    if not all(isinstance(r.get(k), dict) for k in ("profile_content", "reward_fn_identity", "settings", "checkers")):
+        raise Refused(f"{run_dir}: its report does not record what scored it (the reward profile's content, the "
+                      f"reward function's version and the checkers)")
+    return {"profile": {k: v for k, v in r["profile_content"].items() if k != "name"},
+            "reward_fn": r["reward_fn_identity"], "checkers": r["checkers"],
+            "settings": {k: v for k, v in r["settings"].items() if k != "profile"}}
+
+
+def differing(a: dict, b: dict, path: str = "") -> list[str]:
+    """The dotted paths at which two JSON trees differ, as far down as both are objects."""
+    if not (isinstance(a, dict) and isinstance(b, dict)):
+        return [path or "(all)"] if a != b else []
+    out = []
+    for k in sorted(set(a) | set(b)):
+        out += differing(a.get(k), b.get(k), f"{path}.{k}" if path else k)
+    return out
+
+
+def files_digest(files: dict) -> str:
+    """sha256 over the files' names and sha256s, as the score report's `files_sha256` takes it (canonical JSON)."""
+    return hashlib.sha256(json.dumps(dict(sorted(files.items())), sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+SNAPSHOT = re.compile(r"/snapshots/([0-9a-f]{7,64})(?:/|$)")  # a Hugging Face snapshot directory's revision
+
+
+def base_model(run_dir: Path, rep: dict) -> tuple[dict, str | None]:
+    """The base model a run started from: the name and sha256 of every file of `model.base_dir` (the weights, the
+    config, the tokenizer), as its run plan hashed them, and the snapshot revision its path names, if any. A run that
+    served the base as it is (`merged_dir`) must have served exactly those top-level files; one that merged an adapter
+    was checked against them when it merged."""
+    if not (Path(run_dir) / "run_plan.json").is_file():
+        raise Refused(f"{run_dir}: no run_plan.json, so its base model cannot be checked")
+    plan = json.loads((Path(run_dir) / "run_plan.json").read_text(encoding="utf-8"))
+    files = {k.partition("/")[2]: v.get("sha256") for k, v in (plan.get("extra_files") or {}).items()
+             if k.startswith("base/")}
+    if not files:
+        raise Refused(f"{run_dir}: its run plan hashes no base model files, so its base model cannot be checked")
+    model = rep["run"].get("model") or {}
+    if model.get("kind") == "merged_dir":
+        top = {n: h for n, h in files.items() if "/" not in n and n != "merge-manifest.json"}
+        if model.get("files_sha256") != files_digest(top):
+            raise Refused(f"{run_dir}: the model it served (files sha256 {str(model.get('files_sha256'))[:16]}) is "
+                          f"not the base its run plan hashed ({files_digest(top)[:16]})")
+    elif model.get("kind") == "base_plus_adapter":
+        served = (json.loads((Path(run_dir) / "score" / "model.json").read_text(encoding="utf-8"))
+                  .get("model") or {}) if (Path(run_dir) / "score" / "model.json").is_file() else {}
+        if not (model.get("merge") or {}).get("tensor_digest") or \
+                files_digest(served.get("files") or {}) != model.get("files_sha256"):
+            raise Refused(f"{run_dir}: its merged weights' hash is missing or does not match the files it recorded")
+    else:
+        raise Refused(f"{run_dir}: its report names no model kind it can be checked by ({model.get('kind')})")
+    paths = [str(v.get("path", "")) for k, v in (plan.get("extra_files") or {}).items() if k.startswith("base/")]
+    revisions = {m.group(1) for p in paths if (m := SNAPSHOT.search(p))}
+    return files, (revisions.pop() if len(revisions) == 1 else None)
+
+
+def same_base(base_dir: Path, trained_dir: Path, base: dict, trained: dict) -> None:
+    """Refuse two runs that did not start from the same base model: a trained adapter is compared with the base it
+    was trained on, not with another revision or another set of weights."""
+    (fb, rev_b), (ft, rev_t) = base_model(base_dir, base), base_model(trained_dir, trained)
+    if fb != ft:
+        changed = sorted(n for n in set(fb) | set(ft) if fb.get(n) != ft.get(n))
+        revs = f" (revision {rev_b} against {rev_t})" if rev_b and rev_t and rev_b != rev_t else ""
+        raise Refused(f"the two runs did not start from the same base model{revs}: {len(changed)} files differ, "
+                      f"{', '.join(changed[:5])}")
+
+
 def headline(rep: dict) -> dict:
     t = rep["total"]
     return {"samples": t["samples"], "scored": t["scored"], "scored_fraction": t["scored_fraction"],
@@ -129,10 +207,14 @@ def compare(base_dir: Path, trained_dir: Path) -> dict:
     base, trained = read_report(base_dir), read_report(trained_dir)
     if list(base["prompts"]) != list(trained["prompts"]):
         raise Refused("the two runs did not score the same prompts in the same order")
-    for key in ("sampling", "options", "reward"):  # options: P and the passes, which decide each prompt's seeds
+    for key in ("sampling", "options"):  # options: P and the passes, which decide each prompt's seeds
         sb, st = base["run"].get(key), trained["run"].get(key)
         if sb != st:
             raise Refused(f"the two runs differ in {key}: {sb} against {st}")
+    rb, rt = reward_content(base_dir, base), reward_content(trained_dir, trained)
+    if rb != rt:
+        raise Refused(f"the two runs differ in reward: {', '.join(differing(rb, rt))}")
+    same_base(base_dir, trained_dir, base, trained)
     for pid, b in base["prompts"].items():
         t = trained["prompts"][pid]
         for key in ("task_sha256", "samples"):
