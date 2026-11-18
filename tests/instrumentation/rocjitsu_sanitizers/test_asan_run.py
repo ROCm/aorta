@@ -297,6 +297,46 @@ def test_a_host_elf_whose_sections_cannot_be_read_is_unreadable(tmp_path):
     assert kernel_inventory(truncated).unreadable
 
 
+def _unparseable(blob: bytes) -> bytes:
+    data = bytearray(blob)
+    struct.pack_into("<Q", data, 0x28, len(data) + 4096)
+    return bytes(data)
+
+
+def test_a_code_object_whose_sections_cannot_be_read_is_unreadable(tmp_path):
+    """It names no kernels because aorta could not read them, not because it has none."""
+
+    blob = _unparseable(_code_object([_STORE_INDEX], asan=False, xnack=False))
+    bare = _write(tmp_path / "k.hsaco", blob)
+    bundled = _write(tmp_path / "libplain.so", _host_binary(_bundle([(_GFX950_PLAIN, blob)])))
+
+    for path in (bare, bundled):
+        assert kernel_inventory(path).unreadable, path
+
+
+def test_a_fatbin_section_outside_the_file_is_unreadable(tmp_path):
+    data = bytearray(_plain_binary(tmp_path / "libplain.so").read_bytes())
+    (table,) = struct.unpack_from("<Q", data, 0x28)
+    # Section 2 is .hip_fatbin; its sh_offset is 24 bytes into the 64-byte header.
+    struct.pack_into("<Q", data, table + 2 * 64 + 24, len(data) + 4096)
+
+    assert kernel_inventory(_write(tmp_path / "libplain.so", bytes(data))).unreadable
+
+
+def test_a_fatbin_section_ending_at_the_end_of_the_file_is_readable(tmp_path):
+    data = bytearray(_plain_binary(tmp_path / "libplain.so").read_bytes())
+    (table,) = struct.unpack_from("<Q", data, 0x28)
+    (length,) = struct.unpack_from("<Q", data, table + 2 * 64 + 32)
+    struct.pack_into("<Q", data, table + 2 * 64 + 24, len(data) - length)
+
+    assert kernel_inventory(_write(tmp_path / "libplain.so", bytes(data))).unreadable is None
+
+
+def test_a_code_object_with_no_kernels_is_still_readable(tmp_path):
+    inventory = kernel_inventory(_write(tmp_path / "k.hsaco", _code_object([], asan=True)))
+    assert inventory.unreadable is None and inventory.code_objects
+
+
 # --------------------------------------------------------------------------- #
 # The run environment
 # --------------------------------------------------------------------------- #
@@ -852,6 +892,24 @@ def test_an_unreadable_loaded_file_could_hold_the_copy_that_ran(tmp_path):
 def test_a_library_whose_sections_cannot_be_read_could_hold_the_copy_that_ran(tmp_path):
     evidence = _evidence(tmp_path)
     plain = _without_section_table(_plain_binary(tmp_path / "libplain.so"))
+    _process(
+        evidence,
+        7,
+        program=_instrumented_binary(tmp_path / "probe"),
+        kernels=["store_index(int*, int)"],
+        objects=[plain],
+    )
+
+    report = evaluate_asan_run(evidence, returncode=0)
+
+    assert report.verdict is Verdict.NOT_CHECKED
+    assert report.opaque_device_code == (str(plain),)
+
+
+def test_a_library_with_an_unreadable_code_object_could_hold_the_copy_that_ran(tmp_path):
+    evidence = _evidence(tmp_path)
+    blob = _unparseable(_code_object([_STORE_INDEX], asan=False, xnack=False))
+    plain = _write(tmp_path / "libplain.so", _host_binary(_bundle([(_GFX950_PLAIN, blob)])))
     _process(
         evidence,
         7,
