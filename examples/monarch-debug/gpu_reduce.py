@@ -348,7 +348,7 @@ def _place(
     """``prefix`` pinned to the hosts every step uses, and those hosts.
 
     Slurm 25.05 does not always honor ``-w`` alone for a step: in testing, an
-    ``-N1 -w <node>`` step ran on the other node about half the time. Adding
+    ``-N1 -w <second node>`` step ran there once in 12 runs. Adding
     ``-x`` for the rest of the allocation pins it, so the probe and the
     workers get the same ``-w`` and ``-x``.
     """
