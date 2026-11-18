@@ -20,7 +20,7 @@ While the ranks wait, open a second terminal on this machine and run
 ``monarch debug``. The controller stays here, so the debugger talks to
 localhost. Do not step one rank into the all-reduce while the others still
 sit at ``breakpoint()``: it waits for them forever. Inspect the bad rank,
-then ``continue`` the whole mesh.
+``detach``, then ``continue`` at ``monarch_dbg>`` for the whole mesh.
 
 Usage
 -----
@@ -66,6 +66,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import IO, Any
 
@@ -170,6 +171,24 @@ if [ -n "$cancel" ]; then
 fi
 status=0
 wait "$child" || status=$?
+# The direct child can die on SIGTERM while a descendant ignores it and
+# keeps the GPUs and ports. The watcher sends SIGKILL a second later;
+# stopping it first would skip that. Empty the group before stopping it.
+if kill -0 -- "-$child" 2>/dev/null; then
+  kill -TERM -- "-$child" 2>/dev/null || true
+  sleep 1
+  if kill -0 -- "-$child" 2>/dev/null; then
+    kill -KILL -- "-$child" 2>/dev/null || true
+    ticks=0
+    while kill -0 -- "-$child" 2>/dev/null; do
+      ticks=$((ticks + 1))
+      if [ "$ticks" -ge 10 ]; then
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+fi
 if [ -n "${watcher:-}" ]; then
   kill "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
@@ -399,7 +418,85 @@ def _signal_group(proc: subprocess.Popen[str], pgid: int | None, sig: int) -> No
         proc.send_signal(sig)
 
 
+def _group_has_members(pgid: int | None) -> bool:
+    """Whether any process in ``pgid`` is still alive.
+
+    A dead launcher does not mean the group is empty: a descendant can ignore
+    SIGTERM and keep the GPUs and ports. ``None``, and this process's own
+    group, count as empty so cleanup never signals the controller.
+    ``PermissionError`` still means a member exists. Any other probe error is
+    reported and treated as empty, so a bad pgid cannot turn into a SIGKILL.
+    """
+    if pgid is None or pgid == os.getpgrp():
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        print(f"could not probe process group {pgid}: {exc}", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+def _workers_need_stop(proc: subprocess.Popen[str], pgid: int | None, cancel: Path | None) -> bool:
+    """Whether the worker step still needs teardown.
+
+    Spur always does. The local client can exit while the remote workers live,
+    and the cancel file is how they notice. On Slurm, a launcher that has
+    already exited is left alone unless its process group still has a member.
+    """
+    if cancel is not None or proc.poll() is None:
+        return True
+    return _group_has_members(pgid)
+
+
+def _reap_group(proc: subprocess.Popen[str], pgid: int | None, timeout: float) -> None:
+    """Wait until the launcher and its group are gone, or ``timeout`` elapses.
+
+    ``Popen.wait`` returns when the launcher exits. A descendant that ignored
+    SIGTERM is still in the group, so this keeps waiting until ``killpg``
+    reports the group empty. The bound is short: it runs after SIGKILL.
+    """
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None or _group_has_members(pgid):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        slice_s = min(0.2, remaining)
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=slice_s)
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            time.sleep(slice_s)
+
+
 def _stop_workers(proc: subprocess.Popen[str], pgid: int | None, cancel: Path | None) -> None:
+    """SIGTERM the step, then SIGKILL any group member that outlives the launcher.
+
+    An interrupt during the SIGTERM wait still SIGKILLs the group and is
+    re-raised. Cleanup does not return while that group has a member, unless
+    the one-second reap after SIGKILL runs out.
+    """
+
+    def _escalate() -> None:
+        _signal_group(proc, pgid, signal.SIGKILL)
+        try:
+            _reap_group(proc, pgid, 1)
+        except KeyboardInterrupt:
+            pass
+        if proc.poll() is None or _group_has_members(pgid):
+            print(
+                f"worker pid {getattr(proc, 'pid', '?')} in process group {pgid} "
+                "still has members after SIGKILL",
+                file=sys.stderr,
+                flush=True,
+            )
+
     if cancel is not None:
         cancel.parent.mkdir(parents=True, exist_ok=True)
         cancel.touch()
@@ -407,8 +504,14 @@ def _stop_workers(proc: subprocess.Popen[str], pgid: int | None, cancel: Path | 
     try:
         proc.wait(timeout=15)
     except subprocess.TimeoutExpired:
-        _signal_group(proc, pgid, signal.SIGKILL)
-        proc.wait(timeout=5)
+        pass
+    except KeyboardInterrupt:
+        _escalate()
+        raise
+    # wait() returns when the launcher exits, including on SIGTERM, even if a
+    # descendant ignored that signal and is still holding GPUs or ports.
+    if proc.poll() is None or _group_has_members(pgid):
+        _escalate()
 
 
 def _open_logs(stdout_path: Path, stderr_path: Path) -> tuple[IO[str], IO[str]]:
@@ -429,9 +532,10 @@ def _print_debug_hint(world: int, bug_rank: int | None) -> None:
         "activate the environment that has Monarch and run:\n"
         f"  monarch debug\n"
         f"It connects to localhost:{port}. Try: list, attach worker {target}, p rank, "
-        "p partial, n, p partial, then continue.\n"
+        "p partial, n, p partial, detach, then continue at monarch_dbg>.\n"
         "Do not step one rank into all_reduce while the others wait at breakpoint(); "
-        "it hangs until they arrive. Use continue for the whole mesh.",
+        "it hangs until they arrive. continue at (Pdb) resumes only the attached rank. "
+        "Run continue at monarch_dbg> for the whole mesh.",
         flush=True,
     )
 
@@ -549,8 +653,9 @@ def run(
 
         return asyncio.run(_run_and_close())
     finally:
-        # On Spur the remote workers can outlive the local `spur srun` client.
-        if workers is not None and (cancel is not None or workers.poll() is None):
+        # Spur's client can exit before the remote workers. On either scheduler
+        # a descendant can ignore SIGTERM and outlive the launcher.
+        if workers is not None and _workers_need_stop(workers, pgid, cancel):
             _stop_workers(workers, pgid, cancel)
         stdout_log.close()
         stderr_log.close()

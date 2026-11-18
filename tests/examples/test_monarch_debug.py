@@ -13,9 +13,11 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -283,6 +285,246 @@ def test_signal_group_never_signals_its_own_group(gpu_reduce, monkeypatch):
     step = _FakeStep()
     gpu_reduce._signal_group(step, 4242, 9)
     assert step.signals == [9]
+
+
+class _ExitedStep:
+    """A launcher that has already exited, so ``wait`` returns at once."""
+
+    def __init__(self, returncode: int | None = 0):
+        self.returncode = returncode
+        self.signals: list[int] = []
+        self.waits = 0
+
+    def send_signal(self, sig: int) -> None:
+        self.signals.append(sig)
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits += 1
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("step", timeout)
+        return self.returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+def test_stop_workers_sigkills_a_group_that_outlives_the_launcher(gpu_reduce, monkeypatch):
+    sent: list[int] = []
+
+    def _killpg(_pgid: int, sig: int) -> None:
+        sent.append(sig)
+        if sig == 0 and signal.SIGKILL not in sent:
+            return
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(os, "getpgrp", lambda: 1, raising=False)
+    monkeypatch.setattr(os, "killpg", _killpg, raising=False)
+    step = _ExitedStep()
+    gpu_reduce._stop_workers(step, 4242, None)
+    assert sent == [signal.SIGTERM, 0, signal.SIGKILL, 0, 0]
+    assert step.signals == []
+
+
+def test_stop_workers_leaves_an_empty_group_after_sigterm(gpu_reduce, monkeypatch):
+    sent: list[int] = []
+
+    def _killpg(_pgid: int, sig: int) -> None:
+        sent.append(sig)
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(os, "getpgrp", lambda: 1, raising=False)
+    monkeypatch.setattr(os, "killpg", _killpg, raising=False)
+    gpu_reduce._stop_workers(_ExitedStep(), 4242, None)
+    assert signal.SIGKILL not in sent
+
+
+def test_workers_need_stop_when_the_launcher_exited_but_the_group_lives(gpu_reduce, monkeypatch):
+    monkeypatch.setattr(os, "getpgrp", lambda: 1, raising=False)
+    monkeypatch.setattr(os, "killpg", lambda _pgid, _sig: None, raising=False)
+    assert gpu_reduce._workers_need_stop(_ExitedStep(0), 4242, None)
+
+
+def test_workers_need_stop_skips_a_finished_slurm_step(gpu_reduce, monkeypatch):
+    def _gone(_pgid: int, _sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "getpgrp", lambda: 1, raising=False)
+    monkeypatch.setattr(os, "killpg", _gone, raising=False)
+    assert not gpu_reduce._workers_need_stop(_ExitedStep(0), 4242, None)
+
+
+def test_workers_need_stop_still_cleans_spur_after_the_client_exits(
+    gpu_reduce, monkeypatch, tmp_path
+):
+    def _no_killpg(_pgid: int, _sig: int) -> None:
+        raise AssertionError("an empty group must not be probed when cancel is set")
+
+    monkeypatch.setattr(os, "killpg", _no_killpg, raising=False)
+    assert gpu_reduce._workers_need_stop(_ExitedStep(0), 4242, tmp_path / "cancel")
+
+
+def test_stop_workers_sigkills_the_group_when_wait_is_interrupted(gpu_reduce, monkeypatch):
+    sent: list[int] = []
+
+    def _killpg(_pgid: int, sig: int) -> None:
+        sent.append(sig)
+        if sig == 0 and signal.SIGKILL not in sent:
+            return
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(os, "getpgrp", lambda: 1, raising=False)
+    monkeypatch.setattr(os, "killpg", _killpg, raising=False)
+
+    class _Interrupted(_ExitedStep):
+        def wait(self, timeout: float | None = None) -> int:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        gpu_reduce._stop_workers(_Interrupted(), 4242, None)
+    assert sent == [signal.SIGTERM, signal.SIGKILL, 0, 0]
+
+
+def test_group_has_members_treats_permission_errors_as_alive(gpu_reduce, monkeypatch):
+    def _denied(_pgid: int, _sig: int) -> None:
+        raise PermissionError("not allowed")
+
+    monkeypatch.setattr(os, "getpgrp", lambda: 1, raising=False)
+    monkeypatch.setattr(os, "killpg", _denied, raising=False)
+    assert gpu_reduce._group_has_members(4242)
+    assert not gpu_reduce._group_has_members(None)
+    assert not gpu_reduce._group_has_members(1)
+
+
+def test_group_has_members_reports_other_probe_errors(gpu_reduce, monkeypatch, capsys):
+    def _bad(_pgid: int, _sig: int) -> None:
+        raise OSError("bad pgid")
+
+    monkeypatch.setattr(os, "getpgrp", lambda: 1, raising=False)
+    monkeypatch.setattr(os, "killpg", _bad, raising=False)
+    assert not gpu_reduce._group_has_members(4242)
+    assert "could not probe process group 4242: bad pgid" in capsys.readouterr().err
+
+
+def _descendant_is_gone(pid: int, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_stop_workers_kills_a_descendant_that_ignores_sigterm(gpu_reduce, tmp_path):
+    pidfile = tmp_path / "descendant.pid"
+    script = tmp_path / "ignore-term.sh"
+    script.write_text(
+        "#!/bin/bash\n"
+        'bash -c \'echo $$ > "$1"; trap "" TERM INT; '
+        'while true; do read -t 0.2 || true; done\' _ "$1" &\n'
+        "sleep 60\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen(
+        ["bash", str(script), str(pidfile)],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    pgid = os.getpgid(proc.pid)
+    try:
+        deadline = time.monotonic() + 5
+        while not pidfile.exists():
+            if proc.poll() is not None or time.monotonic() > deadline:
+                raise AssertionError("descendant did not start")
+            time.sleep(0.05)
+        descendant = int(pidfile.read_text(encoding="utf-8").strip())
+        started = time.monotonic()
+        gpu_reduce._stop_workers(proc, pgid, None)
+        assert time.monotonic() - started < 5
+        assert _descendant_is_gone(descendant)
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=5)
+
+
+def test_spur_watch_kills_a_descendant_before_stopping_the_watcher(gpu_reduce, tmp_path):
+    pidfile = tmp_path / "descendant.pid"
+    cancel = tmp_path / "cancel"
+    inner = (
+        'bash -c \'echo $$ > "$1"; trap "" TERM INT; '
+        'while true; do read -t 0.2 || true; done\' _ "$1" & sleep 60'
+    )
+    env = os.environ.copy()
+    env["AORTA_STEP_CANCEL"] = str(cancel)
+    proc = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            gpu_reduce._SPUR_WATCH,
+            "debug-demo",
+            "bash",
+            "-c",
+            inner,
+            "_",
+            str(pidfile),
+        ],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    descendant = 0
+    try:
+        deadline = time.monotonic() + 5
+        while not pidfile.exists():
+            if proc.poll() is not None or time.monotonic() > deadline:
+                raise AssertionError("descendant did not start")
+            time.sleep(0.05)
+        descendant = int(pidfile.read_text(encoding="utf-8").strip())
+        cancel.write_text("", encoding="utf-8")
+        proc.wait(timeout=10)
+        assert _descendant_is_gone(descendant)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        if descendant:
+            try:
+                os.kill(descendant, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_spur_watch_returns_when_the_child_exits_before_cancel(gpu_reduce, tmp_path):
+    env = os.environ.copy()
+    env["AORTA_STEP_CANCEL"] = str(tmp_path / "cancel")
+    started = time.monotonic()
+    proc = subprocess.run(
+        ["bash", "-c", gpu_reduce._SPUR_WATCH, "debug-demo", "true"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert time.monotonic() - started < 2
+
+
+def test_debug_hints_continue_from_monarch_dbg_after_detach(cpu_mesh, gpu_reduce, capsys):
+    cpu_mesh._print_debug_hint(8)
+    gpu_reduce._print_debug_hint(8, 3)
+    out = capsys.readouterr().out
+    assert out.count("detach, then continue at monarch_dbg>") == 2
+    assert "continue at (Pdb) resumes only the attached rank" in out
 
 
 # ---- Worker import path -------------------------------------------------

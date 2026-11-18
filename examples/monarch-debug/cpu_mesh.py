@@ -10,8 +10,8 @@ The controller prints each worker's partial and the total, which comes out
 as 26.
 
 While the workers wait, open a second terminal on this machine and run
-``monarch debug``. From there you can list the stopped workers, attach to
-one, print ``rank`` and ``partial``, step over the bad line, and continue.
+``monarch debug``. List the workers, attach, print ``rank`` and ``partial``,
+step over the bad line, ``detach``, then ``continue`` at ``monarch_dbg>``.
 
 Usage
 -----
@@ -114,7 +114,7 @@ def _print_debug_hint(workers: int) -> None:
         "activate the environment that has Monarch and run:\n"
         f"  monarch debug\n"
         f"It connects to localhost:{port}. Try: list, attach worker 2, p partial, n, "
-        "p partial, continue.",
+        "p partial, detach, then continue at monarch_dbg> to release the whole mesh.",
         flush=True,
     )
 

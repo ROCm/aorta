@@ -509,14 +509,14 @@ Open terminal 2 on the same node, do the setup, and run `monarch debug`. Then:
 monarch_dbg> list
 monarch_dbg> attach worker 3
 Attached to debug session for worker 3 (<hostname>)
-> .../monarch-debug/gpu_reduce.py(126)reduce()
+> .../monarch-debug/gpu_reduce.py(127)reduce()
 -> partial = torch.zeros_like(partial) if is_bug_rank(host, gpu, hosts) else partial
 (Pdb) p rank
 3
 (Pdb) p partial
 tensor([4.], device='cuda:3')
 (Pdb) n
-> .../monarch-debug/gpu_reduce.py(127)reduce()
+> .../monarch-debug/gpu_reduce.py(128)reduce()
 -> before = partial.item()
 (Pdb) p partial
 tensor([0.], device='cuda:3')
@@ -527,15 +527,15 @@ monarch_dbg> continue
 ```
 
 `list` shows ranks 0 to 7 stopped in `gpu_reduce.reduce`, with the arrow on
-line 126, the bug line. As in step 1, pdb has not run that line yet. Rank 3 is
+line 127, the bug line. As in step 1, pdb has not run that line yet. Rank 3 is
 the only bug rank here. Before `n`, its `partial` is a one-element CUDA tensor
 holding `rank + 1`, which is 4. After `n`, it holds 0. After `continue`,
 terminal 1 prints one row per rank and ends with `reduced sum 32  honest sum
 36` and `ranks with partial 0: 3`.
 
-One rule applies to this step and the next. One `n` over line 126 is safe. It
-touches only this rank's tensor, and pdb stops on line 127,
-`before = partial.item()`. Do not step further. Line 130,
+One rule applies to this step and the next. One `n` over line 127 is safe. It
+touches only this rank's tensor, and pdb stops on line 128,
+`before = partial.item()`. Do not step further. Line 131,
 `dist.init_process_group(...)`, and the `all_reduce` after it wait for every
 rank. The other ranks are still stopped at `breakpoint()`, so the rank you
 stepped waits forever. Inspect the bad rank, `detach`, then `continue` the
@@ -594,7 +594,7 @@ prompt. Attaching to rank 3 shows its held reply right after the
 3 on the other host, so the zero belongs to rank 11 alone. Rank 11's reply
 waits until you attach to rank 11 again.
 
-The rule from step 2 still applies: one `n` over line 126, then `detach`, never
+The rule from step 2 still applies: one `n` over line 127, then `detach`, never
 a step into `init_process_group` or `all_reduce`. After `continue`, terminal 1
 ends with `reduced sum 124  honest sum 136` and `ranks with partial 0: 11`.
 
