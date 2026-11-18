@@ -1,0 +1,63 @@
+# Model-kernel survey inventory: gpt-oss (workload survey, non-gating).
+#
+# Read by scripts/sanitizers/model_survey.py in the sanitizers-model-survey
+# nightly job. Every (kernel, scenario) pair the specs below list for a kept
+# role is launched once, and the object Triton compiles for that launch is
+# scanned by waitcheck. One scenario per kernel (the first the spec lists, which
+# is its most frequent launch shape) is then dispatched under ConSan, rotating
+# through the kernels across nights when the time budget runs out.
+#
+# The sources come from the aorta-model-kernels release asset pinned in
+# .github/workflows/sanitizers-nightly.yml; asset_version must match it.
+schema_version: 1
+model: gpt-oss
+asset_version: "1"
+specs:
+  - attention.json
+  - misc.json
+  - moe.json
+# Kernels gpt-oss launches when serving. The specs also carry dead-for-gpt-oss
+# and training-only kernels, which are left out.
+roles:
+  - launched
+  - conditional
+expected_pairs: 182
+consan:
+  timeout_seconds: 900
+  exclude: {}
+# Every launched (kernel, scenario) is compared under Triton FpSan with its
+# reference (scripts/sanitizers/fpsan_compare.py): by default the same kernel
+# and scenario at num_warps 4, num_stages 1 and no AMD launch kwargs. Tile
+# sizes stay as captured unless listed below: FpSan does not zero masked lanes
+# (exp of -inf is not 0 in its payload algebra), so a tile size that changes
+# how many padded or causally masked lanes are computed changes the digest
+# without a bug.
+fpsan:
+  timeout_seconds: 900
+  # FpSan rewrites floating-point ops only. These kernels have none, so both
+  # runs are the same integer program and a match would say nothing.
+  exclude:
+    _prepare_prefill_inputs_kernel: integer-only input bookkeeping; FpSan has no floating-point op to rewrite
+    _prepare_pos_seq_lens_kernel: integer-only input bookkeeping; FpSan has no floating-point op to rewrite
+    _combine_sampled_and_draft_tokens_kernel: integer-only token bookkeeping; FpSan has no floating-point op to rewrite
+    _get_num_sampled_and_rejected_kernel: integer-only token bookkeeping; FpSan has no floating-point op to rewrite
+    _post_update_kernel: integer-only token bookkeeping; FpSan has no floating-point op to rewrite
+    _gather_block_tables_kernel: integer-only block-table copy through device-pointer tables; FpSan has no floating-point op to rewrite
+    _compute_slot_mappings_kernel: integer-only slot mapping through a device-pointer table; FpSan has no floating-point op to rewrite
+    pack_bitmatrix: integer-only MoE routing bitmask; FpSan has no floating-point op to rewrite
+    _stage2_pow2: integer-only MoE routing index scatter; FpSan has no floating-point op to rewrite
+    _masked_compaction: moves bf16 routing weights by index without arithmetic; FpSan has no floating-point op to rewrite
+  reference:
+    # K = 3072 is a multiple of both BLOCK_K values, so EVEN_K holds and no K
+    # lane is masked; the grid tiles M and N only. Reduction tiling is what
+    # FpSan's ring arithmetic is invariant to.
+    _matmul_ogs:
+      constexprs: {BLOCK_K: 64}
+    _matmul_ogs@w2:
+      constexprs: {BLOCK_K: 64}
+    # Captured at num_warps 4 and num_stages 1 already, so the default
+    # reference would be the same launch; TILE_SIZE is the masked KV tile.
+    kernel_unified_attention_2d/P3_swa:
+      num_warps: 8
+    kernel_unified_attention_2d/P3_full:
+      num_warps: 8
