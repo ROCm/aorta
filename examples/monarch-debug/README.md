@@ -523,7 +523,14 @@ Thread <tid> (idle): "monarch-actor-driver"
 
 A rank stuck inside an endpoint shows that endpoint's function in one of these
 threads. It is the check that [Troubleshooting](#troubleshooting) suggests
-when step 3 stalls in `init_process_group`. py-spy was
+when step 3 stalls in `init_process_group`. In one sixteen-GPU run of step 3
+without the cluster's RCCL network settings, the run hung after `continue`, and
+`py-spy dump --pid <worker pid>` on one worker showed the rank's actor thread
+waiting in `_create_nccl2_process_group`, called from
+`_new_process_group_helper` and `init_process_group` in
+`reduce (gpu_reduce.py:131)`. That pointed at the missing
+[network settings](#network-settings-for-two-nodes); with them set, the same
+run printed `reduced sum 124  honest sum 136` and exited 0. py-spy was
 installed in the Monarch environment used here. If `py-spy` is not found,
 install it in that environment. The mesh admin service below can also take
 these dumps, but it needs the Job API.
