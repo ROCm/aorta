@@ -287,6 +287,9 @@ _STEP_TOKEN_RE = re.compile(r"\Aaorta-\d+-[0-9a-f]+\Z")
 _STEP_ID_RE = re.compile(r"StepId=(\d+)\.(\d+)\b")
 _STEP_GONE_TIMEOUT_SEC = 15.0
 _STEP_POLL_SEC = 0.2
+_SCHEDULER_QUERY_TIMEOUT_SEC = 15.0
+# The node probe is a step that starts Python on every node, not a query.
+_NODE_PROBE_TIMEOUT_SEC = 120.0
 _LOG_TEXT = {"encoding": "utf-8", "errors": "backslashreplace"}
 
 _MONARCH_MISSING = (
@@ -725,7 +728,7 @@ def _run_scheduler(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
             check=False,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=_SCHEDULER_QUERY_TIMEOUT_SEC,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         log.warning("scheduler command %s failed: %s", argv, exc)
@@ -1481,8 +1484,8 @@ def _monarch_nodes(
     )
     argv = [*prefix, "bash", "-c", script]
     try:
-        out = subprocess.check_output(argv, text=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
+        out = subprocess.check_output(argv, text=True, timeout=_NODE_PROBE_TIMEOUT_SEC)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"Could not list hostnames with {' '.join(prefix)}: {exc}") from exc
     rows: list[tuple[int, str, str]] = []
     for line in out.splitlines():
@@ -1513,9 +1516,19 @@ def _slurm_allocation_nodes(job_id: str) -> list[str]:
 
 def _scheduler_listing(argv: list[str]) -> str:
     try:
-        return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
+        return subprocess.run(
+            argv,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_SCHEDULER_QUERY_TIMEOUT_SEC,
+        ).stdout
     except OSError as exc:
         raise RuntimeError(f"Could not run {argv[0]}: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"`{' '.join(argv)}` did not answer within {_SCHEDULER_QUERY_TIMEOUT_SEC:g} seconds"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip() or f"exit status {exc.returncode}"
         raise RuntimeError(f"`{' '.join(argv)}` failed: {detail}") from exc

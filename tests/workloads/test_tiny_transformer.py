@@ -794,7 +794,7 @@ def test_monarch_srun_requests_one_task_per_node(monkeypatch) -> None:
 
     seen: dict[str, list[str]] = {}
 
-    def fake_check_output(argv, text=True):
+    def fake_check_output(argv, text=True, **_kwargs):
         del text
         seen["argv"] = list(argv)
         return "1 nb node-b\n0 na node-a\n"
@@ -820,13 +820,13 @@ def test_monarch_probe_refuses_a_node_without_a_scheduler_name(monkeypatch) -> N
 
     monkeypatch.setattr(
         "aorta.workloads.distributed_launch.subprocess.check_output",
-        lambda argv, text=True: "0 na node-a\n1 node-b\n",
+        lambda argv, text=True, **_kwargs: "0 na node-a\n1 node-b\n",
     )
     with pytest.raises(RuntimeError, match="SLURMD_NODENAME"):
         _monarch_nodes(["srun"], 2)
     monkeypatch.setattr(
         "aorta.workloads.distributed_launch.subprocess.check_output",
-        lambda argv, text=True: "0 na node-a\n1 na node-a\n",
+        lambda argv, text=True, **_kwargs: "0 na node-a\n1 na node-a\n",
     )
     with pytest.raises(RuntimeError, match="distinct"):
         _monarch_nodes(["srun"], 2)
@@ -969,6 +969,25 @@ def test_slurm_allocation_nodes_expands_the_jobs_node_list(monkeypatch) -> None:
         ["squeue", "-j", "4242", "-h", "-o", "%N"],
         ["scontrol", "show", "hostnames", "n[0-1]"],
     ]
+
+
+def test_scheduler_queries_and_the_node_probe_time_out(monkeypatch) -> None:
+    """A stalled ``squeue``, ``scontrol`` or probe step fails the launch instead of hanging it."""
+    from aorta.workloads import distributed_launch as dl
+
+    seen: list[object] = []
+
+    def stalled(argv, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.run", stalled)
+    monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.check_output", stalled)
+    with pytest.raises(RuntimeError, match="did not answer within 15 seconds"):
+        dl._slurm_allocation_nodes("4242")
+    with pytest.raises(RuntimeError, match="Could not list hostnames"):
+        dl._monarch_nodes(["srun"], 2)
+    assert seen == [dl._SCHEDULER_QUERY_TIMEOUT_SEC, dl._NODE_PROBE_TIMEOUT_SEC]
 
 
 def test_monarch_launch_pins_probe_and_workers_with_x_in_a_larger_allocation(monkeypatch) -> None:
