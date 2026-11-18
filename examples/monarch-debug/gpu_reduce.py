@@ -385,6 +385,31 @@ def _worker_env() -> dict[str, str]:
     return {"PYTHONPATH": os.pathsep.join(extra)}
 
 
+# Older Monarch builds attach only to ``<proc-id>@<url>`` and newer ones also
+# accept it, so the controller picks each worker's service proc id and passes
+# the list here, one id per node in ``SLURM_NODEID`` order.
+_SERVICE_IDS_ENV = "DEBUG_DEMO_SERVICE_PROC_IDS"
+
+
+def _worker_bootstrap(port: int) -> str:
+    """Python ``-c`` source that serves one Monarch worker under this node's id."""
+    return (
+        "import os, socket\n"
+        "from monarch.actor import run_worker_loop_forever\n"
+        f"ids = os.environ[{_SERVICE_IDS_ENV!r}].split(',')\n"
+        "proc_id = ids[int(os.environ['SLURM_NODEID'])]\n"
+        f"address = f'{{proc_id}}@tcp://{{socket.gethostname()}}:{port}'\n"
+        "run_worker_loop_forever(address=address, ca='trust_all_connections')\n"
+    )
+
+
+def _worker_addrs(hostnames: list[str], proc_ids: list[str], port: int) -> list[str]:
+    """The ``<proc-id>@<url>`` each worker serves on, in the same order."""
+    return [
+        f"{proc_id}@tcp://{host}:{port}" for host, proc_id in zip(hostnames, proc_ids, strict=True)
+    ]
+
+
 def _cancel_path() -> Path:
     key = "DEBUG_DEMO_SHARED_DIR"
     raw = os.environ.get(key, "").strip()
@@ -401,7 +426,9 @@ def _cancel_path() -> Path:
     root = Path(raw)
     if not root.is_dir():
         raise RuntimeError(f"{key} {raw!r} is not a directory")
-    return root / f"debug-demo-step-cancel-{os.getpid()}"
+    # The directory is shared across hosts and outlives interrupted runs, so a
+    # PID alone can match another controller's file or a stale one.
+    return root / f"debug-demo-step-cancel-{os.getpid()}-{os.urandom(8).hex()}"
 
 
 def _signal_group(proc: subprocess.Popen[str], pgid: int | None, sig: int) -> None:
@@ -560,13 +587,7 @@ def run(
     nodes: int, gpus_per_node: int, scheduler: str = "slurm", spur_bin: str = "spur"
 ) -> list[dict[str, Any]]:
     """Attach to the current Slurm or Spur allocation and run the all-reduce on it."""
-    from monarch._src.job._slurm_batch import _worker_bootstrap
-    from monarch._src.job.service_identity import (
-        SERVICE_PROC_IDS_ENV,
-        allocate_service_proc_ids,
-        serialize_service_proc_ids,
-        service_proc_addrs,
-    )
+    from monarch._src.job.service_identity import new_service_proc_id
     from monarch.actor import attach_to_workers, enable_transport
 
     if gpus_per_node < 1:
@@ -586,13 +607,13 @@ def run(
         f"nccl master {master_addr}:{master_port}",
         flush=True,
     )
-    proc_ids = allocate_service_proc_ids(nodes)
+    proc_ids = [str(new_service_proc_id()) for _ in range(nodes)]
     env = os.environ.copy()
     env.update(_worker_env())
-    env[SERVICE_PROC_IDS_ENV] = serialize_service_proc_ids(proc_ids)
+    env[_SERVICE_IDS_ENV] = ",".join(proc_ids)
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"):
         env.pop(key, None)
-    bootstrap = _worker_bootstrap(port, None)
+    bootstrap = _worker_bootstrap(port)
     inner = [sys.executable, "-c", bootstrap]
     if cancel is not None:
         env["AORTA_STEP_CANCEL"] = str(cancel)
@@ -635,7 +656,7 @@ def run(
         hosts = attach_to_workers(
             name="debug-demo",
             ca="trust_all_connections",
-            workers=service_proc_addrs([f"tcp://{host}:{port}" for host in hostnames], proc_ids),
+            workers=_worker_addrs(hostnames, proc_ids, port),
         )
 
         async def _run_and_close() -> list[dict[str, Any]]:

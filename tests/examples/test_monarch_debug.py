@@ -10,6 +10,7 @@ the README's citations of script lines.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import re
@@ -544,6 +545,63 @@ def test_workers_can_import_gpu_reduce_by_its_module_name(gpu_reduce):
     assert Path(out.strip()).resolve() == _EXAMPLE / "gpu_reduce.py"
 
 
+# ---- Worker attach ------------------------------------------------------
+
+
+def test_worker_bootstrap_serves_under_this_nodes_service_id(gpu_reduce, tmp_path):
+    fake = tmp_path / "monarch"
+    fake.mkdir()
+    (fake / "__init__.py").write_text("", encoding="utf-8")
+    (fake / "actor.py").write_text(
+        "def run_worker_loop_forever(*, address, ca):\n    print(address, ca)\n",
+        encoding="utf-8",
+    )
+    ids = ["service<aaaaaaaaaaa>", "service<bbbbbbbbbbb>"]
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(tmp_path),
+        gpu_reduce._SERVICE_IDS_ENV: ",".join(ids),
+        "SLURM_NODEID": "1",
+    }
+    out = subprocess.run(
+        [sys.executable, "-c", gpu_reduce._worker_bootstrap(22222)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert out.split() == [f"{ids[1]}@tcp://{socket.gethostname()}:22222", "trust_all_connections"]
+
+
+def test_worker_addrs_pair_each_host_with_its_service_id(gpu_reduce):
+    ids = ["service<aaaaaaaaaaa>", "service<bbbbbbbbbbb>"]
+    assert gpu_reduce._worker_addrs(["h0", "h1"], ids, 22222) == [
+        "service<aaaaaaaaaaa>@tcp://h0:22222",
+        "service<bbbbbbbbbbb>@tcp://h1:22222",
+    ]
+    with pytest.raises(ValueError):
+        gpu_reduce._worker_addrs(["h0"], ids, 22222)
+
+
+def test_run_imports_only_service_identity_helpers_every_monarch_has(gpu_reduce):
+    tree = ast.parse((_EXAMPLE / "gpu_reduce.py").read_text(encoding="utf-8"))
+    imported = {
+        (node.module, alias.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("monarch._src")
+        for alias in node.names
+    }
+    assert imported == {("monarch._src.job.service_identity", "new_service_proc_id")}
+
+
+def test_cancel_path_is_unique_per_run(gpu_reduce, tmp_path, monkeypatch):
+    monkeypatch.setenv("DEBUG_DEMO_SHARED_DIR", str(tmp_path))
+    first, second = gpu_reduce._cancel_path(), gpu_reduce._cancel_path()
+    assert first != second
+    assert first.parent == second.parent == tmp_path
+    assert str(os.getpid()) in first.name
+
+
 # ---- README -------------------------------------------------------------
 
 _PDB_LOCATION = re.compile(r"^> \.\.\./monarch-debug/(\w+\.py)\((\d+)\)\w+\(\)\n-> (.+)$", re.M)
@@ -613,10 +671,13 @@ _LAUNCHERS = ["run-slurm.sh", "run-spur.sh"]
 
 
 def _launcher_env(**extra: str) -> dict[str, str]:
+    # A GPU shell often exports the cluster's NCCL and Gloo settings, which the
+    # fake interpreters echo back.
     env = {
         key: value
         for key, value in os.environ.items()
         if key not in _ALLOCATION_VARS
+        and not key.startswith(("NCCL_", "GLOO_"))
         and key
         not in (
             "MONARCH_PYTHON",

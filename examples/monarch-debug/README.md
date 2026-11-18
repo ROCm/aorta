@@ -1082,3 +1082,9 @@ The GPU steps read these settings:
   `MONARCH_DEBUG_SERVER_PORT` (27000).
 - Slurm's `srun`, `squeue`, and `scontrol`, or the `spur` binary, found
   through `SPUR_BIN`, `SPUR_HOME`, or `PATH`.
+
+From Monarch itself the GPU steps use only its public actor API and
+`new_service_proc_id`. `gpu_reduce.py` picks each worker's service proc id
+and attaches to `<proc-id>@tcp://<host>:<port>`, a form both older builds
+and Monarch's current main branch accept. Steps 2 and 3 were run with Monarch
+0.8.0.dev0; the main branch was checked against its source only.
