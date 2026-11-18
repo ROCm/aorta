@@ -90,6 +90,9 @@ def load_env(code: str | os.PathLike[str] | None = None) -> Any:
     """Import ``rocjitsu_env`` (and the harness helpers) from a code snapshot; idempotent."""
     global _rj
     if _rj is not None:
+        if code is not None and Path(_rj.__file__).resolve().parent != (Path(code) / "examples" / "rl").resolve():
+            raise SystemExit(f"rocjitsu_env is already loaded from {_rj.__file__}; "
+                             f"one process cannot switch to --env-code {code}")
         return _rj
     root = Path(code or os.environ.get(ENV_CODE_VAR) or DEFAULT_ENV_CODE)
     rl = root / "examples" / "rl"
