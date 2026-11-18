@@ -376,6 +376,332 @@ files. The same works for anything a node sets up on its own, such as
 `p torch.__version__`. The environment is less likely to differ, because
 `srun` passes terminal 1's environment to every node.
 
+## Other ways Monarch helps you debug
+
+The debugger is one of several tools Monarch has for finding problems. Some
+work with these scripts as they are. Others need the program to start its
+workers through Monarch's Job API, which these scripts do not use. The
+debugger was run in all three steps. Each of the other tools below was checked
+only on one machine, on CPU, with Monarch 0.8.0.dev0, and none of them has
+been tried on the GPU steps.
+
+| Symptom | Tool | With these scripts as they are |
+| --- | --- | --- |
+| A value is wrong on some ranks | `breakpoint()` and `monarch debug` | Yes |
+| You need each rank's output | Log forwarding | Yes, with two added calls |
+| A rank or its process dies | Supervision errors, `__supervise__` | Yes |
+| The run hangs | `py-spy dump` | Yes |
+| Where each actor runs, right now | `monarch tui` | No, needs the Job API |
+| What failed, and when | `monarch query` | No, needs the Job API |
+| Slow or uneven ranks | `monarch profile`, `get_meter()` | No, needs the Job API |
+| A host or its environment differs | `monarch exec`, `monarch shell` | No; use `p` at a breakpoint |
+
+### Step through code on any rank
+
+Steps 1 to 3 and [What this catches](#what-this-catches) cover this:
+`breakpoint()` in an endpoint, then `list`, `attach`, `cast`, and `continue`
+at the `monarch_dbg>` prompt. Monarch also opens pdb where an exception is
+raised, but only on a rank where the same endpoint call already stopped at
+`breakpoint()`; see [An exception on one rank](#an-exception-on-one-rank).
+
+### Logs from every rank
+
+Where worker output goes depends on how the workers started. In step 1 the
+workers inherit terminal 1, so their prints show up there, without a rank
+label. In steps 2 and 3 they go to `gpu-workers.out` and `gpu-workers.err`,
+not to terminal 1. Monarch's own log is `/tmp/$USER/monarch_log.log`, named on
+the first line that terminal 1 prints.
+
+Log forwarding sends each worker's stdout and stderr to the controller,
+labelled with host, process, and rank. Turn it on before the controller
+spawns any processes, then ask the process mesh to stream:
+
+```python
+from monarch.config import configure
+
+configure(enable_log_forwarding=True, tail_log_lines=100)
+...
+procs = hosts.spawn_procs(name="gpus", per_host={"gpus": 8})
+await procs.logging_option(stream_to_client=True, aggregate_window_sec=None)
+```
+
+Each line then reaches the controller like this:
+
+```text
+[<hostname> gpus-1<...>@gpus-1<...>.tcp://<ip>:<port>] [1] child rank 1 pid <pid> says hello
+```
+
+That was checked on a mesh made with `this_host()`, as in step 1, and on one
+made with `attach_to_workers`, as in steps 2 and 3. In the second case each
+line also still goes to the worker's own output file. In step 1 every line
+appears twice on terminal 1, once as the worker printed it and once with the
+label. `logging_option` is a coroutine, so `await` it; `gpu_reduce.py`
+already runs its mesh code under `asyncio`. Without the `configure` call,
+`logging_option` only warns:
+
+```text
+UserWarning: logging_option(stream_to_client=True) has no effect: log forwarding was disabled when this ProcMesh was spawned, ...
+```
+
+`tail_log_lines` keeps the last lines of each worker process. When the process
+exits, Monarch's own log records them after `tail:`. A number for
+`aggregate_window_sec` batches lines for that many seconds; that was not
+tried. `configure` also accepts `enable_file_capture=True`, but no capture
+file turned up in testing, so it is not described here.
+
+### Failures that reach the controller
+
+What the controller sees depends on what failed:
+
+- An endpoint raised. The call raises `ActorError`, whose message starts with
+  `Actor call worker.boom failed.` and includes the worker's traceback. The
+  actor and its process keep running.
+- An actor or its process died. A pending call raises `SupervisionError`, for
+  example `Endpoint call crasher.crash() failed, The actor <...> and all its
+  descendants have failed: the process this actor was running on exited with
+  non-zero code 3`. For an exception in an actor's `__init__`, the reason is
+  `actor explicitly aborted due to:` followed by the traceback.
+- Nothing handled the failure. The controller prints
+  `Unhandled monarch error on the root actor, hostname=<hostname>, PID=<pid>`
+  and the report, then stops with a `KeyboardInterrupt` that you did not send.
+  In testing, the program exited with status 130. To keep the controller
+  running, set `monarch.actor.unhandled_fault_hook` to a function that returns
+  normally. The pending call then raises `SupervisionError` instead.
+- `The process likely crashed`, and `never connected` with
+  `MESH_ATTACH_CONFIG_TIMEOUT`, came up in runs of these scripts;
+  [Troubleshooting](#troubleshooting) explains both.
+
+An actor that spawns its own mesh can handle a failure in it with
+`__supervise__`:
+
+```python
+from monarch.actor import Actor, MeshFailure, endpoint, this_host
+
+
+class Supervisor(Actor):
+    def __init__(self):
+        self.failures = []
+
+    def __supervise__(self, failure: MeshFailure) -> bool:
+        self.failures.append(failure.report())
+        return True  # handled; do not pass it up
+
+    @endpoint
+    def run(self):
+        kids = this_host().spawn_procs(per_host={"kids": 2}).spawn("kid", Child)
+        ...
+```
+
+When rank 1 of `kids` exited with `os._exit(5)`, `__supervise__` ran once for
+each actor mesh on that process: `kid`, and Monarch's own helpers such as
+`log_level`. `failure.mesh_name` names the mesh. The call into the dead rank
+still raised `SupervisionError`. In an actor with plain `def` endpoints,
+`__supervise__` runs after the current endpoint returns, so read
+`self.failures` from a later call. This worked on both kinds of mesh. In these
+scripts the controller spawns the workers itself, so there is no actor to put
+`__supervise__` on; for the controller, use `unhandled_fault_hook`.
+
+### Where a stuck rank is waiting
+
+`py-spy dump` prints the Python stack of every thread in a process. Each rank
+runs in a process started as `python3 -m monarch._src.actor.bootstrap_main`.
+On the node that holds the rank:
+
+```bash
+pgrep -af monarch._src.actor.bootstrap_main
+py-spy dump --pid <pid>
+```
+
+```text
+Thread <tid> (idle): "MainThread"
+    select (selectors.py:468)
+    ...
+    invoke_main (monarch/_src/actor/bootstrap_main.py:77)
+Thread <tid> (idle): "monarch-actor-driver"
+    _sync_dispatch_loop (monarch/_src/actor/actor_mesh.py:1664)
+```
+
+A rank stuck inside an endpoint shows that endpoint's function in one of these
+threads. It is the check that [Troubleshooting](#troubleshooting) suggests
+when step 3 stalls in `init_process_group`. py-spy was
+installed in the Monarch environment used here. If `py-spy` is not found,
+install it in that environment. The mesh admin service below can also take
+these dumps, but it needs the Job API.
+
+### Tools that need the Job API
+
+The remaining tools work through a job object: `ProcessJob` for worker
+processes on this machine, or `SlurmJob` for a Slurm allocation, which was not
+tried. The job starts the workers. `job.state()` connects to them and saves
+the job in `.monarch/job_state.pkl` under the current directory. The
+`monarch` commands below look for that file in the directory you run them
+from. These scripts start their workers themselves, with `this_host()` in
+step 1 and `attach_to_workers` in steps 2 and 3, so none of this is on for
+them.
+
+```python
+from monarch.job import ProcessJob
+
+job = ProcessJob({"hosts": 1}).enable_telemetry()
+state = job.state()
+procs = state.hosts.spawn_procs(per_host={"workers": 4})
+```
+
+`enable_telemetry()` must come before `state()`. It starts the telemetry store
+and the mesh admin service. `ProcessJob` workers keep running after the
+program exits, and another program that calls `state()` on the same job from
+the same directory reuses them. `monarch kill`, from that directory, stops
+them. `monarch profile` without an address, `monarch exec`, and
+`monarch shell` also need the job registered by its import path: put
+`job = ...` in a file such as `myjob.py`, and run `monarch apply myjob.job`
+from that directory. It prints `Job is ready`.
+
+#### Topology and live state
+
+When `state()` starts the mesh admin service, the program prints:
+
+```text
+Mesh admin server listening on http://<hostname>:1729
+  - Root node:     curl http://<hostname>:1729/v1/root
+  - Mesh tree:     curl http://<hostname>:1729/v1/tree
+```
+
+`job.state().admin_url` holds the same address. In testing, port 1729
+belonged to the program that called `state()`, so use the service while that
+program runs. In a terminal:
+
+```bash
+monarch tui --addr http://<hostname>:1729 --plaintext
+```
+
+The TUI shows a Topology pane with each host and its processes, and a details
+pane for the selected one, refreshed every 2 seconds. Without a real terminal
+it fails with `The cursor position could not be read within a normal
+duration`. Its key bar includes `p: py-spy`; pressing it was not tried, but
+the service's REST call `GET /v1/pyspy/<proc reference>` returned a worker's
+stacks.
+
+`enable_telemetry(include_dashboard=True)` also prints
+`Monarch Dashboard: http://localhost:8265`. In this build that page answers
+`{"error":"Frontend not built. API available at /api/"}`, so there is no
+dashboard to look at. `monarch dashboard` has only a `mast` subcommand, for
+Meta's internal scheduler, and `monarch-dashboard` serves a SQLite file, with
+sample data by default. Ports 1729 and 8265 listen on all network interfaces,
+over plain HTTP.
+
+#### Telemetry history in SQL
+
+`monarch query` runs SQL against the job's telemetry store. It keeps working
+after the program exits, for as long as the job's workers run.
+
+```bash
+monarch query 'SHOW TABLES'
+monarch query 'DESCRIBE actor_failures'
+```
+
+`SHOW TABLES` listed 29 tables, among them `actors`, `actor_failures`,
+`actor_status_events`, `events`, `messages`, `spans`, `metric_sums`,
+`metric_histograms`, and `pyspy_stack_traces`. `actor_failures` has the
+columns `snapshot_id`, `node_id`, `failure_error_message`,
+`failure_root_cause_actor`, `failure_root_cause_name`, `failure_occurred_at`,
+and `failure_is_propagated`. An actor that raised in `__init__` showed up
+there:
+
+```text
+$ monarch query 'SELECT failure_error_message, failure_root_cause_actor FROM actor_failures'
+failure_error_message                                   | failure_root_cause_actor
+--------------------------------------------------------+-------------------------------------
+failed: actor explicitly aborted due to: Traceback ...  | badinit<...>.failers-1<...>@...
+(1 row)
+```
+
+That table is filled from a snapshot of the live mesh, taken every 30 seconds
+by default (`snapshot_interval_secs` in `TelemetryConfig`). It only has
+failures whose process was still running at a snapshot. When a worker process
+exited, nothing reached `actor_failures`, but the unhandled-failure report was
+in `events`:
+
+```bash
+monarch query "SELECT fields_json FROM events WHERE fields_json LIKE '%Unhandled monarch error%'"
+```
+
+`--format json` or `--format jsonl` gives output for scripts, and
+`--timeout 30s` raises the default limit of 10 seconds.
+
+#### Timing and performance
+
+`monarch profile` collects a Perfetto trace of actor activity over a window,
+10 seconds by default:
+
+```text
+$ monarch profile http://127.0.0.1:<port> --time 10s
+Collecting traces for 10s...
+Wrote 170 spans from 9 actors on 9 procs.
+/tmp/$USER/monarch_profiles/monarch-profile-<timestamp>.pftrace
+```
+
+`-o` picks another path. The address is the job's telemetry URL,
+`job.state().telemetry_url`, although `monarch profile --help` calls it a
+mesh-admin URL. Without it, `monarch profile` connects to the job
+by itself, which needs `monarch apply` first. That worked when no other
+program was connected to the job, and hung for 90 seconds while one was, so
+pass the address when you profile a running program. Opening the trace in a
+viewer was not tried. In code, you can profile one block:
+
+```python
+with job.profile() as prof:
+    workers.work.call(200).get()
+print(prof.export_perfetto_trace())
+```
+
+`get_meter()` makes your own counters and histograms. Create them in the
+actor's `__init__`:
+
+```python
+from monarch.actor import Actor, endpoint, get_meter
+
+
+class Worker(Actor):
+    def __init__(self):
+        self.steps = get_meter().create_counter("demo_steps")
+        self.step_ms = get_meter().create_histogram("demo_step_ms")
+```
+
+`self.steps.add(1, {"rank": rank})` and `self.step_ms.record(ms)` land in
+`metric_sums` and `metric_histograms`, one row per set of attributes. After
+2400 steps over four ranks:
+
+```text
+$ monarch query "SELECT name, SUM(sum_u64) AS total FROM metric_sums WHERE name = 'demo_steps' GROUP BY name"
+name       | total
+-----------+------
+demo_steps | 2400
+(1 row)
+```
+
+A meter created at module level in the script you run, and used by an actor
+defined there, makes `spawn` fail with `cannot pickle '...PyCounter' object`.
+Without telemetry the calls still work, but nothing stores the values.
+
+#### A shell on a worker host
+
+```text
+$ monarch exec hostname
+<hostname>
+$ monarch exec --all -- python -c 'import os; print(os.getpid())'
+Output → /tmp/monarch_exec_<id>/ on each worker
+$ monarch shell
+```
+
+`monarch exec` runs a command on rank 0 and streams its output. With `--all`
+it runs on every rank and writes `stdout.txt` and `stderr.txt` under that
+directory on each worker host. `monarch shell` opens an interactive shell on
+rank 0's host. It needs a terminal; with input from a pipe it only echoed
+that input. Both need `monarch apply` first. On these scripts, do the same
+checks with pdb at a breakpoint, for example
+`cast worker ranks(0,8) p os.environ.get("NCCL_SOCKET_IFNAME")`, as in
+[Data that one node does not have](#data-that-one-node-does-not-have).
+
 ## Before the GPU steps: get onto an allocated node
 
 Steps 2 and 3 attach to a Slurm allocation that already holds the nodes. The
