@@ -1040,8 +1040,8 @@ def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch, tmp_path) -> None:
     )
     assert result.passed is True
     step = ["/opt/spur/bin/spur", "srun", "-N2", "--ntasks=2", "--ntasks-per-node=1"]
-    assert seen["prefix"] == step
-    assert seen["scheduler"] == ["spur"]
+    assert seen.get("prefix") == step
+    assert seen.get("scheduler") == ["spur"]
     argv = captured.get("argv")
     assert isinstance(argv, list)
     assert argv[:5] == step

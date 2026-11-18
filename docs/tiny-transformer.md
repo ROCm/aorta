@@ -108,7 +108,7 @@ aorta sweep run --recipe recipes/training/tiny-transformer-monarch.yaml
 
 The workers connect to the machine running aorta. Aorta looks up that machine's IPv4 address from its hostname. If the lookup fails or gives an address the workers cannot reach, set `AORTA_CONTROLLER_IP` to the right IPv4 address.
 
-Aorta then starts one Monarch worker process on each machine, as one `srun --overlap` step of the allocation. That step is pinned with `-w` to the machines an earlier step reported, so an allocation larger than `nodes` still puts the workers where aorta connects. Monarch starts one training process per GPU on each machine: 2 machines and 8 GPUs each for this recipe. If training fails, aorta stops those worker processes. Multi-machine settings such as the RCCL network variables are listed in [Settings for runs across machines](monarch-install.md#settings-for-runs-across-machines).
+Aorta then starts one Monarch worker process on each machine, as one `srun --overlap` step of the allocation. It reads the allocation's machines with `squeue` and `scontrol` and picks `nodes` of them, the machine you run aorta on first. An earlier step that reports each machine's name and the worker step both run with `-w` on those machines and `-x` on the rest of the allocation, because `-w` alone did not pin a step on Slurm 25.05. So an allocation larger than `nodes` still puts the workers where aorta connects. Monarch starts one training process per GPU on each machine: 2 machines and 8 GPUs each for this recipe. If training fails, aorta stops those worker processes. Multi-machine settings such as the RCCL network variables are listed in [Settings for runs across machines](monarch-install.md#settings-for-runs-across-machines).
 
 ## Run 16 GPUs with Monarch on Spur
 
@@ -135,7 +135,7 @@ aorta sweep run --recipe recipes/training/tiny-transformer-monarch-spur.yaml
 exit                                              # releases the Spur allocation
 ```
 
-The recipe sets `scheduler: spur`. Aorta then runs `spur srun -N2 --ntasks=2 --ntasks-per-node=1` inside your Spur allocation: once to read each machine's name and hostname, and once to start one Monarch worker on each machine. The second step is pinned with `-w` to the machines the first one ran on, so an allocation with more machines than `nodes` still starts the workers where aorta expects them. Set `spur_bin` in the recipe to `$SPUR_HOME/bin/spur`, or to wherever your `spur` binary is. The default is `spur` on `PATH`.
+The recipe sets `scheduler: spur`. Aorta then runs `spur srun -N2 --ntasks=2 --ntasks-per-node=1` inside your Spur allocation: once to read each machine's name and hostname, and once to start one Monarch worker on each machine. The name comes from `hostname -s`, because a `spur srun` step does not set `SLURMD_NODENAME`. The second step is pinned with `-w` to the machines the first one ran on, so an allocation with more machines than `nodes` still starts the workers where aorta expects them. Set `spur_bin` in the recipe to `$SPUR_HOME/bin/spur`, or to wherever your `spur` binary is. The default is `spur` on `PATH`.
 
 - **Run aorta from `spur salloc`, not from `spur sbatch`.** Spur runs a multi-machine batch script on every machine, so `spur sbatch` would start one aorta controller on each machine. `spur salloc` opens one shell on the machine where you run it.
 - **Aorta refuses to start without `SPUR_JOB_ID`.** That variable is how aorta knows it is inside a Spur allocation. It does not request one itself.

@@ -23,7 +23,8 @@ controller IPv4, one worker per node, a proc mesh, and
 current allocation: ``srun --jobid <id> --overlap`` under Slurm, or
 ``spur srun`` from inside a Spur allocation (``scheduler: spur``). The actor
 calls :func:`run_training_rank` instead of an inlined model. A missing
-``monarch`` import raises an error that says Monarch is not installed.
+``monarch`` import raises an error that says Monarch is not installed, and a
+Monarch without ``new_service_proc_id`` raises one that names that helper.
 """
 
 from __future__ import annotations
