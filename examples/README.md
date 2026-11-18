@@ -17,6 +17,7 @@ Two kinds of thing live in this directory:
 
 | | What it is | Start at |
 |---|---|---|
+| [`monarch-debug/`](monarch-debug/README.md) | Monarch's debugger in three steps: eight CPU workers on one machine, then eight and sixteen GPUs under Slurm or Spur, each with one planted bug to find from a second terminal | [`monarch-debug/README.md`](monarch-debug/README.md) |
 | [`profiling/`](profiling/README.md) | Four GPU payloads captured with the `rocprof` and `proton` collectors: a HIP SGEMM, a torch matmul, and two Triton kernels | [`profiling/README.md`](profiling/README.md) |
 | [`rl/`](rl/README.md) | Seam demonstrations for RL post-training. Not workloads, not wired into CI: a graded recipe-synthesis reward computed by aorta's own validators | [`rl/README.md`](rl/README.md) |
 | [`mitigations-sidecar.json`](mitigations-sidecar.json) | Template for a sidecar file that adds named mitigations *and* environments without installing a plugin. Pass with `--mitigations-file` | [`src/aorta/registry/README.md`](../src/aorta/registry/README.md) |
@@ -60,6 +61,7 @@ file shipped which entry.
 | `profiling/rocprof/hip-gemm` | `hipcc`, one AMD GPU, `rocprofv3` |
 | `profiling/rocprof/torch-matmul` | PyTorch for ROCm, `rocprofv3` |
 | `profiling/proton/*` | PyTorch **and** Triton for ROCm |
+| `monarch-debug` | Monarch ([`docs/monarch-install.md`](../docs/monarch-install.md)) and `ncat`, `nc`, or `netcat`; steps 2 and 3 also need a Slurm or Spur allocation with eight GPUs per node |
 | the sidecar templates | nothing — no GPU, no container |
 
 The PyTorch and Triton examples are meant to run **inside** a ROCm container
