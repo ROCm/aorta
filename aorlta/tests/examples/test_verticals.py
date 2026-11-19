@@ -172,9 +172,9 @@ def job_for(mod, tmp_path, row, reply, leg):
                   task_sha256=mod.row_sha256(row), inputs={"response": str(resp)}, output_dir=str(tmp_path))
 
 
-def adapter(v, settings=None):
+def adapter(v, settings=None, thinking="off"):
     ctx = plugins.CheckContext(name=v.check, worker_id="w/1", settings=settings or {}, clock=lambda: 0.0,
-                               timeout_s=30.0, pools=(str(VERTICALS / v.name / "pool" / "train"),))
+                               timeout_s=30.0, pools=(str(VERTICALS / v.name / "pool" / "train"),), thinking=thinking)
     return plugins.CHECK_ADAPTERS[v.check](ctx)
 
 
@@ -187,6 +187,31 @@ def test_the_check_gives_each_failure_its_own_reason(load, tmp_path, v):
     for reply, reason in v.bad:
         res = check.run(job_for(mod, tmp_path, row, reply, v.leg))
         assert (res.state, res.reason) == ("fail", reason), reply
+
+
+@BY_NAME
+@pytest.mark.parametrize("thinking", ["off", "on"])
+def test_the_check_reads_a_reply_as_the_parse_did_in_both_thinking_modes(load, tmp_path, v, thinking):
+    """With thinking off a literal `</think>` is part of the reply (here, a line after the good answer), so the check
+    must not cut the reply there; with thinking on, what comes before the last one is reasoning. Either way the check
+    finds nothing to check (its first reason) exactly when the parse rejected the reply, and the mode is part of the
+    checker's version."""
+    from aorlta.rollout.chain import make_parse_adapter
+
+    mod = load(v)
+    row = mod.load_rows(VERTICALS / v.name / "pool" / "train")[0]
+    parse = make_parse_adapter(f"{v.name}.parse")
+    check = adapter(v, thinking=thinking)
+    stray = f"{v.good}\nA stray </think> tag."
+    replies = [stray, f"<think>{v.nothing}</think>\n{v.good}", f"<think>{v.good}</think>\n{v.nothing}"]
+    for reply in replies:
+        accepted = parse.check(reply, thinking, None).kind == "edits"
+        res = check.run(job_for(mod, tmp_path, row, reply, v.leg))
+        assert (res.reason != v.bad[0][1]) == accepted, (thinking, reply, res.state, res.reason)
+    assert parse.check(stray, thinking, None).kind == ("edits" if thinking == "off" else "rejected")
+    assert check.run(job_for(mod, tmp_path, row, stray, v.leg)).state == ("clean" if thinking == "off" else "fail")
+    assert f"thinking-{thinking}" in check.version and adapter(v, thinking="off").version != \
+        adapter(v, thinking="on").version
 
 
 @BY_NAME
@@ -237,7 +262,8 @@ def test_the_isa_tool_is_part_of_the_checkers_identity(load, tmp_path):
     t = tool(tmp_path, '{"verdict": "pass"}')
     versions = [adapter(ISA).version, adapter(ISA, {"tool": t}).version, adapter(ISA, {"tool": t + ["-x"]}).version,
                 adapter(ISA, {"tool": t, "tool_timeout_s": 5}).version]
-    assert len(set(versions)) == 4 and versions[0] == "1" and adapter(ISA, {"tool": t}).version == versions[1]
+    assert len(set(versions)) == 4 and versions[0] == "2+thinking-off"
+    assert adapter(ISA, {"tool": t}).version == versions[1]
     Path(t[0]).write_text("#!/bin/bash\necho '{\"verdict\": \"fail\"}'\n")
     assert adapter(ISA, {"tool": t}).version != versions[1]
 

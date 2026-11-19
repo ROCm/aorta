@@ -60,6 +60,12 @@ def final_verdict(reply: str) -> dict | None:
     return last
 
 
+def reply_text(text: str, thinking: str) -> str:
+    """The reply as the rollout's parse reads it: after the last `</think>` when thinking is on, the whole text when it
+    is off. The parse and the check both read a reply with it, so the check never fails a reply the parse accepted."""
+    return text.rsplit("</think>", 1)[-1] if thinking == "on" else text
+
+
 def verdict_problem(verdict: dict) -> str | None:
     """PLACEHOLDER check: None for a verdict with exactly `KEYS`, a category from `CATEGORIES` and a non-empty
     rationale of at most `MAX_RATIONALE_CHARS`; otherwise the failure's reason (`bad_keys`, `bad_category`,
@@ -113,8 +119,7 @@ class TriageParse:
     def check(self, text, thinking, prompt):
         from aorlta.rollout.compile_check import ParseOutcome
 
-        reply = text.rsplit("</think>", 1)[-1] if thinking == "on" else text
-        verdict = final_verdict(reply)
+        verdict = final_verdict(reply_text(text, thinking))
         if verdict is None:
             return ParseOutcome("rejected", rejection=(
                 "Your reply has no JSON object. Reply with one JSON object with the keys \"category\" and "
@@ -141,12 +146,12 @@ class TriageCheck:
     `verdict_problem`'s reason for a verdict it rejects, clean otherwise; unsettled when the task is unknown or the
     reply cannot be read."""
 
-    version = "1"
     legs = ("ref.verdict",)
     resource = "local_cpu"
 
     def __init__(self, ctx):
         self.name, self.ctx = ctx.name, ctx
+        self.version = f"2+thinking-{ctx.thinking}"  # cached legs are keyed by it: the thinking flag decides the read
         self.rows = {}
         for pool in ctx.pools:
             if (Path(pool) / "reports.jsonl").is_file():
@@ -162,7 +167,7 @@ class TriageCheck:
             response = job.inputs.get("response")
             if job.leg != "ref.verdict" or row is None or not response:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
-            verdict = final_verdict(Path(response).read_text(encoding="utf-8").rsplit("</think>", 1)[-1])
+            verdict = final_verdict(reply_text(Path(response).read_text(encoding="utf-8"), self.ctx.thinking))
             if verdict is None:
                 return make_result(job, "fail", "no_verdict", t_start=t0, t_end=self.ctx.clock())
             problem = verdict_problem(verdict)

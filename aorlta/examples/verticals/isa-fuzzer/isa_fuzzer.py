@@ -57,6 +57,12 @@ def final_program(reply: str) -> str | None:
     return found[-1] if found else None
 
 
+def reply_text(text: str, thinking: str) -> str:
+    """The reply as the rollout's parse reads it: after the last `</think>` when thinking is on, the whole text when it
+    is off. The parse and the check both read a reply with it, so the check never fails a reply the parse accepted."""
+    return text.rsplit("</think>", 1)[-1] if thinking == "on" else text
+
+
 def program_problem(program: str, row: dict) -> str | None:
     """PLACEHOLDER check: None for a program that keeps the toy grammar, the task's line range and its required
     instructions; otherwise the failure's reason (`malformed`, `wrong_length`, `missing_op`). A real check runs the
@@ -112,8 +118,7 @@ class IsaParse:
     def check(self, text, thinking, prompt):
         from aorlta.rollout.compile_check import ParseOutcome
 
-        reply = text.rsplit("</think>", 1)[-1] if thinking == "on" else text
-        program = final_program(reply)
+        program = final_program(reply_text(text, thinking))
         if program is None:
             return ParseOutcome("rejected", rejection=(
                 "Your reply has no fenced code block. Give the toy-asm program in one fenced code block.",
@@ -151,7 +156,9 @@ class IsaCheck:
         self.name, self.ctx = ctx.name, ctx
         self.tool = ctx.settings.get("tool")
         self.tool_timeout_s = float(ctx.settings.get("tool_timeout_s", 60.0))
-        self.version = "1"  # cached legs are keyed by it: the tool, which decides what the format passes, is part of it
+        # cached legs are keyed by it: the thinking flag, which decides the read, and the tool, which decides what the
+        # format passes
+        self.version = f"2+thinking-{ctx.thinking}"
         if self.tool:
             files = {a: file_identity(a) for a in self.tool if isinstance(a, str) and Path(a).is_file()}
             exe = shutil.which(self.tool[0]) if isinstance(self.tool[0], str) else None  # as PATH finds it, if bare
@@ -159,7 +166,7 @@ class IsaCheck:
                 files[f"exe:{self.tool[0]}"] = f"{os.path.realpath(exe)}:{file_identity(exe)}"
             ident = json.dumps({"tool": list(self.tool), "timeout_s": self.tool_timeout_s, "files": files},
                                sort_keys=True)
-            self.version = f"1+tool-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
+            self.version += f"+tool-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
         self.runner = ProcessRunner()  # kills the tool's whole process group on a timeout or at close()
         self.rows = {}
         for pool in ctx.pools:
@@ -176,7 +183,7 @@ class IsaCheck:
             response = job.inputs.get("response")
             if job.leg != "ref.program" or row is None or not response:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
-            program = final_program(Path(response).read_text(encoding="utf-8").rsplit("</think>", 1)[-1])
+            program = final_program(reply_text(Path(response).read_text(encoding="utf-8"), self.ctx.thinking))
             if program is None:
                 return make_result(job, "fail", "no_program", t_start=t0, t_end=self.ctx.clock())
             problem = program_problem(program, row)

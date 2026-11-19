@@ -164,19 +164,23 @@ stale_containers() {  # the aorlta-run-<job id>[-part] containers on this node w
     [ "${ended[$id]}" = 1 ] && echo "$name"
   done < <(docker ps -a --format '{{.Names}}' | grep -xE 'aorlta-run-[0-9]+(-[a-z]+)?')
 }
-own_containers() {  # this job's containers, aorlta-run-<job id>[-part], by exact name (not aorlta-run-<job id>5)
-  docker ps -a --format '{{.Names}}' | grep -xE "$CNAME(-[a-z]+)?"
+own_containers() {  # this job's containers, aorlta-run-<job id>[-part], by exact name (not aorlta-run-<job id>5); fails
+  # when docker cannot list them, so that "none" never stands for "could not ask"
+  local names
+  names=$(docker ps -a --format '{{.Names}}') || return 1
+  grep -xE "$CNAME(-[a-z]+)?" <<< "$names"
+  return 0
 }
 clear_earlier_attempt() {  # remove this job's containers from an earlier attempt; fails if any is still there
   # A requeued job keeps its id, and an attempt killed before its trap ran leaves its containers (the checkers run
   # detached, and a killed docker client leaves its container running): they hold this job's container names, so the
   # first container it starts by name would fail. stale_containers skips this job's id, since it runs.
   local left
-  left=$(own_containers)
+  left=$(own_containers) || { echo "[guard] docker cannot list this node's containers" >&2; return 1; }
   [ -z "$left" ] && return 0
   stamp "removing this job's containers from an earlier attempt: $(echo $left)"
   echo "$left" | xargs -r docker rm -f >/dev/null 2>&1
-  left=$(own_containers)
+  left=$(own_containers) || left="(docker cannot list them)"
   [ -z "$left" ] && return 0
   echo "[guard] cannot remove this job's containers from an earlier attempt: $(echo $left)" >&2
   return 1
@@ -396,10 +400,11 @@ cleanup() {  # once: the TERM/INT trap's exit runs the EXIT trap too, and by the
   CLEANED=1
   [ -n "$VRAM_PID" ] && kill "$VRAM_PID" 2>/dev/null
   own_containers | xargs -r docker rm -f >/dev/null 2>&1
-  # A container docker would not remove may still use this job's images, GPUs and directories: then the job keeps
-  # them all and is not leaving; a later job's stale_containers removes the container once Slurm has ended this job
+  # A container docker would not remove, or cannot say is gone, may still use this job's images, GPUs and directories:
+  # then the job keeps them all and is not leaving; a later job's stale_containers removes the container once Slurm has
+  # ended this job
   local left own=$OWN_DIRS
-  left=$(own_containers)
+  left=$(own_containers) || left="(docker cannot list them)"
   [ -n "$left" ] && own=0
   find "$OUT" -maxdepth 3 -name 'gpucore.*' -type f -delete 2>/dev/null
   local img mounts=()
