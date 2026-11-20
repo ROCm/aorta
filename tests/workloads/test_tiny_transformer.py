@@ -194,11 +194,7 @@ def test_launcher_import_does_not_load_training() -> None:
         / "distributed_launch.py"
     )
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    top_level = [
-        node.module
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-    ]
+    top_level = [node.module for node in tree.body if isinstance(node, ast.ImportFrom)]
     assert "aorta.workloads.training" not in top_level
 
 
@@ -649,27 +645,22 @@ def _install_fake_monarch(monkeypatch, train_result):
 
             return _Hosts()
 
-    def bootstrap(port: int, _auth: object) -> str:
-        return f"boot-{port}"
+    minted = iter(range(100))
 
     trainer_mod = types.ModuleType("aorta.workloads.monarch_trainer")
     trainer_mod.Trainer = type("Trainer", (), {})  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "aorta.workloads.monarch_trainer", trainer_mod)
     monkeypatch.setattr(
         "aorta.workloads.distributed_launch._import_monarch",
-        lambda: (
-            _Actor(),
-            object(),
-            bootstrap,
-            "SERVICE_PROC_IDS",
-            lambda nodes: [f"id-{index}" for index in range(nodes)],
-            lambda ids: ",".join(ids),
-            lambda addrs, ids: list(zip(addrs, ids, strict=True)),
-        ),
+        lambda: (_Actor(), object(), lambda: f"service<id{next(minted)}>"),
+    )
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch._slurm_allocation_nodes",
+        lambda job_id: ["n0", "n1"],
     )
     monkeypatch.setattr(
         "aorta.workloads.distributed_launch._monarch_nodes",
-        lambda job_id, nodes: [(f"n{index}", f"node-{index}") for index in range(nodes)],
+        lambda prefix, nodes, **_kwargs: [(f"n{index}", f"node-{index}") for index in range(nodes)],
     )
 
     async def fake_train(hosts, spmd_mod, trainer_cls, gpus_per_node, config):
@@ -763,6 +754,14 @@ def test_monarch_launch_selects_rank0_and_stops_workers(monkeypatch) -> None:
     names = [arg for arg in argv if str(arg).startswith("--job-name=")]
     assert len(names) == 1 and str(names[0]).startswith("--job-name=aorta-")
     assert argv[argv.index("-w") + 1] == "n0,n1"
+    assert "-x" not in argv
+    assert env.get("AORTA_MONARCH_SERVICE_IDS") == "service<id0>,service<id1>"
+    attach = captured.get("attach")
+    assert isinstance(attach, dict)
+    assert attach.get("workers") == [
+        "service<id0>@tcp://node-0:22222",
+        "service<id1>@tcp://node-1:22222",
+    ]
     assert captured.get("transport") == "tcp://10.1.2.3:0"
     assert captured.get("gpus_per_node") == 8
     forwarded = captured.get("config")
@@ -795,7 +794,7 @@ def test_monarch_srun_requests_one_task_per_node(monkeypatch) -> None:
 
     seen: dict[str, list[str]] = {}
 
-    def fake_check_output(argv, text=True):
+    def fake_check_output(argv, text=True, **_kwargs):
         del text
         seen["argv"] = list(argv)
         return "1 nb node-b\n0 na node-a\n"
@@ -821,13 +820,13 @@ def test_monarch_probe_refuses_a_node_without_a_scheduler_name(monkeypatch) -> N
 
     monkeypatch.setattr(
         "aorta.workloads.distributed_launch.subprocess.check_output",
-        lambda argv, text=True: "0 na node-a\n1 node-b\n",
+        lambda argv, text=True, **_kwargs: "0 na node-a\n1 node-b\n",
     )
     with pytest.raises(RuntimeError, match="SLURMD_NODENAME"):
         _monarch_nodes(["srun"], 2)
     monkeypatch.setattr(
         "aorta.workloads.distributed_launch.subprocess.check_output",
-        lambda argv, text=True: "0 na node-a\n1 na node-a\n",
+        lambda argv, text=True, **_kwargs: "0 na node-a\n1 na node-a\n",
     )
     with pytest.raises(RuntimeError, match="distinct"):
         _monarch_nodes(["srun"], 2)
@@ -870,6 +869,172 @@ def test_monarch_slurm_rejects_a_spur_job_id(monkeypatch) -> None:
     assert monarch_step_prefix(scheduler="slurm", nodes=2)[:3] == ["srun", "--jobid", "4242"]
 
 
+def _stub_monarch(monkeypatch, *, new_service_proc_id: bool) -> None:
+    """Install a ``monarch`` package whose ``service_identity`` matches Monarch main."""
+    import types
+
+    names = ["monarch", "monarch.actor", "monarch.spmd", "monarch._src", "monarch._src.job"]
+    for name in names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    identity = types.ModuleType("monarch._src.job.service_identity")
+    identity.service_proc_addr = lambda address, proc_id: f"{proc_id}@{address}"  # type: ignore[attr-defined]
+    if new_service_proc_id:
+        identity.new_service_proc_id = lambda: "service<x>"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "monarch._src.job.service_identity", identity)
+
+
+def test_import_monarch_needs_only_what_current_monarch_exports(monkeypatch) -> None:
+    """Monarch main dropped allocate_service_proc_ids and its siblings (meta-pytorch/monarch#5273)."""
+    from aorta.workloads.distributed_launch import _import_monarch
+
+    _stub_monarch(monkeypatch, new_service_proc_id=True)
+    _actor, _spmd, new_id = _import_monarch()
+    assert new_id() == "service<x>"
+
+
+def test_import_monarch_names_a_missing_helper_instead_of_a_missing_install(monkeypatch) -> None:
+    from aorta.workloads.distributed_launch import _import_monarch
+
+    _stub_monarch(monkeypatch, new_service_proc_id=False)
+    with pytest.raises(RuntimeError, match="new_service_proc_id") as raised:
+        _import_monarch()
+    assert "not installed" not in str(raised.value)
+
+
+def test_monarch_worker_bootstrap_serves_under_this_nodes_service_id(tmp_path) -> None:
+    import socket
+
+    from aorta.workloads.distributed_launch import _monarch_worker_bootstrap
+
+    stub = tmp_path / "monarch"
+    stub.mkdir()
+    (stub / "__init__.py").write_text("", encoding="utf-8")
+    (stub / "actor.py").write_text(
+        "def run_worker_loop_forever(*, address, ca):\n    print(address, ca)\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(tmp_path),
+        "AORTA_MONARCH_SERVICE_IDS": "service<a>,service<b>",
+        "SLURM_NODEID": "1",
+    }
+    out = subprocess.run(
+        [sys.executable, "-c", _monarch_worker_bootstrap(22222)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert out.split() == [
+        f"service<b>@tcp://{socket.gethostname()}:22222",
+        "trust_all_connections",
+    ]
+
+
+def test_monarch_spur_probe_ignores_the_callers_node_name() -> None:
+    """A ``spur srun`` step forwards the caller's ``SLURMD_NODENAME`` instead of setting it."""
+    from aorta.workloads.distributed_launch import _monarch_nodes
+
+    prefix = ["env", "SLURM_NODEID=0", "SLURMD_NODENAME=the-callers-node"]
+    [(node, _host)] = _monarch_nodes(prefix, 1, scheduler="spur")
+    short = subprocess.run(["hostname", "-s"], check=True, capture_output=True, text=True)
+    assert node == short.stdout.strip()
+
+
+def test_choose_monarch_nodes_puts_this_machine_first_and_leaves_out_the_rest() -> None:
+    from aorta.workloads.distributed_launch import _choose_monarch_nodes
+
+    allocated = ["n0", "n1", "n2"]
+    assert _choose_monarch_nodes(allocated, 2, "n2") == (["n2", "n0"], ["n1"])
+    assert _choose_monarch_nodes(allocated, 2, "login") == (["n0", "n1"], ["n2"])
+    assert _choose_monarch_nodes(["n0", "n1"], 2, "n1") == (["n1", "n0"], [])
+    with pytest.raises(RuntimeError, match="allocation has 1"):
+        _choose_monarch_nodes(["n0"], 2, "n0")
+
+
+def test_slurm_allocation_nodes_expands_the_jobs_node_list(monkeypatch) -> None:
+    from aorta.workloads.distributed_launch import _slurm_allocation_nodes
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        out = "n[0-1]\n" if argv[0] == "squeue" else "n0\nn1\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.run", fake_run)
+    assert _slurm_allocation_nodes("4242") == ["n0", "n1"]
+    assert calls == [
+        ["squeue", "-j", "4242", "-h", "-o", "%N"],
+        ["scontrol", "show", "hostnames", "n[0-1]"],
+    ]
+
+
+def test_scheduler_queries_and_the_node_probe_time_out(monkeypatch) -> None:
+    """A stalled ``squeue``, ``scontrol`` or probe step fails the launch instead of hanging it."""
+    from aorta.workloads import distributed_launch as dl
+
+    seen: list[object] = []
+
+    def stalled(argv, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.run", stalled)
+    monkeypatch.setattr("aorta.workloads.distributed_launch.subprocess.check_output", stalled)
+    with pytest.raises(RuntimeError, match="did not answer within 15 seconds"):
+        dl._slurm_allocation_nodes("4242")
+    with pytest.raises(RuntimeError, match="Could not list hostnames"):
+        dl._monarch_nodes(["srun"], 2)
+    assert seen == [dl._SCHEDULER_QUERY_TIMEOUT_SEC, dl._NODE_PROBE_TIMEOUT_SEC]
+
+
+def test_monarch_launch_pins_probe_and_workers_with_x_in_a_larger_allocation(monkeypatch) -> None:
+    """``-w`` alone does not pin a Slurm 25.05 step, so the rest of the allocation is excluded."""
+    captured, _stopped = _install_fake_monarch(
+        monkeypatch,
+        {"rank0": {"passed": True, "metrics": {"rank": 0, "world_size": 16, "final_loss": 1.0}}},
+    )
+    probes: list[list[str]] = []
+
+    def fake_nodes(prefix, nodes, **_kwargs):
+        probes.append(list(prefix))
+        return [("n2", "node-2"), ("n0", "node-0")]
+
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch._slurm_allocation_nodes",
+        lambda job_id: ["n0", "n1", "n2"],
+    )
+    monkeypatch.setattr("aorta.workloads.distributed_launch._monarch_nodes", fake_nodes)
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch.socket.gethostname", lambda: "n2.example"
+    )
+    result = launch_monarch({"steps": 1, "device": "cpu"}, nodes=2, gpus_per_node=8)
+    assert result.passed is True
+    [probe] = probes
+    argv = captured.get("argv")
+    assert isinstance(argv, list)
+    for step in (probe, argv):
+        assert step[step.index("-w") + 1] == "n2,n0"
+        assert step[step.index("-x") + 1] == "n1"
+
+
+def test_monarch_launch_refuses_a_probe_that_ran_elsewhere(monkeypatch) -> None:
+    _install_fake_monarch(monkeypatch, {"rank0": {"passed": True, "metrics": {"rank": 0}}})
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch._slurm_allocation_nodes",
+        lambda job_id: ["n0", "n1"],
+    )
+    monkeypatch.setattr(
+        "aorta.workloads.distributed_launch._monarch_nodes",
+        lambda prefix, nodes, **_kwargs: [("n1", "node-1")],
+    )
+    monkeypatch.setattr("aorta.workloads.distributed_launch.socket.gethostname", lambda: "n0")
+    with pytest.raises(RuntimeError, match="asked Slurm for n0, but the probe ran on n1"):
+        launch_monarch({"steps": 1, "device": "cpu"}, nodes=1, gpus_per_node=8)
+
+
 def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch, tmp_path) -> None:
     captured, stopped = _install_fake_monarch(
         monkeypatch,
@@ -877,8 +1042,9 @@ def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch, tmp_path) -> None:
     )
     seen: dict[str, list[str]] = {}
 
-    def fake_nodes(prefix, nodes):
+    def fake_nodes(prefix, nodes, *, scheduler="slurm"):
         seen["prefix"] = list(prefix)
+        seen["scheduler"] = [scheduler]
         return [(f"n{index}", f"node-{index}") for index in range(nodes)]
 
     monkeypatch.setattr("aorta.workloads.distributed_launch._monarch_nodes", fake_nodes)
@@ -893,7 +1059,8 @@ def test_monarch_launch_on_spur_uses_spur_steps(monkeypatch, tmp_path) -> None:
     )
     assert result.passed is True
     step = ["/opt/spur/bin/spur", "srun", "-N2", "--ntasks=2", "--ntasks-per-node=1"]
-    assert seen["prefix"] == step
+    assert seen.get("prefix") == step
+    assert seen.get("scheduler") == ["spur"]
     argv = captured.get("argv")
     assert isinstance(argv, list)
     assert argv[:5] == step
@@ -979,7 +1146,9 @@ def test_launcher_subprocess_logs_are_siblings_of_the_trial_log(monkeypatch, tmp
     assert stderr_path.is_file()
     assert not Path(f"{prefix}.stdout.log").exists()
 
-    captured, stopped = _install_fake_monarch(monkeypatch, {"rank0": {"passed": True, "metrics": {"rank": 0}}})
+    captured, stopped = _install_fake_monarch(
+        monkeypatch, {"rank0": {"passed": True, "metrics": {"rank": 0}}}
+    )
     monarch = launch_monarch(config, nodes=2, gpus_per_node=8)
     assert monarch.passed is True
     monarch_out = captured.get("stdout")
@@ -1645,7 +1814,9 @@ def test_second_interrupt_during_monarch_cancel_keeps_the_file(monkeypatch, tmp_
     monkeypatch.setattr(distributed_launch, "_wait_owned_step_gone", interrupted)
     monkeypatch.setattr(
         "aorta.workloads.distributed_launch._monarch_nodes",
-        lambda _prefix, nodes: [(f"n{index}", f"node-{index}") for index in range(nodes)],
+        lambda _prefix, nodes, **_kwargs: [
+            (f"n{index}", f"node-{index}") for index in range(nodes)
+        ],
     )
     monkeypatch.setenv("SPUR_JOB_ID", "17")
     monkeypatch.setenv("AORTA_SHARED_DIR", str(tmp_path))

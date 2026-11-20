@@ -734,8 +734,9 @@ hostname
 
 Pass `-x` for every other node in the allocation, and leave it out when the
 allocation has one node. On Slurm 25.05, `-w` alone did not pin a step: a
-step with `-N1 -w <node>` ran on the other node about half the time. `-x` fixed
-that. Check `hostname` anyway.
+step with `-N1 -w <node>` aimed at the allocation's first node always ran
+there, but aimed at the second it ran there only once in 12 runs. `-x` fixed
+that every time. Check `hostname` anyway.
 
 A shell from `srun --pty` has `SLURM_JOB_ID` set. A shell you opened with
 `ssh` does not, so set the job id yourself. Terminal 1, after the setup:
