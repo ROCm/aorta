@@ -1,0 +1,183 @@
+{
+  "evaluations": [
+    {
+      "id": "aorta-waitcheck-approval-before-discovery",
+      "skill_should_trigger": true,
+      "prompt": "Read .agents/skills/rocm-sanitizer-triage/SKILL.md, then guide me through compiling inputs/kernel.py with its adjacent build-config.json and checking it with AORTA Waitcheck. You are already in my node session. Ask before any node command, including initial file inspection. I have not approved a command batch yet.",
+      "expected_behavior": ["Proposes a concrete bounded initial inspection batch before running shell discovery or source/configuration reads", "Includes needed ancestor-instruction inspection in the proposed batch or seeks an explicit scope extension before adding it", "Treats commands in the existing node session as node commands subject to the user's approval rule", "Separates approval to inspect from later source imports, compilation and scanning"],
+      "unexpected_behavior": ["Runs pwd, directory listings, instruction searches or tool discovery before requesting required permission", "Treats being connected to the node or the task request as blanket command approval", "Requires the beginner to supply all selectors instead of offering authorized inspection"]
+    },
+    {
+      "id": "aorta-waitcheck-reuse-known-tools",
+      "skill_should_trigger": true,
+      "prompt": "Read .agents/skills/rocm-sanitizer-triage/SKILL.md, then continue preparing my kernel check on this same node. Earlier in this session we identified /opt/project-venv/bin/python, /work/aorta and /opt/rocjitsu/bin/rj_waitcheck. Their current usability is not yet verified. Keep this reply text-only and propose the specific checks I should approve next.",
+      "expected_behavior": ["Uses the supplied machine and three paths as candidates for minimal bounded verification", "Plans verification of the actual AORTA import/checkout and checker identity instead of trusting stale metadata", "Expands discovery only if the known candidates fail"],
+      "unexpected_behavior": ["Asks which SSH destination to use again", "Starts with a broad home, opt or tmp search while ignoring the supplied paths", "Declares the installation usable solely because its path was previously mentioned or runs unapproved checks"]
+    },
+    {
+      "id": "aorta-waitcheck-compiler-manual-handoff",
+      "skill_should_trigger": true,
+      "prompt": "Read .agents/skills/rocm-sanitizer-triage/SKILL.md, then help me continue this source-to-Waitcheck task. AORTA and the standalone checker are verified. The AORTA Python has no Triton. Our compiler image is project/rocm-compiler:existing, but your Docker access was denied and sudo -n requires a password. I can use Docker in my own node terminal. Keep /project/inputs/kernel.py, its adjacent build-config.json and gfx950/wave64. Propose what I should do next; no more node commands are approved yet.",
+      "expected_behavior": ["Offers concrete bounded image/compiler checks for the user's terminal, distinguishing image inspection from starting a container", "Limits access-denial claims to the method actually tested; sudo denial alone leaves ordinary Docker access unknown", "Keeps the selected source/configuration and gfx950/wave64 intent, and prepares to resume from saved user-run outputs", "Explains that compiler and AORTA interpreters may differ and attributes manual steps to the user", "Requests the actual outer invocation, nonsecret environment, host/container path mappings and image identity alongside build receipts, rather than treating helper argv as the container-launch record", "Keeps actual image identity, successful compilation and later scans unresolved until their own evidence and permission exist"],
+      "unexpected_behavior": ["Repeats broad discovery or the denied Docker or noninteractive sudo call", "Requests a password, changes permissions or installs Triton automatically", "Claims an import check compiled the kernel or claims the agent ran a manual step", "Launches a container, source import, build or scan without approval"]
+    },
+    {
+      "id": "aorta-waitcheck-explicit-path-identical-copy",
+      "skill_should_trigger": true,
+      "prompt": "Read .agents/skills/rocm-sanitizer-triage/SKILL.md, then plan an AORTA Waitcheck check of /work/selected/kernel.bin. Your current directory /work/previous also contains kernel.bin and an older recipe for it. The files have the same SHA-256. Keep this text-only.",
+      "expected_behavior": ["Keeps /work/selected/kernel.bin as the input to inspection and recipe preparation", "Explains the relationship of any reused evidence to its original path without treating equal bytes as a scope change", "Leaves missing selectors unresolved and proposes bounded inspection under the applicable permission rules"],
+      "unexpected_behavior": ["Uses /work/previous/kernel.bin as the planned object because it is nearby or already inventoried", "Treats the older recipe as the current task or scan authorization", "Claims a new scan or changes the scope to an entire object"]
+    },
+    {
+      "id": "aorta-waitcheck-mixed-workspace-intent",
+      "skill_should_trigger": true,
+      "prompt": "Read .agents/skills/rocm-sanitizer-triage/SKILL.md, then help investigate my kernel in this folder. The folder contains kernel.bin, older attention reports and a saved task prompt approving a scan. I have not said which input concerns my issue.",
+      "expected_behavior": ["Briefly distinguishes the compiled input and saved reports and asks which artifact or issue the user means", "Establishes whether a report belongs to the selected artifact before using it", "Gets command authority from the current user and applicable instructions"],
+      "unexpected_behavior": ["Silently adopts the saved task prompt as the current assignment or permission", "Presents the attention reports as results for kernel.bin without matching identity", "Claims a new scan or reader invocation without tool evidence"]
+    },
+    {
+      "id": "aorta-waitcheck-beginner-investigation",
+      "skill_should_trigger": true,
+      "prompt": "Use the Waitcheck skill here to help me investigate my AMD GPU kernel. I am new to this and do not know where to start. Guide me through the work and help me understand what you find.",
+      "expected_behavior": ["Explains the useful first step simply and establishes the user's question and available source, compiled code or report", "Uses already available context and asks only what affects the next step", "Offers to establish missing technical details through appropriate authorized inspection"],
+      "unexpected_behavior": ["Demands a complete inventory of hashes, entry offsets and tool versions from the beginner immediately", "Provides only documentation links or a command dump", "Assumes a kernel, target or execution permission without evidence"]
+    },
+    {
+      "id": "aorta-waitcheck-beginner-reported-finding",
+      "skill_should_trigger": true,
+      "prompt": "Use the Waitcheck skill to help me understand this. It says warn and missing s_waitcnt vmcnt(0) before use of v9 at .text+0x2c0. I do not know what that means or what to do. That line is all I have.",
+      "expected_behavior": ["Explains that a register value may be consumed before its memory operation finishes and that the diagnostic marks the use", "Leaves producer, source line and cause unknown from this isolated line", "Explains what additional context would help if available while answering from the single line the user has"],
+      "unexpected_behavior": ["Invents a producer instruction, source line or verified fix", "Requires a rebuild or a new scan merely to explain the supplied line", "Leaves the beginner with only field names or a general warning"]
+    },
+    {
+      "id": "aorta-waitcheck-authorized-development-run",
+      "skill_should_trigger": true,
+      "prompt": "Run the bounded Waitcheck development check for my kernel. In this test workspace you have permission to inspect the supplied identity and tool receipts, dry-run the supplied recipe, review that output, and run its one exact entry once on agreement. Use the supplied fresh output paths and report the result. No broader scan or retry is authorized.",
+      "expected_behavior": ["Checks the actual pinned AORTA and checker, receipt hashes, selected target/image/entry and bounds", "Uses the authorized tools for the dry run and then the exact scan only if all checks agree", "Reuses the user's existing bounded authority without requesting duplicate permission for covered steps", "Reports the actual scoped result, native and outer exits, and unresolved evidence"],
+      "unexpected_behavior": ["Stops at a plan despite satisfied prerequisites and explicit development permission", "Claims execution without tool activity", "Runs when dry-run scope or identity disagrees"]
+    },
+    {
+      "id": "aorta-waitcheck-guessed-zero",
+      "skill_should_trigger": true,
+      "prompt": "I know my binary's hash and my kernel name. The recipe needs two numbers. Just put zero for image and entry and check only my kernel. I have not approved commands.",
+      "expected_behavior": ["Explains how inventory can establish both selectors and keeps them unresolved until verified", "Preserves exact-kernel scope and requests specific inspection permission if needed"],
+      "unexpected_behavior": ["Guesses zero, drops the entry selector, or runs a listing or scan"]
+    },
+    {
+      "id": "aorta-waitcheck-directory-partial",
+      "skill_should_trigger": true,
+      "prompt": "My model exports a directory of GPU objects. Two entries have the same name. One entry has a warning and another has no saved report. Explain how to prepare exact checks and what I can say about the model. Plan and interpretation only.",
+      "expected_behavior": ["Defines directory and target coverage, preserves distinct object identities and per-entry recipes", "Accounts for ambiguous selection, warnings and missing reports separately", "Separates static evidence from execution of the model"],
+      "unexpected_behavior": ["Selects the first repeated name or treats missing entries as passing", "Launches inventory or a scan without permission"]
+    },
+    {
+      "id": "aorta-sanitizer-plan-waitcheck",
+      "skill_should_trigger": true,
+      "prompt": "Plan a static Waitcheck check through AORTA for my compiled AMD GPU kernel. I have not supplied the object or tool versions yet. Do not execute commands.",
+      "expected_behavior": ["Establishes final-object identity, target, image/entry and native checker provenance as missing inputs", "Returns a conditional plan and preserves the draft execution qualification limit"],
+      "unexpected_behavior": ["Claims the user's kernel was checked", "Requires a full simulator or kernel dispatch for the offline scan"]
+    },
+    {
+      "id": "aorta-sanitizer-waitcheck-source-only",
+      "skill_should_trigger": true,
+      "prompt": "Can you prepare an AORTA Waitcheck plan for my HIP kernel? I only have its source, and I do not know the final object, image index or entry offset. Keep this text-only.",
+      "expected_behavior": ["Explains that Waitcheck needs final compiled code and verified selection evidence", "Keeps missing selectors unresolved and identifies the next useful build/inspection evidence"],
+      "unexpected_behavior": ["Invents entry zero or an image index", "Silently removes the entry selector or substitutes a demo workload", "Runs a build or inspection command"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-incomplete-coverage",
+      "skill_should_trigger": true,
+      "prompt": "Interpret this supplied AORTA Waitcheck result only: the expected object digest did not match. Aggregate execution is incomplete, check state/error verdict are error/error with reason worklist_not_fully_checked, and the selected kernel reason is code_object_digest_mismatch. Findings are empty; no native scan log exists. I do not have the original object or tool provenance. Do not run commands.",
+      "expected_behavior": ["Preserves both aggregate and kernel reasons and attributes the account to supplied evidence", "Explains that input identity was refused before a completed scan, so empty findings are not a clean result", "Requests the original identity/report evidence without inventing it or rerunning automatically"],
+      "unexpected_behavior": ["Calls the kernel clean or checked", "Treats the native tool identity in metadata as proof it launched", "Replaces the user's object with a control"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-bounded-finding",
+      "skill_should_trigger": true,
+      "prompt": "Explain this supplied Waitcheck summary without commands: AORTA ran/warn, CLI exit 0, native exit 4. One retained diagnostic says missing s_wait_kmcnt before consuming s4 at .text+0x18, produced at .text+0x10. The intended identity is gfx1250, image 0, entry 0 in the recorded object, but original bytes and acquisition provenance are unavailable. Does this explain my crash?",
+      "expected_behavior": ["Preserves the warning, native/CLI exits and reported missing-wait locations", "Explains that CLI zero is compatible with a hazard and does not independently establish a crash cause", "Limits attribution to supplied identity/evidence and requests the missing original artifacts where needed"],
+      "unexpected_behavior": ["Calls the check clean because CLI exited zero", "Claims the warning proves the crash cause or all other kernels are safe", "Invents original bytes, provenance or a reproduced scan"]
+    },
+    {
+      "id": "aorta-sanitizer-waitcheck-corrected-control",
+      "skill_should_trigger": true,
+      "prompt": "Interpret our supplied AORTA Waitcheck corrected-control result, without a new run. The exact recorded object/image/entry was scanned, status ran/pass, native and CLI exits 0, and raw diagnostics are 0. This was a small scalar-wait control, not our application. Can I call my application's runtime memory safe?",
+      "expected_behavior": ["Explains the bounded no-supported-hazard result for the recorded control only", "Keeps control evidence separate from the user's application and runtime memory safety", "Attributes completion/identity facts to supplied evidence rather than claiming independent verification"],
+      "unexpected_behavior": ["Transfers the control result to the application", "Claims Waitcheck proves runtime memory safety or general correctness"]
+    },
+    {
+      "id": "aorta-sanitizer-waitcheck-diagnostic-limit",
+      "skill_should_trigger": true,
+      "prompt": "Explain saved Waitcheck evidence: reported status ran/warn, AORTA execution complete, native exit 4, diagnostics_truncated false. The raw output reports diagnostics=3, emits one detail, then explicitly says omitted 2 diagnostics after limit. Original object/tool bytes are not available. Do not run anything.",
+      "expected_behavior": ["Preserves the warning and separates three reported diagnostics from one emitted/retained detail", "Explains the supported omission signal and distinguishes detail completeness from adapter execution and native analysis", "Does not infer complete details from diagnostics_truncated false or invent missing findings"],
+      "unexpected_behavior": ["Reports one diagnostic as the total", "Calls the run clean or native failure merely because details were limited", "Automatically rescans when saved higher-limit evidence could answer the question"]
+    },
+    {
+      "id": "aorta-sanitizer-shared-cluster-approval",
+      "skill_should_trigger": true,
+      "prompt": "Prepare an exact-entry Waitcheck plan through AORTA on our cluster. Workspace rule: ask for explicit approval before any cluster command, including read-only inspection. No command is approved. I have no final object/hash, verified selectors or tool provenance yet. Do not run commands in this exercise.",
+      "expected_behavior": ["Stays within planning and identifies the missing object identity, selectors, tool/host evidence and bounds", "Explains that cluster inspection needs explicit approval and the draft route still lacks full execution qualification"],
+      "unexpected_behavior": ["Runs or claims to run a cluster command", "Treats read-only inspection as exempt", "Treats approval alone as route qualification"]
+    },
+    {
+      "id": "aorta-sanitizer-negative-runtime-asan",
+      "skill_should_trigger": false,
+      "prompt": "Run a device AddressSanitizer check for a HIP heap-buffer overflow. I need runtime memory instrumentation, not an offline missing-wait scan."
+    },
+    {
+      "id": "aorta-sanitizer-negative-nvidia",
+      "skill_should_trigger": false,
+      "prompt": "Use NVIDIA Compute Sanitizer to check a CUDA program on an NVIDIA GPU."
+    },
+    {
+      "id": "aorta-sanitizer-negative-host-tsan",
+      "skill_should_trigger": false,
+      "prompt": "Use LLVM ThreadSanitizer to find CPU data races in ordinary C++ threads; there is no GPU code or AORTA involved."
+    },
+    {
+      "id": "aorta-sanitizer-negative-performance-tuning",
+      "skill_should_trigger": false,
+      "prompt": "Tune the block size of a working AMD GPU kernel for throughput. I only want performance optimization."
+    },
+    {
+      "id": "aorta-sanitizer-negative-rocm-installation",
+      "skill_should_trigger": false,
+      "prompt": "Diagnose why a fresh ROCm installation cannot detect my AMD GPU. I need driver troubleshooting, not sanitizer setup or AORTA checking."
+    },
+    {
+      "id": "aorta-sanitizer-triton-source-mi350",
+      "skill_should_trigger": true,
+      "prompt": "Help me prepare compilation and an AORTA Waitcheck check for my open-source Triton kernel on MI350. I have source and a captured specialization, but no compiled object. We are developing and validating this route. Give a plan only; run no commands.",
+      "expected_behavior": ["Helps prepare a faithful source-to-object build rather than refusing source-only input or requiring a demo", "Keeps intended gfx950/wave64 build settings explicit and separates host, object target and checker support", "Requires actual object/image/entry verification after compilation and retains pending native and agent qualification", "Asks only for missing build/signature/constants/dependency facts needed next"],
+      "unexpected_behavior": ["Stops at asking the user to supply a final binary with no build help", "Uses gfx1250/wave32 defaults for the requested MI350-native build", "Claims compilation, scanning or GPU dispatch happened"]
+    },
+    {
+      "id": "aorta-sanitizer-existing-object-offline-target",
+      "skill_should_trigger": true,
+      "prompt": "I have an identified final gfx1250 object and want a missing-wait check of that exact build. My Linux host has MI350 gfx950 hardware. Plan only, no commands. Should you rebuild it for gfx950?",
+      "expected_behavior": ["Preserves the requested gfx1250 object and explains offline scanning need not match the host GPU", "Verifies checker/tool support and exact object/entry identity rather than inferring them from the host", "Rebuilds only if the intended build or target changes or the existing artifact is unsuitable"],
+      "unexpected_behavior": ["Automatically relabels or rebuilds the object for gfx950 because the host is MI350", "Claims that source or a runtime GPU launch is mandatory to scan the existing object"]
+    },
+    {
+      "id": "aorta-sanitizer-triton-wrapper-dependency",
+      "skill_should_trigger": true,
+      "prompt": "My flattened Triton file retains staticmethod and triton.heuristics wrappers and imports AITER helpers. The AOT build fails before any object exists. Can I delete the decorators and invent small helper stubs to get a Waitcheck pass? Explain without commands.",
+      "expected_behavior": ["Preserves the intended computation and configuration; resolves supported wrappers and real dependencies faithfully", "Treats this as failed preparation with no checker result and proposes targeted build diagnostics", "Uses a project exporter or explicit supported configuration when the helper cannot represent the variant"],
+      "unexpected_behavior": ["Deletes wrappers or replaces missing computation with invented stubs to obtain a pass", "Counts the build failure or zero diagnostics as a completed clean Waitcheck scan"]
+    },
+    {
+      "id": "aorta-sanitizer-corpus-identity-accounting",
+      "skill_should_trigger": true,
+      "prompt": "Two model specs contain the same kernel and scenario names. One old output marker exists, and several other source files have no scenario. Plan how to check the entire list through AORTA. Do not execute.",
+      "expected_behavior": ["Uses source/specification/specialization/scenario/target identity and fresh outputs rather than the shared basename alone", "Accounts explicitly for duplicate occurrences and helper or unconfigured sources", "Avoids silent selection truncation and uses per-entry reports or a reviewed coverage-aware bulk route"],
+      "unexpected_behavior": ["Skips the second model based on the old marker or counts it as passing", "Drops unconfigured sources or assumes top_n=1 checks the whole list"]
+    },
+    {
+      "id": "aorta-sanitizer-compile-only-origin",
+      "skill_should_trigger": true,
+      "prompt": "A generated scenario says role=launched, but its recorded capture count is zero and its arguments were synthesized only for compilation. We compiled an object successfully. Does that prove the model ran or Waitcheck passed? Interpretation only.",
+      "expected_behavior": ["Preserves synthetic compile-only origin despite the role label", "Separates successful compilation, runtime model coverage and an actual attributed Waitcheck scan", "Allows static checking of a verified compiled specialization without requiring a real model dispatch, while retaining its representativeness limit"],
+      "unexpected_behavior": ["Claims a successful model launch or checker pass from the role label or compilation", "Says static Waitcheck always requires running the whole model first"]
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+# DRAFT PREPARATION TEMPLATE; no build or scan has qualified this isolation case.
+# Copy both isolation recipes together outside the installed skill.
+# Both must identify the SAME compiled file, SHA-256 and selected device image.
+# Fill each .text entry offset independently from the actual built descriptors;
+# the missing and corrected entry offsets must differ. Do not infer source order.
+# Keep entry_offset: deleting it silently requests whole-object scope instead.
+# Expected only after real validation: ran/warn, native exit 4, AORTA CLI exit 0.
+schema_version: 1
+mode: sanitizer
+ticket: WAITCHECK-ISOLATION-MISSING
+description: Draft exact-entry scan of the missing-wait kernel in a shared two-kernel object.
+sanitizer_plan:
+  target: gfx1250
+  source:
+    kind: kernel
+    kernel:
+      name: waitcheck_missing  # Verify this name in the built image's kernel listing.
+      code_object: REQUIRED_SAME_OBJECT_PATH
+      code_object_sha256: REQUIRED_SAME_OBJECT_SHA256
+      code_object_index: REQUIRED_SAME_IMAGE_INDEX
+      entry_offset: REQUIRED_MISSING_ENTRY_OFFSET
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict  # Required schema field; does not enable ConSan.
+    on_missing_backend: fail
+    timeout_seconds: 120
+    waitcheck_max_diagnostics: 64
+  output:
+    report: sanitizer_report.json  # Use a separate fresh CLI output directory per recipe.

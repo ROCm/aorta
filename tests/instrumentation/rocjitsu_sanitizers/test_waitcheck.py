@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from aorta.instrumentation.rocjitsu_sanitizers import (
+    CountMeaning,
+    EvidenceStatus,
     ExecutionState,
     KernelIdentity,
     KernelObservation,
@@ -99,7 +101,7 @@ def test_waitcheck_hazard_uses_valid_exact_entry_cli(
     assert "--code-object-index" in argv
     assert argv[argv.index("--kernel-entry") + 1] == "0x120"
     assert "--diagnostics-jsonl" not in argv
-    # An uncapped summary is a complete count, and nothing overrides the
+    # A bare summary does not prove exhaustive analysis. Nothing overrides the
     # backend's own diagnostic cap unless a caller asks for it.
     assert "--max-diagnostics" not in argv
     assert result.diagnostics_truncated is False
@@ -152,8 +154,7 @@ def test_waitcheck_reports_a_capped_scan_as_truncated(tmp_path: Path) -> None:
 
 
 def test_waitcheck_raises_the_backend_cap_when_asked(tmp_path: Path) -> None:
-    # The cap is what truncates, so a lane that needs a complete count must be able
-    # to raise it without editing code.
+    # The requested detail cap reaches argv and does not establish completeness.
     binary = tmp_path / "rj_waitcheck"
     binary.write_text("binary")
     artifact = tmp_path / "library.so"
@@ -169,7 +170,7 @@ def test_waitcheck_raises_the_backend_cap_when_asked(tmp_path: Path) -> None:
         captured.append(tuple(argv))
         output = (
             f"{artifact}:gfx950[3]:kernel=.text+0x120: "
-            "instructions=43023 memory-events=5198 diagnostics=45"
+            "instructions=43023 memory-events=5198 diagnostics=0"
         )
         return ProcessResult(tuple(argv), 0, output, "")
 
@@ -184,6 +185,8 @@ def test_waitcheck_raises_the_backend_cap_when_asked(tmp_path: Path) -> None:
     argv = captured[0]
     assert argv[argv.index("--max-diagnostics") + 1] == "100000"
     assert result.diagnostics_truncated is False
+    assert result.verdict is Verdict.PASS
+    assert result.kernel_results[0].diagnostic_summary.requested_limit == 100000
 
 
 @pytest.mark.parametrize("bad_cap", [0, -1, True, 1.5, "1"])
@@ -542,6 +545,99 @@ def test_parse_waitcheck_text_accepts_exact_entry_marker() -> None:
 
     assert len(parsed.findings) == 1
     assert parsed.diagnostics_truncated is False
+
+
+@pytest.mark.parametrize("cap,records", [(64, 3), (1, 1)])
+def test_saved_control_derivatives_preserve_count_details_and_signals(tmp_path, cap, records):
+    artifact = tmp_path / "multiple_missing_waits"
+    artifact.write_bytes(b"inert object")
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_bytes(b"inert backend")
+    identity = KernelIdentity(
+        name="waitcheck_multiple_missing", target="gfx1250", code_object=str(artifact),
+        code_object_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        code_object_index=0, entry_offset=0,
+    )
+    text = (Path(__file__).parent / "fixtures" / f"waitcheck-cap{cap}.txt").read_text()
+    text = text.replace("/fixtures/multiple_missing_waits", str(artifact))
+    calls = []
+
+    def execute(argv, **kwargs):
+        calls.append(argv)
+        return ProcessResult(tuple(argv), 4, text, "")
+
+    check = run_waitcheck(_worklist(identity), output_dir=tmp_path / "out", binary=binary,
+                          max_diagnostics=cap, execute=execute)
+    entry = check.kernel_results[0]
+    assert check.verdict is entry.verdict is Verdict.WARN
+    assert entry.returncode == 4
+    assert check.state is ExecutionState.RAN
+    assert not check.diagnostics_truncated
+    assert len(entry.findings) == records
+    summary = entry.diagnostic_summary
+    assert (summary.reported_count, summary.emitted_records, summary.requested_limit) == (3, records, cap)
+    if cap == 1:
+        assert summary.count_meaning is CountMeaning.EXACT
+        assert summary.details is EvidenceStatus.INCOMPLETE
+        assert summary.native_analysis is EvidenceStatus.COMPLETE
+        assert check.diagnostic_summary.reported_count == 3
+    else:
+        assert summary.count_meaning is CountMeaning.UNKNOWN
+        assert summary.details is summary.native_analysis is EvidenceStatus.UNKNOWN
+        assert check.diagnostic_summary.reported_count is None
+    assert len(calls) == 1  # No recovery scan or cap change.
+
+
+def _text_summary(count="1", bound="", signal="", copies=1):
+    return (
+        f"/tmp/library.so:gfx950[3]:kernel=.text+0x120: "
+        f"instructions={bound}10 memory-events={bound}2 diagnostics={count}\n"
+        + "/tmp/library.so:gfx950[3]:.text+0x20: missing s_waitcnt lgkmcnt(0)\n" * copies
+        + signal
+    )
+
+
+def test_raw_duplicates_are_not_detail_omissions():
+    parsed = parse_waitcheck_text(_text_summary("2", copies=2), expected=_entry_identity())
+    assert len(parsed.findings) == 1
+    assert parsed.diagnostic_summary.emitted_records == 2
+    assert parsed.diagnostic_summary.reported_count == 2
+    assert parsed.diagnostic_summary.details is EvidenceStatus.UNKNOWN
+    assert not parsed.diagnostics_truncated
+
+
+@pytest.mark.parametrize("count,bound,signal,meaning,details,native", [
+    ("3", "", "omitted 2 diagnostic(s) after limit", CountMeaning.EXACT,
+     EvidenceStatus.INCOMPLETE, EvidenceStatus.COMPLETE),
+    (">=3", ">=", "omitted at least 2 diagnostic(s) after limit", CountMeaning.LOWER_BOUND,
+     EvidenceStatus.INCOMPLETE, EvidenceStatus.INCOMPLETE),
+    (">=1", ">=", "analysis stopped early; additional diagnostics may exist", CountMeaning.LOWER_BOUND,
+     EvidenceStatus.UNKNOWN, EvidenceStatus.INCOMPLETE),
+    (">=1", "", "", CountMeaning.LOWER_BOUND, EvidenceStatus.UNKNOWN, EvidenceStatus.UNKNOWN),
+    ("1", "", "", CountMeaning.UNKNOWN, EvidenceStatus.UNKNOWN, EvidenceStatus.UNKNOWN),
+])
+def test_explicit_upstream_signals_and_legacy_unknowns(count, bound, signal, meaning, details, native):
+    parsed = parse_waitcheck_text(_text_summary(count, bound, signal), expected=_entry_identity())
+    summary = parsed.diagnostic_summary
+    assert (summary.count_meaning, summary.details, summary.native_analysis) == (meaning, details, native)
+
+
+@pytest.mark.parametrize("text", [
+    _text_summary("0"),
+    _text_summary() + _text_summary(),
+    _text_summary().replace("diagnostics=1", "diagnostics=1junk"),
+    _text_summary("3", signal="omitted 1 diagnostic(s) after limit"),
+    _text_summary("3", signal="omitted at least 2 diagnostic(s) after limit"),
+    _text_summary(">=3", ">=", "omitted 2 diagnostic(s) after limit"),
+    _text_summary(">=3", ">=", "analysis stopped early; additional diagnostics may exist"),
+    _text_summary("3", signal="omitted 2 diagnostic(s) after limit\nomitted 2 diagnostic(s) after limit"),
+    _text_summary() + "unknown completion token",
+    _text_summary().replace("/tmp/library.so", "/foreign/library.so"),
+    "producer .text+0x0: s_load_b32 s0\n" + _text_summary(),
+])
+def test_malformed_or_conflicting_count_evidence_is_rejected(text):
+    with pytest.raises(ValueError):
+        parse_waitcheck_text(text, expected=_entry_identity())
 
 
 @pytest.mark.parametrize(
