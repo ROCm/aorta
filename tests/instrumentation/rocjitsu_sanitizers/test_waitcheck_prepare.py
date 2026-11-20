@@ -108,7 +108,7 @@ def test_single_from_other_cwd(prep, tmp_path, monkeypatch, name, index, offset)
         "--kernel",
         name,
         "--waitcheck-sha256",
-        prep.digest(Path(sys.executable)),
+        prep.digest(Path(sys.executable).resolve()),
     )
     assert prep.main(args) == 0
     assert len(calls) == 2
