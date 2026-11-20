@@ -4,7 +4,7 @@
 Requires the AORTA Python environment. Exit 0: summary written (limits may remain).
 Exit 2: summary written with report contradictions or inconsistent/unsupported raw evidence.
 Exit 1: invalid report/scope/input/output, no summary written.
-Argument usage errors also exit 2, before writing any summary.
+Argument usage errors exit 64 before writing a summary.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import sys
 import tempfile
 
 LIMIT = 4 * 1024 * 1024
+TESTED_AORTA_REVISION = '90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb'
 HEADER = re.compile(
     r"^(?:rj_waitcheck: )?(?P<object>.+):(?P<target>gfx[0-9a-f]+)\[(?P<index>[0-9]+)\]:"
     r"kernel=\.text\+0x(?P<entry>[0-9a-f]+): instructions=(?P<instruction_cap>>=)?(?P<instructions>[0-9]+) "
@@ -58,10 +59,34 @@ def unique_object(pairs):
     return result
 
 
-def raw_comparison(log, identity, result, *, truncation_claims=None):
+def compatible_readers():
+    """Check the imported installation even when a legacy report omits metadata."""
+    try:
+        from aorta.instrumentation.rocjitsu_sanitizers.models import CheckResult, KernelCheckResult, KernelIdentity
+        from aorta.instrumentation.rocjitsu_sanitizers.report import read_report
+        from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import parse_waitcheck_text
+
+        for model in (CheckResult, KernelCheckResult):
+            require(hasattr(model, 'diagnostic_summary'), f'{model.__name__} lacks diagnostic_summary')
+        # An in-memory sample exercises the parser independently of the user's evidence.
+        identity = KernelIdentity(name='probe', target='gfx950', code_object='probe.hsaco',
+                                  code_object_index=0, entry_offset=0)
+        sample = ('probe.hsaco:gfx950[0]:kernel=.text+0x0: instructions=1 memory-events=1 diagnostics=1\n'
+                  'omitted 1 diagnostic(s) after limit')
+        parsed = parse_waitcheck_text(sample, expected=identity)
+        counts = parsed.diagnostic_summary
+        require(counts.reported_count == 1 and counts.emitted_records == 0 and counts.requested_limit is None
+                and counts.count_meaning.value == 'exact' and counts.details.value == 'incomplete'
+                and counts.native_analysis.value == 'complete', 'unsupported Waitcheck diagnostic count parser')
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f'Incompatible AORTA Python installation ({exc}). Use the Python environment for '
+                         f'AORTA revision {TESTED_AORTA_REVISION} or one with compatible reporting support.') from exc
+    return read_report, parse_waitcheck_text
+
+
+def raw_comparison(log, identity, result, *, parser, truncation_claims=None):
     """Compare native records before deduplication, keeping unknown semantics."""
-    from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import parse_waitcheck_text
-    parsed = parse_waitcheck_text(log, expected=identity)
+    parsed = parser(log, expected=identity)
     lines = [line.strip() for line in log.splitlines() if line.strip()]
     headers = [(line, HEADER.fullmatch(line)) for line in lines if HEADER.fullmatch(line)]
     require(len(headers) == 1, "need exactly one supported summary with an explicit entry marker")
@@ -124,8 +149,44 @@ def raw_comparison(log, identity, result, *, truncation_claims=None):
     return description, evidence, gap
 
 
+def reading_guide(identity, check, result, completed, raw_summary, code, count_gap):
+    """Give the reader the scoped outcome before showing the structured evidence."""
+    scope = (f"The report selects {json.dumps(identity.name)} for {identity.target}, "
+             f"image {identity.code_object_index}, entry .text+0x{identity.entry_offset:x}.")
+    if count_gap:
+        outcome = ("Waitcheck reported a possible instruction-wait hazard. The raw count and retained "
+                   "details differ without an explanation, so detail coverage remains unresolved.")
+    elif code == 2:
+        outcome = (f"The recorded verdict is {check.verdict.value}. Conflicting or unsupported "
+                   "evidence leaves the result unresolved.")
+    elif check.reason == 'dry_run':
+        outcome = "Planned only. Waitcheck did not run."
+    elif not completed:
+        outcome = f"The check did not complete ({check.reason or check.state.value})."
+    elif result.verdict.value == "warn":
+        outcome = "Waitcheck reported a possible instruction-wait hazard."
+    elif result.verdict.value == "pass":
+        outcome = "Waitcheck reported no supported wait hazard in this entry."
+    else:
+        outcome = f"The entry verdict is {result.verdict.value}."
+
+    reported = result.diagnostic_summary if result else None
+    evidence = raw_summary or reported
+    count = "unknown"
+    if evidence and evidence.reported_count is not None:
+        meaning = {"exact": "exact", "lower_bound": "lower bound", "unknown": "meaning unknown"}
+        count = f"{evidence.reported_count} ({meaning[evidence.count_meaning.value]})"
+    limit = reported.requested_limit if reported else None
+    details = evidence.details.value if evidence else "unknown"
+    counts = (f"Reported diagnostic count: {count}. Retained findings: {len(check.findings)}. "
+              f"Requested detail cap: {limit if limit is not None else 'unknown'}. "
+              f"Detail completeness: {details}.")
+    return [scope + " " + outcome, counts,
+            "This static check alone cannot establish kernel correctness or explain a crash."]
+
+
 def summarize(report_path, log_path=None):
-    from aorta.instrumentation.rocjitsu_sanitizers.report import read_report
+    read_report, parser = compatible_readers()
     report_bytes = bounded(report_path)
     raw = json.loads(report_bytes.decode("utf-8-sig"), object_pairs_hook=unique_object)
     model_input = deepcopy(raw)
@@ -219,6 +280,7 @@ def summarize(report_path, log_path=None):
     if not completed:
         notes.append("No completed single-entry check is established. Preserve the stated failure/dry-run reason; do not interpret partial output as a pass.")
     raw_status, code, log_bytes, raw_summary = "No raw log supplied.", 2 if issues else 0, None, None
+    count_gap = False
     if issues:
         notes.append("Reported statuses conflict; preserve these fields and resolve the contradiction before accepting a completed result.")
     if log_path is None:
@@ -230,8 +292,9 @@ def summarize(report_path, log_path=None):
         if completed:
             try:
                 raw_status, raw_summary, gap = raw_comparison(
-                    log, identity, result, truncation_claims=(check_truncation, entry_truncation))
+                    log, identity, result, parser=parser, truncation_claims=(check_truncation, entry_truncation))
                 if gap:
+                    count_gap = bool(result.findings) and not issues
                     code = 2
                     notes.append("Preserve the warning and both counts. Do not silently rescan, raise limits or change scope. "
                                  "Use existing detailed evidence, or a separately authorized higher-limit run only if needed.")
@@ -256,7 +319,8 @@ def summarize(report_path, log_path=None):
     inputs = {"report": {"path": str(report_path), "sha256": hashlib.sha256(report_bytes).hexdigest()}}
     if log_bytes is not None:
         inputs['log'] = {"path": str(log_path), "sha256": hashlib.sha256(log_bytes).hexdigest()}
-    lines = ["# Saved Waitcheck evidence summary", "", raw_status,
+    lines = ["# Saved Waitcheck evidence summary", "",
+             *reading_guide(identity, check, result, completed, raw_summary, code, count_gap), "", raw_status,
              "", "Report consistency: " + ("INCONSISTENT: " + "; ".join(issues) if issues else "no supported-field contradiction identified."),
              "", "Reported result:",
              "```json", json.dumps(record, indent=2, ensure_ascii=True), "```", "", "Limits:", ""]
@@ -268,8 +332,14 @@ def summarize(report_path, log_path=None):
     return "\n".join(lines), code
 
 
+class ReaderArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(64, f"{self.prog}: error: {message}\n")
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ReaderArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--log', type=Path)
     parser.add_argument('--output', type=Path, required=True)

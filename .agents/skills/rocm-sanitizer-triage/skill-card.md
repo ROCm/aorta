@@ -3,8 +3,9 @@
 ## Description
 
 Shared ROCm sanitizer skill foundation with an offline Waitcheck integration
-through AORTA: exact-entry planning and supplied-evidence interpretation for
-compiled missing-wait hazards. Skill-guided execution remains draft. Other
+through AORTA: source/build preparation, exact-entry recipes, authorized development
+validation and supplied-evidence interpretation for missing-wait hazards.
+General execution qualification remains pending, including MI350/gfx950. Other
 sanitizer procedures are not included in this increment.
 
 ## Owner

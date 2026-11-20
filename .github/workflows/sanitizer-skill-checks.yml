@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       run_agent_evals:
-        description: 'Run paid model routing and behavior checks on the planning-only cases'
+        description: 'Run paid model routing and behavior checks; live execution requires staged inputs'
         type: boolean
         default: false
 
@@ -44,6 +44,8 @@ jobs:
           tests/instrumentation/rocjitsu_sanitizers/test_waitcheck.py
           tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_failures.py
           tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_report.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_prepare.py
+          tests/instrumentation/rocjitsu_sanitizers/test_waitcheck_compile.py
           tests/instrumentation/rocjitsu_sanitizers/test_report_pipeline.py
           tests/instrumentation/rocjitsu_sanitizers/test_selection_models.py
           tests/instrumentation/rocjitsu_sanitizers/test_recipe_daily.py
@@ -67,7 +69,7 @@ jobs:
             --docs docs/sanitizers/skill-maintenance.md,docs/sanitizers/waitcheck-reporting.md,examples/sanitizers/waitcheck/docs/waitcheck-examples.md,examples/sanitizers/waitcheck/docs/waitcheck-isolation.md
 
   agent-evals:
-    name: Manual planning evaluations
+    name: Manual skill evaluations
     if: github.event_name == 'workflow_dispatch' && inputs.run_agent_evals
     needs: structural
     uses: amd/skillscope/.github/workflows/reusable.yml@68b69e2eff60c41f5d5482bb89f24e07ce4fbebb # v0.1.2

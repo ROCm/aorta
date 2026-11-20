@@ -1,7 +1,8 @@
 # Waitcheck
 
-**Readiness: draft.** Prepare plans and interpret supplied evidence. The recipe
-below is a preparation aid, not a qualified launch procedure. Follow the
+**Readiness: expanded route under development.** Help prepare builds, recipes and
+explicitly authorized development checks; interpret saved evidence. No general
+execution profile is qualified yet. Follow the
 [common workflow](aorta-workflow.md).
 
 ## 1. Question and limits
@@ -13,17 +14,25 @@ or numerical correctness. A reported hazard does not establish a crash cause.
 
 Choose one verified kernel entry or an explicitly requested whole-object scope.
 Never silently substitute a whole-object scan, filename match, other build or demo
-workload. Source alone is insufficient; ask for the final compiled object.
+workload. Source is a valid starting point: help build it using
+[source preparation](waitcheck-build.md) if a usable final object is absent.
 
 ## 2. Tested environment
 
-Source contract: AORTA `12e75e694488cd29937f2ee83dccf530c1f0a92a`.
+For the offline report reader, use AORTA commit
+`90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb` as the reference installation.
+Its report models and native-log parser expose diagnostic summaries. Older
+saved reports can still be read with that installation.
+
+The historical recipe and adapter baseline was AORTA
+`12e75e694488cd29937f2ee83dccf530c1f0a92a`. Its Python modules lack the
+diagnostic summary support required by the current reader.
 Upstream reference: RocJITsu `d03c6fe410eed62b211d56bb7878dd1f494269fe`.
 The adapter contract was also checked at AORTA
 `ac11f84616a8bf7cc475e455bfb4a7ae250d4928`. Three development controls have now
 run through that installation on Linux x86_64: a scalar missing-wait finding,
 its corrected counterpart and a deliberately wrong input digest. See the
-[reproducible examples and qualification gaps](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md).
+[reproducible examples and qualification gaps](https://github.com/ROCm/aorta/blob/90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb/examples/sanitizers/waitcheck/docs/waitcheck-examples.md).
 This is bounded evidence for gfx1250 and the recorded tool, **not a qualified
 general launch route**. Other targets, tool versions and hazard classes are not
 established by these controls.
@@ -33,6 +42,20 @@ Compiler/ROCm SDK setup matters when creating an object, not inherently when
 scanning an existing one. Do not impose ConSan's hook or full emulator setup.
 Do not assume Windows binary support or treat an upstream target list as a tested
 skill matrix.
+
+### Architecture selection
+
+Record three facts independently: host GPU (if present), actual object/build
+target, and targets supported by the selected checker. On MI350 a new native
+build is expected to use gfx950/wave64, subject to verification. This does not
+convert an existing gfx1250 object or prohibit offline scanning it on that host.
+Do not infer the code target from the machine name or silently use a compiler's
+gfx1250/wave32 default.
+
+Separate target policy from tested coverage. Later development checks scanned
+selected gfx950 entries on an MI300 host. Those results apply to the recorded
+objects and tool; MI350-host validation and general execution qualification
+remain open. Verify each new object and tool combination.
 
 ## 3. Required inputs
 
@@ -56,7 +79,7 @@ Verify the selected checker's prerequisites:
 1. Establish the execution machine and AORTA installation. The skill installs
    neither AORTA nor the checker. This AORTA baseline declares Python >=3.10,
    PyYAML and Click.
-2. Resolve `rj_waitcheck`: recipe lookup prefers
+2. [Obtain or verify the checker bundle](waitcheck-provision.md). Recipe lookup prefers
    `ROCJITSU_PREBUILT/bin/rj_waitcheck`, then
    `ROCJITSU_BUILD/tools/rj_waitcheck`, then PATH. A broken preferred file does
    not automatically fall back. Record the actual binary/hash and manifest/build
@@ -83,8 +106,8 @@ does not establish that its executable is available today.
 
 For the complete user-input handoff, provenance record, bounded command shapes
 and offline evidence reader, use the [single-entry procedure](waitcheck-procedure.md).
-It remains draft; recorded development controls do not qualify arbitrary user
-execution.
+Its command shapes can support an explicitly authorized development/qualification
+task. Recorded controls do not qualify arbitrary user execution.
 
 The procedure owns recipe preparation, dry-run/run command shapes and retained
 evidence. Its [exact-entry template](../assets/waitcheck-exact-entry.yaml) selects
@@ -132,6 +155,30 @@ The native tool can exit 4 for hazards; AORTA can exit zero for a complete warni
 Process exit alone is not a clean result. Expose conflicts between summaries and
 raw output instead of turning inconsistent evidence into a pass.
 
+When a user brings only a report, explain the reported dependency in plain
+language. For a load/use warning, identify the instruction that starts the load,
+the instruction that needs the value, and the wait named in the diagnostic.
+Use the locations in this report. If it names only the use, leave the producer
+unknown until matching disassembly or a fuller record identifies it.
+The report alone does not give a source
+line, show which path ran on a GPU, or establish a wrong numerical answer.
+For a source-level investigation, request the matching build and its address
+mapping. For a comparison, check whether the same load/use warning appears
+in the other build, allowing for changed addresses.
+
+If the original already warns, record each reported load and use before
+comparing builds. Match the instructions and their dependency in the selected
+entry of each build. A rebuild can reuse the old register for a different load.
+Trace where the loaded value is used, even when its register name changes.
+Say which warnings are present in the available records.
+Identify findings shared by both builds, findings seen only in one, and any
+whose correspondence is uncertain. Preserve unexpected outcomes.
+Explain the outcome at the edited instruction even when the verdict stays the same.
+If details were omitted, coverage is unclear or the instructions cannot be
+matched, leave disappearance unresolved. Two reports can each contain one warning and
+point to different operations. A separate kernel stage with zero diagnostics
+leaves the first stage's warning open.
+
 Counts are version-dependent. Optional `diagnostic_summary` separates reported
 count/meaning, emitted records before deduplication, requested detail limit, detail
 completeness and native analysis completion. Missing metadata stays unknown.
@@ -146,16 +193,18 @@ alone establish neither exhaustive analysis nor complete details.
 Compare the summary count with raw diagnostic records, then separately count
 retained unique findings. Deduplication alone is not omitted output. Unexplained
 raw count/record differences remain a compatibility gap (reader2), not proof of
-corruption or a checker crash. Preserve the warning and all counts. The existing
-cap64 control already supplies its three details; use those rather than silently
-rescanning. Recommend a separately authorized higher-limit run only if needed.
+corruption or a checker crash. Preserve the warning and all counts. Look for
+fuller evidence for the same object digest, target, image and entry. If it comes
+from another run, identify that run and verify comparable tool, settings and
+scope before comparing. Keep each result attributed to its own run. Recommend
+a separately authorized higher-limit run only if details are still needed.
 Diagnostic records are not necessarily distinct bugs. Matching warnings across
 builds do not prove identical code or a crash explanation. AORTA execution
 `complete` describes adapter execution, separately from native analysis.
 
 ## 7. Required examples and agent cases
 
-The repository [three-case example](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md) supplies two small source
+The repository [three-case example](https://github.com/ROCm/aorta/blob/90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb/examples/sanitizers/waitcheck/docs/waitcheck-examples.md) supplies two small source
 files and generates finding, corrected and digest-mismatch recipes. It is for
 explicitly authorized development validation; it does not check the user's kernel
 or replace their requested scope with a demo.
@@ -185,13 +234,13 @@ qualified AORTA route.
 
 ## 8. Qualification record
 
-The [qualification table](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#qualification-gaps) separates
+The [qualification table](https://github.com/ROCm/aorta/blob/90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#qualification-gaps) separates
 the verified controls from untested behavior. A separate
-[two-kernel development pair](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-isolation.md#recorded-development-result-10-november-2026)
+[two-kernel development pair](https://github.com/ROCm/aorta/blob/90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb/examples/sanitizers/waitcheck/docs/waitcheck-isolation.md#recorded-development-result-10-november-2026)
 now supports exact-entry isolation for its recorded build and tool: the faulty
 entry warns while its corrected neighbor passes. This is not an arbitrary-kernel
 or multi-entry-worklist qualification. A
-[three-diagnostic limit comparison](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#recorded-diagnostic-limit-result)
+[three-diagnostic limit comparison](https://github.com/ROCm/aorta/blob/90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#recorded-diagnostic-limit-result)
 originally stopped at a raw-count/retained-detail gate at limit1; the updated reader
 now explains the saved explicit omission signal. Broader cap/completion semantics
 and early stopping are not natively qualified. The native binary
@@ -200,7 +249,7 @@ but its full upstream build provenance remains unresolved. Applicable agent
 evaluation and release acceptance are still required. Advance readiness only under the
 [common rules](aorta-workflow.md#route-readiness).
 
-The [recorded attention result](https://github.com/ROCm/aorta/blob/main/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#recorded-attention-kernel-result)
+The [recorded attention result](https://github.com/ROCm/aorta/blob/90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb/examples/sanitizers/waitcheck/docs/waitcheck-examples.md#recorded-attention-kernel-result)
 adds one independently verified real-application AORTA warning with an explicit
 omission signal, plus accepted agent interpretation content. It preserves the
 same exact-entry and provenance boundaries; it does not qualify arbitrary kernels

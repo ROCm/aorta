@@ -85,6 +85,50 @@ def test_missing_raw_is_a_limit_not_evidence_of_clean(evidence):
     assert code == 0
     assert 'No raw log supplied' in summary
     assert 'Raw findings/entry evidence was not compared' in summary
+    lead = summary.split('Reported result:')[0]
+    assert 'reported no supported wait hazard' in lead
+    assert 'Requested detail cap: unknown' in lead
+
+
+def test_usage_error_is_distinct_from_evidence_conflict(tmp_path, capsys):
+    output = tmp_path / 'summary.md'
+    with pytest.raises(SystemExit) as error:
+        helper.main(['--output', str(output)])
+    assert error.value.code == 64
+    assert '--report' in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_failed_check_lead_preserves_zero_findings_without_pass(evidence):
+    report, _ = evidence('digest')
+    summary, _ = helper.summarize(report)
+    lead = summary.split('Reported result:')[0]
+    assert 'did not complete' in lead and 'Retained findings: 0' in lead
+    assert 'reported no supported wait hazard' not in lead
+
+
+@pytest.mark.parametrize('stale_component', ['CheckResult', 'KernelCheckResult', 'parser', 'import'])
+def test_incompatible_installation_refuses_even_report_only_input(evidence, tmp_path, monkeypatch, capsys,
+                                                                 stale_component):
+    from aorta.instrumentation.rocjitsu_sanitizers import models, waitcheck
+
+    report, _ = evidence()
+    if stale_component == 'parser':
+        # An older parser can accept the same arguments but return only findings and a flag.
+        monkeypatch.setattr(waitcheck, 'parse_waitcheck_text',
+                            lambda output, *, expected: waitcheck.ParsedWaitcheckOutput((), False))
+    elif stale_component == 'import':
+        monkeypatch.delattr(waitcheck, 'parse_waitcheck_text')
+    else:
+        monkeypatch.setattr(models, stale_component, object)
+
+    output = tmp_path / 'summary.md'
+    assert helper.main(['--report', str(report), '--output', str(output)]) == 1
+    error = capsys.readouterr().err
+    assert 'Incompatible AORTA Python installation' in error
+    assert '90fe1d8a440f4c88dc8187e5a52a52dc4385c3bb' in error
+    assert 'Traceback' not in error
+    assert not output.exists()
 
 
 @pytest.mark.parametrize('kind,reason', [('digest', 'code_object_digest_mismatch'), ('dry', 'dry_run')])
@@ -93,6 +137,8 @@ def test_prelaunch_outcome_needs_no_raw(evidence, kind, reason):
     summary, code = helper.summarize(report)
     assert code == 0
     assert reason in summary
+    if kind == 'dry':
+        assert 'Planned only. Waitcheck did not run.' in summary.split('Reported result:')[0]
     assert 'No completed single-entry check is established' in summary
 
 
@@ -254,6 +300,8 @@ def test_plain_limited_details_remain_explicit_compatibility_gap(evidence, inclu
     summary, code = helper.summarize(report, log)
     assert code == 2
     assert 'compatibility gap' in summary
+    assert 'reported a possible instruction-wait hazard' in summary.split('Reported result:')[0]
+    assert 'detail coverage remains unresolved' in summary.split('Reported result:')[0]
     assert 'reported diagnostics=3, emitted records=1, retained unique findings=1' in summary
     assert 'count meaning=unknown' in summary
     assert 'native analysis=unknown' in summary
@@ -272,6 +320,10 @@ def test_explicit_storage_omission_is_supported_separately_from_completion(evide
     summary, code = helper.summarize(report, log)
     assert code == 0
     assert 'Count meaning=exact; details=incomplete; native analysis=complete' in summary
+    lead = summary.split('Reported result:')[0]
+    assert 'possible instruction-wait hazard' in lead and '3 (exact)' in lead
+    assert f"Requested detail cap: {1 if include_metadata else 'unknown'}" in lead
+    assert 'Detail completeness: incomplete' in lead
     assert '"diagnostics_truncated": false' in summary
 
 

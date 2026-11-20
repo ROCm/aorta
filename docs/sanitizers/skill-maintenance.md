@@ -2,8 +2,9 @@
 
 This increment delivers the shared foundation and **Waitcheck only** in
 [rocm-sanitizer-triage](../../.agents/skills/rocm-sanitizer-triage/SKILL.md).
-It supports offline missing-wait planning and supplied-evidence interpretation;
-qualified skill-guided execution remains draft. Other checker procedures arrive
+It supports source/build preparation, offline missing-wait planning, explicitly
+authorized development validation and supplied-evidence interpretation.
+General execution qualification remains pending. Other checker procedures arrive
 in separate AORTA PRs. The completed shared package is submitted to AMD Skills
 together after its integration, evaluation and product approvals.
 
@@ -32,6 +33,10 @@ The installed skill retains the three AMD-required files (`SKILL.md`,
 `skill-card.md`, `evals/evals.json`), common workflow, Waitcheck guide/procedure,
 [exact-entry template](../../.agents/skills/rocm-sanitizer-triage/assets/waitcheck-exact-entry.yaml)
 and [saved-report reader](../../.agents/skills/rocm-sanitizer-triage/scripts/waitcheck_report.py).
+The source-preparation increment also includes
+[build guidance](../../.agents/skills/rocm-sanitizer-triage/references/waitcheck-build.md)
+and a single-specialization Triton compiler helper. Real compiler/MI350 qualification
+and full-corpus execution remain separate from its CPU fixture tests.
 The reader needs Python from a compatible AORTA installation, including the
 matching report/model/parser APIs; copying the skill does not install AORTA.
 
@@ -71,8 +76,20 @@ Moving examples or passing local tests does not close those qualification gaps.
 ## Evaluation conventions
 
 Maintain one [Skillscope dataset](../../.agents/skills/rocm-sanitizer-triage/evals/evals.json).
-Current positive cases concern Waitcheck planning, source-only inputs, supplied
-finding/corrected/refused-input evidence, diagnostic omission and cluster approval.
+Positive cases cover planning, source preparation, saved reports and the authorized
+development route. For an actual run evaluation, stage the intended binary, pinned
+tool and AORTA, verified inventory, recipe and fresh output paths. Give permission
+for that bounded case. Grade the observed commands, dry-run review, exact scan and
+retained evidence. A text answer or unavailable fixture leaves execution untested.
+Use the same case with missing permission or mismatched identity to test stopping.
+Directory evaluation requires every requested entry to be accounted for.
+For first-time users, add a conversational test beginning only with a request
+to use the skill and investigate a kernel. Let the user supply real files,
+intent and scoped permissions when needed. Grade progress across the conversation,
+including plain explanations, useful questions, actual authorized work and
+follow-up diagnosis. A detailed task prompt cannot establish this behavior alone.
+Keep answer keys outside the test session. Replace example commit links with
+verified release-tag links when a tag containing those examples is published.
 Runtime ASan is an exclusion, not a promised integration in this increment.
 Use at least three positive and two negative routing cases and two positive
 behavior cases. Preserve stable case IDs unless intentionally retiring a case.
@@ -99,7 +116,7 @@ Do not replace missing provenance or checker evidence with a successful reader.
 
 The workflow `.github/workflows/sanitizer-skill-checks.yml` watches the skill,
 Waitcheck examples, sanitizer docs/backend/tests and its own definition. It runs
-the existing eleven-file CPU suite, with mocked subprocesses and inert data.
+the CPU helper and integration suite, with mocked subprocesses and inert data.
 It does not dispatch GPU input programs or run a native checker.
 
 Skillscope is pinned to v0.1.2 at

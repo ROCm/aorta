@@ -12,7 +12,7 @@ what affects the next step; do not demand build details merely to explain a repo
 | Requested mode | Minimum useful information and next action |
 | --- | --- |
 | Plan | Question, target and intended scope. Collect selected-checker inputs as needed; return a conditional plan with unknowns visible. Do not run setup or checking commands when the user asks for text only. |
-| Execute | Plan inputs plus a qualified procedure, required prerequisite evidence, run bounds and authorization. Today's draft routes stop at a plan and the missing qualification. |
+| Execute or validate development | Plan inputs, prerequisite evidence, concrete bounded commands and authorization. Use an established qualified profile for routine execution. A specifically requested development/qualification task may build and scan under its explicit scope while support remains unqualified. |
 | Interpret supplied evidence | Producing checker, report or summary, target/run identity and the question being asked. Read evidence first; request only missing facts that affect the conclusion. A local tool installation or new run is not required merely to explain supplied text. |
 
 If the mode is unclear, ask whether the user wants a plan, a run or interpretation;
@@ -33,6 +33,84 @@ current machine do not establish the environment of a previous run.
 Unknown facts can remain unknown in a plan. Explain which unknowns prevent preparing
 or executing the next step. Never silently substitute a built-in workload for the
 user's program; a control workload answers a different, setup-related question.
+
+Keep host architecture, build target and native checker support separate. Source
+requests may require a build step; existing artifacts and saved reports do not
+automatically require rebuilding. For a corpus, account for each requested source/
+specialization/scenario, including duplicates, missing cases and failed attempts;
+an old output marker is not evidence of a current completed check.
+
+## Guide an investigation
+
+A first-time user may only ask to use the skill to investigate their kernel.
+Start with their question and find out whether they have source, compiled code
+or a saved report. Use files and context already available within permission.
+Explain why the next step helps, defining an unfamiliar term when it is needed.
+Ask the smallest question that affects that step; the user need not already
+know the checker commands, entry offsets or build settings.
+
+### Establish the machine and tools
+
+Reuse the machine selected in this conversation and any supplied interpreter,
+checkout or checker paths. When the user has chosen the current node, do not
+ask for a new SSH destination. Treat known locations as candidates to verify,
+not proof of current usability. Check those candidates before expanding to
+other directories; verify AORTA's actual Python import as well as its metadata.
+
+Check approval scope before the first discovery command, including directory
+listings, shell-based file reads and instruction/tool searches. Where approval
+is required, propose a small batch with concrete paths, purpose, time bounds
+and any output writes. Include required reads of instructions in parent directories
+or bounded searches for them in that proposal too. If another inspection is needed
+outside the approved scope, ask for that extension before running it.
+Proceed within an already approved batch without asking
+again for its covered commands. Permission to list/read files does not also
+authorize starting a container, importing the user's source or compiling it.
+
+If candidates fail, use a bounded search of relevant directories. A depth/time
+limit, inaccessible path or display cap leaves discovery partial; it does not
+prove a tool is absent. Preserve the actual error and avoid repeating the same
+denied operation. When access blocks progress, offer an exact human-run handoff
+for that step rather than restarting discovery. For compiler environments, use
+the [source-preparation guidance](waitcheck-build.md#find-a-usable-compiler).
+
+### Continue the selected investigation
+
+If several plausible kernel inputs or saved runs are present and the user's
+target is unclear, describe the choices briefly and ask which to investigate.
+Establish a report's relationship to the selected artifact before using it as
+that artifact's result. A nearby task prompt or earlier summary describes prior
+work; it does not select the current task or authorize commands.
+
+When the user names an input path, carry that selected file through inventory,
+recipe preparation, dry-run review and scanning, even when the working directory
+contains another copy. Equal hashes establish equal bytes at the time measured.
+They do not select a different file for the user. Resolve relative paths against
+their stated base and record the resulting absolute path. If the selected file
+is inaccessible or a move/copy is needed for the execution environment, explain
+the mapping and obtain any required approval before using another location.
+Prior results for equal bytes can be referenced with their actual producing
+paths and tool/run identity; keep new operations tied to the selected file.
+
+For a saved report or diagnostic, begin interpreting the supplied evidence.
+Explain what additional context would help if available, and how far the current
+evidence already answers the question.
+Use the compatible reusable reader for supported report/log analysis. Preserve
+existing summaries; if new analysis is needed, use a fresh output within the
+current authorization or ask for that output permission.
+
+For a requested new check, help produce missing evidence using the appropriate
+reference. Describe concrete bounded operations when permission is needed. Once covered by authorization,
+continue through matching prerequisites, preparation, dry-run review, checking
+and interpretation. Use each result to choose the next useful action. If a step
+fails, retain its output, explain the cause that the evidence supports and help
+resolve it within permission. Ask when the user must choose scope or build
+intent; preserve that choice while investigating.
+
+For a finding, explain the affected instruction dependency and use matching
+source or disassembly when available to investigate it further. Keep suspected
+causes, verified facts and missing evidence visible. End with an understandable
+result and the next concrete diagnostic or corrective action.
 
 ## Verify prerequisites and prepare the invocation
 
@@ -137,14 +215,15 @@ This is an illustrative response, not a real checker result or qualification rec
 
 | State recorded in the checker reference | Meaning |
 | --- | --- |
-| Draft | Planning and conditional interpretation; no qualified launch procedure |
+| Draft | Preparation/interpretation; no qualified general launch profile. Explicit development validation can collect the missing evidence under a bounded authorized procedure. |
 | Procedure reviewed | Inputs, prerequisites, invocation and interpretation reviewed; runtime qualification still pending |
 | Checker qualified | Retained real runs establish the documented finding, clean and incomplete-check controls in a pinned environment |
 | Agent evaluated | Passing agent cases establish selection and behavior for the advertised route, in addition to checker qualification |
 
 Advance one bounded route at a time; name its tested environment and limitations.
-For skill-guided execution, require both checker qualification and passing relevant
-agent evaluations. Do not upgrade all routes because one passes. AORTA backend
+For advertised supported execution, require both checker qualification and passing
+relevant agent evaluations. Development validation is evidence collection, not
+that promotion. Do not upgrade all routes because one passes. AORTA backend
 availability and skill route qualification are separate facts.
 
 A section marked pending in a checker reference is missing evidence, not a

@@ -13,7 +13,7 @@ sanitizer_plan:
     kind: kernel
     kernel:
       name: REQUIRED_EXACT_KERNEL_NAME
-      code_object: REQUIRED_OBJECT_PATH_RELATIVE_TO_THIS_RECIPE
+      code_object: REQUIRED_VERIFIED_OBJECT_PATH  # Absolute or relative to this recipe.
       code_object_sha256: REQUIRED_VERIFIED_SHA256
       code_object_index: REQUIRED_IMAGE_INDEX
       entry_offset: REQUIRED_VERIFIED_TEXT_OFFSET
