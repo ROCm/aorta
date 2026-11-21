@@ -1,0 +1,15 @@
+{
+  "cases": [
+    "waitcheck",
+    "consan-clean",
+    "consan-racy",
+    "fpsan-match",
+    "fpsan-mismatch"
+  ],
+  "commit": "576ff2facfbbbbf5a5b7e61e4ef8fc5fe79d709c",
+  "date": "2026-11-21T14:09:03+00:00",
+  "gate": true,
+  "gpu": "gfx950",
+  "run": "2026-11-21T140903-44902868148",
+  "run_url": "https://github.com/ROCm/aorta/actions/runs/44902868148"
+}
