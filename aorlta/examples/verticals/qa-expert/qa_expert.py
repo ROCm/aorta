@@ -56,6 +56,12 @@ def final_answer(reply: str) -> str | None:
     return (found[-1] or None) if found else None  # the last marker decides, an empty one included
 
 
+def reply_text(text: str, thinking: str) -> str:
+    """The reply as the rollout's parse reads it: after the last `</think>` when thinking is on, the whole text when it
+    is off. The parse and the check both read a reply with it, so the check never fails a reply the parse accepted."""
+    return text.rsplit("</think>", 1)[-1] if thinking == "on" else text
+
+
 def messages(row: dict) -> list[dict]:
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": USER.format(question=row["question"])}]
 
@@ -94,8 +100,7 @@ class ExpertParse:
     def check(self, text, thinking, prompt):
         from aorlta.rollout.compile_check import ParseOutcome
 
-        reply = text.rsplit("</think>", 1)[-1] if thinking == "on" else text
-        answer = final_answer(reply)
+        answer = final_answer(reply_text(text, thinking))
         if answer is None:
             return ParseOutcome("rejected", rejection=(
                 "Your reply has no final line of the form 'Answer: <your answer>'. Give your answer on such a line.",
@@ -122,12 +127,12 @@ class ExpertMatch:
     `normalise`; `fail` `wrong_answer`, or `no_answer` when the reply has no `Answer:` line; unsettled when the task is
     unknown or the reply cannot be read."""
 
-    version = "1"
     legs = ("ref.answer",)
     resource = "local_cpu"
 
     def __init__(self, ctx):
         self.name, self.ctx = ctx.name, ctx
+        self.version = f"2+thinking-{ctx.thinking}"  # cached legs are keyed by it: the thinking flag decides the read
         self.rows = {}
         for pool in ctx.pools:
             if (Path(pool) / "questions.jsonl").is_file():
@@ -143,7 +148,7 @@ class ExpertMatch:
             response = job.inputs.get("response")
             if job.leg != "ref.answer" or row is None or not response:
                 return unsettled(job, "adapter_error", t_start=t0, t_end=self.ctx.clock())
-            answer = final_answer(Path(response).read_text(encoding="utf-8").rsplit("</think>", 1)[-1])
+            answer = final_answer(reply_text(Path(response).read_text(encoding="utf-8"), self.ctx.thinking))
             if answer is None:
                 return make_result(job, "fail", "no_answer", t_start=t0, t_end=self.ctx.clock())
             # PLACEHOLDER: an exact match after normalising. A judge (a command or a service that reads the

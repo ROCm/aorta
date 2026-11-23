@@ -112,12 +112,13 @@ echo "slurm_load_jobs error: Invalid job id specified" >&2
 exit 1
 """
 DOCKER2 = r"""#!/bin/bash
-# docker ps -a [--filter ancestor=IMG] --format ...: $CONTAINERS, or the containers $USERS_OF_IMAGE names for IMG;
-# docker rmi / rm: logged; docker run ... -c CMD: CMD run here (the cleanup's file work); docker image inspect: found,
+# docker ps -a [--filter ancestor=IMG] --format ...: $CONTAINERS, or the containers $USERS_OF_IMAGE names for IMG; with
+# $PS_DOWN set, the daemon's error and exit 1; docker rmi / rm: logged; docker run ... -c CMD: CMD run here (the cleanup's file work); docker image inspect: found,
 # or with $IMAGES_DIR set, found while a file of the image's name is there (rmi removes it)
 echo "$*" >> "$DOCKER_LOG"
 case "$1" in
-  ps) if [ "$3" = --filter ]; then printf '%s\n' $USERS_OF_IMAGE; else printf '%s\n' $CONTAINERS; fi ;;
+  ps) [ -n "${PS_DOWN:-}" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+      if [ "$3" = --filter ]; then printf '%s\n' $USERS_OF_IMAGE; else printf '%s\n' $CONTAINERS; fi ;;
   rm|rmi) shift; [ "$1" = -f ] && shift; printf '%s %s\n' "removed" "$*" >> "$DOCKER_LOG"
      [ -n "${IMAGES_DIR:-}" ] && rm -f "$IMAGES_DIR/$(printf %s "$*" | tr '/:' '__')" ;;
   image) [ -z "${IMAGES_DIR:-}" ] || [ -e "$IMAGES_DIR/$(printf %s "$3" | tr '/:' '__')" ]; exit ;;
@@ -410,10 +411,11 @@ def test_the_import_pre_flight_loads_aorta_only_for_a_profile_that_uses_it(tmp_p
         assert sorted(k for k in report["failed"] if k.startswith("aorta.")) == aorta
 
 
-@pytest.mark.parametrize("stuck", [True, False])
+@pytest.mark.parametrize("stuck", [True, False, "unlisted"])
 def test_a_container_that_will_not_go_keeps_the_jobs_images_claims_and_directories(tmp_path, stuck):
     """The leaving marker tells another job's cleanup this job uses no image, and a dropped claim frees its GPUs and
-    directories: neither may happen while one of this job's containers is still there."""
+    directories: neither may happen while one of this job's containers is still there, nor when docker cannot list
+    the containers (its `docker ps` fails), since an empty listing is then no evidence that they are gone."""
     images = tmp_path / "images"
     images.mkdir()
     for name in ("trainer_1", "b"):  # b: the image the cleanup's helper runs from
@@ -422,10 +424,14 @@ def test_a_container_that_will_not_go_keeps_the_jobs_images_claims_and_directori
         (tmp_path / d).mkdir(parents=True, exist_ok=True)
     (tmp_path / "claims" / "gpu0").write_text("123 GPU 0\n")
     names = "aorlta-run-123-checkers aorlta-run-1234" if stuck else "aorlta-run-1234"  # the stub never removes one
-    out = _cleanup(tmp_path, 1, NODE_JOBS="123", JOBS="123:RUNNING", CONTAINERS=names, IMAGES_DIR=str(images))
+    down = {"PS_DOWN": "1"} if stuck == "unlisted" else {}
+    out = _cleanup(tmp_path, 1, NODE_JOBS="123", JOBS="123:RUNNING", CONTAINERS=names, IMAGES_DIR=str(images), **down)
     kept = [(tmp_path / "claims" / "leaving-123").exists(), (tmp_path / "claims" / "gpu0").exists(),
             (images / "trainer_1").exists(), (tmp_path / "shm" / "r").exists(), (tmp_path / "shm" / "sockets").exists()]
-    if stuck:
+    if stuck == "unlisted":
+        assert kept == [False, True, True, True, True], out.stdout + out.stderr
+        assert "[guard] cannot remove this job's containers: (docker cannot list them)" in out.stderr
+    elif stuck:
         assert kept == [False, True, True, True, True], out.stdout + out.stderr
         assert "[guard] cannot remove this job's containers: aorlta-run-123-checkers" in out.stderr
         assert "containers left: 1" in out.stdout
@@ -504,11 +510,12 @@ def test_a_job_is_leaving_only_after_its_last_container_and_never_from_an_earlie
 
 
 DOCKER_NAMES = r"""#!/bin/bash
-# docker ps -a --format ...: the names in $NAMES_FILE; docker rm -f NAME...: each name leaves the file, except one
-# named in $STUCK (a container docker cannot remove)
+# docker ps -a --format ...: the names in $NAMES_FILE, or with $PS_DOWN set the daemon's error and exit 1; docker rm -f
+# NAME...: each name leaves the file, except one named in $STUCK (a container docker cannot remove)
 echo "$*" >> "$DOCKER_LOG"
 case "$1" in
-  ps) cat "$NAMES_FILE" ;;
+  ps) [ -n "${PS_DOWN:-}" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+      cat "$NAMES_FILE" ;;
   rm) shift; [ "$1" = -f ] && shift
       for n in "$@"; do
         echo "removed $n" >> "$DOCKER_LOG"
@@ -556,6 +563,10 @@ def test_a_first_attempt_removes_nothing_and_a_container_that_stays_refuses_the_
     assert stuck.stdout.strip().endswith("refused"), stuck.stdout + stuck.stderr
     assert "[guard] cannot remove this job's containers from an earlier attempt: aorlta-run-123-checkers" \
         in stuck.stderr
+    (tmp_path / "docker.log").unlink()
+    unlisted = _earlier_attempt(tmp_path, "aorlta-run-123", PS_DOWN="1")  # no listing is no evidence of none
+    assert unlisted.stdout.strip().endswith("refused"), unlisted.stdout + unlisted.stderr
+    assert "[guard] docker cannot list this node's containers" in unlisted.stderr and _removed(tmp_path) == []
 
 
 def test_the_earlier_attempts_containers_go_before_the_job_starts_any_container():
