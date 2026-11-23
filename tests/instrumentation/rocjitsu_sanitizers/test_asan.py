@@ -16,6 +16,7 @@ import stat
 import struct
 import subprocess
 import zlib
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -1081,7 +1082,7 @@ def _script(
     code: int,
     dispatch: str | None = "store_index(int*, int)",
     loads: object = _LOADS_REPRO,
-    program: str | None = None,
+    program: str | Sequence[str] | None = None,
     dispatch_log: str = "${AMD_LOG_LEVEL_FILE}_$$",
     name: str = "repro.sh",
 ) -> Path:
@@ -1089,8 +1090,8 @@ def _script(
     the HIP runtime does under AMD_LOG_LEVEL_FILE (one file per pid). Like ASan, it
     writes its report to ``log_path.<pid>`` when ASAN_OPTIONS names one; and like
     the loader under LD_DEBUG, it logs ``loads`` (by default ``repro.bin``, the
-    object :func:`_instrumented` builds) as loaded, and ``program`` as the program
-    it initialised."""
+    object :func:`_instrumented` builds) as loaded, and ``program`` as the program,
+    or the programs one after another, it initialised."""
 
     if loads is _LOADS_REPRO:
         loads = tmp_path / "repro.bin"
@@ -1106,9 +1107,14 @@ def _script(
             f'printf "%7d:\\tcalling init: %s\\n" $$ "{loads}" >> "${{LD_DEBUG_OUTPUT}}.$$"'
         )
     if program is not None:
+        # The shell is standing in for ``program``, so its own entry has to go.
+        lines.append(
+            '[ "$LD_DEBUG" = files ] && sed -i "/initialize program:/d" "${LD_DEBUG_OUTPUT}.$$"'
+        )
+    for each in [program] if isinstance(program, str) else program or ():
         lines.append(
             f'[ "$LD_DEBUG" = files ] && '
-            f'printf "%7d:\\tinitialize program: %s\\n" $$ "{program}" >> "${{LD_DEBUG_OUTPUT}}.$$"'
+            f'printf "%7d:\\tinitialize program: %s\\n" $$ "{each}" >> "${{LD_DEBUG_OUTPUT}}.$$"'
         )
     if dispatch is not None:
         lines.append(f'echo ":3: 1 us:  ShaderName : {dispatch}" >> "{dispatch_log}"')
@@ -1356,6 +1362,28 @@ class TestRunAsan:
             objects=(checked,),
         )
         assert check.verdict is Verdict.PASS
+
+    def test_a_process_that_execs_another_program_is_not_vouched_for(self, tmp_path, runtime):
+        """``exec`` keeps the pid, so the checked program's entry in the loader log
+        says nothing about the program that dispatched afterwards."""
+
+        checked = _instrumented(tmp_path)
+        inner = _script(
+            tmp_path,
+            stderr_fixture=None,
+            code=0,
+            loads=None,
+            program=(str(checked), str(tmp_path / "other.bin")),
+        )
+        check = run_asan(
+            _worklist(),
+            command=_wrapper(tmp_path, inner),
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            objects=(checked,),
+        )
+        assert check.verdict is Verdict.NOT_CHECKED
+        assert check.reason.startswith("asan_dispatch_not_from_checked_code:")
 
     @pytest.mark.parametrize("log", ["${AMD_LOG_LEVEL_FILE}", "${AMD_LOG_LEVEL_FILE}_x$$"])
     def test_a_dispatch_no_process_log_holds_is_not_checked(self, tmp_path, runtime, log):

@@ -367,6 +367,13 @@ class LoadedFiles:
     programs: tuple[str, ...]
     objects: tuple[str, ...]
 
+    @property
+    def execed(self) -> bool:
+        """Whether the process ran more than one program. exec keeps the pid, and
+        the log does not say which program loaded what or which one dispatched."""
+
+        return len(self.programs) > 1
+
 
 def loaded_files(ld_log: str) -> LoadedFiles:
     """Parse one process's ``LD_DEBUG=files`` output.
@@ -671,9 +678,8 @@ def evaluate_asan_run(
             continue
         definitions: dict[str, list[tuple[str, bool, str]]] = {}
         process_opaque: dict[str, str] = {}
-        # exec keeps the pid, and the loader log does not say which program loaded
-        # what, so one program's declarations could describe another's files.
-        if len(loaded.programs) > 1:
+        # One program's declarations could describe another's files.
+        if loaded.execed:
             for program in loaded.programs:
                 process_opaque[program] = "run by one process in turn (exec)"
         # A declaration is evidence only for the program that declared it, and Triton's

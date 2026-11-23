@@ -287,8 +287,10 @@ is why aorta checks all five instead of trusting the build:
    The runtime's own messages go to that file too, and are read with the streams.
    The dispatch counts only from a process whose own log shows it and that
    loaded one of the checked binaries by absolute path (aorta sets
-   `LD_DEBUG=files`), so a script that runs some other build, or runs the repro
-   by a relative path, is `not_checked` (`asan_dispatch_not_from_checked_code`). ASan writes
+   `LD_DEBUG=files`) and ran no other program (`exec` keeps the pid, and the
+   loader's record does not say which program dispatched), so a script that runs
+   some other build, runs the repro by a relative path, or `exec`s from one program
+   into another, is `not_checked` (`asan_dispatch_not_from_checked_code`). ASan writes
    each process's report to its own `log_path` file in the output directory,
    where a wrapper that throws away its child's stderr cannot hide it; a report
    file aorta cannot read or does not recognise is an error.
@@ -422,7 +424,8 @@ A workload that loads code objects by file (`hipModuleLoad`) must declare them w
 record does not list them, and a workload may delete its build before the run ends,
 so a declaration records what each file defines when it is declared. A declaration is
 evidence only for the program that made it. A loaded file aorta cannot read (including
-an ELF whose section table it cannot parse), or that the loader recorded by a relative
+an ELF, or a device code object in one, whose section table it cannot parse, and a
+`.hip_fatbin` that lies outside the file), or that the loader recorded by a relative
 path, could hold the copy of a kernel that ran, so it leaves that process's kernels
 unchecked, as compressed device code does; so does a process that `exec`s another
 program, since the loader's record does not say which program loaded what. An evidence
